@@ -21,7 +21,7 @@ export const metadata: Metadata = {
     "Rabet is a lightweight Telegram-based digital services management system with a web dashboard.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html
       lang="en"
