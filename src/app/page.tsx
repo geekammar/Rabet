@@ -38,9 +38,9 @@ const features = [
 export default function LandingPage() {
   return (
     <div className="flex flex-1 flex-col">
-      <header className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between px-4 sm:px-6 lg:px-8">
+      <header className="mx-auto flex min-h-16 w-full max-w-5xl items-center justify-between px-4 pt-[env(safe-area-inset-top)] sm:px-6 lg:px-8">
         <Logo />
-        <Button asChild size="sm" variant="outline">
+        <Button asChild size="sm" variant="outline" className="h-11">
           <Link href="/overview">Open dashboard</Link>
         </Button>
       </header>
@@ -63,13 +63,13 @@ export default function LandingPage() {
             place.
           </p>
           <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <Button asChild size="lg">
+            <Button asChild size="lg" className="h-11">
               <Link href="/overview">
                 Open dashboard
                 <ArrowRightIcon />
               </Link>
             </Button>
-            <Button asChild size="lg" variant="outline">
+            <Button asChild size="lg" variant="outline" className="h-11">
               <Link href={REPOSITORY_URL} target="_blank" rel="noreferrer">
                 View on GitHub
               </Link>
@@ -105,14 +105,14 @@ export default function LandingPage() {
       </main>
 
       <footer className="border-t">
-        <div className="mx-auto flex w-full max-w-5xl flex-col items-center justify-between gap-3 px-4 py-6 text-sm text-muted-foreground sm:flex-row sm:px-6 lg:px-8">
+        <div className="mx-auto flex w-full max-w-5xl flex-col items-center justify-between gap-3 px-4 py-6 pb-[max(env(safe-area-inset-bottom),1.5rem)] text-sm text-muted-foreground sm:flex-row sm:px-6 lg:px-8">
           <p>Rabet · Phase 1 — Discovery &amp; Development</p>
           <nav aria-label="Footer">
             <Link
               href={REPOSITORY_URL}
               target="_blank"
               rel="noreferrer"
-              className="font-medium underline-offset-4 hover:underline"
+              className="rounded-sm font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
             >
               GitHub
             </Link>

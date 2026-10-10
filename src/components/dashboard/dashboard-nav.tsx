@@ -31,16 +31,21 @@ export function DashboardNav({
                 onClick={onNavigate}
                 aria-current={isActive ? "page" : undefined}
                 className={cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium outline-none transition-colors",
-                  "focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+                  // min-h-11 keeps every link at the 44x44 CSS-pixel touch
+                  // target required on mobile, in the drawer and the sidebar.
+                  "relative flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium outline-none transition-colors",
+                  "focus-visible:ring-2 focus-visible:ring-sidebar-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar",
                   isActive
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:inset-y-2 before:left-2 before:w-1 before:rounded-full before:bg-foreground before:content-['']"
                     : "text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
                 )}
               >
                 <Icon
                   aria-hidden="true"
-                  className="size-4 shrink-0 text-muted-foreground"
+                  className={cn(
+                    "size-4 shrink-0",
+                    isActive ? "text-sidebar-accent-foreground" : "text-muted-foreground",
+                  )}
                 />
                 <span className="truncate">{item.label}</span>
               </Link>

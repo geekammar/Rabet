@@ -62,6 +62,8 @@ deployable is simpler to build, test and deploy at this scale.
 ```
 src/app/
 ├── page.tsx              # Landing page (public)
+├── manifest.ts           # Web App Manifest → /manifest.webmanifest (PWA)
+├── favicon.ico           # Brand favicon, generated from the brand mark
 ├── (dashboard)/          # Route group — no URL prefix
 │   ├── overview/         # /overview
 │   ├── services/         # /services
@@ -89,7 +91,27 @@ src/components/
 ├── ui/            # shadcn/ui primitives (button, card, badge, sheet, …)
 ├── empty-state.tsx
 └── page-header.tsx
+
+public/icons/      # PWA icons served as-is (any + maskable + apple touch)
+scripts/           # generate-pwa-icons.py — stdlib-only icon generator
 ```
+
+### Mobile-first shell
+
+The merchant works from a mobile device, so the shell is built mobile-first and
+reviewed at 320, 360, 390, 430, 768, 1024 px and desktop:
+
+- The sidebar collapses to a Radix `Sheet` drawer below `md`; both surfaces
+  render the same `DashboardNav`, and drawer navigation is single-handed
+  (opens from the header, closes on tap, `Escape` or overlay).
+- All navigation items and primary controls are at least 44 × 44 CSS px.
+- The root layout uses `min-h-dvh` against the mobile dynamic viewport, and
+  `viewport-fit=cover` plus `env(safe-area-inset-*)` padding keeps the sticky
+  header, sidebar, drawer and page bottoms clear of notches and the home
+  indicator in standalone mode.
+- Content is width-constrained (`min-w-0` on the flex column, `max-w-6xl`
+  content rail, mobile-first single-column grids) so the layout cannot overflow
+  horizontally.
 
 ### Server Components first
 
@@ -192,6 +214,31 @@ not. Application-level authentication arrives in Phase 02; until then the
 dashboard is explicitly marked as a non-secure preview and must not be described
 as secure.
 
+### ADR-008 — PWA foundation is manifest-only; no service worker yet
+
+**Decision.** Phase 01C makes the dashboard installable through a Web App
+Manifest (`src/app/manifest.ts`), real brand icons, theme color, standalone
+display mode and Apple touch metadata. It deliberately does **not** introduce a
+service worker, offline caching, Web Push Notifications, or a custom install
+button.
+
+**Rationale.** Rabet is an admin application. A service worker that caches
+dashboard HTML, API responses or any authenticated payload would risk serving
+stale or private business data (customer records, orders, payments) from a
+device, and a stale cached shell can mask the fact that a user is signed out.
+There is no proven offline requirement: every administrative action in the
+product roadmap needs the network anyway. The manifest-only approach delivers
+the real user benefit of this phase — a home-screen icon and a standalone,
+app-like window — without that risk surface. Installation is left to the
+browser's own prompt, so no fake install affordances exist.
+
+**Consequences.** The installed app requires a network connection. When a
+genuine offline requirement is identified and Phase 02 authentication exists, a
+service worker can be added behind an explicit cache-strategy review, caching
+only the static shell and never authenticated or data responses. Web Push is
+not part of any planned merchant flow and stays out until there is a concrete
+need.
+
 ## 5. Data flow (future)
 
 1. A customer sends a message to the bot.
@@ -216,8 +263,14 @@ as secure.
   "Phase 1 · Preview" to make the stage obvious.
 - Phase 02 will add Auth.js session protection for the `(dashboard)` route group
   before any administrative function or private data is introduced.
+- **No caching of sensitive data is introduced in Phase 01C.** There is no
+  service worker and no offline layer. Next.js defaults prerendered pages with
+  `s-maxage` at the CDN edge; that is acceptable only while the shell contains
+  no personalized or authenticated data — it must be replaced with
+  `dynamic`/`private` rendering as part of Phase 02, before any customer,
+  order, payment or session response is served.
 - Secrets are never committed; `.env*` is git-ignored and `.env.example` holds
-  placeholders only.
+  placeholders only. Vercel Deployment Protection stays enabled.
 
 ## 8. Development and deployment workflow
 

@@ -123,8 +123,13 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* App-like feel in standalone mode: no rubber-banding or pull-to-refresh. */
+    overscroll-behavior-y: none;
   }
   html {
     @apply font-sans;
+    /* Remove the default mobile tap highlight so touch states read from the
+       component styles instead of a grey system flash. */
+    -webkit-tap-highlight-color: transparent;
   }
 }

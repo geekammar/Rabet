@@ -17,10 +17,10 @@ export default function NotFound() {
         </p>
       </div>
       <div className="flex flex-wrap items-center justify-center gap-2">
-        <Button asChild>
+        <Button asChild className="h-11">
           <Link href="/">Back home</Link>
         </Button>
-        <Button asChild variant="outline">
+        <Button asChild variant="outline" className="h-11">
           <Link href="/overview">Open dashboard</Link>
         </Button>
       </div>
