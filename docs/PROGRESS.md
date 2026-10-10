@@ -5,20 +5,31 @@ Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions.
 
+> This file tracks the **Phase 01B** final review, validation and documentation
+> alignment pass. Phase 01 stays in **Review** until every acceptance criterion
+> is actually satisfied.
+
 ---
 
 ## Phase status
 
 | Phase | Scope | Status |
 | --- | --- | --- |
-| **Phase 1** | Project foundation & UI shell | 🚧 **In progress — validation passing, pending final verification** |
-| Phase 2 | Database (Neon + Drizzle) and Auth.js authentication | Not started |
-| Phase 3 | grammY Telegram bot, webhooks, bot content | Not started |
-| Phase 4 | Services, orders, customers, persistent customer state | Not started |
-| Phase 5 | Telegram Stars payments | Not started |
-| Phase 6 | Vercel deployment & hardening | Not started |
+| **Phase 01** | Project foundation & UI shell | 🟡 **Review — validation passing, awaiting final acceptance** |
+| Phase 02 | Admin authentication | Not started |
+| Phase 03 | Database schema & migrations | Not started |
+| Phase 04 | Settings & localization | Not started |
+| Phase 05 | Service management | Not started |
+| Phase 06 | Telegram bot onboarding | Not started |
+| Phase 07 | Customer journey & orders | Not started |
+| Phase 08 | Payment integration | Not started |
+| Phase 09 | Order operations & messaging | Not started |
+| Phase 10 | Testing, security & release hardening | Not started |
 
-## What is done in Phase 1
+The base Vercel deployment and the GitHub integration were configured during
+Phase 01, but release hardening (Phase 10) is **not** complete.
+
+## What is done in Phase 01
 
 ### Foundation
 
@@ -55,50 +66,90 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions.
 - `README.md`, `docs/ARCHITECTURE.md`, `docs/PROGRESS.md`, `.env.example` and
   `.gitignore` written.
 
+### Phase 01B — final review and documentation alignment
+
+- The roadmap in every document was realigned to the approved ten-phase order
+  (foundation → authentication → database → settings → services → Telegram →
+  customers/orders → payments → operations → hardening).
+- The development workflow (Mobile → VPS → GitHub → Vercel) and the preferred
+  Git workflow (branch → PR → CI → Vercel preview → review → merge) were
+  recorded in `README.md` and `docs/ARCHITECTURE.md`.
+- Payment documentation was corrected: it no longer claims no other provider
+  will ever be integrated. Telegram Stars remain the required method for
+  digital goods inside Telegram; Binance personal payment links are noted as
+  under evaluation for separately permitted contexts only, expiring by nature,
+  and not implemented now.
+- The root 404 page was given a `<main>` landmark so it matches the landmark
+  structure of every other page.
+- The base Vercel deployment is recorded as configured; release hardening stays
+  incomplete and assigned to Phase 10.
+
 ## What is deliberately not implemented
 
-Per the Phase 1 scope, the following are **absent by design**:
+Per the Phase 01 scope, the following are **absent by design**:
 
-- Database connections or schema (Drizzle / Neon).
-- Authentication (Auth.js) — the dashboard is **not protected**.
-- Telegram API calls or webhooks (grammY).
-- Payment APIs of any kind. Telegram Stars are planned; nothing is wired up.
-- Customer, order or service CRUD.
+- Database connections or schema (Drizzle / Neon) — Phase 03.
+- Authentication (Auth.js) — Phase 02. The dashboard is **not protected**.
+- Telegram API calls or webhooks (grammY) — Phase 06.
+- Payment APIs of any kind — Phase 08. Nothing is wired up.
+- Customer, order or service CRUD — Phases 05 and 07.
 - Background workers, queues or cron jobs.
 - Real-time updates.
 - Dark-mode toggle (token sets exist; the toggle is deferred).
-- Localization / RTL (dashboard is English only; Arabic bot content is Phase 3).
+- Localization / RTL (dashboard is English only; Arabic bot content is Phase 04).
 
 No fake data, no fake statistics and no non-functional buttons are present.
 
 ## Constraints respected
 
-- Digital goods sold inside Telegram must use **Telegram Stars**. No Binance or
-  other payment integration is present.
+- Digital goods and services sold inside Telegram must use **Telegram Stars**.
+  No real payment integration is present. Binance personal payment links are
+  being evaluated only for separately permitted contexts, are not implemented
+  now, and can expire — so they are never assumed valid indefinitely. No
+  external checkout capability is invented or promised.
 - No actual secrets are requested, generated or committed.
-- The dashboard is not presented as production-secure; it is labelled a preview.
+- The dashboard is not presented as production-secure; it is labelled a preview
+  and must not be described as secure until Phase 02 lands.
 
 ## Validation status
 
-All commands were executed in the repository and passed:
+### Phase 01B re-run
+
+All commands were executed again on the `chore/phase-01-final-review` branch:
 
 | Command | Result |
 | --- | --- |
-| `npm install` | ✅ completed |
+| `npm ci` | ✅ exit 0 — 675 packages installed |
 | `npm run lint` | ✅ exit 0, no warnings |
 | `npm run typecheck` | ✅ exit 0 |
-| `npm run build` | ✅ exit 0 — 12 routes prerendered as static |
-| `npm run dev` (manual smoke test) | ✅ all routes 200, `/nonexistent` 404, no console errors |
+| `npm run build` | ✅ exit 0 — 12 static pages (10 routes + loading/error boundaries) |
+| Route probe against `next start` | ✅ all 9 routes 200, `/nonexistent-page` 404 |
 
-Smoke tests verified: landing page hero copy, overview empty state, every
-section placeholder, the 404 page, page `<title>` values, document landmarks
-(`nav` / `main` / `header` / `aside`), heading hierarchy, the `lang="en"`
-attribute and `aria-current="page"` on the active navigation link.
+Structural checks on the server-rendered HTML all passed: `lang="en"`, a correct
+`<title>` on every page, one `<main>` / `<aside>` / `<header>` / `<nav>`
+landmark set on every dashboard page, exactly one `<h1>` per page with correct
+`<h2>` descendants, `aria-current="page"` on the active link for all 8 dashboard
+sections, the skip link resolving to `<main id="main">`, the mobile-nav trigger
+present in the markup, and the "Phase 1 · Preview" / "Not production-secure"
+markers visible. No server errors were logged.
+
+Known non-blocking finding: `npm audit` reports 9 high-severity advisories, all
+in dev-tooling transitive dependencies (`shadcn` registry, `ts-morph`,
+`eslint-config-next`). None are runtime dependencies of the deployed app. They
+are left untouched to avoid toolchain churn and are queued for Phase 10.
 
 ## Remaining manual verification
 
-- [ ] Review the responsive layout at mobile and desktop widths in a browser.
-- [ ] Confirm keyboard navigation: tab through the sidebar, open the mobile
-      drawer with the keyboard, and close it with `Escape`.
-- [ ] Confirm the accessibility tree: landmarks, headings and the skip link.
-- [ ] Confirm CI runs green on GitHub after the first push.
+The development VPS has no browser installed, so these need a real browser and
+must be checked from the user's mobile browser against the Vercel preview:
+
+- [ ] Visual review of the responsive layout at mobile **and** desktop widths:
+      landing page, overview, and each section placeholder.
+- [ ] Confirm no horizontal overflow at 360px–400px viewport widths.
+- [ ] Confirm the mobile drawer opens, moves focus correctly, navigates on tap
+      and closes with `Escape`.
+- [ ] Confirm keyboard tab order through the sidebar and header, and that the
+      focus ring is visible.
+- [ ] Confirm the loading skeleton and the error boundary render acceptably
+      (both are wired into the route group but were not visually triggered).
+- [ ] Confirm CI runs green on the Phase 01B pull request.

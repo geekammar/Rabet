@@ -4,7 +4,7 @@ A lightweight **Telegram-based digital services management system** with a web d
 
 Rabet connects a Telegram bot — where customers browse services and place orders — to a clean admin dashboard where a single merchant manages services, orders, customers and payments.
 
-> **Status:** Phase 1 — Project Foundation & UI Shell.
+> **Status:** Phase 01 — Project Foundation & UI Shell (in review).
 > The dashboard is a static UI shell only. There is no database, no authentication and no Telegram integration yet. It is **not production-secure**. See [docs/PROGRESS.md](./docs/PROGRESS.md).
 
 ---
@@ -23,7 +23,7 @@ Rabet connects a Telegram bot — where customers browse services and place orde
 | Telegram (planned) | grammY |
 | Hosting | Vercel |
 
-Only the technologies in the first four rows are installed in Phase 1. Everything marked _planned_ is deliberately absent — see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the reasoning.
+Phase 01 installs only the framework and UI rows, plus the base Vercel hosting project. Everything marked _planned_ is deliberately absent — see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the reasoning.
 
 ## Project structure
 
@@ -110,21 +110,51 @@ cp .env.example .env.local
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — stack, structure and architectural decisions.
 - [docs/PROGRESS.md](./docs/PROGRESS.md) — phase status, what is done and what is pending.
 
+## Development workflow
+
+Work moves in this order:
+
+1. **Mobile** — the interface is reviewed on a mobile browser first, because that is the primary viewing device right now.
+2. **VPS development** — code is written and validated on the development VPS.
+3. **GitHub** — finished work lands in the repository on a dedicated branch.
+4. **Vercel** — the GitHub integration builds the preview and production deployments.
+
+The preferred Git workflow is:
+
+> feature branch → pull request → CI → Vercel preview → review → merge to `main` → production deployment
+
+No custom release system is used or planned; Vercel's GitHub integration handles builds.
+
 ## Roadmap
+
+Development follows this fixed feature order.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
-| **Phase 1** | Project foundation & UI shell | In progress |
-| Phase 2 | Database (Neon + Drizzle) and Auth.js authentication | Not started |
-| Phase 3 | grammY Telegram bot, webhooks and bot content | Not started |
-| Phase 4 | Services, orders, customers and persistent customer state | Not started |
-| Phase 5 | Payments via Telegram Stars | Not started |
-| Phase 6 | Deployment to Vercel and hardening | Not started |
+| **Phase 01** | Project foundation & UI shell | **Review** |
+| Phase 02 | Admin authentication | Not started |
+| Phase 03 | Database schema & migrations | Not started |
+| Phase 04 | Settings & localization | Not started |
+| Phase 05 | Service management | Not started |
+| Phase 06 | Telegram bot onboarding | Not started |
+| Phase 07 | Customer journey & orders | Not started |
+| Phase 08 | Payment integration | Not started |
+| Phase 09 | Order operations & messaging | Not started |
+| Phase 10 | Testing, security & release hardening | Not started |
 
-## Payments constraint
+The base Vercel deployment was already configured during Phase 01, but final release hardening (Phase 10) is not complete.
 
-Digital goods and services sold inside a Telegram bot **must** be paid with [Telegram Stars](https://telegram.org/blog/telegram-stars). No other payment provider (including Binance) will be integrated, and no payment functionality exists in this phase.
+## Payments
+
+Rabet is in **Discovery & Development** — no real payment integration is active and none is implemented in this phase.
+
+- Digital goods and services sold inside Telegram **must** be paid with [Telegram Stars](https://telegram.org/blog/telegram-stars), as Telegram requires for digital goods sold inside bots.
+- Binance **personal payment links** are being evaluated only for separately permitted contexts. They are not being integrated now.
+- Personal payment links can expire, so they must not be assumed valid indefinitely.
+- No external checkout capability is being invented or promised. Future payment handling will keep provider-specific code modular, and payment and fulfillment statuses will stay separate in the data model.
+
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) (ADR-005) for the reasoning.
 
 ## Deployment
 
-The application is intended for Vercel. Deployment is **not** configured yet — it belongs to a later phase.
+The application is hosted on Vercel. The base project and the GitHub integration were configured during Phase 01, so pushes to `main` build the production deployment and pull requests build preview deployments automatically. Vercel deployment protection stays enabled.
