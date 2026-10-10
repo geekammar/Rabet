@@ -1,36 +1,130 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Rabet (رابط)
 
-## Getting Started
+A lightweight **Telegram-based digital services management system** with a web dashboard.
 
-First, run the development server:
+Rabet connects a Telegram bot — where customers browse services and place orders — to a clean admin dashboard where a single merchant manages services, orders, customers and payments.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+> **Status:** Phase 1 — Project Foundation & UI Shell.
+> The dashboard is a static UI shell only. There is no database, no authentication and no Telegram integration yet. It is **not production-secure**. See [docs/PROGRESS.md](./docs/PROGRESS.md).
+
+---
+
+## Tech stack
+
+| Concern | Choice |
+| --- | --- |
+| Framework | Next.js 16 (App Router, TypeScript, strict mode) |
+| UI | React 19, Tailwind CSS v4, shadcn/ui (radix-nova), lucide-react |
+| Validation (planned) | Zod |
+| Testing (planned) | Vitest |
+| ORM (planned) | Drizzle |
+| Database (planned) | PostgreSQL on Neon |
+| Auth (planned) | Auth.js |
+| Telegram (planned) | grammY |
+| Hosting | Vercel |
+
+Only the technologies in the first four rows are installed in Phase 1. Everything marked _planned_ is deliberately absent — see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the reasoning.
+
+## Project structure
+
+```
+rabet/
+├── .github/workflows/     # CI (install, lint, typecheck, build)
+├── docs/                  # Architecture decisions and phase progress
+│   ├── ARCHITECTURE.md
+│   └── PROGRESS.md
+├── public/                # Static assets
+├── src/
+│   ├── app/
+│   │   ├── (dashboard)/    # Dashboard route group (shared shell)
+│   │   │   ├── overview/
+│   │   │   ├── services/
+│   │   │   ├── orders/
+│   │   │   ├── customers/
+│   │   │   ├── payments/
+│   │   │   ├── bot-content/
+│   │   │   ├── telegram/
+│   │   │   ├── settings/
+│   │   │   ├── layout.tsx  # Sidebar + header shell
+│   │   │   ├── loading.tsx # Skeleton loader for the group
+│   │   │   └── error.tsx   # Error boundary for the group
+│   │   ├── globals.css     # Design tokens + Tailwind
+│   │   ├── layout.tsx      # Root layout (fonts, metadata)
+│   │   ├── not-found.tsx   # Root 404
+│   │   └── page.tsx        # Landing page
+│   ├── components/
+│   │   ├── brand/          # Logo
+│   │   ├── dashboard/      # Sidebar, header, mobile nav, shared nav
+│   │   ├── ui/             # shadcn/ui primitives
+│   │   ├── empty-state.tsx # Reusable empty state
+│   │   └── page-header.tsx # Reusable page header
+│   └── lib/
+│       ├── navigation.ts   # Single source of truth for dashboard nav
+│       └── utils.ts        # cn() class helper
+├── .env.example            # Placeholder documentation for future env vars
+├── next.config.ts
+└── tsconfig.json           # strict mode, @/* → ./src/*
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Getting started
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Prerequisites
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Node.js 22 or later
+- npm 10 or later
 
-## Learn More
+### Install and run
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+# Install dependencies
+npm install
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+# Start the development server
+npm run dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Open [http://localhost:3000](http://localhost:3000) for the landing page, or [http://localhost:3000/overview](http://localhost:3000/overview) for the dashboard.
 
-## Deploy on Vercel
+## Scripts
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Start the development server |
+| `npm run build` | Create an optimized production build |
+| `npm run start` | Serve the production build |
+| `npm run lint` | Run ESLint |
+| `npm run typecheck` | Run `tsc --noEmit` without emitting output |
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Environment variables
+
+No environment variables are required in Phase 1. `.env.example` documents the variables that later phases will need. Copy it to `.env.local` and fill in real values only when the corresponding phase is implemented.
+
+```bash
+cp .env.example .env.local
+```
+
+> Never commit real secrets. `.env*` files are git-ignored.
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — stack, structure and architectural decisions.
+- [docs/PROGRESS.md](./docs/PROGRESS.md) — phase status, what is done and what is pending.
+
+## Roadmap
+
+| Phase | Scope | Status |
+| --- | --- | --- |
+| **Phase 1** | Project foundation & UI shell | In progress |
+| Phase 2 | Database (Neon + Drizzle) and Auth.js authentication | Not started |
+| Phase 3 | grammY Telegram bot, webhooks and bot content | Not started |
+| Phase 4 | Services, orders, customers and persistent customer state | Not started |
+| Phase 5 | Payments via Telegram Stars | Not started |
+| Phase 6 | Deployment to Vercel and hardening | Not started |
+
+## Payments constraint
+
+Digital goods and services sold inside a Telegram bot **must** be paid with [Telegram Stars](https://telegram.org/blog/telegram-stars). No other payment provider (including Binance) will be integrated, and no payment functionality exists in this phase.
+
+## Deployment
+
+The application is intended for Vercel. Deployment is **not** configured yet — it belongs to a later phase.
