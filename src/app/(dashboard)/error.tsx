@@ -19,7 +19,9 @@ export default function DashboardError({
           loading it again.
         </p>
       </div>
-      <Button onClick={reset}>Try again</Button>
+      <Button onClick={reset} className="h-11">
+        Try again
+      </Button>
     </div>
   );
 }

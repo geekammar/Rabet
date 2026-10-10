@@ -5,7 +5,7 @@ A lightweight **Telegram-based digital services management system** with a web d
 Rabet connects a Telegram bot — where customers browse services and place orders — to a clean admin dashboard where a single merchant manages services, orders, customers and payments.
 
 > **Status:** Phase 01 — Project Foundation & UI Shell (in review).
-> The dashboard is a static UI shell only. There is no database, no authentication and no Telegram integration yet. It is **not production-secure**. See [docs/PROGRESS.md](./docs/PROGRESS.md).
+> The dashboard is a static UI shell only. There is no database, no authentication and no Telegram integration yet. It is **not production-secure**. Authentication is the next major phase (Phase 02) and has **not** been started. See [docs/PROGRESS.md](./docs/PROGRESS.md).
 
 ---
 
@@ -33,7 +33,9 @@ rabet/
 ├── docs/                  # Architecture decisions and phase progress
 │   ├── ARCHITECTURE.md
 │   └── PROGRESS.md
-├── public/                # Static assets
+├── public/
+│   └── icons/             # PWA icons (any, maskable, Apple touch)
+├── scripts/               # generate-pwa-icons.py — reproducible icon generator
 ├── src/
 │   ├── app/
 │   │   ├── (dashboard)/    # Dashboard route group (shared shell)
@@ -49,7 +51,9 @@ rabet/
 │   │   │   ├── loading.tsx # Skeleton loader for the group
 │   │   │   └── error.tsx   # Error boundary for the group
 │   │   ├── globals.css     # Design tokens + Tailwind
-│   │   ├── layout.tsx      # Root layout (fonts, metadata)
+│   │   ├── layout.tsx      # Root layout (fonts, viewport, metadata)
+│   │   ├── manifest.ts     # Web App Manifest (PWA)
+│   │   ├── favicon.ico     # Brand favicon
 │   │   ├── not-found.tsx   # Root 404
 │   │   └── page.tsx        # Landing page
 │   ├── components/
@@ -154,6 +158,43 @@ Rabet is in **Discovery & Development** — no real payment integration is activ
 - No external checkout capability is being invented or promised. Future payment handling will keep provider-specific code modular, and payment and fulfillment statuses will stay separate in the data model.
 
 See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) (ADR-005) for the reasoning.
+
+## Mobile-first UX
+
+The merchant works from a mobile device, so the dashboard is built and reviewed
+mobile-first at 320, 360, 390, 430, 768 and 1024 px and on desktop:
+
+- The sidebar collapses into a focus-managed drawer below the `md` breakpoint;
+  both surfaces share one navigation definition.
+- Navigation items and primary controls meet a 44 × 44 CSS px touch target.
+- `viewport-fit=cover` with `env(safe-area-inset-*)` padding keeps the header,
+  sidebar, drawer and page content clear of notches and the home indicator in
+  standalone mode.
+- Layouts are width-constrained so nothing scrolls horizontally.
+
+Interactive verification still needs a real mobile browser — see the remaining
+manual checks in [docs/PROGRESS.md](./docs/PROGRESS.md).
+
+## Progressive Web App
+
+The dashboard is installable to a home screen. Next.js generates the manifest
+from `src/app/manifest.ts` at `/manifest.webmanifest`: `display: standalone`,
+`start_url: /overview`, `scope: /`, a light theme color, and `any` + `maskable`
+icons at 192 and 512 px. A 180 × 180 Apple touch icon and the favicon complete
+the set. All assets are real images generated from the brand mark by
+`scripts/generate-pwa-icons.py` (standard library only, no dependencies).
+
+**Deliberate limitations** (see [ADR-008](./docs/ARCHITECTURE.md)):
+
+- **No service worker and no offline support.** This is an admin application —
+  caching dashboard data or authenticated responses is a security risk, and no
+  proven offline requirement exists yet.
+- **No Web Push Notifications.**
+- **No custom install button.** Installation uses the browser's own prompt,
+  which appears once the manifest, icons and HTTPS criteria are met.
+
+Installation on Android has not yet been tested on a real device; the pending
+checks are listed in [docs/PROGRESS.md](./docs/PROGRESS.md).
 
 ## Deployment
 
