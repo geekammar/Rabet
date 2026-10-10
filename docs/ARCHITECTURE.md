@@ -45,11 +45,11 @@ bot; the merchant interacts only with the dashboard.
 | Database | PostgreSQL on Neon | Planned — serverless Postgres |
 | Auth | Auth.js | Planned — admin-only authentication |
 | Telegram | grammY | Planned — bot framework and webhooks |
-| Hosting | Vercel | Planned — edge functions + Postgres |
+| Hosting | Vercel | Base project configured in Phase 01; previews and production via the GitHub integration |
 
-**Phase 1 installs only the UI row of this table.** Future dependencies are
-intentionally absent so that no dead code or half-wired modules exist before
-their phase begins.
+**Phase 01 installs only the framework and UI rows of this table, plus the base
+Vercel hosting project.** Future dependencies are intentionally absent so that
+no dead code or half-wired modules exist before their phase begins.
 
 ## 3. Codebase structure
 
@@ -148,18 +148,27 @@ and a **fulfillment status**.
 **Rationale.** Payment and delivery of a digital service are distinct lifecycles.
 A service can be paid but not yet delivered, or delivered while payment is being
 confirmed. Collapsing them into a single state forces ambiguous values such as
-"completed" and makes reporting unreliable. This is a data-modelling decision
-that Phase 4 will implement.
+"completed" and makes reporting unreliable. The two statuses are introduced by
+the schema work in Phase 03 and exercised by the order work in Phase 07.
 
-### ADR-005 — Telegram Stars are the only payment method
+### ADR-005 — Telegram Stars first; payment providers stay modular
 
-**Decision.** Digital goods and services sold inside the bot will be paid with
-Telegram Stars. No other payment provider will be integrated.
+**Decision.** Digital goods and services sold inside the bot are paid with
+Telegram Stars. No real payment integration is active yet — the project is in
+Discovery & Development, and payment work belongs to Phase 08.
 
 **Rationale.** Telegram's terms require Stars for digital goods sold inside
-bots. Alternative flows (for example personal payment links) expire and are not
-operationally reliable, so they are out of scope. No payment code exists in
-Phase 1.
+bots, so Stars are the default and the first choice. The earlier stance that no
+other provider would ever be integrated was too absolute. Binance **personal
+payment links** are being evaluated, but only for separately permitted contexts,
+and they are not being integrated now. Personal payment links can expire, so
+they must never be assumed valid indefinitely. No external checkout capability
+is being invented or promised.
+
+**Consequences.** Payment-specific code will stay behind a small modular
+boundary so a provider can be added or replaced without reworking order flows,
+and payment and fulfillment statuses remain separate in the data model
+(see ADR-004). No payment code exists in Phase 01.
 
 ### ADR-006 — English first, Arabic optional
 
@@ -167,18 +176,21 @@ Phase 1.
 explicitly enabled language.
 
 **Rationale.** Defaulting to one language keeps content and UX predictable, and
-content strings will be externalised in Phase 3 so that Arabic can be added
-without restructuring. The dashboard interface itself is English only.
+content strings will be externalised in Phase 04 (settings & localization) so
+that Arabic can be added without restructuring. The dashboard interface itself
+is English only.
 
-### ADR-007 — No database, auth or bot code in Phase 1
+### ADR-007 — No database, auth or bot code in Phase 01
 
-**Decision.** Phase 1 contains only the UI shell, routes, documentation and CI.
+**Decision.** Phase 01 contains only the UI shell, routes, documentation and CI.
 No ORM, auth, webhook or payment code is included.
 
 **Rationale.** Authentication protects every business endpoint, and the schema
 shapes every data structure. Building them later, in one coherent pass, avoids
 placeholder schema rework and avoids a dashboard that looks functional but is
-not. The dashboard is explicitly marked as a non-secure preview.
+not. Application-level authentication arrives in Phase 02; until then the
+dashboard is explicitly marked as a non-secure preview and must not be described
+as secure.
 
 ## 5. Data flow (future)
 
@@ -194,14 +206,37 @@ not. The dashboard is explicitly marked as a non-secure preview.
 
 - **Vitest** for unit and integration tests (utilities, validators, bot flows).
 - Schema and migration tests against a Neon branch.
-- Lint, typecheck and build remain the Phase 1 gate in CI.
+- Lint, typecheck and build remain the Phase 01 gate in CI; formal test
+  coverage, the security review and release hardening arrive in Phase 10.
 
 ## 7. Security considerations
 
 - **No authentication exists yet.** Nothing in the dashboard is protected and no
   private business data is shown, because none exists. The interface is marked
   "Phase 1 · Preview" to make the stage obvious.
-- Phase 2 will add Auth.js session protection for the `(dashboard)` route group
+- Phase 02 will add Auth.js session protection for the `(dashboard)` route group
   before any administrative function or private data is introduced.
 - Secrets are never committed; `.env*` is git-ignored and `.env.example` holds
   placeholders only.
+
+## 8. Development and deployment workflow
+
+```
+Mobile  →  VPS development  →  GitHub  →  Vercel
+```
+
+1. **Mobile.** Interfaces are reviewed on a mobile browser first, because the
+   merchant currently works from a mobile device.
+2. **VPS development.** Code is written and validated on the development VPS
+   with `npm ci`, `npm run lint`, `npm run typecheck` and `npm run build`.
+3. **GitHub.** Finished work is pushed on a dedicated branch.
+4. **Vercel.** The GitHub integration builds the branch.
+
+The preferred Git workflow is: **feature branch → pull request → CI → Vercel
+preview → review → merge to `main` → production deployment.** CI runs install,
+lint, typecheck and build on every pull request, and Vercel produces a preview
+deployment for review. Merging to `main` triggers the production build.
+
+There is no custom release system and none is planned: Vercel's GitHub
+integration is the only deployment path, and Vercel deployment protection stays
+enabled.

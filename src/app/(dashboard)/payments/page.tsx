@@ -14,7 +14,7 @@ export default function PaymentsPage() {
       title="Payments"
       description="Payments received for orders placed through the bot."
       icon={CreditCard}
-      emptyDescription="Payment records will appear here. Digital goods sold inside Telegram must be paid with Telegram Stars, so no other payment provider will be integrated. Payment tracking is planned for a later phase."
+      emptyDescription="Payment records will appear here. Rabet is in Discovery & Development, so no payment integration is active yet. Digital goods and services sold inside Telegram must be paid with Telegram Stars. Personal payment links such as Binance are being evaluated only for separately permitted contexts — because such links can expire, they will not be assumed valid indefinitely. Payment tracking is planned for a later phase."
     />
   );
 }
