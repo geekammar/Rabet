@@ -1,16 +1,18 @@
 # Rabet (رابط)
 
-A lightweight **Telegram-based digital services management system** with a web dashboard.
+A lightweight **Telegram digital-product catalog** with a mobile-first admin dashboard.
 
-Rabet connects a Telegram bot — where customers browse services and place orders — to a clean admin dashboard where a single merchant manages services, orders, customers and payments.
+Rabet connects a Telegram bot — where customers browse an arbitrarily deep catalog, interact with configurable product buttons, and open **inquiries** to the seller — to a clean dashboard where a single merchant manages the catalog, configures the button trees, and replies to customers.
 
-> **Status:** Phase 03A — Database architecture & data model **design** (documentation only).
+> **Status:** Phase 03A — Data model & recursive button architecture **design** (documentation only).
 > Phases 01 and 02 (UI shell and admin authentication) are merged into `main` and
-> Production is ready for the merged commit. Phase 03A adds a reviewed data model,
-> infrastructure recommendation and migration plan — but deliberately **no** database,
-> **no** schema code and **no** migrations yet (that is Phase 03B). There is still no
-> Telegram integration and no real payment processing — those are later phases, and the
-> app is **not** production-secure until they land.
+> Production is ready for the merged commit. Phase 03A delivers a reviewed data model — two
+> independent recursive hierarchies (catalog + interaction buttons), a configurable button
+> action system, a unified inquiry model, an infrastructure recommendation and a migration
+> plan — but deliberately **no** database, **no** schema code and **no** migrations yet
+> (that is Phase 03B). There is no Telegram integration yet, and **no payment processing at
+> all** — the MVP has no checkout, no orders and no invoices; an inquiry is a conversation,
+> not a purchase (ADR-013). The app is **not** production-secure until later phases land.
 > See [docs/PROGRESS.md](./docs/PROGRESS.md) and
 > [docs/DATA_MODEL.md](./docs/DATA_MODEL.md).
 ---
@@ -177,7 +179,7 @@ cp .env.example .env.local
 
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — stack, structure and architectural decisions.
 - [docs/PROGRESS.md](./docs/PROGRESS.md) — phase status, what is done and what is pending.
-- [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) — Phase 03A database design, infrastructure and migration plan.
+- [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) — Phase 03A data model: the two recursive hierarchies (catalog + interaction buttons), the configurable button-action system, the inquiry model, security and integrity rules, infrastructure and migration plan.
 
 ## Development workflow
 
@@ -202,28 +204,42 @@ Development follows this fixed feature order.
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | **Merged** |
 | **Phase 02** | Admin authentication | **Merged** (PR #3, `5e3bc7e`) — manual device checks and rate limiting remain open |
-| **Phase 03A** | Database architecture & data model **design** | **Design complete** — documentation only, no implementation |
+| **Phase 03A** | Data model & recursive button architecture **design** | **Revised design complete** — documentation only, no implementation |
 | Phase 03B | Database schema & migrations implementation | Not started |
 | Phase 04 | Settings & localization | Not started |
-| Phase 05 | Service management | Not started |
+| Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
-| Phase 07 | Customer journey & orders | Not started |
-| Phase 08 | Payment integration | Not started |
-| Phase 09 | Order operations & messaging | Not started |
+| Phase 07 | Customer journey, inquiries & messaging | Not started |
+| Phase 08 | Payment integration (**deferred** — Telegram Stars) | Deferred — see ADR-013 |
+| Phase 09 | Inquiry operations & admin messaging | Not started |
 | Phase 10 | Testing, security & release hardening | Not started |
 
 The base Vercel deployment was already configured during Phase 01, but final release hardening (Phase 10) is not complete.
 
 ## Payments
 
-Rabet is in **Discovery & Development** — no real payment integration is active and none is implemented in this phase.
+**There are no payments in the MVP.** Rabet is in **Discovery & Development** as a
+digital-product catalog with displayed prices and **seller inquiries**.
 
-- Digital goods and services sold inside Telegram **must** be paid with [Telegram Stars](https://telegram.org/blog/telegram-stars), as Telegram requires for digital goods sold inside bots.
-- Binance **personal payment links** are being evaluated only for separately permitted contexts. They are not being integrated now.
-- Personal payment links can expire, so they must not be assumed valid indefinitely.
-- No external checkout capability is being invented or promised. Future payment handling will keep provider-specific code modular, and payment and fulfillment statuses will stay separate in the data model.
+- An **inquiry** is a tracked conversation between a customer and the seller. It is **not**
+  a purchase: no order, no invoice, no charge and no payment state is created. A displayed
+  price is a quote, and the price the customer saw is frozen onto the inquiry.
+- Rabet integrates **no** payment gateway, no Binance API, no Vodafone Cash API, no
+  financial webhooks, no payment-proof workflow and no settlement engine. Nothing is wired
+  up and no payment entity exists in the data model.
+- **Telegram Stars guardrail.** Rabet offers digital services, and Telegram requires
+  [Telegram Stars](https://core.telegram.org/bots/payments-stars) for **real digital
+  goods/services sold inside bots and Mini Apps — including where an external payment page
+  exists**. The bot's external-link button is therefore for **information pages only** and
+  must never be framed or used as a checkout or payment redirect, or as a Stars workaround
+  ([Bot Developer Terms](https://telegram.org/tos/bot-developers) §6.2).
+- **Future real checkout.** When an in-bot digital sale is explicitly required, it must be
+  built on compliant Telegram Stars checkout (or the commerce must genuinely live outside
+  the bot's checkout/referral flow). That is a separate, deferred feature with a designed
+  additive path — not something the current model blocks or assumes.
 
-See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) (ADR-005) for the reasoning.
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) (ADR-013) and
+[docs/DATA_MODEL.md](./docs/DATA_MODEL.md) §16 for the reasoning.
 
 ## Mobile-first UX
 

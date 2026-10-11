@@ -1,6 +1,6 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 03A — Database architecture & data model design (design only)**
+Current phase: **Phase 03A — Final data model & recursive button architecture (design only)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
@@ -18,14 +18,14 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
 | **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #3](https://github.com/geekammar/Rabet/pull/3), commit `5e3bc7e`) — code complete and Production-ready; the **manual interactive device checks and the durable rate limiter remain open** (see below), so Phase 02 is not marked *fully accepted* |
-| **Phase 03A** | Database architecture & data model **design** | 🟦 **Design complete on `design/phase-03a-data-model`** — documentation only; no schema files, no migrations, no dependencies, no database |
-| Phase 03B | Database schema & migrations implementation | Not started — see [DATA_MODEL.md §13](./DATA_MODEL.md) for exact prerequisites |
+| **Phase 03A** | Data model & recursive button architecture **design** | 🟦 **Revised design complete on `design/phase-03a-data-model`** — documentation only; no schema files, no migrations, no dependencies, no database |
+| Phase 03B | Database schema & migrations implementation | Not started — see [DATA_MODEL.md §17](./DATA_MODEL.md) for the implementation plan and prerequisites |
 | Phase 04 | Settings & localization | Not started |
-| Phase 05 | Service management | Not started |
+| Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
-| Phase 07 | Customer journey & orders | Not started |
-| Phase 08 | Payment integration | Not started |
-| Phase 09 | Order operations & messaging | Not started |
+| Phase 07 | Customer journey, inquiries & messaging | Not started |
+| Phase 08 | Payment integration (**deferred** — Telegram Stars, future) | Deferred — see ADR-013 |
+| Phase 09 | Inquiry operations & admin messaging | Not started |
 | Phase 10 | Testing, security & release hardening | Not started |
 
 The base Vercel deployment and the GitHub integration were configured during
@@ -51,32 +51,70 @@ stay separately tracked:
 
 A **design-only** pass — the deliverable is a reviewed document, not code.
 
-- **Domain model.** Fourteen tables grouped by domain (Configuration, Catalog, Content,
-  People, Commerce, Payments, Support, Integration), with a Mermaid ER diagram, relationship
-  cardinalities and per-column constraints.
-  See [DATA_MODEL.md](./DATA_MODEL.md).
-- **Hierarchical catalog.** The service catalog is a single self-referencing `service`
-  table using a `parent_id` **adjacency list**, supporting nesting to arbitrary depth.
-  Navigation-only nodes and sellable nodes are distinguished by `is_sellable`, with
-  database-level protection against cycles, invalid parents, deleted ancestors and
-  ambiguous pricing (a sellable node must be a priced leaf).
-- **Immutable order snapshots.** `order_item` freezes the purchased name, price, currency
-  and terms at order time, so editing the catalog later never rewrites history.
-- **Independent state.** Payment and fulfillment statuses are two independent columns on
-  `order` (ADR-004), driven by an append-only `order_event` audit log that records
-  **verified** events only — inferred journey stages are never stored (requirement 9).
-- **Idempotency.** Telegram update deduplication via a unique `telegram_update.update_id`,
-  with the same one-row-lock pattern applied to payment charges and support messages.
-- **Infrastructure recommendation.** **Neon** managed PostgreSQL, Free plan, region
-  `aws-us-east-2`, connected via the Neon-managed Vercel integration for per-preview
-  database branches. Evaluated against Supabase, Vercel Postgres, Railway/Render, and
-  self-hosting, using current official documentation.
-- **Migration plan.** Drizzle ORM + Drizzle Kit, codebase-first with **generated,
-  committed, human-reviewed SQL migrations**. Production migrations are run by hand against
-  the direct connection — never from a Vercel build, never at app startup, and
-  `drizzle-kit push` is never used.
-- **Documentation updates.** [ARCHITECTURE.md](./ARCHITECTURE.md) gained ADR-012; this file
-  and the Phase 02 status were corrected to reflect the merged baseline.
+### The scope correction (product-owner review on PR #4)
+
+Phase 03A started with a fourteen-table model built around orders and payments. Five
+clarifications from the product owner on [PR #4](https://github.com/geekammar/Rabet/pull/4)
+converged on a simpler product, and the design was **rewritten around it** rather than
+patched:
+
+1. **Simplify payment management** — no payment gateway, no Binance/Vodafone API, no
+   financial webhooks, no auto-settlement; a manual external-payment workflow at most.
+2. **Complete the request flow inside Telegram** — browse, select, create/track a request,
+   and message the seller; Rabet manages communication, not money.
+3. **Final correction — inquiries, not orders** — "Buy" starts a **conversation** tied to
+   the catalog item and its displayed price. **No payment, payment link, proof, charge,
+   invoice or checkout exists in Rabet at this stage.**
+4. **Configurable multi-action buttons** — each catalog item may have multiple ordered,
+   enabled/disabled buttons with localized labels and a safe, finite action allowlist.
+5. **Recursive multi-level button trees** — buttons can open further buttons, recursively,
+   with the admin choosing label and behaviour at **every node**. Catalog navigation and
+   interaction-button navigation are **separate hierarchies**.
+
+The resulting design is in [DATA_MODEL.md](./DATA_MODEL.md); the scope decisions are
+recorded as **ADR-013** (catalog + inquiries, not a checkout — including the Telegram Stars
+compliance guardrail) and **ADR-014** (two independent recursive hierarchies) in
+[ARCHITECTURE.md](./ARCHITECTURE.md).
+
+### What the revised design delivers
+
+- **Simplified entity model.** Fourteen tables in seven domains — Configuration, Content,
+  Catalog, Buttons, People, Conversations, Integration — down from a commerce-centric model
+  by removing the **entire financial subsystem** (`order`, `order_item`, `order_event`,
+  `payment`) and **unifying support tickets into the inquiry model**
+  (`support_ticket` / `support_message` are gone).
+- **Two independent recursive hierarchies.** The **catalog tree** (`category`,
+  adjacency-list `parent_id`) organizes products; the **interaction-button tree**
+  (`product_action`, adjacency-list `parent_action_id`) controls customer interaction. Both
+  are arbitrary-depth with **no schema depth cap** — bounded only by documented application
+  runtime guards (`MAX_ACTION_DEPTH` 8, `MAX_ACTIVE_CHILDREN` 20, `MENU_PAGE_SIZE` 10).
+- **Configurable button actions.** A closed, safe allowlist of seven `action_type` values —
+  `OPEN_SUBMENU`, `START_INQUIRY`, `SHOW_DETAILS`, `SEND_TEMPLATE_MESSAGE`, `OPEN_URL`,
+  `OPEN_SUPPORT`, `NAVIGATE_CATALOG`. An `OPEN_SUBMENU` may first send an editable
+  localized message and then show its children, which delivers "message + more options"
+  **without a workflow engine**. Only `OPEN_SUBMENU` may have children — enforced by
+  trigger, not convention.
+- **Tree integrity at the database level.** Triggers and indexes make self-parenting,
+  cycles, **cross-product parent references**, children under terminal nodes and duplicate
+  sibling ordering **impossible to write**.
+- **Unified inquiry system.** One `inquiry` table serves product inquiries and general
+  support; the displayed price and the customer's selected button path are **frozen at
+  creation** (`product_snapshot`, `selected_options`, write-once), so later catalog edits
+  never rewrite a conversation. At most one active inquiry per customer per product —
+  `START_INQUIRY` is resume-by-construction.
+- **Telegram navigation contract.** Opaque uuid `callback_data` (36 bytes, under the 64-byte
+  limit) re-resolved server-side on every tap; reserved `back` / `product` / `home` /
+  `page:<n>` tokens; one button per row; pagination; graceful empty-submenu handling;
+  documented stale-keyboard behaviour; prompt callback answers; idempotent state changes.
+- **Minimal durable state.** Submenu navigation needs **zero session state** (every callback
+   is self-describing), which fits Vercel serverless. The selected path is recovered from
+   the action's own ancestor chain at inquiry time.
+- **Localization.** One mechanism reused across categories, products, buttons and
+  templates: one row per language with an English-first fallback chain; Arabic renders RTL.
+- **Infrastructure & migration plan retained.** **Neon** managed PostgreSQL, Free plan,
+  `aws-us-east-2`, via the Neon-managed Vercel integration; Drizzle ORM + Kit with
+  generated, committed, human-reviewed SQL; production migrations by hand against the
+  unpooled connection; `drizzle-kit push` never used.
 
 ### What Phase 03A deliberately did not do
 
@@ -84,6 +122,7 @@ A **design-only** pass — the deliverable is a reviewed document, not code.
 - No new npm dependency installed (`drizzle-orm`, `drizzle-kit`,
   `@neondatabase/serverless` are Phase 03B).
 - No Neon project or database created, no connection made, no migration applied.
+- No Telegram handlers, no Button Tree Editor, no bot runtime — those are Phases 05–09.
 - No changes to application code, no version bump, and no deployment.
 
 The manual Phase 02 checks below are unchanged and were **not** claimed as passing.
@@ -243,10 +282,13 @@ outstanding sessions at once. See ADR-009.
 
 Per the current scope, the following are **absent by design**:
 
-- Database connections or schema (Drizzle / Neon) — Phase 03.
+- Database connections or schema (Drizzle / Neon) — Phase 03B.
 - Telegram API calls or webhooks (grammY) — Phase 06.
-- Payment APIs of any kind — Phase 08. Nothing is wired up.
-- Customer, order or service CRUD — Phases 05 and 07.
+- **Any payment, checkout, order or invoice functionality** — deferred, not started
+  (ADR-013). The MVP is a catalog with seller inquiries; nothing is wired up and no
+  payment entity exists in the data model.
+- Catalog, product and button-tree CRUD (the dashboard editor) — Phases 05.
+- Customer, inquiry and messaging runtime — Phase 07.
 - Background workers, queues or cron jobs.
 - Real-time updates.
 - **Service worker / offline support.** This is an admin application; caching
@@ -264,11 +306,17 @@ No fake data, no fake statistics and no non-functional buttons are present.
 
 ## Constraints respected
 
-- Digital goods and services sold inside Telegram must use **Telegram Stars**.
-  No real payment integration is present. Binance personal payment links are
-  being evaluated only for separately permitted contexts, are not implemented
-  now, and can expire — so they are never assumed valid indefinitely. No
-  external checkout capability is invented or promised.
+- **No payments in the MVP.** The product is a catalog with displayed prices and seller
+  inquiries. An inquiry is a conversation, never a purchase. No payment gateway, no Binance
+  or Vodafone API, no financial webhooks, no payment-proof workflow, no settlement engine,
+  no invoices, no refunds — none designed, none wired up (ADR-013).
+- **Telegram Stars guardrail.** Rabet offers digital services, so Telegram requires
+  **Telegram Stars for real digital goods/services sold inside bots**, including where an
+  external payment page exists. The bot's `OPEN_URL` action is for **information pages
+  only** and must never be used as a checkout or payment redirect or as a Stars workaround.
+  Real in-bot sales are a deferred, compliant-Stars future feature. Sources:
+  <https://core.telegram.org/bots/payments-stars>, <https://telegram.org/tos/bot-developers>
+  §6.2.
 - No actual secrets are requested, generated or committed.
 - The dashboard still has no database, no Telegram integration and no payment
   processing, so the product as a whole is **not** production-secure yet.

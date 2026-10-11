@@ -31,6 +31,14 @@ the Telegram webhook endpoints in the same codebase.
 The system has one admin and one Telegram bot. Customers interact only with the
 bot; the merchant interacts only with the dashboard.
 
+> **Product scope (Phase 03A, corrected).** Rabet is a **configurable digital-product
+> catalog inside a Telegram bot with a mobile-first admin dashboard**. Customers browse an
+> arbitrarily deep catalog, interact with **configurable recursive button trees** per
+> product, and **open inquiries** — tracked conversations with the seller. The MVP does
+> **not** handle payments: no checkout, no payment gateway, no order and no invoice. An
+> inquiry is a conversation, not a purchase. See ADR-013 and
+> [DATA_MODEL.md](./DATA_MODEL.md).
+
 ## 2. Tech stack
 
 | Concern | Choice | Notes |
@@ -83,6 +91,12 @@ The dashboard lives in a **route group** so that:
 - The dashboard shell (sidebar + header) is defined once in the group layout.
 - A boundary exists for Phase 2 to attach authentication without touching the
   public landing page.
+
+> **Placeholder routes.** `/orders` and `/payments` exist only as placeholder pages from
+> Phase 01 and are **not** part of the MVP data model (ADR-013). They will be re-scoped or
+> removed in a later phase; no code change is made by Phase 03A, which is
+> documentation-only. `/services` is where the catalog and the Button Tree Editor will
+> eventually live.
 
 ### Component layout
 
@@ -166,6 +180,11 @@ sets are already defined in `globals.css`.
 
 ### ADR-004 — Separate payment and fulfillment statuses
 
+> **Status note (Phase 03A):** this decision describes the **deferred** future checkout
+> feature. The MVP has no orders and no payments (ADR-013), so neither status exists in the
+> current data model. The decision is retained because it records the shape real checkout
+> work must take when it is explicitly scheduled.
+
 **Decision.** An order will carry two independent statuses: a **payment status**
 and a **fulfillment status**.
 
@@ -173,13 +192,19 @@ and a **fulfillment status**.
 A service can be paid but not yet delivered, or delivered while payment is being
 confirmed. Collapsing them into a single state forces ambiguous values such as
 "completed" and makes reporting unreliable. The two statuses are introduced by
-the schema work in Phase 03 and exercised by the order work in Phase 07.
+the schema work in a future checkout phase and exercised by the order work that
+follows it.
 
 ### ADR-005 — Telegram Stars first; payment providers stay modular
 
+> **Status note (Phase 03A):** no payment integration is in scope for the MVP or for the
+> Phase 03A data model — there is no order, payment or checkout entity. The compliance
+> guardrail below is now recorded more precisely as **ADR-013**, which governs how the
+> bot's `OPEN_URL` action may and may not be used.
+
 **Decision.** Digital goods and services sold inside the bot are paid with
 Telegram Stars. No real payment integration is active yet — the project is in
-Discovery & Development, and payment work belongs to Phase 08.
+Discovery & Development.
 
 **Rationale.** Telegram's terms require Stars for digital goods sold inside
 bots, so Stars are the default and the first choice. The earlier stance that no
@@ -192,7 +217,7 @@ is being invented or promised.
 **Consequences.** Payment-specific code will stay behind a small modular
 boundary so a provider can be added or replaced without reworking order flows,
 and payment and fulfillment statuses remain separate in the data model
-(see ADR-004). No payment code exists in Phase 01.
+(see ADR-004). No payment code exists, and none is scheduled for the MVP.
 
 ### ADR-006 — English first, Arabic optional
 
@@ -373,20 +398,107 @@ no production migration runs from a Vercel build or app startup, `drizzle-kit pu
 never used, and no destructive migration is accepted — all documented in §11 of that
 document.
 
-**Consequences.** Phase 03B has an explicit, ordered list of prerequisites (§13 of
-DATA_MODEL.md), including product sign-off on a small set of open decisions. The model
+**Consequences.** Phase 03B has an explicit, ordered list of prerequisites (§17 of
+that document), including product sign-off on a small set of open decisions. The model
 targets the one-admin, one-bot MVP: it contains no multi-tenancy, multi-bot, role or
-analytics structure, and the payment and fulfillment statuses remain independent columns
-per ADR-004.
+analytics structure.
+
+> **Revision (same phase, later clarification).** The Phase 03A model was subsequently
+> simplified per product-owner review: the financial subsystem (orders, payments, events)
+> was removed entirely and replaced by a **catalog + configurable recursive button tree +
+> inquiry** model. See **ADR-013** and **ADR-014** below, and
+> [DATA_MODEL.md](./DATA_MODEL.md). The design-only rule above is unchanged.
+
+### ADR-013 — Rabet is a catalog with inquiries, not a checkout (Phase 03A scope correction)
+
+**Decision.** The Rabet MVP is a **digital-product catalog inside a Telegram bot** with
+**displayed prices** and **seller inquiries**. Selecting a product and starting a
+conversation creates an **inquiry** — a tracked customer ↔ seller thread — and **never**
+creates an order, a payment, an invoice or a charge. There is no payment gateway, no
+Binance API, no Vodafone Cash API, no financial webhooks, no payment-evidence processing,
+no settlement engine, no invoices and no refunds anywhere in the design. This supersedes
+the earlier Phase 03A drafts that centred on orders and payments.
+
+**Rationale.** The product owner's clarifications converged on one target: a customer
+browses the catalog, interacts with configurable buttons, and **contacts the seller**;
+the seller replies from the dashboard. The primary action is a conversation, not a
+transaction. Keeping a fourteen-table financial model around that structure would have
+meant maintaining order, order-item, order-event and payment tables plus an append-only
+audit log — all in service of a checkout nobody can use yet.
+
+**The compliance guardrail that makes this a decision rather than a deferment.** Rabet
+offers **digital services**. Telegram's official Bot Payments terms require **Telegram
+Stars exclusively for the sale of digital goods and services inside bots and Mini Apps,
+including where an external payment page exists** — so routing an in-bot digital purchase
+to a seller-owned payment link does not by itself make it permitted. Therefore:
+
+- `OPEN_URL` exists for **information pages only**. It must never be framed, configured or
+  used as a payment or checkout redirect, or as a substitute for compliant Stars checkout.
+- The MVP has **no real digital payment initiated by the bot**, and no proof/claim
+  workflow that could masquerade as one.
+- A future real in-bot sale must be built on compliant Telegram Stars checkout, or the
+  commerce must genuinely live outside the bot's checkout/referral flow.
+
+Sources: <https://core.telegram.org/bots/payments-stars> and
+<https://telegram.org/tos/bot-developers> §6.2.
+
+**Consequences.** A displayed price is a **quote**, not a charge — so the price a customer
+saw is frozen onto the inquiry at creation time (immutable `product_snapshot`), which is
+the only snapshot discipline the MVP needs. Orders and payments remain **deferred with a
+designed additive path**, not deleted and not started. `ADR-004` and `ADR-005` now describe
+that deferred future rather than the current model.
+
+### ADR-014 — Two independent recursive hierarchies, both adjacency lists
+
+**Decision.** The data model contains **two separate recursive structures that are never
+merged**:
+
+1. **The catalog hierarchy** (`category`, self-referencing `parent_id`) — organizes
+   products. Categories are pure navigation; products carry prices and button trees.
+2. **The interaction hierarchy** (`product_action`, self-referencing `parent_action_id`)
+   — controls customer interaction. Each product owns a tree of configurable buttons;
+   every button independently has a type, a localized label, an order, an activation state
+   and optionally children.
+
+Both are **adjacency lists**. Neither carries a depth column or a depth constraint;
+arbitrary depth is bounded only by documented application-level runtime guards. Moving
+between the two trees is an explicit, validated action (`NAVIGATE_CATALOG`) with real
+foreign-key targets, never an implicit structural link.
+
+**Rationale.** Catalog navigation and interaction-button navigation are different
+operations with different integrity rules: a category groups products, while a button
+executes an action or opens a submenu. Merging them (or forcing navigation actions into
+the category table) would produce one structure that serves two masters, with neither
+invariant enforceable — a category cannot "start an inquiry" and a button cannot "contain
+products". Separating them makes each one's constraints expressible in the database:
+same-product containment, menu-capable-only parents, sibling-order uniqueness and
+cycle prevention are all triggers and indexes on a table with one clear purpose.
+
+The **adjacency list** is chosen over a materialised path, `ltree` or a graph store
+because at this scale it is the simplest correct structure — one table per tree, nothing
+denormalized to keep in sync, native recursive-CTE traversal — and because the scale-up
+path (add a path/`ltree` column maintained by trigger) is purely additive.
+
+**Consequences.** Two trees means two sets of integrity triggers and two sets of sibling
+indexes, but each set is small and identical in shape, so there is one mental model. A
+button's ancestor chain doubles as **the customer's selected path** when an inquiry starts,
+which removes the need for any cart or selection state. Adding nesting levels and supported
+button types is configuration, not code.
 
 ## 5. Data flow (future)
 
-1. A customer sends a message to the bot.
-2. grammY receives the update via a Vercel webhook and updates the customer's
-   persistent state machine.
-3. The customer selects a service and pays with Telegram Stars.
-4. The bot records the order with separate payment and fulfillment statuses.
-5. The merchant sees the order, customer and payment in the dashboard.
+1. A customer starts the bot; the customer row is created and, if more than one language is
+   enabled, the customer chooses a language.
+2. grammY receives updates via a Vercel webhook; every update is deduplicated before any
+   business logic runs.
+3. The customer browses the recursive category catalog and opens a product, which renders
+   its configured root buttons.
+4. The customer navigates the product's recursive button tree; each tap resolves the action
+   server-side from an opaque id, validates it, and either opens a submenu, shows details,
+   sends a localized template, opens an information URL, navigates the catalog, or starts
+   an inquiry.
+5. An inquiry freezes the product context and the customer's selected path, and becomes a
+   two-way conversation; the admin replies from the dashboard and the bot relays replies.
 6. Drizzle validates every write; Zod validates every external input.
 
 ## 6. Testing strategy
