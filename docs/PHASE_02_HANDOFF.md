@@ -216,11 +216,24 @@ Phase 02 is **not** the end of release hardening. In order:
 ```
 branch:  feat/admin-auth
 base:    ddd525adff427ea5263e60f15b37437ca9149477  (Phase 01C merged into main)
-head:    see `git log -1`
-pr:      see the PR opened against main from this branch
+head:    b43f3ad  (Phase 02B)
+pr:      https://github.com/geekammar/Rabet/pull/3
 ```
+
+**Delivery verification (observed, not assumed):**
+
+- **GitHub Actions CI:** completed, conclusion `success`
+  (install → lint → typecheck → build → test).
+- **Vercel Preview:** deployed and `Ready` at
+  `https://rabet-git-feat-admin-auth-ammarj1.vercel.app`.
+- **Vercel Deployment Protection:** active. Every preview route (`/`, `/login`,
+  `/overview`, `/manifest.webmanifest`) responds `302` to an unauthenticated
+  client, redirecting to `vercel.com/sso-api`. `/overview` serves no dashboard
+  content. This is the intended state — the preview is not reachable from the open
+  internet, which is the compensating control while no rate limiter is in place
+  (§2).
 
 `main` was **not** modified, no manual production deployment was made, no version
 number was changed, and `pnpm ship` was not run. Phase 02 is complete and ready
 for review but is **not** marked Done — that decision belongs to the reviewer once
-the interactive device checks are signed off.
+the interactive device checks are signed off and the secrets are provisioned.

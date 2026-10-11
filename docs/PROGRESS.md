@@ -18,7 +18,7 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
-| **Phase 02** | Admin authentication | 🟢 **Phase 02A + 02B complete on `feat/admin-auth`** — lint, typecheck, build and 71 tests pass; PR open |
+| **Phase 02** | Admin authentication | 🟢 **Phase 02A + 02B complete on `feat/admin-auth`** — lint, typecheck, build and 71 tests pass; [PR #3](https://github.com/geekammar/Rabet/pull/3) open, CI green |
 | Phase 03 | Database schema & migrations | Not started |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Service management | Not started |
