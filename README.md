@@ -4,8 +4,14 @@ A lightweight **Telegram-based digital services management system** with a web d
 
 Rabet connects a Telegram bot — where customers browse services and place orders — to a clean admin dashboard where a single merchant manages services, orders, customers and payments.
 
-> **Status:** Phase 01 — Project Foundation & UI Shell (in review).
-> The dashboard is a static UI shell only. There is no database, no authentication and no Telegram integration yet. It is **not production-secure**. Authentication is the next major phase (Phase 02) and has **not** been started. See [docs/PROGRESS.md](./docs/PROGRESS.md).
+> **Status:** Phase 02 — Admin authentication (complete, pre-merge on `feat/admin-auth`).
+> The dashboard UI shell from Phase 01 is now protected by Auth.js: one
+> administrator signs in by email + password, sessions are encrypted JWT
+> cookies, and every dashboard route is gated server-side. There is still no
+> database, no Telegram integration and no real payment processing — those are
+> later phases, and the app is **not** production-secure until they land.
+> See [docs/PROGRESS.md](./docs/PROGRESS.md) and
+> [docs/PHASE_02_HANDOFF.md](./docs/PHASE_02_HANDOFF.md).
 
 ---
 
@@ -15,15 +21,16 @@ Rabet connects a Telegram bot — where customers browse services and place orde
 | --- | --- |
 | Framework | Next.js 16 (App Router, TypeScript, strict mode) |
 | UI | React 19, Tailwind CSS v4, shadcn/ui (radix-nova), lucide-react |
-| Validation (planned) | Zod |
-| Testing (planned) | Vitest |
+| Validation | Zod |
+| Testing | Vitest |
 | ORM (planned) | Drizzle |
 | Database (planned) | PostgreSQL on Neon |
-| Auth (planned) | Auth.js |
+| Auth | Auth.js v5 (`next-auth@5.0.0-beta.32`), Credentials provider, JWT sessions |
+| Password hashing | Argon2id via `@node-rs/argon2` |
 | Telegram (planned) | grammY |
 | Hosting | Vercel |
 
-Phase 01 installs only the framework and UI rows, plus the base Vercel hosting project. Everything marked _planned_ is deliberately absent — see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the reasoning.
+Phase 01 installed the framework and UI rows plus the base Vercel hosting project; Phase 02 added validation, testing, authentication and password hashing. Everything still marked _planned_ is deliberately absent — see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the reasoning.
 
 ## Project structure
 
@@ -38,6 +45,7 @@ rabet/
 ├── scripts/               # generate-pwa-icons.py — reproducible icon generator
 ├── src/
 │   ├── app/
+│   │   ├── (auth)/login/    # Sign-in page (public)
 │   │   ├── (dashboard)/    # Dashboard route group (shared shell)
 │   │   │   ├── overview/
 │   │   │   ├── services/
@@ -47,9 +55,13 @@ rabet/
 │   │   │   ├── bot-content/
 │   │   │   ├── telegram/
 │   │   │   ├── settings/
-│   │   │   ├── layout.tsx  # Sidebar + header shell
+│   │   │   ├── layout.tsx  # Sidebar + header shell + server-side auth gate
 │   │   │   ├── loading.tsx # Skeleton loader for the group
 │   │   │   └── error.tsx   # Error boundary for the group
+│   │   ├── actions/auth.ts # login + logout Server Actions
+│   │   ├── api/
+│   │   │   ├── admin/      # Protected Route Handler (the reuse pattern)
+│   │   │   └── auth/[...nextauth]/  # Auth.js route handler
 │   │   ├── globals.css     # Design tokens + Tailwind
 │   │   ├── layout.tsx      # Root layout (fonts, viewport, metadata)
 │   │   ├── manifest.ts     # Web App Manifest (PWA)
@@ -57,17 +69,27 @@ rabet/
 │   │   ├── not-found.tsx   # Root 404
 │   │   └── page.tsx        # Landing page
 │   ├── components/
+│   │   ├── auth/           # login-form, logout-button
 │   │   ├── brand/          # Logo
 │   │   ├── dashboard/      # Sidebar, header, mobile nav, shared nav
 │   │   ├── ui/             # shadcn/ui primitives
 │   │   ├── empty-state.tsx # Reusable empty state
 │   │   └── page-header.tsx # Reusable page header
-│   └── lib/
-│       ├── navigation.ts   # Single source of truth for dashboard nav
-│       └── utils.ts        # cn() class helper
-├── .env.example            # Placeholder documentation for future env vars
+│   ├── lib/
+│   │   ├── auth/           # admin-config, credentials, session, redirect, schema, cache
+│   │   ├── navigation.ts   # Single source of truth for dashboard nav
+│   │   └── utils.ts        # cn() class helper
+│   ├── types/              # Auth.js type augmentation (role claim)
+│   ├── auth.ts             # Auth.js configuration (Credentials + JWT)
+│   └── proxy.ts            # Next.js 16 proxy — optimistic dashboard redirect
+├── scripts/
+│   ├── generate-admin-hash.mjs  # Local Argon2id hash provisioning helper
+│   └── generate-pwa-icons.py    # Reproducible icon generator
+├── tests/                  # Integration tests over the real production server
+├── .env.example            # Required environment variables (placeholders only)
 ├── next.config.ts
-└── tsconfig.json           # strict mode, @/* → ./src/*
+├── tsconfig.json           # strict mode, @/* → ./src/*
+└── vitest.config.ts        # @/* alias + server-only stub for tests
 ```
 
 ## Getting started
@@ -87,7 +109,28 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) for the landing page, or [http://localhost:3000/overview](http://localhost:3000/overview) for the dashboard.
+Open [http://localhost:3000](http://localhost:3000) for the landing page. The dashboard at [http://localhost:3000/overview](http://localhost:3000/overview) now requires a sign-in — see below.
+
+### Provision the administrator (required)
+
+The dashboard is gated behind a single administrator declared by environment
+variables. Until they are set, the app **fails closed**: sign-in is refused and
+every dashboard route redirects to `/login`.
+
+```bash
+cp .env.example .env.local
+
+# 1. Generate a session secret
+npx auth secret
+
+# 2. Generate an Argon2id hash of your admin password (reads from stdin,
+#    prints only the hash — the plaintext is never written anywhere)
+node scripts/generate-admin-hash.mjs
+
+# 3. In .env.local, set ADMIN_EMAIL and paste the hash into ADMIN_PASSWORD_HASH
+```
+
+Then `npm run dev` and sign in at `/login`.
 
 ## Scripts
 
@@ -98,10 +141,19 @@ Open [http://localhost:3000](http://localhost:3000) for the landing page, or [ht
 | `npm run start` | Serve the production build |
 | `npm run lint` | Run ESLint |
 | `npm run typecheck` | Run `tsc --noEmit` without emitting output |
+| `npm run test` | Run the Vitest unit + auth integration suites |
+| `npm run test:auth` | Run only the auth integration suite (`tests/auth.test.ts`) |
+
+The integration suite builds the app and boots the real production server on
+ports 3210/3211 with a synthetic, throwaway configuration — no real secret,
+password or hash is used or printed.
 
 ## Environment variables
 
-No environment variables are required in Phase 1. `.env.example` documents the variables that later phases will need. Copy it to `.env.local` and fill in real values only when the corresponding phase is implemented.
+`AUTH_SECRET`, `ADMIN_EMAIL` and `ADMIN_PASSWORD_HASH` are **required** in every
+environment (local, preview and production). `.env.example` documents all of
+them with placeholders and is the single source of truth; copy it to
+`.env.local` and fill in real values.
 
 ```bash
 cp .env.example .env.local
@@ -135,8 +187,8 @@ Development follows this fixed feature order.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
-| **Phase 01** | Project foundation & UI shell | **Review** |
-| Phase 02 | Admin authentication | Not started |
+| **Phase 01** | Project foundation & UI shell | **Merged** |
+| **Phase 02** | Admin authentication | **Complete on `feat/admin-auth`** (Phase 02A) |
 | Phase 03 | Database schema & migrations | Not started |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Service management | Not started |

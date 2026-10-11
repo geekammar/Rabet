@@ -39,16 +39,18 @@ bot; the merchant interacts only with the dashboard.
 | Language | TypeScript (strict) | `strict: true`, `@/*` → `./src/*` |
 | UI | React 19 + Tailwind CSS v4 | Design tokens as CSS variables |
 | Components | shadcn/ui (radix-nova) + lucide-react | Components are copied into the repo, not a dependency |
-| Validation | Zod | Planned — schema validation at trust boundaries |
-| Testing | Vitest | Planned — unit and integration tests |
+| Validation | Zod | Installed in Phase 02 — sign-in input validation at the trust boundary |
+| Testing | Vitest | Installed in Phase 02 — unit + auth integration suites |
 | ORM | Drizzle | Planned — migration-friendly, type-safe |
 | Database | PostgreSQL on Neon | Planned — serverless Postgres |
-| Auth | Auth.js | Planned — admin-only authentication |
+| Auth | Auth.js v5 (`next-auth@5.0.0-beta.32`) | Installed in Phase 02 — one admin, Credentials provider, encrypted JWT sessions |
+| Password hashing | `@node-rs/argon2` | Installed in Phase 02 — Argon2id, OWASP-recommended parameters |
 | Telegram | grammY | Planned — bot framework and webhooks |
 | Hosting | Vercel | Base project configured in Phase 01; previews and production via the GitHub integration |
 
-**Phase 01 installs only the framework and UI rows of this table, plus the base
-Vercel hosting project.** Future dependencies are intentionally absent so that
+**Phase 01 installed the framework and UI rows plus the base Vercel hosting
+project; Phase 02 added validation, testing, authentication and password
+hashing.** Remaining future dependencies are intentionally absent so that
 no dead code or half-wired modules exist before their phase begins.
 
 ## 3. Codebase structure
@@ -239,6 +241,66 @@ only the static shell and never authenticated or data responses. Web Push is
 not part of any planned merchant flow and stays out until there is a concrete
 need.
 
+### ADR-009 — Database-free JWT sessions, and their revocation limitation
+
+**Decision.** Phase 02 uses Auth.js v5 (`next-auth@5.0.0-beta.32`) with the
+Credentials provider and the default **stateless encrypted JWT** session
+strategy — no adapter, no database. The single administrator is declared by the
+`ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH` environment variables; the password hash
+is an Argon2id PHC string verified with `@node-rs/argon2`. The session is an
+encrypted, `HttpOnly`, `Secure`-under-HTTPS, `SameSite=lax` cookie named
+`__Secure-authjs.session-token`, encrypted with `AUTH_SECRET`, with a 7-day
+`maxAge`.
+
+**Rationale.** The MVP has exactly one administrator and no database yet, so a
+session table would require infrastructure that Phase 03 introduces anyway.
+Auth.js's encrypted-cookie JWT needs no datastore and is the documented,
+library-maintained path — no custom JWT or crypto code is written. Argon2id is
+the OWASP-recommended memory-hard hash; plain SHA-256 is never used for
+passwords. Missing or invalid configuration fails closed (`getAdminConfig()`
+returns `null` and every sign-in is rejected), so there is no default account
+and no bypass.
+
+**Consequences — the important limitation.** Because the session is a
+self-contained encrypted token and not a server-side record, **logout clears the
+browser cookie but does not revoke a token that has already left the device.**
+A stolen cookie remains valid until its natural 7-day expiry; there is no
+server-side denylist to invalidate it sooner. Mitigations in place: the short
+`maxAge`, `Secure` + `HttpOnly` + `SameSite=lax` cookie attributes, `private,
+no-store` cache headers on every dashboard route, and a generic
+invalid-credentials error that leaks no signal about the admin identity.
+Central revocation (a session table or rotated `AUTH_SECRET`) is a deliberate
+Phase 03+ decision once a database exists; rotating `AUTH_SECRET` invalidates
+all outstanding sessions immediately, at the cost of signing everyone out.
+
+### ADR-010 — Authorization is layered; `proxy.ts` is not the sole gate
+
+**Decision.** Every dashboard route is protected at **two** independent layers:
+
+1. `src/proxy.ts` (the Next.js 16 rename of `middleware.ts`) runs an *optimistic*
+   Auth.js check and redirects an unauthenticated visitor to `/login` before the
+   dashboard shell is ever downloaded.
+2. `requireAdmin()` (`src/lib/auth/session.ts`) is the *authoritative*
+   server-side check, called by the `(dashboard)` layout, by Server Actions
+   (`src/app/actions/auth.ts`) and by Route Handlers (`src/app/api/admin/route.ts`).
+
+**Rationale.** A Next.js layout does not re-run on every navigation, and
+returning `null` from a layout does not stop nested segments or Server Actions
+from executing. Equally, the proxy matcher excludes paths (the Auth.js route
+handler, static and PWA assets), and excluding a path also skips Server Function
+invocations on it — so the proxy cannot be the only gate. Centralizing the
+authoritative check in one `server-only` helper means a new route is protected
+by calling a single function, and a handler that forgets it is the only gap.
+
+**Consequences.** Both layers read the session cookie; `getAdminSession()` is
+wrapped in React `cache()` so a render pass reads it once. Protected responses
+are marked `private, no-store, must-revalidate` statically in `next.config.ts`
+(declared statically because, with Cache Components, the dashboard shell's
+headers are finalized before the streamed gated segment runs, so an imperatively
+set header at request time throws). Redirect destinations after login are
+validated against an internal allowlist (`isValidInternalRedirect`) so the login
+page cannot become an open redirect.
+
 ## 5. Data flow (future)
 
 1. A customer sends a message to the bot.
@@ -249,26 +311,43 @@ need.
 5. The merchant sees the order, customer and payment in the dashboard.
 6. Drizzle validates every write; Zod validates every external input.
 
-## 6. Testing strategy (planned)
+## 6. Testing strategy
 
-- **Vitest** for unit and integration tests (utilities, validators, bot flows).
-- Schema and migration tests against a Neon branch.
-- Lint, typecheck and build remain the Phase 01 gate in CI; formal test
-  coverage, the security review and release hardening arrive in Phase 10.
+- **Vitest** is installed and running (Phase 02).
+  - Unit tests under `src/**/__tests__/` cover the auth modules: fail-closed
+    admin configuration, credential verification, and the redirect allowlist.
+  - `tests/auth.test.ts` is an integration suite driven over HTTP against the
+    real production server (`next start`) on ports 3210/3211 with a synthetic,
+    throwaway configuration: it asserts that unauthenticated requests never see
+    dashboard content, that login/logout work end to end, that tampered and
+    fabricated cookies are rejected, that protected responses are not cacheable,
+    and that a deployment with no admin configured fails closed.
+- Schema and migration tests against a Neon branch arrive in Phase 03.
+- Lint, typecheck, build **and** test are the CI gate as of Phase 02; formal
+  coverage thresholds, the security review and release hardening arrive in
+  Phase 10.
 
 ## 7. Security considerations
 
-- **No authentication exists yet.** Nothing in the dashboard is protected and no
-  private business data is shown, because none exists. The interface is marked
-  "Phase 1 · Preview" to make the stage obvious.
-- Phase 02 will add Auth.js session protection for the `(dashboard)` route group
-  before any administrative function or private data is introduced.
-- **No caching of sensitive data is introduced in Phase 01C.** There is no
-  service worker and no offline layer. Next.js defaults prerendered pages with
-  `s-maxage` at the CDN edge; that is acceptable only while the shell contains
-  no personalized or authenticated data — it must be replaced with
-  `dynamic`/`private` rendering as part of Phase 02, before any customer,
-  order, payment or session response is served.
+- **Authentication exists as of Phase 02** (see ADR-009 and ADR-010). One
+  administrator, email + password, Argon2id hash verification, encrypted JWT
+  session cookie, 7-day expiry, no self-registration and no other roles.
+- **Missing or invalid configuration fails closed.** If `AUTH_SECRET`,
+  `ADMIN_EMAIL` or `ADMIN_PASSWORD_HASH` is absent, empty, or the hash is not an
+  Argon2 PHC string, sign-in is refused and the dashboard stays unreachable.
+  There is no default account and no bypass.
+- **Authorization is layered** (ADR-010): an optimistic `proxy.ts` redirect plus
+  an authoritative `requireAdmin()` used by layouts, Server Actions and Route
+  Handlers.
+- **No caching of authenticated responses.** Dashboard routes are declared
+  `private, no-store, must-revalidate` in `next.config.ts`. No service worker
+  exists, so no authenticated payload can be cached on the device.
+- **Sessions cannot be centrally revoked before expiry** (ADR-009). Logout
+  clears the browser cookie; a cookie that has already left the device stays
+  valid for up to its natural 7-day lifetime. Rotating `AUTH_SECRET` invalidates
+  all outstanding sessions at once.
+- **Open-redirect protection.** Post-login destinations are validated against an
+  internal allowlist; unvalidated values fall back to `/overview`.
 - Secrets are never committed; `.env*` is git-ignored and `.env.example` holds
   placeholders only. Vercel Deployment Protection stays enabled.
 
