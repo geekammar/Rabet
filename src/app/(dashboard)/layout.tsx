@@ -1,11 +1,43 @@
+import { Suspense } from "react";
+
 import { Header } from "@/components/dashboard/header";
 import { Sidebar } from "@/components/dashboard/sidebar";
+import { requireAdmin } from "@/lib/auth/session";
 
-export default function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+/**
+ * Authoritative authorization gate for the whole dashboard route group.
+ *
+ * Every dashboard section is protected here on the server, not in the client.
+ * `proxy.ts` additionally performs an early optimistic redirect so an
+ * unauthenticated visitor never downloads the dashboard shell in the first
+ * place — but it is deliberately not the only check (see ADR-010).
+ *
+ * `requireAdmin()` reads the session cookie and sets private cache headers,
+ * which are request-time reads. With `cacheComponents` enabled such access must
+ * sit inside a `<Suspense>` boundary (reading `cookies()`/`headers()` outside
+ * one is a build error), so both are pushed into `AdminGate`. Nothing below the
+ * gate is rendered, streamed or included in the RSC payload until the session
+ * has been verified; on the unauthenticated path `redirect()` throws and the
+ * remainder of the tree never renders.
+ *
+ * `instant = false` documents that navigations into the dashboard legitimately
+ * block on the server while the session is checked — the route is personalized
+ * and can never be part of the static shell.
+ */
+
+// Mark navigations into the dashboard as allowed to block on the server.
+export const instant = false;
+
+async function AdminGate({ children }: { children: React.ReactNode }) {
+  // Verifies the admin session; throws a redirect to /login when absent.
+  // The `private, no-store` cache policy for these routes is declared
+  // statically in `next.config.ts`.
+  await requireAdmin();
+
+  return <>{children}</>;
+}
+
+function DashboardShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-dvh w-full bg-background">
       <a
@@ -24,5 +56,19 @@ export default function DashboardLayout({
         </main>
       </div>
     </div>
+  );
+}
+
+export default function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <DashboardShell>
+      <Suspense fallback={null}>
+        <AdminGate>{children}</AdminGate>
+      </Suspense>
+    </DashboardShell>
   );
 }

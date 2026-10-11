@@ -7,10 +7,12 @@ on:
     branches: [main]
 
 # Runs on every push to main and on pull requests targeting main.
-# No secrets are required: the app has no database, auth or API integrations yet.
+# No production secrets are required: the auth tests generate their own
+# throwaway AUTH_SECRET and Argon2id hash in-process (see tests/setup.ts), and
+# the build is given a safe test-only configuration below.
 jobs:
   verify:
-    name: Install, lint, typecheck, build
+    name: Install, lint, typecheck, build, test
     runs-on: ubuntu-latest
 
     steps:
@@ -32,5 +34,21 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Auth.js requires an AUTH_SECRET to serve requests, and the integration
+      # tests exercise the built output, so the build and the test run both need
+      # one present. It is generated per workflow run from /dev/urandom, is
+      # test-only, is never committed, and never appears in the logs. No GitHub
+      # secret has to be configured for CI to pass.
+      - name: Generate test-only AUTH_SECRET
+        id: auth-secret
+        run: echo "value=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
+
       - name: Build
+        env:
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run build
+
+      - name: Unit and integration tests
+        env:
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
+        run: npm run test

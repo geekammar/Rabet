@@ -1,13 +1,15 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 01 — Project Foundation & UI Shell**
+Current phase: **Phase 02 — Admin authentication**
 Project stage: **Discovery & Development** (not commercial production)
 
-Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions.
+Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
+[PHASE_02_HANDOFF.md](./PHASE_02_HANDOFF.md) for the Phase 02A handoff.
 
 > This file tracks the **Phase 01C** mobile-first UX and PWA foundation pass on
-> top of the Phase 01B final review. Phase 01 stays in **Review** until every
-> acceptance criterion is actually satisfied.
+> top of the Phase 01B final review, and the **Phase 02A** authentication pass.
+> Phase 01 is merged; Phase 02A is complete on the `feat/admin-auth` branch and
+> awaits review.
 
 ---
 
@@ -15,8 +17,8 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
-| **Phase 01** | Project foundation & UI shell | 🟡 **Review — validation passing, awaiting final acceptance** |
-| Phase 02 | Admin authentication | Not started |
+| **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
+| **Phase 02** | Admin authentication | 🟢 **Phase 02A + 02B complete on `feat/admin-auth`** — provisioning prompt security fix applied; lint, typecheck, build and 79 tests pass; [PR #3](https://github.com/geekammar/Rabet/pull/3) open |
 | Phase 03 | Database schema & migrations | Not started |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Service management | Not started |
@@ -128,12 +130,63 @@ shell was hardened for small touch screens:
 - `scripts/generate-pwa-icons.py` is the stdlib-only generator for all of the
   above, so the assets stay reproducible from the brand tokens.
 
+## What is done in Phase 02A
+
+### Authentication
+
+- **Auth.js v5** (`next-auth@5.0.0-beta.32`) configured in `src/auth.ts` with the
+  Credentials provider and the database-free encrypted-JWT session strategy
+  (7-day `maxAge`, custom `/login` pages). See ADR-009 in
+  [ARCHITECTURE.md](./ARCHITECTURE.md).
+- **One administrator**, declared by the `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH`
+  environment variables. No registration, no other accounts, no roles.
+- **Argon2id password hashing** via `@node-rs/argon2` (OWASP-recommended cost
+  parameters). Plain SHA-256 is never used. The plaintext password is never
+  stored, logged or compared in the clear; a failed attempt returns `null` for
+  every failure mode so the admin email cannot be enumerated.
+- **Fail-closed configuration** (`src/lib/auth/admin-config.ts`): a missing,
+  empty or non-Argon2 `ADMIN_PASSWORD_HASH` disables sign-in entirely. There is
+  no default account and no bypass. The login page renders an honest
+  "sign-in unavailable" state when the deployment is not provisioned.
+- **Layered authorization** (ADR-010): an optimistic redirect in `src/proxy.ts`
+  (the Next.js 16 rename of `middleware.ts`) plus the authoritative
+  `requireAdmin()` server-only helper used by the `(dashboard)` layout, the
+  login/logout Server Actions and the protected Route Handler.
+- **Login experience** at `/login`: mobile-first, accessible labels and
+  `aria-describedby` wiring, `autoComplete="username"` / `current-password`,
+  email `inputMode`, 44 px touch targets, a show/hide password toggle, a clear
+  loading state, a live error region showing only a generic
+  "Incorrect email or password." message, and no horizontal overflow.
+- **Logout** in the dashboard header clears the session cookie server-side.
+- **Session security**: `HttpOnly`, `Secure` under HTTPS, `SameSite=lax`
+  encrypted cookie; Auth.js CSRF tokens on the credential callback; post-login
+  redirect destinations validated against an internal allowlist
+  (`isValidInternalRedirect`) with a safe `/overview` fallback; no
+  authentication tokens in logs; `private, no-store, must-revalidate` on every
+  dashboard route, declared statically in `next.config.ts`.
+- **Provisioning helper** `scripts/generate-admin-hash.mjs` reads the password
+  from stdin and prints only the Argon2id PHC string, so the plaintext is never
+  written anywhere.
+- **Tests**: 23 unit tests over the auth modules and 24 integration tests over
+  the real production server — unauthenticated access is blocked on all eight
+  dashboard routes and the API handler, correct credentials succeed, wrong
+  password and unknown email both fail with the same generic error, tampered and
+  fabricated cookies are rejected, protected responses are non-cacheable,
+  logout invalidates the session, the public landing page and PWA assets stay
+  reachable, and a deployment with no admin configured fails closed.
+
+### Known limitation (documented, not a bug)
+
+Stateless JWT sessions cannot be centrally revoked before their natural
+expiry. Logout clears the browser cookie; a cookie that has already left the
+device remains valid up to 7 days. Rotating `AUTH_SECRET` invalidates all
+outstanding sessions at once. See ADR-009.
+
 ## What is deliberately not implemented
 
-Per the Phase 01 scope, the following are **absent by design**:
+Per the current scope, the following are **absent by design**:
 
 - Database connections or schema (Drizzle / Neon) — Phase 03.
-- Authentication (Auth.js) — Phase 02. The dashboard is **not protected**.
 - Telegram API calls or webhooks (grammY) — Phase 06.
 - Payment APIs of any kind — Phase 08. Nothing is wired up.
 - Customer, order or service CRUD — Phases 05 and 07.
@@ -160,8 +213,10 @@ No fake data, no fake statistics and no non-functional buttons are present.
   now, and can expire — so they are never assumed valid indefinitely. No
   external checkout capability is invented or promised.
 - No actual secrets are requested, generated or committed.
-- The dashboard is not presented as production-secure; it is labelled a preview
-  and must not be described as secure until Phase 02 lands.
+- The dashboard still has no database, no Telegram integration and no payment
+  processing, so the product as a whole is **not** production-secure yet.
+  Authentication itself (Phase 02A) is implemented and tested, but release
+  hardening is Phase 10.
 
 ## Validation status
 
@@ -230,8 +285,134 @@ dependency was added; a scan of tracked files for secret-like patterns
 nothing; `.env.example` still holds commented placeholders only. Next.js
 default cache headers were inspected: static asset and HTML responses carry no
 private data (the shell has none), but the default `s-maxage` on prerendered
-pages must be revisited in Phase 02 once authenticated responses exist. Vercel
-Deployment Protection remains enabled and untouched.
+  pages must be revisited in Phase 02 once authenticated responses exist. Vercel
+  Deployment Protection remains enabled and untouched.
+
+  This has since been done: Phase 02 declares `private, no-store,
+  must-revalidate` on every dashboard route (see ADR-010), so prerendered
+  dashboard pages are no longer cacheable at the edge.
+
+### Phase 02A verification
+
+All commands were executed on the `feat/admin-auth` branch. The build was given
+a test-only generated `AUTH_SECRET`; no real secret, password or hash was used
+or printed by any check.
+
+| Command | Result |
+| --- | --- |
+| `npm install` | ✅ exit 0 — adds `@node-rs/argon2`, `next-auth`, `zod`, `vitest` |
+| `npm run lint` | ✅ exit 0, no warnings |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm run build` | ✅ exit 0 — proxy active, dashboard routes gated, `/` and `/login` public |
+| `npm run test` | ✅ exit 0 — **4 test files, 47 tests passing** (23 unit + 24 integration) |
+
+The integration suite was run twice consecutively to confirm repeatability
+(both runs exit 0 and leave no orphaned server processes or bound ports).
+
+Two real test-harness bugs were found and fixed while validating — see
+[PHASE_02_HANDOFF.md](./PHASE_02_HANDOFF.md):
+
+1. Killing only the `npx` wrapper orphaned the `next-server` grandchild, which
+   kept port 3210 bound and made the *next* run die with `EADDRINUSE`. Fixed by
+   signalling the whole detached process group and awaiting its exit.
+2. `freePort` used `lsof -i tcp:PORT`, which matches a socket by **remote** port
+   too — so it matched the test process's own outbound `fetch()` connections and
+   SIGKILLed the vitest worker itself after the tests had passed. Fixed by
+   restricting both lookup strategies to `LISTEN`-state sockets and never
+   signalling this process or its parent.
+
+### Phase 02B verification
+
+All commands were executed on the `feat/admin-auth` branch after the Phase 02B
+pass. The build was given a test-only generated `AUTH_SECRET`; no real secret,
+password or hash was used or printed by any check.
+
+| Command | Result |
+| --- | --- |
+| `npm ci` | ✅ exit 0 — 722 packages |
+| `npm run lint` | ✅ exit 0, no warnings |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm run build` | ✅ exit 0 — proxy active, dashboard routes gated, `/` and `/login` public |
+| `npm run test` | ✅ exit 0 — **6 test files, 79 tests passing** (31 unit + 8 provisioning + 40 integration) |
+
+The integration suite was run repeatedly, including twice consecutively and on
+overridden ports (`RABET_TEST_PORT=4210 RABET_TEST_PORT_2=4211`); every run exited
+0, left no orphaned `next-server` process, left no bound port behind, and left no
+`rabet-test-*` temp directory in `/tmp`.
+
+Provisioning prompt security fix applied to this branch after the Phase 02B pass:
+
+- **The interactive prompt now hides the password for real.** The previous
+  implementation used Node's `readline.question()` with `terminal: true`, which
+  the header described as hiding the input. It does not: `terminal: true` makes
+  readline's line editor echo every typed character back to the terminal, so an
+  operator's password was shown in cleartext on screen (and stayed in the
+  terminal scrollback) while it was being entered. The script now switches the
+  tty to raw mode, which disables the kernel's keystroke echo — the same
+  mechanism `sudo` and `read -s` use — and collects the bytes itself, writing
+  nothing to stdout. Not even the password's length is revealed.
+- **Fail-closed when hiding cannot be guaranteed.** If stdin is a terminal that
+  cannot enter raw mode, the script refuses to prompt and exits non-zero rather
+  than display the password; the operator is told to pipe it instead. Empty and
+  mismatched inputs still abort without emitting a hash.
+- **The shell-history hazard was removed from the docs.** The header previously
+  suggested `printf '%s' 'your-password' | …`, which records the password in the
+  shell history and the process list. The remaining piped example is fed by
+  another process, and every doc now describes the interactive prompt as the
+  normal path.
+- **No architectural or compatibility change.** The Argon2id parameters and the
+  PHC output format are untouched, so hashes still verify in the deployed app,
+  and the piped (non-interactive) path still behaves exactly as before. No new
+  dependency was added.
+- **New test coverage.** `tests/generate-admin-hash.test.ts` (8 tests) drives the
+  script through a real pseudo-terminal (`script`) and asserts the typed
+  password never appears in the terminal's recorded output — including its
+  length as a run of placeholders — plus the mismatch path, the piped path, and
+  that the emitted hash verifies with the app's own `@node-rs/argon2`. The PTY
+  tests are skipped on platforms without the `script` utility.
+
+What Phase 02B changed in the suite (no existing assertion was removed; the
+behaviour they assert is unchanged):
+
+- **Configurable ports.** `RABET_TEST_PORT` / `RABET_TEST_PORT_2` replace the
+  hard-coded 3210/3211, defaulting to the old values so an unconfigured run
+  behaves as before.
+- **Complete cleanup.** The throwaway env directory is now removed in `afterAll`
+  (previously it leaked one temp directory per run), and every server the file
+  spawns is tracked and reaped even if a test threw before its own `finally`.
+- **New coverage.** Expired-session rejection (a genuine JWT past its `exp`,
+  minted with the server's own secret), CSRF enforcement (missing and bogus
+  tokens), off-origin `callbackUrl` handling on both the callback and Server
+  Action paths, the login page's cache policy, PWA asset reachability while
+  signed out, absence of a service worker, and absence of credential material in
+  response bodies.
+
+What Phase 02B changed in dependencies:
+
+- **`shadcn` moved to `devDependencies`.** It is a build-time tool (a CSS
+  `@import` and a CLI); it was never imported by application runtime code. This
+  removes its entire transitive subtree — `fast-glob`, `micromatch`, `braces`,
+  `ts-morph`, `@shadcn/registry` — from the **production** dependency tree, which
+  is where all nine `npm audit` advisories lived. See the security findings below.
+
+Security review performed in Phase 02B (details in
+[ARCHITECTURE.md](./ARCHITECTURE.md), ADR-011):
+
+- `npm audit` reports **9 high-severity advisories**, all tracing to a single
+  root package `braces` (stack-exhaustion DoS) reached through
+  `micromatch` → `fast-glob`. Every path is a **development/build tool**:
+  `eslint-config-next` (lint) and `shadcn`/`ts-morph` (component CLI). **No
+  runtime or authentication dependency is affected** — not `next`, `next-auth`,
+  `@auth/core`, `@node-rs/argon2` or `zod`.
+- After moving `shadcn` to `devDependencies`, `npm ls --omit=dev` contains
+  **none** of the vulnerable packages. The advisories remain in the dev tree and
+  so remain in the audit count, but they are not shipped to Vercel's runtime.
+- `npm audit fix --force` was deliberately **not** run: its only "fix" is a
+  breaking downgrade of `shadcn` to `1.0.0`, which risks the toolchain for no
+  runtime benefit.
+- **No application rate limiter exists**, and none is claimed. Argon2id's
+  memory-hard cost is the per-attempt brake; a durable, externally enforced
+  limiter is recommended before internet-facing access (ADR-011).
 
 ## Remaining manual verification
 
@@ -259,6 +440,46 @@ the Vercel preview:
       (both are wired into the route group but were not visually triggered).
 - [ ] Confirm the active-section accent bar renders as intended in both the
       sidebar and the drawer.
+
+### Authentication checks (require a real browser, provisioned deployment)
+
+The integration suite proves the HTTP behaviour server-side; these need the
+interactive UI on a provisioned deployment (`.env` set on the Vercel preview):
+
+- [ ] The `/login` page renders the brand, accessible email and password fields,
+      and the error banner is announced by a screen reader on a failed sign-in.
+- [ ] The show/hide password toggle works and the email keyboard appears on
+      mobile (`inputMode="email"`).
+- [ ] Autofill from a password manager fills email + password correctly via the
+      `autoComplete` attributes.
+- [ ] A signed-in admin who navigates to `/login` is redirected to `/overview`.
+- [ ] Signing out from the dashboard header clears the session and lands on
+      `/login`; the back button and refresh do not restore dashboard access.
+- [ ] An already-authenticated dashboard navigation is not interrupted by the
+      proxy redirect on a slow network.
+
+### Phase 02B automated checks that back the list above
+
+These were executed over HTTP against the real production server and are the
+evidence for the server-side half of the items above — but they are **not** a
+substitute for the interactive UI checks, which need a real browser:
+
+- [x] Unauthenticated requests to all eight dashboard routes and `/api/admin`
+      redirect to `/login` and never render dashboard content.
+- [x] Correct credentials authenticate and issue a session cookie; wrong
+      password and unknown email both fail with the same generic error.
+- [x] Tampered, fabricated and **expired** session cookies are all rejected.
+- [x] CSRF is enforced: a POST without a token, or with a bogus one, is rejected
+      with `MissingCSRF` and issues no session.
+- [x] External and protocol-relative `callbackUrl` values are not followed
+      off-origin, on both the callback path and the login Server Action.
+- [x] `/overview`, `/api/admin` and `/login` all serve `private, no-store`
+      cache headers.
+- [x] The manifest, all five icons and `/favicon.ico` return 200 while signed
+      out, so the installed PWA can always present the login screen.
+- [x] No service worker is registered and `/sw.js` / `/service-worker.js` 404.
+- [x] The admin password, its Argon2 hash and the session token value never
+      appear in any response body.
 
 ### PWA installation checks (require an Android device)
 

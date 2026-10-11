@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { LogoutButton } from "@/components/auth/logout-button";
 import { Badge } from "@/components/ui/badge";
 import { MobileNav } from "@/components/dashboard/mobile-nav";
 
@@ -19,8 +20,9 @@ export function Header() {
             aria-hidden="true"
             className="size-1.5 rounded-full bg-amber-500"
           />
-          Phase 1 · Preview
+          Phase 2 · Preview
         </Badge>
+        <LogoutButton />
       </div>
     </header>
   );

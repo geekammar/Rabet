@@ -39,16 +39,18 @@ bot; the merchant interacts only with the dashboard.
 | Language | TypeScript (strict) | `strict: true`, `@/*` → `./src/*` |
 | UI | React 19 + Tailwind CSS v4 | Design tokens as CSS variables |
 | Components | shadcn/ui (radix-nova) + lucide-react | Components are copied into the repo, not a dependency |
-| Validation | Zod | Planned — schema validation at trust boundaries |
-| Testing | Vitest | Planned — unit and integration tests |
+| Validation | Zod | Installed in Phase 02 — sign-in input validation at the trust boundary |
+| Testing | Vitest | Installed in Phase 02 — unit + auth integration suites |
 | ORM | Drizzle | Planned — migration-friendly, type-safe |
 | Database | PostgreSQL on Neon | Planned — serverless Postgres |
-| Auth | Auth.js | Planned — admin-only authentication |
+| Auth | Auth.js v5 (`next-auth@5.0.0-beta.32`) | Installed in Phase 02 — one admin, Credentials provider, encrypted JWT sessions |
+| Password hashing | `@node-rs/argon2` | Installed in Phase 02 — Argon2id, OWASP-recommended parameters |
 | Telegram | grammY | Planned — bot framework and webhooks |
 | Hosting | Vercel | Base project configured in Phase 01; previews and production via the GitHub integration |
 
-**Phase 01 installs only the framework and UI rows of this table, plus the base
-Vercel hosting project.** Future dependencies are intentionally absent so that
+**Phase 01 installed the framework and UI rows plus the base Vercel hosting
+project; Phase 02 added validation, testing, authentication and password
+hashing.** Remaining future dependencies are intentionally absent so that
 no dead code or half-wired modules exist before their phase begins.
 
 ## 3. Codebase structure
@@ -239,6 +241,122 @@ only the static shell and never authenticated or data responses. Web Push is
 not part of any planned merchant flow and stays out until there is a concrete
 need.
 
+### ADR-009 — Database-free JWT sessions, and their revocation limitation
+
+**Decision.** Phase 02 uses Auth.js v5 (`next-auth@5.0.0-beta.32`) with the
+Credentials provider and the default **stateless encrypted JWT** session
+strategy — no adapter, no database. The single administrator is declared by the
+`ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH` environment variables; the password hash
+is an Argon2id PHC string verified with `@node-rs/argon2`. The session is an
+encrypted, `HttpOnly`, `Secure`-under-HTTPS, `SameSite=lax` cookie named
+`__Secure-authjs.session-token`, encrypted with `AUTH_SECRET`, with a 7-day
+`maxAge`.
+
+**Rationale.** The MVP has exactly one administrator and no database yet, so a
+session table would require infrastructure that Phase 03 introduces anyway.
+Auth.js's encrypted-cookie JWT needs no datastore and is the documented,
+library-maintained path — no custom JWT or crypto code is written. Argon2id is
+the OWASP-recommended memory-hard hash; plain SHA-256 is never used for
+passwords. Missing or invalid configuration fails closed (`getAdminConfig()`
+returns `null` and every sign-in is rejected), so there is no default account
+and no bypass.
+
+**Consequences — the important limitation.** Because the session is a
+self-contained encrypted token and not a server-side record, **logout clears the
+browser cookie but does not revoke a token that has already left the device.**
+A stolen cookie remains valid until its natural 7-day expiry; there is no
+server-side denylist to invalidate it sooner. Mitigations in place: the short
+`maxAge`, `Secure` + `HttpOnly` + `SameSite=lax` cookie attributes, `private,
+no-store` cache headers on every dashboard route, and a generic
+invalid-credentials error that leaks no signal about the admin identity.
+Central revocation (a session table or rotated `AUTH_SECRET`) is a deliberate
+Phase 03+ decision once a database exists; rotating `AUTH_SECRET` invalidates
+all outstanding sessions immediately, at the cost of signing everyone out.
+
+### ADR-010 — Authorization is layered; `proxy.ts` is not the sole gate
+
+**Decision.** Every dashboard route is protected at **two** independent layers:
+
+1. `src/proxy.ts` (the Next.js 16 rename of `middleware.ts`) runs an *optimistic*
+   Auth.js check and redirects an unauthenticated visitor to `/login` before the
+   dashboard shell is ever downloaded.
+2. `requireAdmin()` (`src/lib/auth/session.ts`) is the *authoritative*
+   server-side check, called by the `(dashboard)` layout, by Server Actions
+   (`src/app/actions/auth.ts`) and by Route Handlers (`src/app/api/admin/route.ts`).
+
+**Rationale.** A Next.js layout does not re-run on every navigation, and
+returning `null` from a layout does not stop nested segments or Server Actions
+from executing. Equally, the proxy matcher excludes paths (the Auth.js route
+handler, static and PWA assets), and excluding a path also skips Server Function
+invocations on it — so the proxy cannot be the only gate. Centralizing the
+authoritative check in one `server-only` helper means a new route is protected
+by calling a single function, and a handler that forgets it is the only gap.
+
+**Consequences.** Both layers read the session cookie; `getAdminSession()` is
+wrapped in React `cache()` so a render pass reads it once. Protected responses
+are marked `private, no-store, must-revalidate` statically in `next.config.ts`
+(declared statically because, with Cache Components, the dashboard shell's
+headers are finalized before the streamed gated segment runs, so an imperatively
+set header at request time throws). Redirect destinations after login are
+validated against an internal allowlist (`isValidInternalRedirect`) so the login
+page cannot become an open redirect.
+
+### ADR-011 — No application rate limiting in Phase 02; what limits brute force instead
+
+**Decision.** Phase 02 deliberately ships **no application-level rate limiter** on
+the sign-in endpoint. This is a documented gap, not an omission, and it is
+recorded here so it is not mistaken for a control that exists.
+
+**Rationale.** The deployment target is Vercel serverless functions. An in-process
+counter (a `Map` of attempt counts, or a token-bucket variable) is **not reliable**
+there: each invocation may run in a fresh instance with its own memory, so a
+counter in one instance does not constrain a request that lands on another. Such a
+limiter would both under-count an attacker who fans out across instances and
+over-count a legitimate admin whose requests are spread across them. Presenting it
+as protection would be misleading, so it is not implemented and no claim is made
+that it is.
+
+What does limit brute force today:
+
+- **Argon2id is memory-hard.** Every sign-in attempt costs 19 MiB of memory and
+  roughly 20–25 ms of CPU on this VPS, and the cost is paid on *every* attempt —
+  including when the email does not match, so the expensive work cannot be
+  skipped to detect a correct address. Guessing a strong password at that cost,
+  serially or across a bounded number of concurrent function instances, is
+  impractical for the credential sizes involved.
+- **Exactly one identity.** There is a single admin declared by environment
+  variables, no registration, and no user list, so there is no account to
+  enumerate and no password-spray target surface beyond one account.
+- **A generic, uniform failure response.** Every failure mode returns the same
+  "Incorrect email or password." message and the same timing profile, so the
+  endpoint leaks no signal about which part of the credential was wrong.
+- **Vercel Deployment Protection stays enabled**, so the preview and production
+  endpoints are not reachable from the open internet by default.
+
+**Recommendation before public access (smallest suitable protections).** In rough
+order of effort, any *one* of these closes the gap properly:
+
+1. **Vercel's platform-level protections** — the built-in DDoS mitigation plus a
+   Firewall rate-limit rule scoped to `POST /api/auth/callback/credentials` and
+   the `/login` page. This is configured in the Vercel dashboard, requires no code
+   and no new dependency, and is enforced at the edge before a function is ever
+   invoked — which is exactly where a serverless application cannot enforce it
+   itself.
+2. **A durable, external limiter** such as Upstash Ratelimit (REST-based, designed
+   for serverless, free tier) or Vercel KV applied to the same two endpoints. This
+   is the application-level equivalent of option 1 and shares state across
+   instances because the state lives outside them.
+
+Both are deliberately deferred out of Phase 02 because they require provisioning an
+external resource and a secret, which is an operations decision for the owner, not
+a code change. **Until one of them is in place the application should not be
+treated as brute-force hardened for an internet-facing deployment**, and Vercel
+Deployment Protection should remain on.
+
+**Consequences.** The gap is time-bounded: Phase 03 introduces a database, at which
+point a durable counter becomes a local concern rather than an external service and
+can be revisited alongside session revocation (ADR-009).
+
 ## 5. Data flow (future)
 
 1. A customer sends a message to the bot.
@@ -249,26 +367,64 @@ need.
 5. The merchant sees the order, customer and payment in the dashboard.
 6. Drizzle validates every write; Zod validates every external input.
 
-## 6. Testing strategy (planned)
+## 6. Testing strategy
 
-- **Vitest** for unit and integration tests (utilities, validators, bot flows).
-- Schema and migration tests against a Neon branch.
-- Lint, typecheck and build remain the Phase 01 gate in CI; formal test
-  coverage, the security review and release hardening arrive in Phase 10.
+- **Vitest** is installed and running (Phase 02).
+  - Unit tests under `src/**/__tests__/` cover the auth modules: fail-closed
+    admin configuration, credential verification, and the redirect allowlist.
+  - `tests/auth.test.ts` is an integration suite driven over HTTP against the
+    real production server (`next start`) with a synthetic, throwaway
+    configuration. The listen ports are configurable via `RABET_TEST_PORT` and
+    `RABET_TEST_PORT_2` (defaults 3210/3211) so CI and local runs never fight
+    over a fixed address. It asserts that unauthenticated requests never see
+    dashboard content, that login/logout work end to end, that tampered,
+    fabricated and **expired** cookies are rejected, that CSRF is enforced on the
+    credentials callback, that off-origin `callbackUrl` values are not followed,
+    that protected responses are not cacheable, that the login Server Action
+    applies the redirect allowlist, that PWA assets stay reachable while signed
+    out, that no credential material appears in any response body, and that a
+    deployment with no admin configured fails closed. The expired-session test
+    mints a genuine JWT that is already past its `exp` using the server's own
+    secret, so it exercises the real expiry check rather than a malformed cookie.
+  - `src/app/actions/__tests__/auth.test.ts` covers the login and logout Server
+    Actions with Auth.js mocked, proving the redirect allowlist is wired to the
+    form action path and that failures collapse to one generic message.
+- Schema and migration tests against a Neon branch arrive in Phase 03.
+- Lint, typecheck, build **and** test are the CI gate as of Phase 02; formal
+  coverage thresholds, the security review and release hardening arrive in
+  Phase 10.
 
 ## 7. Security considerations
 
-- **No authentication exists yet.** Nothing in the dashboard is protected and no
-  private business data is shown, because none exists. The interface is marked
-  "Phase 1 · Preview" to make the stage obvious.
-- Phase 02 will add Auth.js session protection for the `(dashboard)` route group
-  before any administrative function or private data is introduced.
-- **No caching of sensitive data is introduced in Phase 01C.** There is no
-  service worker and no offline layer. Next.js defaults prerendered pages with
-  `s-maxage` at the CDN edge; that is acceptable only while the shell contains
-  no personalized or authenticated data — it must be replaced with
-  `dynamic`/`private` rendering as part of Phase 02, before any customer,
-  order, payment or session response is served.
+- **Authentication exists as of Phase 02** (see ADR-009 and ADR-010). One
+  administrator, email + password, Argon2id hash verification, encrypted JWT
+  session cookie, 7-day expiry, no self-registration and no other roles.
+- **Missing or invalid configuration fails closed.** If `AUTH_SECRET`,
+  `ADMIN_EMAIL` or `ADMIN_PASSWORD_HASH` is absent, empty, or the hash is not an
+  Argon2 PHC string, sign-in is refused and the dashboard stays unreachable.
+  There is no default account and no bypass.
+- **Authorization is layered** (ADR-010): an optimistic `proxy.ts` redirect plus
+  an authoritative `requireAdmin()` used by layouts, Server Actions and Route
+  Handlers.
+- **CSRF is enforced by Auth.js** on the credentials callback: a POST without a
+  valid token and cookie pair is rejected with `MissingCSRF` before the
+  credentials are ever evaluated, and no session is issued.
+- **No caching of authenticated responses.** Dashboard routes are declared
+  `private, no-store, must-revalidate` in `next.config.ts`; the `/login` page
+  carries `private, no-cache, no-store`. No service worker exists, so no
+  authenticated payload can be cached on the device.
+- **Sessions cannot be centrally revoked before expiry** (ADR-009). Logout
+  clears the browser cookie; a cookie that has already left the device stays
+  valid for up to its natural 7-day lifetime. Rotating `AUTH_SECRET` invalidates
+  all outstanding sessions at once. This is a documented limitation, not a claim
+  of revocation.
+- **No application rate limiting** (ADR-011). The memory-hard cost of Argon2id is
+  the per-attempt brake; a durable, externally enforced limiter (Vercel Firewall
+  rate limiting or Upstash Ratelimit) is the recommended prerequisite for
+  internet-facing access. An in-process counter is deliberately *not* used,
+  because it is unreliable across serverless function instances.
+- **Open-redirect protection.** Post-login destinations are validated against an
+  internal allowlist; unvalidated values fall back to `/overview`.
 - Secrets are never committed; `.env*` is git-ignored and `.env.example` holds
   placeholders only. Vercel Deployment Protection stays enabled.
 

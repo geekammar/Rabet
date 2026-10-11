@@ -52,7 +52,7 @@ export default function LandingPage() {
               aria-hidden="true"
               className="size-1.5 rounded-full bg-amber-500"
             />
-            Phase 1 · Foundation &amp; UI shell
+            Phase 2 · Admin authentication
           </span>
           <h1 className="mt-6 font-heading text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
             Sell digital services through Telegram
@@ -106,7 +106,7 @@ export default function LandingPage() {
 
       <footer className="border-t">
         <div className="mx-auto flex w-full max-w-5xl flex-col items-center justify-between gap-3 px-4 py-6 pb-[max(env(safe-area-inset-bottom),1.5rem)] text-sm text-muted-foreground sm:flex-row sm:px-6 lg:px-8">
-          <p>Rabet · Phase 1 — Discovery &amp; Development</p>
+          <p>Rabet · Phase 2 — Discovery &amp; Development</p>
           <nav aria-label="Footer">
             <Link
               href={REPOSITORY_URL}
