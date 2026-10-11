@@ -41,8 +41,8 @@ bot; the merchant interacts only with the dashboard.
 | Components | shadcn/ui (radix-nova) + lucide-react | Components are copied into the repo, not a dependency |
 | Validation | Zod | Installed in Phase 02 — sign-in input validation at the trust boundary |
 | Testing | Vitest | Installed in Phase 02 — unit + auth integration suites |
-| ORM | Drizzle | Planned — migration-friendly, type-safe |
-| Database | PostgreSQL on Neon | Planned — serverless Postgres |
+| ORM | Drizzle | Planned — designed in Phase 03A, implemented in Phase 03B ([DATA_MODEL.md](./DATA_MODEL.md)) |
+| Database | PostgreSQL on Neon | Planned — designed in Phase 03A, implemented in Phase 03B ([DATA_MODEL.md](./DATA_MODEL.md)) |
 | Auth | Auth.js v5 (`next-auth@5.0.0-beta.32`) | Installed in Phase 02 — one admin, Credentials provider, encrypted JWT sessions |
 | Password hashing | `@node-rs/argon2` | Installed in Phase 02 — Argon2id, OWASP-recommended parameters |
 | Telegram | grammY | Planned — bot framework and webhooks |
@@ -356,6 +356,28 @@ Deployment Protection should remain on.
 **Consequences.** The gap is time-bounded: Phase 03 introduces a database, at which
 point a durable counter becomes a local concern rather than an external service and
 can be revisited alongside session revocation (ADR-009).
+
+### ADR-012 — Phase 03A data model is designed, not implemented
+
+**Decision.** Phase 03A produces a reviewed **design only** — the entity model, integrity
+rules, infrastructure recommendation and migration plan in
+[docs/DATA_MODEL.md](./DATA_MODEL.md). It deliberately creates **no** `src/db/` code, **no**
+Drizzle schema, **no** SQL migration files, **no** new dependency, and **no** database or
+Neon account. Nothing is applied to any database.
+
+**Rationale.** The schema touches every later phase (settings, services, orders, payments,
+support). Freezing it as a reviewed document before any migration is generated means the
+first `0000_initial.sql` is born coherent instead of being rewritten as each phase
+discovers the previous one's mistakes. It also keeps the mandate's hard rules structural:
+no production migration runs from a Vercel build or app startup, `drizzle-kit push` is
+never used, and no destructive migration is accepted — all documented in §11 of that
+document.
+
+**Consequences.** Phase 03B has an explicit, ordered list of prerequisites (§13 of
+DATA_MODEL.md), including product sign-off on a small set of open decisions. The model
+targets the one-admin, one-bot MVP: it contains no multi-tenancy, multi-bot, role or
+analytics structure, and the payment and fulfillment statuses remain independent columns
+per ADR-004.
 
 ## 5. Data flow (future)
 

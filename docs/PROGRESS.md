@@ -1,15 +1,14 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 02 — Admin authentication**
+Current phase: **Phase 03A — Database architecture & data model design (design only)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
-[PHASE_02_HANDOFF.md](./PHASE_02_HANDOFF.md) for the Phase 02A handoff.
+[DATA_MODEL.md](./DATA_MODEL.md) for the database design delivered by this phase.
 
-> This file tracks the **Phase 01C** mobile-first UX and PWA foundation pass on
-> top of the Phase 01B final review, and the **Phase 02A** authentication pass.
-> Phase 01 is merged; Phase 02A is complete on the `feat/admin-auth` branch and
-> awaits review.
+> This file tracks the **Phase 02B** authentication pass and the **Phase 03A** data-model
+> design pass. Phase 01 and Phase 02 are merged into `main`; Phase 03A is a design-only
+> pass on its own branch.
 
 ---
 
@@ -18,8 +17,9 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
-| **Phase 02** | Admin authentication | 🟢 **Phase 02A + 02B complete on `feat/admin-auth`** — provisioning prompt security fix applied; lint, typecheck, build and 79 tests pass; [PR #3](https://github.com/geekammar/Rabet/pull/3) open |
-| Phase 03 | Database schema & migrations | Not started |
+| **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #3](https://github.com/geekammar/Rabet/pull/3), commit `5e3bc7e`) — code complete and Production-ready; the **manual interactive device checks and the durable rate limiter remain open** (see below), so Phase 02 is not marked *fully accepted* |
+| **Phase 03A** | Database architecture & data model **design** | 🟦 **Design complete on `design/phase-03a-data-model`** — documentation only; no schema files, no migrations, no dependencies, no database |
+| Phase 03B | Database schema & migrations implementation | Not started — see [DATA_MODEL.md §13](./DATA_MODEL.md) for exact prerequisites |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Service management | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
@@ -30,6 +30,63 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 
 The base Vercel deployment and the GitHub integration were configured during
 Phase 01, but release hardening (Phase 10) is **not** complete.
+
+### What "Phase 02 merged" means, precisely
+
+To avoid overstating: PR #3 merged and Vercel Production is **Ready** for the merged
+commit, so Phase 02 is delivered. The following were **not** completed by the merge and
+stay separately tracked:
+
+- The **manual interactive authentication checks** (the checklist under "Remaining manual
+  verification" below). The development VPS has no browser; the integration suite proves
+  the HTTP/server-side behaviour, but the interactive UI checks need a real browser
+  against a provisioned deployment.
+- The **durable rate limiter** (ADR-011). Until it is in place, Vercel Deployment
+  Protection should stay enabled and the app is not brute-force hardened for an
+  internet-facing deployment.
+- Central **session revocation** (ADR-009) — still stateless JWT sessions; revisited as an
+  open decision now that a database is being designed (DATA_MODEL.md §12.2).
+
+## What was done in Phase 03A
+
+A **design-only** pass — the deliverable is a reviewed document, not code.
+
+- **Domain model.** Fourteen tables grouped by domain (Configuration, Catalog, Content,
+  People, Commerce, Payments, Support, Integration), with a Mermaid ER diagram, relationship
+  cardinalities and per-column constraints.
+  See [DATA_MODEL.md](./DATA_MODEL.md).
+- **Hierarchical catalog.** The service catalog is a single self-referencing `service`
+  table using a `parent_id` **adjacency list**, supporting nesting to arbitrary depth.
+  Navigation-only nodes and sellable nodes are distinguished by `is_sellable`, with
+  database-level protection against cycles, invalid parents, deleted ancestors and
+  ambiguous pricing (a sellable node must be a priced leaf).
+- **Immutable order snapshots.** `order_item` freezes the purchased name, price, currency
+  and terms at order time, so editing the catalog later never rewrites history.
+- **Independent state.** Payment and fulfillment statuses are two independent columns on
+  `order` (ADR-004), driven by an append-only `order_event` audit log that records
+  **verified** events only — inferred journey stages are never stored (requirement 9).
+- **Idempotency.** Telegram update deduplication via a unique `telegram_update.update_id`,
+  with the same one-row-lock pattern applied to payment charges and support messages.
+- **Infrastructure recommendation.** **Neon** managed PostgreSQL, Free plan, region
+  `aws-us-east-2`, connected via the Neon-managed Vercel integration for per-preview
+  database branches. Evaluated against Supabase, Vercel Postgres, Railway/Render, and
+  self-hosting, using current official documentation.
+- **Migration plan.** Drizzle ORM + Drizzle Kit, codebase-first with **generated,
+  committed, human-reviewed SQL migrations**. Production migrations are run by hand against
+  the direct connection — never from a Vercel build, never at app startup, and
+  `drizzle-kit push` is never used.
+- **Documentation updates.** [ARCHITECTURE.md](./ARCHITECTURE.md) gained ADR-012; this file
+  and the Phase 02 status were corrected to reflect the merged baseline.
+
+### What Phase 03A deliberately did not do
+
+- No `src/db/` code, no `drizzle.config.ts`, no `drizzle/` migrations.
+- No new npm dependency installed (`drizzle-orm`, `drizzle-kit`,
+  `@neondatabase/serverless` are Phase 03B).
+- No Neon project or database created, no connection made, no migration applied.
+- No changes to application code, no version bump, and no deployment.
+
+The manual Phase 02 checks below are unchanged and were **not** claimed as passing.
 
 ## What is done in Phase 01
 

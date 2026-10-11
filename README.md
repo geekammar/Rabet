@@ -4,14 +4,15 @@ A lightweight **Telegram-based digital services management system** with a web d
 
 Rabet connects a Telegram bot — where customers browse services and place orders — to a clean admin dashboard where a single merchant manages services, orders, customers and payments.
 
-> **Status:** Phase 02 — Admin authentication (complete, pre-merge on `feat/admin-auth`).
-> The dashboard UI shell from Phase 01 is now protected by Auth.js: one
-> administrator signs in by email + password, sessions are encrypted JWT
-> cookies, and every dashboard route is gated server-side. There is still no
-> database, no Telegram integration and no real payment processing — those are
-> later phases, and the app is **not** production-secure until they land.
+> **Status:** Phase 03A — Database architecture & data model **design** (documentation only).
+> Phases 01 and 02 (UI shell and admin authentication) are merged into `main` and
+> Production is ready for the merged commit. Phase 03A adds a reviewed data model,
+> infrastructure recommendation and migration plan — but deliberately **no** database,
+> **no** schema code and **no** migrations yet (that is Phase 03B). There is still no
+> Telegram integration and no real payment processing — those are later phases, and the
+> app is **not** production-secure until they land.
 > See [docs/PROGRESS.md](./docs/PROGRESS.md) and
-> [docs/PHASE_02_HANDOFF.md](./docs/PHASE_02_HANDOFF.md).
+> [docs/DATA_MODEL.md](./docs/DATA_MODEL.md).
 ---
 
 ## Tech stack
@@ -22,8 +23,8 @@ Rabet connects a Telegram bot — where customers browse services and place orde
 | UI | React 19, Tailwind CSS v4, shadcn/ui (radix-nova), lucide-react |
 | Validation | Zod |
 | Testing | Vitest |
-| ORM (planned) | Drizzle |
-| Database (planned) | PostgreSQL on Neon |
+| ORM (planned) | Drizzle — designed in Phase 03A |
+| Database (planned) | PostgreSQL on Neon — designed in Phase 03A |
 | Auth | Auth.js v5 (`next-auth@5.0.0-beta.32`), Credentials provider, JWT sessions |
 | Password hashing | Argon2id via `@node-rs/argon2` |
 | Telegram (planned) | grammY |
@@ -176,6 +177,7 @@ cp .env.example .env.local
 
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — stack, structure and architectural decisions.
 - [docs/PROGRESS.md](./docs/PROGRESS.md) — phase status, what is done and what is pending.
+- [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) — Phase 03A database design, infrastructure and migration plan.
 
 ## Development workflow
 
@@ -199,8 +201,9 @@ Development follows this fixed feature order.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | **Merged** |
-| **Phase 02** | Admin authentication | **Complete on `feat/admin-auth`** (Phase 02A) |
-| Phase 03 | Database schema & migrations | Not started |
+| **Phase 02** | Admin authentication | **Merged** (PR #3, `5e3bc7e`) — manual device checks and rate limiting remain open |
+| **Phase 03A** | Database architecture & data model **design** | **Design complete** — documentation only, no implementation |
+| Phase 03B | Database schema & migrations implementation | Not started |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Service management | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
