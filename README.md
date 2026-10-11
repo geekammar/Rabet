@@ -12,7 +12,6 @@ Rabet connects a Telegram bot — where customers browse services and place orde
 > later phases, and the app is **not** production-secure until they land.
 > See [docs/PROGRESS.md](./docs/PROGRESS.md) and
 > [docs/PHASE_02_HANDOFF.md](./docs/PHASE_02_HANDOFF.md).
-
 ---
 
 ## Tech stack
@@ -144,9 +143,20 @@ Then `npm run dev` and sign in at `/login`.
 | `npm run test` | Run the Vitest unit + auth integration suites |
 | `npm run test:auth` | Run only the auth integration suite (`tests/auth.test.ts`) |
 
-The integration suite builds the app and boots the real production server on
-ports 3210/3211 with a synthetic, throwaway configuration — no real secret,
-password or hash is used or printed.
+The integration suite builds the app and boots the real production server with a
+synthetic, throwaway configuration — no real secret, password or hash is used or
+printed. The listen ports are configurable so runs never collide:
+
+```bash
+# defaults 3210 / 3211
+npm run test:auth
+
+# or choose your own
+RABET_TEST_PORT=4210 RABET_TEST_PORT_2=4211 npm run test:auth
+```
+
+The suite reaps every server it spawns and removes its temp environment directory
+on the way out, on success and on failure.
 
 ## Environment variables
 
@@ -226,6 +236,48 @@ mobile-first at 320, 360, 390, 430, 768 and 1024 px and on desktop:
 
 Interactive verification still needs a real mobile browser — see the remaining
 manual checks in [docs/PROGRESS.md](./docs/PROGRESS.md).
+
+## Security posture
+
+What Phase 02 provides, and what it deliberately does not.
+
+**In place:**
+
+- One administrator declared by environment variables; no registration, no other
+  accounts, no roles.
+- Argon2id password hashing (19 MiB memory-hard); the plaintext password is never
+  stored, logged or compared in the clear.
+- Fail-closed configuration — a missing or invalid `ADMIN_PASSWORD_HASH` disables
+  sign-in entirely. No default account, no bypass.
+- Layered authorization: an optimistic `proxy.ts` redirect plus an authoritative
+  `requireAdmin()` used by every protected layout, Server Action and Route Handler.
+- Encrypted, `HttpOnly`, `Secure`, `SameSite=lax` session cookie with a 7-day
+  expiry; CSRF enforced by Auth.js on the credentials callback; `private, no-store`
+  cache headers on every dashboard route and on `/login`.
+- Open-redirect protection: post-login destinations are validated against an
+  internal allowlist.
+
+**Documented limitations — not claims of protection:**
+
+- **Sessions are stateless JWTs and cannot be centrally revoked before they
+  expire.** Logout clears the browser cookie; a cookie that has already left the
+  device remains valid up to 7 days. Rotating `AUTH_SECRET` invalidates all
+  outstanding sessions at once. See ADR-009.
+- **There is no application rate limiter.** The memory-hard cost of Argon2id is
+  the only per-attempt brake, and an in-process counter is *not* reliable across
+  Vercel serverless instances, so none is shipped or claimed. Before
+  internet-facing access, enable a durable, externally enforced limit — a Vercel
+  Firewall rate-limit rule on the sign-in endpoints (no code required) or Upstash
+  Ratelimit. Until then, keep Vercel Deployment Protection on. See ADR-011.
+
+**Dependency advisories.** `npm audit` reports 9 high-severity advisories. Every
+one traces to a single root package (`braces`, a stack-exhaustion DoS) reached
+only through development tooling — `eslint-config-next` and the `shadcn` CLI's
+`ts-morph` / `fast-glob` subtree. **No runtime or authentication dependency is
+affected.** `shadcn` was moved to `devDependencies` in Phase 02B, which removes
+that entire subtree from the production dependency tree. `npm audit fix --force`
+was deliberately not run: its only offered fix is a breaking downgrade of the
+`shadcn` CLI. Residual dev-tooling advisories are tracked for Phase 10.
 
 ## Progressive Web App
 

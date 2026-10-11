@@ -18,7 +18,7 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
-| **Phase 02** | Admin authentication | 🟢 **Phase 02A complete on `feat/admin-auth`** — lint, typecheck, build and 47 tests pass |
+| **Phase 02** | Admin authentication | 🟢 **Phase 02A + 02B complete on `feat/admin-auth`** — lint, typecheck, build and 71 tests pass; PR open |
 | Phase 03 | Database schema & migrations | Not started |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Service management | Not started |
@@ -321,6 +321,68 @@ Two real test-harness bugs were found and fixed while validating — see
    restricting both lookup strategies to `LISTEN`-state sockets and never
    signalling this process or its parent.
 
+### Phase 02B verification
+
+All commands were executed on the `feat/admin-auth` branch after the Phase 02B
+pass. The build was given a test-only generated `AUTH_SECRET`; no real secret,
+password or hash was used or printed by any check.
+
+| Command | Result |
+| --- | --- |
+| `npm ci` | ✅ exit 0 — 722 packages |
+| `npm run lint` | ✅ exit 0, no warnings |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm run build` | ✅ exit 0 — proxy active, dashboard routes gated, `/` and `/login` public |
+| `npm run test` | ✅ exit 0 — **5 test files, 71 tests passing** (31 unit + 40 integration) |
+
+The integration suite was run repeatedly, including twice consecutively and on
+overridden ports (`RABET_TEST_PORT=4210 RABET_TEST_PORT_2=4211`); every run exited
+0, left no orphaned `next-server` process, left no bound port behind, and left no
+`rabet-test-*` temp directory in `/tmp`.
+
+What Phase 02B changed in the suite (no existing assertion was removed; the
+behaviour they assert is unchanged):
+
+- **Configurable ports.** `RABET_TEST_PORT` / `RABET_TEST_PORT_2` replace the
+  hard-coded 3210/3211, defaulting to the old values so an unconfigured run
+  behaves as before.
+- **Complete cleanup.** The throwaway env directory is now removed in `afterAll`
+  (previously it leaked one temp directory per run), and every server the file
+  spawns is tracked and reaped even if a test threw before its own `finally`.
+- **New coverage.** Expired-session rejection (a genuine JWT past its `exp`,
+  minted with the server's own secret), CSRF enforcement (missing and bogus
+  tokens), off-origin `callbackUrl` handling on both the callback and Server
+  Action paths, the login page's cache policy, PWA asset reachability while
+  signed out, absence of a service worker, and absence of credential material in
+  response bodies.
+
+What Phase 02B changed in dependencies:
+
+- **`shadcn` moved to `devDependencies`.** It is a build-time tool (a CSS
+  `@import` and a CLI); it was never imported by application runtime code. This
+  removes its entire transitive subtree — `fast-glob`, `micromatch`, `braces`,
+  `ts-morph`, `@shadcn/registry` — from the **production** dependency tree, which
+  is where all nine `npm audit` advisories lived. See the security findings below.
+
+Security review performed in Phase 02B (details in
+[ARCHITECTURE.md](./ARCHITECTURE.md), ADR-011):
+
+- `npm audit` reports **9 high-severity advisories**, all tracing to a single
+  root package `braces` (stack-exhaustion DoS) reached through
+  `micromatch` → `fast-glob`. Every path is a **development/build tool**:
+  `eslint-config-next` (lint) and `shadcn`/`ts-morph` (component CLI). **No
+  runtime or authentication dependency is affected** — not `next`, `next-auth`,
+  `@auth/core`, `@node-rs/argon2` or `zod`.
+- After moving `shadcn` to `devDependencies`, `npm ls --omit=dev` contains
+  **none** of the vulnerable packages. The advisories remain in the dev tree and
+  so remain in the audit count, but they are not shipped to Vercel's runtime.
+- `npm audit fix --force` was deliberately **not** run: its only "fix" is a
+  breaking downgrade of `shadcn` to `1.0.0`, which risks the toolchain for no
+  runtime benefit.
+- **No application rate limiter exists**, and none is claimed. Argon2id's
+  memory-hard cost is the per-attempt brake; a durable, externally enforced
+  limiter is recommended before internet-facing access (ADR-011).
+
 ## Remaining manual verification
 
 The development VPS has **no browser installed** (no Chromium, Firefox,
@@ -364,6 +426,29 @@ interactive UI on a provisioned deployment (`.env` set on the Vercel preview):
       `/login`; the back button and refresh do not restore dashboard access.
 - [ ] An already-authenticated dashboard navigation is not interrupted by the
       proxy redirect on a slow network.
+
+### Phase 02B automated checks that back the list above
+
+These were executed over HTTP against the real production server and are the
+evidence for the server-side half of the items above — but they are **not** a
+substitute for the interactive UI checks, which need a real browser:
+
+- [x] Unauthenticated requests to all eight dashboard routes and `/api/admin`
+      redirect to `/login` and never render dashboard content.
+- [x] Correct credentials authenticate and issue a session cookie; wrong
+      password and unknown email both fail with the same generic error.
+- [x] Tampered, fabricated and **expired** session cookies are all rejected.
+- [x] CSRF is enforced: a POST without a token, or with a bogus one, is rejected
+      with `MissingCSRF` and issues no session.
+- [x] External and protocol-relative `callbackUrl` values are not followed
+      off-origin, on both the callback path and the login Server Action.
+- [x] `/overview`, `/api/admin` and `/login` all serve `private, no-store`
+      cache headers.
+- [x] The manifest, all five icons and `/favicon.ico` return 200 while signed
+      out, so the installed PWA can always present the login screen.
+- [x] No service worker is registered and `/sw.js` / `/service-worker.js` 404.
+- [x] The admin password, its Argon2 hash and the session token value never
+      appear in any response body.
 
 ### PWA installation checks (require an Android device)
 

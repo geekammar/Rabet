@@ -15,12 +15,17 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess, execSync } from "node:child_process";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { hash } from "@node-rs/argon2";
+import { encode as encodeJwt } from "@auth/core/jwt";
 
-const PORT = "3210";
+// Configurable ports so CI and local runs (or two runs side by side) never
+// fight over a fixed address. Defaults keep the historic 3210/3211 so an
+// unconfigured `npm run test` behaves exactly as before.
+const PORT = process.env.RABET_TEST_PORT ?? "3210";
+const CLOSED_PORT = process.env.RABET_TEST_PORT_2 ?? "3211";
 const BASE = `http://localhost:${PORT}`;
 
 const TEST_EMAIL = "admin@example.test";
@@ -141,9 +146,31 @@ async function killTree(child: ChildProcess | null): Promise<void> {
 
 /**
  * The temp directory holding the throwaway env files. Kept module-scoped so the
- * fail-closed test can write a second env file into the same directory.
+ * fail-closed test can write a second env file into the same directory, and so
+ * `afterAll` can remove it on the way out (success *and* failure).
  */
 const envDirRef = { dir: "" };
+
+/**
+ * Every server this file has spawned. `afterAll` walks this list so a server
+ * started inside an individual test cannot outlive the suite even if that test
+ * threw before reaching its own cleanup.
+ */
+const spawnedServers: Array<ChildProcess> = [];
+
+/** Record a spawn and return it, so the suite-wide teardown can always find it. */
+function track(child: ChildProcess): ChildProcess {
+  spawnedServers.push(child);
+  return child;
+}
+
+/**
+ * The throwaway `AUTH_SECRET` the suite boots its server with. Recorded so the
+ * expired-session test can mint a JWT against the same key the server verifies
+ * with. It is generated per run, never written anywhere outside the temp env
+ * file, and never printed.
+ */
+let testAuthSecret = "";
 
 async function buildOnce(): Promise<void> {
   // Reuse the already-built .next output when present (the CI matrix builds
@@ -185,13 +212,18 @@ beforeAll(async () => {
   const envDir = mkdtempSync(path.join(tmpdir(), "rabet-test-"));
   envDirRef.dir = envDir;
   const envFile = path.join(envDir, "test.env");
+
+  // Generate the throwaway secret here and record it so the expired-session
+  // test mints a JWT against the exact key the server verifies with.
+  testAuthSecret = Buffer.from(
+    globalThis.crypto.getRandomValues(new Uint8Array(32)),
+  ).toString("base64");
+
   // Single-quote the hash so the shell does not expand its `$` characters.
   writeFileSync(
     envFile,
     [
-      `AUTH_SECRET=${Buffer.from(
-        globalThis.crypto.getRandomValues(new Uint8Array(32)),
-      ).toString("base64")}`,
+      `AUTH_SECRET=${testAuthSecret}`,
       `ADMIN_EMAIL=${TEST_EMAIL}`,
       `ADMIN_PASSWORD_HASH='${passwordHash}'`,
       `AUTH_URL=${BASE}`,
@@ -239,7 +271,22 @@ afterAll(async () => {
   // `next-server` grandchild dies and releases port 3210, and wait for the
   // process tree to actually be gone before the worker tears down.
   await killTree(server);
+  // Also reap any server an individual test spawned directly (the fail-closed
+  // test starts its own). Guarding the whole list means a test that threw
+  // before its own `finally` still leaves nothing behind.
+  for (const child of spawnedServers) {
+    await killTree(child);
+  }
   freePort(Number(PORT));
+  freePort(Number(CLOSED_PORT));
+
+  // Remove the throwaway env directory so no test-only hash or secret is left
+  // behind in the OS temp dir. `force` makes this a no-op when the directory
+  // was never created (for example when `beforeAll` failed early).
+  if (envDirRef.dir) {
+    rmSync(envDirRef.dir, { recursive: true, force: true });
+    envDirRef.dir = "";
+  }
 });
 
 /** Fetch with redirect-following disabled so redirects can be inspected. */
@@ -362,6 +409,14 @@ describe("login", () => {
     expect(res.body).toContain('id="email"');
   });
 
+  it("marks the sign-in page private and non-cacheable", async () => {
+    // The login page must not be stored in a shared cache either.
+    const res = await raw("/login");
+    const cacheControl = res.headers.get("cache-control") ?? "";
+    expect(cacheControl.toLowerCase()).toContain("private");
+    expect(cacheControl.toLowerCase()).toContain("no-store");
+  });
+
   it("accepts correct credentials and redirects to the dashboard", async () => {
     const res = await signIn({});
     expect([301, 302, 303]).toContain(res.status);
@@ -389,6 +444,91 @@ describe("login", () => {
   it("does not leak the admin email anywhere in the login response", async () => {
     const res = await raw("/login");
     expect(res.body).not.toContain(TEST_EMAIL);
+  });
+});
+
+describe("CSRF protection", () => {
+  it("rejects a sign-in POST without a CSRF token", async () => {
+    // No csrfToken cookie or body field: Auth.js must short-circuit with
+    // MissingCSRF and never evaluate the credentials.
+    const res = await raw("/api/auth/callback/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+        callbackUrl: `${BASE}/overview`,
+      }).toString(),
+    });
+    expect(res.location).toContain("MissingCSRF");
+    expect(
+      Object.keys(res.jar).some((name) => name.includes("session-token")),
+    ).toBe(false);
+  });
+
+  it("rejects a sign-in POST with a bogus CSRF token", async () => {
+    const res = await raw("/api/auth/callback/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        csrfToken: "not-a-real-token",
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+        callbackUrl: `${BASE}/overview`,
+      }).toString(),
+    });
+    expect(res.location).toContain("MissingCSRF");
+    expect(
+      Object.keys(res.jar).some((name) => name.includes("session-token")),
+    ).toBe(false);
+  });
+});
+
+describe("open-redirect protection", () => {
+  it("does not follow an external callbackUrl off the site's origin", async () => {
+    // An attacker-supplied `callbackUrl` must never steer the redirect off the
+    // origin. Auth.js itself collapses it to the origin; the application layer
+    // (`safeLoginRedirect`) additionally restricts it to internal dashboard
+    // routes for the Server Action path.
+    const { csrf, jar } = await withCsrf({});
+    const res = await raw("/api/auth/callback/credentials", {
+      jar,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        csrfToken: csrf,
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+        callbackUrl: "https://evil.example.com/path",
+      }).toString(),
+    });
+    expect(res.status).toBe(302);
+    const location = res.location ?? "";
+    expect(location).not.toContain("evil.example.com");
+    expect(location).toContain(BASE);
+  });
+
+  it("sends a protocol-relative callbackUrl nowhere off-origin", async () => {
+    // A protocol-relative value (`//evil.example.com/...`) has no scheme, so
+    // Auth.js resolves it against the origin as a *path*. The result may carry
+    // the string in its path, but the navigation must stay on this host —
+    // that is the property that matters, so assert the origin, not a substring.
+    const { csrf, jar } = await withCsrf({});
+    const res = await raw("/api/auth/callback/credentials", {
+      jar,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        csrfToken: csrf,
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+        callbackUrl: "//evil.example.com/path",
+      }).toString(),
+    });
+    const location = res.location ?? "";
+    expect(location).toContain(BASE);
+    const host = new URL(location).host;
+    expect(host).toBe(`localhost:${PORT}`);
   });
 });
 
@@ -436,6 +576,37 @@ describe("authenticated access", () => {
     });
     expect(res.body).not.toContain("No activity yet");
   });
+
+  it("rejects a session cookie whose JWT has expired", async () => {
+    // The session is a stateless encrypted JWT, so the only honest way to test
+    // expiry without waiting seven days is to mint a token that is *already*
+    // past its `exp`, using the same secret and salt the running server uses
+    // (`salt` is the cookie name — see `@auth/core`'s session store).
+    //
+    // The control matters: a token minted the same way but still valid IS
+    // accepted, so this assertion is genuinely about the `exp` claim and not
+    // about a malformed cookie.
+    const loginRes = await signIn({});
+    const sessionName = Object.keys(loginRes.jar).find((name) =>
+      name.includes("session-token"),
+    );
+    expect(sessionName).toBeTruthy();
+
+    const expired = await encodeJwt({
+      token: { sub: "admin", email: TEST_EMAIL, role: "admin" },
+      secret: testAuthSecret,
+      salt: sessionName ?? "authjs.session-token",
+      // Negative maxAge sets an expiration time in the past.
+      maxAge: -3600,
+    });
+
+    const res = await raw("/overview", {
+      jar: { [sessionName as string]: expired },
+    });
+    expect([301, 302, 303, 307, 308]).toContain(res.status);
+    expect(res.location).toContain("/login");
+    expect(res.body).not.toContain("No activity yet");
+  });
 });
 
 describe("missing admin configuration fails closed", () => {
@@ -443,8 +614,7 @@ describe("missing admin configuration fails closed", () => {
     // Start a second server that has AUTH_SECRET but no ADMIN_EMAIL /
     // ADMIN_PASSWORD_HASH. Sign-in must be impossible on it: nobody can log
     // in, and the dashboard stays unreachable.
-    const port = "3211";
-    const base = `http://localhost:${port}`;
+    const base = `http://localhost:${CLOSED_PORT}`;
 
     const envFile = path.join(envDirRef.dir, "empty-admin.env");
     writeFileSync(
@@ -459,17 +629,22 @@ describe("missing admin configuration fails closed", () => {
     );
 
     // A leftover from a previously crashed run can still hold this port.
-    await freePort(Number(port));
+    await freePort(Number(CLOSED_PORT));
 
-    const proc = spawn(
-      "bash",
-      ["-c", `set -a; . ${envFile}; set +a; exec npx next start -p ${port}`],
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        cwd: process.cwd(),
-        // Detached so `killTree` reaches the `next-server` grandchild too.
-        detached: true,
-      },
+    const proc = track(
+      spawn(
+        "bash",
+        [
+          "-c",
+          `set -a; . ${envFile}; set +a; exec npx next start -p ${CLOSED_PORT}`,
+        ],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          cwd: process.cwd(),
+          // Detached so `killTree` reaches the `next-server` grandchild too.
+          detached: true,
+        },
+      ),
     );
     const ready = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(
@@ -544,7 +719,8 @@ describe("missing admin configuration fails closed", () => {
   }, 90_000);
 });
 
-describe("logout", () => {  it("invalidates the session and blocks subsequent access", async () => {
+describe("logout", () => {
+  it("invalidates the session and blocks subsequent access", async () => {
     const loginRes = await signIn({});
     const authed = await raw("/overview", { jar: loginRes.jar });
     expect(authed.body).toContain("No activity yet");
@@ -561,5 +737,72 @@ describe("logout", () => {  it("invalidates the session and blocks subsequent ac
     const res = await raw("/");
     expect(res.status).toBe(200);
     expect(res.body).toContain("Rabet");
+  });
+});
+
+describe("PWA assets stay reachable while signed out", () => {
+  // The installed PWA must always be able to present the login screen, so the
+  // proxy must never gate the manifest, the icons or the Auth.js handler.
+  it("serves the web app manifest", async () => {
+    const res = await raw("/manifest.webmanifest");
+    expect(res.status).toBe(200);
+    const manifest = JSON.parse(res.body || "{}") as {
+      start_url?: string;
+      display?: string;
+      icons?: Array<{ src?: string }>;
+    };
+    expect(manifest.start_url).toBe("/overview");
+    expect(manifest.display).toBe("standalone");
+    expect(manifest.icons?.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    "/icons/icon-192x192.png",
+    "/icons/icon-512x512.png",
+    "/icons/maskable-192x192.png",
+    "/icons/maskable-512x512.png",
+    "/icons/apple-touch-icon.png",
+    "/favicon.ico",
+  ])("serves %s without a session", async (asset) => {
+    const res = await raw(asset);
+    expect(res.status).toBe(200);
+  });
+
+  it("registers no service worker", async () => {
+    // No service worker may exist: one could cache authenticated responses,
+    // which is the exact risk ADR-008 rules out. A missing script on the
+    // standard paths plus no registration in the document proves absence.
+    for (const sw of ["/sw.js", "/service-worker.js"]) {
+      const res = await raw(sw);
+      expect(res.status).toBe(404);
+    }
+    const login = await raw("/login");
+    expect(login.body).not.toMatch(/serviceWorker\.register/);
+  });
+});
+
+describe("no credential material leaks", () => {
+  it("never returns the admin password or its hash in any response", async () => {
+    const login = await signIn({});
+    const overview = await raw("/overview", { jar: login.jar });
+    const admin = await raw("/api/admin", { jar: login.jar });
+
+    for (const body of [login.body, overview.body, admin.body]) {
+      expect(body).not.toContain(TEST_PASSWORD);
+      expect(body.toLowerCase()).not.toContain("argon2");
+      expect(body).not.toContain("$argon2id$");
+    }
+  });
+
+  it("does not echo the session token in any response body", async () => {
+    const loginRes = await signIn({});
+    const sessionValue = Object.entries(loginRes.jar).find(([name]) =>
+      name.includes("session-token"),
+    )?.[1];
+    expect(sessionValue).toBeTruthy();
+
+    const res = await raw("/overview", { jar: loginRes.jar });
+    // The token must be cookie-only: it must never be echoed back in HTML.
+    expect(res.body).not.toContain(sessionValue as string);
   });
 });

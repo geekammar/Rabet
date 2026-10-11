@@ -1,194 +1,226 @@
-# Phase 02A — Handoff
+# Phase 02 — Authentication Security, Testing & Delivery (02B)
 
-Recovery and completion of the core authentication pass. This document is the
-continuation point for Phase 02B.
+This document is the completion record for Phase 02. It supersedes the Phase 02A
+handoff that preceded it.
 
 - **Branch:** `feat/admin-auth`
-- **Base:** `ddd525adff427ea5263e60f15b37437ca9149477` (Phase 01C merged into
-  `main`)
-- **Status:** complete and locally committed as a checkpoint. **Not merged, no
-  PR opened, not deployed.**
+- **Base:** `ddd525adff427ea5263e60f15b37437ca9149477` (Phase 01C merged into `main`)
+- **Status:** Phase 02A and 02B complete and committed. PR opened against `main`;
+  **not merged, not deployed to production, no version bumped.**
+
+Phase 02A recovered the interrupted authentication work and committed it as a
+checkpoint. Phase 02B — described below — performed the security validation,
+completed the test suite, ran the audit analysis, and delivered the PR. Nothing
+from Phase 02A was discarded or rewritten: every change below is additive or a
+narrowly-scoped fix.
 
 ---
 
-## 1. What was recovered from the interrupted session
+## 1. What Phase 02B changed
 
-The previous session had built essentially the whole authentication feature but
-left it uncommitted on the `feat/admin-auth` branch, with the working tree dirty
-and the test suite unable to run. Specifically it was:
+### Authentication review
 
-- **Complete and correct:** `src/auth.ts`, `src/proxy.ts`,
-  `src/lib/auth/*` (admin-config, credentials, session, redirect, schema,
-  cache), `src/types/next-auth.d.ts`, `src/app/actions/auth.ts`,
-  `src/app/api/**`, `src/app/(auth)/login/page.tsx`,
-  `src/components/auth/*`, the dashboard layout auth gate, the `LogoutButton`,
-  `scripts/generate-admin-hash.mjs`, `vitest.config.ts`, `tests/setup.ts`, the
-  CI changes, and all 47 tests.
-- **Broken but recoverable:** two lint errors and a test harness that could not
-  finish a run (see §5 and §6).
+The Phase 02A implementation was reviewed end to end against the mandate and
+**no defect requiring a rewrite was found**. Verified properties (each confirmed
+against the real production server, not only by unit test):
 
-Nothing was restarted from scratch. No working code was discarded. The only
-source change to application code was the login form's error-state derivation
-(see §2).
+- Single-admin credentials verification, uniform `null` failure, one Argon2
+  verification per attempt including on an unknown email (timing parity).
+- Fail-closed configuration for missing, empty or non-PHC `ADMIN_PASSWORD_HASH`.
+- Login, logout, session validity and expiry, dashboard protection at two layers,
+  reusable `requireAdmin()` helper, unauthorized API/action access blocked.
+- **CSRF enforced**: a POST without a token, or with a bogus token, is rejected
+  with `MissingCSRF` and issues no session.
+- **Safe redirects**: external and protocol-relative `callbackUrl` values are not
+  followed off-origin. (One test initially asserted a substring absence and
+  failed; investigation showed Auth.js resolves `//evil.example.com` *against the
+  origin as a path*, so the navigation stays on-host — the code was correct and
+  the assertion was wrong. The assertion was corrected to check the origin.)
+- **Sensitive-response caching**: `/overview`, `/api/admin` and `/login` all serve
+  `private, no-store` headers.
+- **PWA compatibility**: the manifest, all five icons and `/favicon.ico` return
+  200 while signed out, so the installed PWA can always present the login screen.
+  No service worker exists; `/sw.js` and `/service-worker.js` 404.
+- **No credential leakage**: the admin password, its Argon2 hash and the session
+  token value never appear in any response body.
 
-## 2. Files created or modified
+The single code change outside the test suite was the dependency
+reclassification in §3.
 
-**Modified (existing):**
+### Test suite completion
 
-- `src/components/auth/login-form.tsx` — replaced a `setState`-in-`useEffect`
-  pattern (a lint error under the react-hooks ruleset) with React's documented
-  "adjust state during render" pattern. Behaviour is unchanged: the generic
-  error shows when a fresh action result arrives and is dismissed when the user
-  edits a field.
-- `tests/setup.ts` — `let snapshot` → `const` (lint).
-- `tests/auth.test.ts` — the three test-harness fixes in §6. **No assertion was
-  changed.**
-- `src/app/(dashboard)/layout.tsx`, `src/app/page.tsx`,
-  `src/components/dashboard/header.tsx`, `next.config.ts`, `tsconfig.json`,
-  `package.json`, `package-lock.json`, `.github/workflows/ci.yml` — carried over
-  from the interrupted session, reviewed and left as written.
-- `.env.example`, `README.md`, `docs/ARCHITECTURE.md`, `docs/PROGRESS.md` —
-  updated: the docs still described Phase 02 as "not started". Added ADR-009
-  (JWT sessions and their revocation limitation) and ADR-010 (layered
-  authorization), which the code comments already referenced by number.
+No existing assertion was removed or weakened. The suite went from **47 to 71
+tests** (5 files: 31 unit + 40 integration).
 
-**Created (existing from the interrupted session, now tracked):**
+New and hardened coverage:
 
-- `src/auth.ts`, `src/proxy.ts`, `src/lib/auth/{admin-config,cache,credentials,redirect,schema,session}.ts`,
-  `src/lib/auth/__tests__/{admin-config,credentials,redirect}.test.ts`,
-  `src/types/next-auth.d.ts`, `src/app/actions/auth.ts`,
-  `src/app/api/admin/route.ts`, `src/app/api/auth/[...nextauth]/route.ts`,
-  `src/app/(auth)/login/page.tsx`, `src/components/auth/{login-form,logout-button}.tsx`,
-  `scripts/generate-admin-hash.mjs`, `tests/`, `vitest.config.ts`.
-- `docs/PHASE_02_HANDOFF.md` — this file.
+- **Configurable ports.** `RABET_TEST_PORT` / `RABET_TEST_PORT_2` (defaults
+  3210/3211) replace the hard-coded addresses, so CI and local runs — or two runs
+  side by side — never collide with `EADDRINUSE`.
+- **Complete cleanup.** The throwaway env directory is removed in `afterAll`
+  (previously one temp directory leaked per run), and every server the file
+  spawns is tracked and reaped even when a test throws before its own `finally`.
+- **Expired sessions** are now genuinely tested: the suite mints a JWT that is
+  already past its `exp` using the running server's own secret and cookie name as
+  the salt, then asserts `/overview` and `/api/admin` reject it. The control
+  matters — the same code path minted with a positive `maxAge` is *accepted*, so
+  the assertion exercises the real `exp` check rather than a malformed cookie.
+- **CSRF** — missing-token and bogus-token POSTs are both rejected.
+- **Open redirects** — covered on both the HTTP callback path and, for the first
+  time, **through the login Server Action** (`src/app/actions/__tests__/auth.test.ts`,
+  with Auth.js mocked), which is the path the `<form action={formAction}>` uses.
+- **PWA assets** stay reachable while signed out; **no service worker** is
+  registered; **no credential material** appears in any response body.
+- **Login page cache policy** is `private, no-store`.
 
-## 3. Authentication design choices
+### Files created or modified in Phase 02B
 
-| Concern | Choice |
+**Modified:**
+
+- `package.json` — `shadcn` moved from `dependencies` to `devDependencies`.
+- `package-lock.json` — regenerated for that reclassification.
+- `tests/auth.test.ts` — configurable ports, env-directory cleanup, server
+  tracking, and the new integration coverage above. No existing assertion changed.
+- `docs/ARCHITECTURE.md` — added ADR-011 (no rate limiting; what limits brute
+  force instead and what to do before public access); updated the testing-strategy
+  and security-considerations sections.
+- `docs/PROGRESS.md` — Phase 02B verification results, security findings, and the
+  automated checklist backing the manual browser checks.
+- `README.md` — security posture section, configurable test ports, audit summary.
+
+**Created:**
+
+- `src/app/actions/__tests__/auth.test.ts` — login/logout Server Action tests.
+
+## 2. Security audit findings and residual risks
+
+`npm audit` reports **9 high-severity advisories**. All nine trace to a single
+root package, `braces` (GHSA-vfj7-8cjw-p6xm, stack-exhaustion DoS via deeply
+nested patterns), reached through `micromatch` → `fast-glob`.
+
+| Consumer | Scope | Exposure |
+| --- | --- | --- |
+| `eslint-config-next` → `@next/eslint-plugin-next` | lint | dev/build only |
+| `shadcn` → `@shadcn/registry`, `ts-morph` → `@ts-morph/common` | component CLI | dev/build only |
+
+**No runtime dependency is affected** — not `next`, `next-auth`, `@auth/core`,
+`@node-rs/argon2` or `zod`, and nothing in the authentication path.
+
+**Action taken.** `shadcn` is a build-time tool (a CSS `@import` resolved at build
+and a CLI); it was never imported by application runtime code. Moving it to
+`devDependencies` removes `fast-glob`, `micromatch`, `braces`, `ts-morph` and
+`@shadcn/registry` from the **production** dependency tree entirely. `npm ls
+--omit=dev` now contains none of them. The audit count is unchanged because `npm
+audit` inspects the dev tree too, but the runtime exposure is eliminated.
+
+**Action deliberately not taken.** `npm audit fix --force` was not run. Its only
+offered remediation is a breaking downgrade of the `shadcn` CLI to `1.0.0`, which
+risks the toolchain for no runtime benefit — precisely the blind fix the mandate
+warns against.
+
+**Residual risk.** The advisories remain in the development tool tree. They are
+exploitable only where an attacker controls input fed to a glob pattern in a lint
+or codegen step, which is not the case in CI. Tracked for Phase 10.
+
+**Brute-force mitigation.** There is no application rate limiter, and none is
+claimed. The memory-hard cost of Argon2id (~20–25 ms, 19 MiB per attempt, paid on
+every attempt) is the per-attempt brake; an in-process counter is explicitly
+**not** shipped because it is unreliable across Vercel serverless instances.
+Before internet-facing access, enable **one** of:
+
+1. A Vercel Firewall rate-limit rule scoped to `POST /api/auth/callback/credentials`
+   and `/login` — no code, no new dependency, enforced at the edge.
+2. Upstash Ratelimit (or Vercel KV) applied to the same endpoints.
+
+Until one is in place, keep **Vercel Deployment Protection enabled** so the
+endpoints are not reachable from the open internet. See ADR-011.
+
+## 3. Validation
+
+Executed on `feat/admin-auth`. The build and tests were given a test-only
+generated `AUTH_SECRET`; no real secret, password or hash was used or printed.
+
+| Command | Result |
 | --- | --- |
-| Library | Auth.js v5 (`next-auth@5.0.0-beta.32`) — the only release line declaring Next.js 16 support |
-| Provider | Credentials, email + password |
-| Session | Stateless **encrypted JWT** cookie, no adapter (7-day `maxAge`) |
-| Cookie | `__Secure-authjs.session-token`: `HttpOnly`, `Secure` under HTTPS, `SameSite=lax` |
-| Password hash | **Argon2id** via `@node-rs/argon2` (19 MiB / 2 iterations / parallelism 1). Never plain SHA-256. |
-| Admin identity | `ADMIN_EMAIL` + `ADMIN_PASSWORD_HASH` env vars. Exactly one admin, no registration, no other roles. |
-| Failure mode | Fail closed — missing/invalid config rejects every sign-in; no default account, no bypass |
-| Authorization | Layered: optimistic `proxy.ts` redirect + authoritative `requireAdmin()` |
-| Redirects | Internal allowlist (`isValidInternalRedirect`), safe fallback `/overview` |
-| Caching | `private, no-store, must-revalidate` on all dashboard routes (static `next.config.ts` headers) |
-| CSRF | Auth.js CSRF token on the credentials callback |
-| Error surface | One generic "Incorrect email or password." for every failure — no email enumeration |
-
-**Documented limitation:** stateless JWT sessions cannot be centrally revoked
-before expiry. Logout clears the browser cookie; a stolen cookie remains valid
-up to 7 days. Rotating `AUTH_SECRET` invalidates all outstanding sessions at
-once. See ADR-009.
-
-## 4. Dependencies introduced
-
-- `next-auth@5.0.0-beta.32` — Auth.js v5.
-- `@node-rs/argon2@2.2.2` — Argon2id hashing (Rust, prebuilt binary).
-- `zod@4.6.5` — sign-in input validation.
-- `vitest@4.1.11` (devDependency) — test runner.
-
-No dependency was replaced or downgraded; `package-lock.json` was already
-updated by the interrupted session and was left as-is.
-
-## 5. Checks passed and failed
-
-Executed on `feat/admin-auth` on the development VPS. The build was given a
-test-only generated `AUTH_SECRET`; no real secret, password or hash was used or
-printed.
-
-| Check | Result |
-| --- | --- |
+| `npm ci` | ✅ exit 0 — 722 packages |
 | `npm run lint` | ✅ exit 0, no warnings |
 | `npm run typecheck` | ✅ exit 0 |
-| `npm run build` | ✅ exit 0 |
-| `npm run test` | ✅ exit 0 — **47 tests passing** (4 files: 3 unit + 1 integration) |
+| `npm run build` | ✅ exit 0 — proxy active, dashboard gated, `/` and `/login` public |
+| `npm run test` | ✅ exit 0 — **5 files, 71 tests** (31 unit + 40 integration) |
 
-The integration suite was run **twice consecutively**, both green, with no
-orphaned server processes or bound ports left behind.
+Repeatability: the suite was run repeatedly, including twice consecutively and on
+overridden ports (`RABET_TEST_PORT=4210 RABET_TEST_PORT_2=4211`). Every run exited
+0 and left behind **no orphaned `next-server` process, no bound port, and no
+`rabet-test-*` temp directory**.
 
-Known non-blocking finding carried from Phase 01: `npm audit` reports
-high-severity advisories in dev-tooling transitive dependencies only
-(`shadcn` registry, `ts-morph`, `eslint-config-next`), none in runtime
-dependencies. Queued for Phase 10.
+### PWA and mobile validation
 
-## 6. Known bugs and unfinished tests
+The development VPS has **no browser and no browser automation** (no Chromium,
+Firefox, Playwright or Puppeteer is installed), so no visual or interactive check
+was performed and none is claimed. What was verified over HTTP against the
+production server:
 
-No known bugs in the authentication code. Two **test-harness** bugs were found
-and fixed (they were why the interrupted session's suite could not finish):
+- `/manifest.webmanifest` returns 200 as `application/manifest+json`, parses, and
+  carries `start_url: /overview`, `scope: /`, `display: standalone` and four icons.
+- All five icons and `/favicon.ico` return 200 while **signed out**.
+- No service worker is registered; `/sw.js` and `/service-worker.js` return 404.
+- Unauthenticated PWA entry points reach `/login`; authenticated entry reaches
+  `/overview`.
 
-1. **Orphaned servers.** Servers are spawned as
-   `bash -c "…; exec npx next start"`. Killing only the `npx` wrapper left the
-   `next-server` grandchild alive, holding port 3210 and making the *next* run
-   die with `EADDRINUSE`. Fixed: spawn `detached` and signal the whole process
-   group, then await its exit.
-2. **The suite was killing its own worker.** `freePort` used
-   `lsof -i tcp:PORT`, which matches a socket by local **or remote** port. The
-   test process makes outbound `fetch()` requests to the server, so it held
-   client sockets whose remote port was 3210 — and `freePort` SIGKILLed the
-   vitest worker itself, after every test had passed. This is why the worker
-   "exited unexpectedly" only sometimes. Fixed: restrict both lookup strategies
-   to `LISTEN`-state sockets (`lsof -sTCP:LISTEN`, `ss -ltnp`) and never signal
-   this process or its parent. An `ss` fallback was also added because `lsof`
-   silently reports nothing for listeners whose process name contains a space
-   or parenthesis (`next-server (v16…)`).
+The interactive checks that remain are listed in
+[docs/PROGRESS.md](./PROGRESS.md) ("Remaining manual verification"). They require
+the user's Android device against the Vercel preview. **None of them were claimed
+as passing.**
 
-**Not fixed — carried to Phase 02B:** the suite boots two real `next start`
-servers and rebuilds the app on every run (~9 s). Ports 3210/3211 are
-hard-coded. Neither is a correctness problem, but they should be made
-configurable and the build cached.
-
-## 7. Exact remaining tasks for Phase 02B
-
-1. Test hardening (the Phase 02B mandate):
-   - Make the integration test ports configurable (env-var override) instead of
-     hard-coded 3210/3211, and skip the suite cleanly when they are in use.
-   - Reuse the already-built `.next` output instead of rebuilding per run, or
-     gate the build behind a `--no-build` flag for local iteration.
-   - Add tests for the login Server Action's redirect validation path
-     (`safeLoginRedirect`) through the actual form action, not only the
-     callback URL path.
-   - Consider a Vitest workspace/coverage threshold and wire `coverage` into CI.
-2. Manual browser verification items listed in
-   [docs/PROGRESS.md](./PROGRESS.md) ("Authentication checks") — none were
-   claimed as passing; the VPS has no browser.
-3. Provision the real secrets on the Vercel **preview** environment (see §8),
-   then re-run the integration suite against the preview URL as a
-   production-configuration smoke test.
-4. Nothing in the authentication code itself is known-incomplete; if Phase 02B
-   uncovers a requirement, ADR-009/ADR-010 are the place to record it.
-
-## 8. Required manual secret provisioning (no secret values here)
+## 4. Required manual secret provisioning
 
 The deployment **fails closed** until these are set, by design. Provide them in
-the Vercel environment variables UI for preview and production, and in
-`.env.local` for local development:
+the Vercel environment variables UI for preview **and** production, and in
+`.env.local` for local development. Never paste real values into chat, a commit
+or a document.
 
 1. **`AUTH_SECRET`** — the Auth.js session encryption key. Generate with
    `npx auth secret` (or `openssl rand -base64 32`). Required in every
-   environment.
+   environment. Do not reuse a value from another project.
 2. **`ADMIN_EMAIL`** — the single administrator's sign-in email.
 3. **`ADMIN_PASSWORD_HASH`** — an **Argon2id PHC string**, never a plaintext
-   password. Generate locally with
+   password. Generate it on the VPS with
    `node scripts/generate-admin-hash.mjs` (it reads the password from stdin and
    prints only the hash, so the plaintext is never written or echoed) and paste
    the whole `$argon2id$…` string. A value that is not an Argon2 PHC string is
    rejected at runtime and sign-in stays disabled.
 
-All three are documented with placeholders in `.env.example`. No real secret was
-generated, printed or committed during this phase, and `.env*` is git-ignored.
+Choose a long, randomly-generated admin password. It is the only credential in the
+system and there is no rate limiter yet (§2).
 
-## 9. Git state
+All three are documented with placeholders in `.env.example`. `.env*` is
+git-ignored and a scan of tracked files found no real hash, secret or token.
+
+## 5. What remains before commercial release
+
+Phase 02 is **not** the end of release hardening. In order:
+
+1. **Interactive verification on a real device** — the manual checklist in
+   [docs/PROGRESS.md](./PROGRESS.md), ideally against the Vercel preview once the
+   secrets above are provisioned on the preview environment.
+2. **Provision the three secrets on Vercel preview and production** — the
+   deployment fails closed until then, which is intended.
+3. **A durable rate limiter** (§2) before any internet-facing access.
+4. **Phase 03 — database.** Introduces the store that makes both durable session
+   revocation and a durable login counter local concerns again (ADR-009, ADR-011).
+5. **Phase 10 — release hardening.** Coverage thresholds, the residual dev-tooling
+   advisories, and the full pre-production security pass.
+
+## 6. Git state
 
 ```
 branch:  feat/admin-auth
 base:    ddd525adff427ea5263e60f15b37437ca9149477  (Phase 01C merged into main)
-head:    see `git log -1` — Phase 02A checkpoint commit
+head:    see `git log -1`
+pr:      see the PR opened against main from this branch
 ```
 
-The checkpoint contains the full authentication implementation, the test harness
-fixes and the documentation updates. `main` was **not** modified, no pull
-request was opened, nothing was deployed, and no version was bumped.
+`main` was **not** modified, no manual production deployment was made, no version
+number was changed, and `pnpm ship` was not run. Phase 02 is complete and ready
+for review but is **not** marked Done — that decision belongs to the reviewer once
+the interactive device checks are signed off.

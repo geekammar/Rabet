@@ -301,6 +301,62 @@ set header at request time throws). Redirect destinations after login are
 validated against an internal allowlist (`isValidInternalRedirect`) so the login
 page cannot become an open redirect.
 
+### ADR-011 — No application rate limiting in Phase 02; what limits brute force instead
+
+**Decision.** Phase 02 deliberately ships **no application-level rate limiter** on
+the sign-in endpoint. This is a documented gap, not an omission, and it is
+recorded here so it is not mistaken for a control that exists.
+
+**Rationale.** The deployment target is Vercel serverless functions. An in-process
+counter (a `Map` of attempt counts, or a token-bucket variable) is **not reliable**
+there: each invocation may run in a fresh instance with its own memory, so a
+counter in one instance does not constrain a request that lands on another. Such a
+limiter would both under-count an attacker who fans out across instances and
+over-count a legitimate admin whose requests are spread across them. Presenting it
+as protection would be misleading, so it is not implemented and no claim is made
+that it is.
+
+What does limit brute force today:
+
+- **Argon2id is memory-hard.** Every sign-in attempt costs 19 MiB of memory and
+  roughly 20–25 ms of CPU on this VPS, and the cost is paid on *every* attempt —
+  including when the email does not match, so the expensive work cannot be
+  skipped to detect a correct address. Guessing a strong password at that cost,
+  serially or across a bounded number of concurrent function instances, is
+  impractical for the credential sizes involved.
+- **Exactly one identity.** There is a single admin declared by environment
+  variables, no registration, and no user list, so there is no account to
+  enumerate and no password-spray target surface beyond one account.
+- **A generic, uniform failure response.** Every failure mode returns the same
+  "Incorrect email or password." message and the same timing profile, so the
+  endpoint leaks no signal about which part of the credential was wrong.
+- **Vercel Deployment Protection stays enabled**, so the preview and production
+  endpoints are not reachable from the open internet by default.
+
+**Recommendation before public access (smallest suitable protections).** In rough
+order of effort, any *one* of these closes the gap properly:
+
+1. **Vercel's platform-level protections** — the built-in DDoS mitigation plus a
+   Firewall rate-limit rule scoped to `POST /api/auth/callback/credentials` and
+   the `/login` page. This is configured in the Vercel dashboard, requires no code
+   and no new dependency, and is enforced at the edge before a function is ever
+   invoked — which is exactly where a serverless application cannot enforce it
+   itself.
+2. **A durable, external limiter** such as Upstash Ratelimit (REST-based, designed
+   for serverless, free tier) or Vercel KV applied to the same two endpoints. This
+   is the application-level equivalent of option 1 and shares state across
+   instances because the state lives outside them.
+
+Both are deliberately deferred out of Phase 02 because they require provisioning an
+external resource and a secret, which is an operations decision for the owner, not
+a code change. **Until one of them is in place the application should not be
+treated as brute-force hardened for an internet-facing deployment**, and Vercel
+Deployment Protection should remain on.
+
+**Consequences.** The gap is time-bounded: Phase 03 introduces a database, at which
+point a durable counter becomes a local concern rather than an external service and
+can be revisited alongside session revocation (ADR-009).
+
 ## 5. Data flow (future)
 
 1. A customer sends a message to the bot.
@@ -317,11 +373,22 @@ page cannot become an open redirect.
   - Unit tests under `src/**/__tests__/` cover the auth modules: fail-closed
     admin configuration, credential verification, and the redirect allowlist.
   - `tests/auth.test.ts` is an integration suite driven over HTTP against the
-    real production server (`next start`) on ports 3210/3211 with a synthetic,
-    throwaway configuration: it asserts that unauthenticated requests never see
-    dashboard content, that login/logout work end to end, that tampered and
-    fabricated cookies are rejected, that protected responses are not cacheable,
-    and that a deployment with no admin configured fails closed.
+    real production server (`next start`) with a synthetic, throwaway
+    configuration. The listen ports are configurable via `RABET_TEST_PORT` and
+    `RABET_TEST_PORT_2` (defaults 3210/3211) so CI and local runs never fight
+    over a fixed address. It asserts that unauthenticated requests never see
+    dashboard content, that login/logout work end to end, that tampered,
+    fabricated and **expired** cookies are rejected, that CSRF is enforced on the
+    credentials callback, that off-origin `callbackUrl` values are not followed,
+    that protected responses are not cacheable, that the login Server Action
+    applies the redirect allowlist, that PWA assets stay reachable while signed
+    out, that no credential material appears in any response body, and that a
+    deployment with no admin configured fails closed. The expired-session test
+    mints a genuine JWT that is already past its `exp` using the server's own
+    secret, so it exercises the real expiry check rather than a malformed cookie.
+  - `src/app/actions/__tests__/auth.test.ts` covers the login and logout Server
+    Actions with Auth.js mocked, proving the redirect allowlist is wired to the
+    form action path and that failures collapse to one generic message.
 - Schema and migration tests against a Neon branch arrive in Phase 03.
 - Lint, typecheck, build **and** test are the CI gate as of Phase 02; formal
   coverage thresholds, the security review and release hardening arrive in
@@ -339,13 +406,23 @@ page cannot become an open redirect.
 - **Authorization is layered** (ADR-010): an optimistic `proxy.ts` redirect plus
   an authoritative `requireAdmin()` used by layouts, Server Actions and Route
   Handlers.
+- **CSRF is enforced by Auth.js** on the credentials callback: a POST without a
+  valid token and cookie pair is rejected with `MissingCSRF` before the
+  credentials are ever evaluated, and no session is issued.
 - **No caching of authenticated responses.** Dashboard routes are declared
-  `private, no-store, must-revalidate` in `next.config.ts`. No service worker
-  exists, so no authenticated payload can be cached on the device.
+  `private, no-store, must-revalidate` in `next.config.ts`; the `/login` page
+  carries `private, no-cache, no-store`. No service worker exists, so no
+  authenticated payload can be cached on the device.
 - **Sessions cannot be centrally revoked before expiry** (ADR-009). Logout
   clears the browser cookie; a cookie that has already left the device stays
   valid for up to its natural 7-day lifetime. Rotating `AUTH_SECRET` invalidates
-  all outstanding sessions at once.
+  all outstanding sessions at once. This is a documented limitation, not a claim
+  of revocation.
+- **No application rate limiting** (ADR-011). The memory-hard cost of Argon2id is
+  the per-attempt brake; a durable, externally enforced limiter (Vercel Firewall
+  rate limiting or Upstash Ratelimit) is the recommended prerequisite for
+  internet-facing access. An in-process counter is deliberately *not* used,
+  because it is unreliable across serverless function instances.
 - **Open-redirect protection.** Post-login destinations are validated against an
   internal allowlist; unvalidated values fall back to `/overview`.
 - Secrets are never committed; `.env*` is git-ignored and `.env.example` holds
