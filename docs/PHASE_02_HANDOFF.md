@@ -146,7 +146,11 @@ generated `AUTH_SECRET`; no real secret, password or hash was used or printed.
 | `npm run lint` | ✅ exit 0, no warnings |
 | `npm run typecheck` | ✅ exit 0 |
 | `npm run build` | ✅ exit 0 — proxy active, dashboard gated, `/` and `/login` public |
-| `npm run test` | ✅ exit 0 — **5 files, 71 tests** (31 unit + 40 integration) |
+| `npm run test` | ✅ exit 0 — **6 files, 79 tests** (31 unit + 8 provisioning + 40 integration) |
+
+The provisioning suite is new to this pass: `tests/generate-admin-hash.test.ts`
+drives the helper through a real pseudo-terminal and asserts the typed password
+never reaches the screen. See §4 for what changed and why.
 
 Repeatability: the suite was run repeatedly, including twice consecutively and on
 overridden ports (`RABET_TEST_PORT=4210 RABET_TEST_PORT_2=4211`). Every run exited
@@ -185,8 +189,11 @@ or a document.
 2. **`ADMIN_EMAIL`** — the single administrator's sign-in email.
 3. **`ADMIN_PASSWORD_HASH`** — an **Argon2id PHC string**, never a plaintext
    password. Generate it on the VPS with
-   `node scripts/generate-admin-hash.mjs` (it reads the password from stdin and
-   prints only the hash, so the plaintext is never written or echoed) and paste
+   `node scripts/generate-admin-hash.mjs`. The script prompts interactively and
+   reads each keystroke with the terminal in raw mode, so the password is never
+   echoed to the screen, never written anywhere, and never logged — not even its
+   length is revealed. It refuses to prompt at all if the terminal cannot
+   guarantee non-echoing input, rather than risk displaying the password. Paste
    the whole `$argon2id$…` string. A value that is not an Argon2 PHC string is
    rejected at runtime and sign-in stays disabled.
 

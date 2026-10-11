@@ -122,8 +122,9 @@ cp .env.example .env.local
 # 1. Generate a session secret
 npx auth secret
 
-# 2. Generate an Argon2id hash of your admin password (reads from stdin,
-#    prints only the hash — the plaintext is never written anywhere)
+# 2. Generate an Argon2id hash of your admin password (interactive prompt —
+#    nothing you type is echoed; only the hash is printed and the plaintext is
+#    never written anywhere)
 node scripts/generate-admin-hash.mjs
 
 # 3. In .env.local, set ADMIN_EMAIL and paste the hash into ADMIN_PASSWORD_HASH

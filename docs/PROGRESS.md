@@ -18,7 +18,7 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
-| **Phase 02** | Admin authentication | 🟢 **Phase 02A + 02B complete on `feat/admin-auth`** — lint, typecheck, build and 71 tests pass; [PR #3](https://github.com/geekammar/Rabet/pull/3) open, CI green |
+| **Phase 02** | Admin authentication | 🟢 **Phase 02A + 02B complete on `feat/admin-auth`** — provisioning prompt security fix applied; lint, typecheck, build and 79 tests pass; [PR #3](https://github.com/geekammar/Rabet/pull/3) open |
 | Phase 03 | Database schema & migrations | Not started |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Service management | Not started |
@@ -333,12 +333,43 @@ password or hash was used or printed by any check.
 | `npm run lint` | ✅ exit 0, no warnings |
 | `npm run typecheck` | ✅ exit 0 |
 | `npm run build` | ✅ exit 0 — proxy active, dashboard routes gated, `/` and `/login` public |
-| `npm run test` | ✅ exit 0 — **5 test files, 71 tests passing** (31 unit + 40 integration) |
+| `npm run test` | ✅ exit 0 — **6 test files, 79 tests passing** (31 unit + 8 provisioning + 40 integration) |
 
 The integration suite was run repeatedly, including twice consecutively and on
 overridden ports (`RABET_TEST_PORT=4210 RABET_TEST_PORT_2=4211`); every run exited
 0, left no orphaned `next-server` process, left no bound port behind, and left no
 `rabet-test-*` temp directory in `/tmp`.
+
+Provisioning prompt security fix applied to this branch after the Phase 02B pass:
+
+- **The interactive prompt now hides the password for real.** The previous
+  implementation used Node's `readline.question()` with `terminal: true`, which
+  the header described as hiding the input. It does not: `terminal: true` makes
+  readline's line editor echo every typed character back to the terminal, so an
+  operator's password was shown in cleartext on screen (and stayed in the
+  terminal scrollback) while it was being entered. The script now switches the
+  tty to raw mode, which disables the kernel's keystroke echo — the same
+  mechanism `sudo` and `read -s` use — and collects the bytes itself, writing
+  nothing to stdout. Not even the password's length is revealed.
+- **Fail-closed when hiding cannot be guaranteed.** If stdin is a terminal that
+  cannot enter raw mode, the script refuses to prompt and exits non-zero rather
+  than display the password; the operator is told to pipe it instead. Empty and
+  mismatched inputs still abort without emitting a hash.
+- **The shell-history hazard was removed from the docs.** The header previously
+  suggested `printf '%s' 'your-password' | …`, which records the password in the
+  shell history and the process list. The remaining piped example is fed by
+  another process, and every doc now describes the interactive prompt as the
+  normal path.
+- **No architectural or compatibility change.** The Argon2id parameters and the
+  PHC output format are untouched, so hashes still verify in the deployed app,
+  and the piped (non-interactive) path still behaves exactly as before. No new
+  dependency was added.
+- **New test coverage.** `tests/generate-admin-hash.test.ts` (8 tests) drives the
+  script through a real pseudo-terminal (`script`) and asserts the typed
+  password never appears in the terminal's recorded output — including its
+  length as a run of placeholders — plus the mismatch path, the piped path, and
+  that the emitted hash verifies with the app's own `@node-rs/argon2`. The PTY
+  tests are skipped on platforms without the `script` utility.
 
 What Phase 02B changed in the suite (no existing assertion was removed; the
 behaviour they assert is unchanged):
