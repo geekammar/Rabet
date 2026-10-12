@@ -461,9 +461,14 @@ merged**:
    and optionally children.
 
 Both are **adjacency lists**. Neither carries a depth column or a depth constraint;
-arbitrary depth is bounded only by documented application-level runtime guards. Moving
+arbitrary depth is bounded only by documented application-level runtime guards — the nesting
+is **unlimited in the schema**, while the editor and renderer apply adjustable operational
+safeguards (DATA_MODEL.md §11.3). Moving
 between the two trees is an explicit, validated action (`NAVIGATE_CATALOG`) with real
-foreign-key targets, never an implicit structural link.
+foreign-key targets, never an implicit structural link. Telegram navigation within the
+interaction tree uses **self-scoping callback tokens** (`b:` / `m:` / `p:` prefixed ids) so
+Back, Return-to-product and pagination are unambiguous with several products or old messages
+open, with no server-side session state (DATA_MODEL.md §8.1).
 
 **Rationale.** Catalog navigation and interaction-button navigation are different
 operations with different integrity rules: a category groups products, while a button
@@ -485,6 +490,38 @@ button's ancestor chain doubles as **the customer's selected path** when an inqu
 which removes the need for any cart or selection state. Adding nesting levels and supported
 button types is configuration, not code.
 
+### ADR-015 — Atomic writes use `db.batch()`, not interactive transactions (neon-http)
+
+**Decision.** Phase 03B's data layer uses `drizzle-orm/neon-http` over Neon's pooled HTTP
+endpoint, and every atomic multi-step write is expressed as **`db.batch([...])`** — a
+non-interactive batched transaction — **not** as an interactive `db.transaction(async (tx) =>
+{ … })` callback. `drizzle-orm/neon-serverless` (WebSocket `Pool`) is the documented escape
+hatch for a future path that genuinely needs interactivity, and is not installed by default.
+
+**Rationale.** Verified against the Drizzle driver source and current Neon documentation
+(October 2026): on `neon-http`, `NeonHttpSession.transaction()` literally throws
+`No transactions support in neon-http driver`. The interactive callback form — read, branch,
+conditionally write inside one server-side transaction — is simply unavailable on the fastest,
+cheapest driver for Vercel serverless. Rather than discover this during implementation, the
+design's write paths are shaped to not need it:
+
+1. validation reads run as plain queries *before* any write, with branching in Node;
+2. every state-changing write is **idempotent at its own site** (`ON CONFLICT DO NOTHING`
+   against `telegram_update.update_id`, `UNIQUE (inquiry_id, telegram_message_id)`, and the
+   active-inquiry partial unique index), so a repeated statement is a no-op;
+3. one `db.batch([...])` per unit of work gives all-or-nothing atomicity — a failure rolls the
+   whole batch back, including the dedup row;
+4. external side effects (Telegram sends) happen *after* the batch commits, with the
+   `inquiry_message` row as the durable record and `pending → sent | failed` tracking the
+   outcome — a crash between commit and send leaves exactly one retryable `pending` row.
+
+**Consequences.** The idempotency design (the one-row-lock pattern) carries the correctness
+load, which is where it belongs anyway — it is what protects against double-taps and
+redelivered webhooks independent of the driver. No WebSocket dependency, no per-request
+connection lifecycle, one round trip per unit of work. The constraint this imposes is honest
+and small: no path may read a row it just wrote in order to decide what to write next. See
+DATA_MODEL.md §15.3.
+
 ## 5. Data flow (future)
 
 1. A customer starts the bot; the customer row is created and, if more than one language is
@@ -493,10 +530,10 @@ button types is configuration, not code.
    business logic runs.
 3. The customer browses the recursive category catalog and opens a product, which renders
    its configured root buttons.
-4. The customer navigates the product's recursive button tree; each tap resolves the action
-   server-side from an opaque id, validates it, and either opens a submenu, shows details,
-   sends a localized template, opens an information URL, navigates the catalog, or starts
-   an inquiry.
+4. The customer navigates the product's recursive button tree; each tap resolves a
+   self-scoping callback token server-side, validates it, and either opens a submenu, shows
+   details, sends a localized template, opens an information URL, navigates the catalog, or
+   starts an inquiry.
 5. An inquiry freezes the product context and the customer's selected path, and becomes a
    two-way conversation; the admin replies from the dashboard and the bot relays replies.
 6. Drizzle validates every write; Zod validates every external input.

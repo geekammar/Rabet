@@ -137,9 +137,9 @@ what was dropped and why.
 | `payment`, `payment_event`, wallet/charge tables | **Absent (deferred).** | No payment gateway, no Binance API, no Vodafone Cash API, no financial webhooks, no payment-evidence processing, no settlement engine, no invoices, no refunds. Telegram requires **Telegram Stars** for real digital-goods purchases inside bots; that path is explicitly deferred (§16, ADR-013). |
 | `order_event` / event-sourced audit log | **Absent (deferred).** | Nothing stateful enough to warrant an append-only event log remains in the MVP. Inquiry status transitions are validated in the write path; an optional `inquiry_event` table is the documented upgrade (§16.2). |
 | `admin_user` / roles | **Absent.** | One admin, declared by `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH` env vars. Already solved by Phase 02 (ADR-009). A table would imply accounts that do not exist. |
-| `session` (revocation) | **Deferred.** | JWT sessions remain stateless (ADR-009). Revisited as an open decision (§19.4), not needed for the MVP. |
+| `session` (revocation) | **Deferred.** | JWT sessions remain stateless (ADR-009). Revisited as a decision (§19.7), not needed for the MVP. |
 | `support_ticket` / `support_message` | **Absent — unified into `inquiry` / `inquiry_message`.** | Product inquiries and general support are the same interaction (a customer talking to the seller over Telegram, answered from the dashboard). Duplicating the messaging system would double the read paths, the reply flow and the delivery-error handling for no benefit (§9.4). |
-| `support_category` table | **Absent.** | Support categories are a `text[]` on the settings singleton — one dashboard form, no orphan-row cleanup, trivially rendered as a keyboard. Promotion to a table (needed only for per-category localization, SLAs or assignment rules) is the documented additive path (§16.2, §19.3). |
+| `support_category` table | **Absent.** | Support categories are a `text[]` on the settings singleton — one dashboard form, no orphan-row cleanup, trivially rendered as a keyboard. Promotion to a table (needed only for per-category localization, SLAs or assignment rules) is the documented additive path (§16.2, §19.1). |
 | `product_variant` / `service_option` | **Deferred, designed for.** | The button tree already expresses selectable options *as configurable buttons* (the worked example in §6 builds a four-deep option picker with no variants table). A dedicated variants table is additive later if structured stock-keeping is ever required (§16.2). |
 | `bot` table | **Absent.** | Exactly one bot; its token is a secret and belongs in env, not a table. |
 | Analytics / funnel tables | **Absent.** | Explicitly out of scope. Journey stages are inferred, never stored as a funnel. |
@@ -353,6 +353,14 @@ so moving a category later never strands its products.
 Kept as **one typed row** rather than a key/value map so the schema stays self-documenting
 and the dashboard form is one form. The one exception is `support_category`, which is an
 array because a category *is* just a short editable string at this scale (§2.1).
+
+> **Localization note (correction).** A plain `text[]` array is **not localizable**: its values
+> are whatever the seller typed, in one language, and the optional Arabic bot (ADR-006) would
+> show English support categories. §19.1 records the decision: **keep `text[]` for the MVP**
+> (English-only support categories, documented as such), with a cheap additive promotion path to
+> a localizable `support_category` table + translations if Arabic support categories are later
+> needed. The `inquiry.category` column stores the same stable string, so promotion does not
+> rewrite history.
 
 ### 4.6 `language`
 
@@ -623,26 +631,58 @@ Supporting rules:
 
 ## 8. Telegram navigation and callback rules (H)
 
-### 8.1 `callback_data` — short, opaque, re-resolved every tap
+### 8.1 `callback_data` — short, opaque, and **self-scoping**
 
-Telegram requires `callback_data` to be **1–64 bytes**. Rabet stores **only the action's
-`uuid`** (36 bytes, opaque, no positional encoding, no product prefix, no state). The uuid
-is a pure identifier: every fact needed to render a menu is re-fetched server-side on each
-tap, so a button can never carry stale assumptions.
+Telegram requires `callback_data` to be **1–64 bytes**. Rabet never relies on a shared
+notion of "the menu the customer is currently looking at" — that would be session state,
+and it would be ambiguous the moment a customer has two products open, two menu messages
+open, or revisits an old message. Instead **every callback button carries enough identity to
+resolve itself**, so each tap is unambiguous and stateless.
 
-A **small set of reserved navigation tokens** is resolved by the bot layer without a
-configured action row — these are affordances, not configuration:
+Two token families, both pure identifiers (no positional encoding, no client-trusted state):
 
-| Token | Meaning |
-| --- | --- |
-| `back` | Show the current action's parent menu (the siblings of its parent). At a root button, equivalent to `product`. |
-| `product` | Show this product's root buttons (the "return to product" affordance). |
-| `home` | Show the catalog root / main menu. |
-| `page:<n>` | Show page `n` of a paginated menu (§8.3). |
+**1. Action tokens** — the action's `uuid` alone (36 bytes). The uuid *is* the button: the
+handler loads it and re-validates every fact server-side on each tap.
 
-All tokens are validated server-side on every callback; an unknown or malformed
-`callback_data` is answered with the generic "this option is no longer available" path
-(§8.5) and never throws.
+**2. Navigation tokens** — a short verb prefix plus the id of the entity they refer to (the
+token's **anchor**). These are affordances, not configuration; they are generated at render
+time from facts the server already holds, and each one names exactly what it does:
+
+| Token | Bytes | Meaning |
+| --- | --- | --- |
+| `<actionUuid>` | 36 | Resolve and execute that action (§8.2). |
+| `b:<actionUuid>` | 38 | **Back** — render the *parent menu* of `<actionUuid>` (the active children of its parent). At a root button (parent is null) → the product card. |
+| `m:<actionUuid>` | 38 | **Menu** — render page 1 of `<actionUuid>`'s own active children. |
+| `m:<actionUuid>:<n>` | 38–42 | Render page `n` of that menu (§8.3 pagination). |
+| `p:<productUuid>` | 38 | **Product** — render that product's card and its root buttons ("return to product"). |
+| `home` | 4 | The catalog root / main menu. Carries no context because it needs none. |
+
+Every token stays well under the 64-byte ceiling; the longest is `m:` + a 36-byte uuid + `:` +
+a page number, and page numbers cannot exceed three digits in practice because
+`MAX_ACTIVE_CHILDREN` (20) bounds a menu to two pages at `MENU_PAGE_SIZE` (10) (§11.3).
+
+**Why the anchor is the menu node, and why that removes the ambiguity.** When the bot renders
+a menu message, it is rendering the active children of one specific `product_action` node
+`X` — it always knows `X`, because it just read it. So the message's **Back** button is
+`b:X` (go to X's parent's menu) and its **Return to product** button is `p:X.product_id`.
+When the customer taps a child `C`, the *next* message renders `C`'s children and carries
+`b:C` / `p:C.product_id`. Each message's navigation therefore refers to *itself*, not to any
+"current" context, so:
+
+- **Multiple products open at once** behave independently — the Back button in product A's
+  menu can never land in product B's tree, because `b:<actionUuid>` resolves through the
+  action's own (immutable, trigger-checked) `product_id` (§11.2).
+- **Old messages keep working.** Tapping Back in a week-old menu re-renders *that* menu's
+  parent, not whatever the customer browsed most recently.
+- **`p:<productUuid>` is robust to menu edits.** It targets the product row directly, so it
+  still works even if every button in the old keyboard was later deleted or re-parented.
+
+**Validation is per-tap and total.** Every token — action or navigation — is re-resolved and
+re-validated server-side on each callback (§8.2). An unknown or malformed `callback_data`, a
+missing/deleted anchor, or an anchor that is no longer active answers with the generic "this
+option is no longer available" path (§8.5) and never throws. A `m:` token whose anchor is no
+longer `OPEN_SUBMENU` (its type was changed after the keyboard was sent) takes the same stale
+path; an out-of-range page number is clamped to the menu's last page rather than erroring.
 
 **URL buttons are not callback buttons.** `OPEN_URL` renders as a Telegram
 `InlineKeyboardButton` with a `url` field, not `callback_data`. The two Bot API behaviours
@@ -651,20 +691,28 @@ action is one or the other by its type.
 
 ### 8.2 What happens on a callback, in order
 
-1. **Deduplicate.** Insert into `telegram_update` on `update_id`; if nothing was inserted,
-   the update was already handled — acknowledge `200 OK` and stop (§11.6).
+1. **Deduplicate.** Insert into `telegram_update` on `update_id` as the **first statement of the
+   unit-of-work batch**; if nothing was inserted, the update was already handled — the batch's
+   remaining statements are idempotent no-ops, so it commits having changed nothing and the
+   handler acknowledges `200 OK` (§11.6, §14.6, §15.3).
 2. **Answer the callback query promptly.** `answerCallbackQuery` is called before the
    expensive work, so the customer's spinner clears immediately.
-3. **Resolve the action server-side.** Load `product_action` by the uuid from
-   `callback_data` (or resolve a reserved token). If missing → stale path (§8.5).
+3. **Resolve the token server-side.** Load `product_action` by the uuid from
+   `callback_data`, or resolve a navigation token against its anchor id (§8.1). If the
+   referenced row is missing → stale path (§8.5).
 4. **Validate the action:** it exists; `is_active = true`; its `product.is_active = true`
    and is not soft-deleted; **every ancestor** is `is_active = true` (an inactive ancestor
    makes the whole branch unreachable — §11.5); the action type is a member of the enum.
-5. **Validate the product and customer context:** the product this action belongs to is
-   the one the customer is currently browsing, the customer exists, the customer's
-   `is_blocked` is false, and the customer's `selected_language_id` is used for rendering.
-6. **Execute the handler** for the action type (§5.2) inside a transaction, and render the
-   resulting keyboard.
+   For an `m:` token the anchor must additionally still be `OPEN_SUBMENU`.
+5. **Validate the product and customer context.** The product is **derived from the token
+   itself** — from the action's own `product_id`, or from the `p:<productUuid>` payload for
+   a product-scoped token — never from any notion of what the customer is "currently
+   browsing", which the stateless model deliberately does not track (§8.1, §14.7). The
+   customer exists, `is_blocked` is false, and `customer.selected_language_id` selects the
+   rendering language. Nothing about the *sender's* keyboard or message is trusted; only the
+   ids in the token are read, and every entity they name is re-checked at this moment.
+6. **Execute the handler** for the action type (§5.2) inside one atomic database write
+   (§15.3), and render the resulting keyboard.
 7. **Guard duplicate state-changing operations.** `START_INQUIRY`, `OPEN_SUPPORT` and
    outbound message sends use the one-row-insert-as-lock pattern (§11.6), so a double-tap
    or a redelivered update cannot create two inquiries or send a reply twice.
@@ -678,12 +726,14 @@ action is one or the other by its type.
   `is_active = true`, ordered by `sort_order`.
 - **Pagination.** If a submenu has more active children than `MENU_PAGE_SIZE` (a documented
   application constant, default **10**), the keyboard shows one page plus `◀` / `▶` buttons
-  using the reserved `page:<n>` tokens. An arbitrarily large menu is never loaded into one
-  message; this bounds the response size and the customer's cognitive load. The practical
-  ceiling on menu size is enforced as a runtime guard (§11.3), not in the schema.
-- **Navigation row.** Every submenu appends **Back** and **Return to product**; the catalog
-  root and the product card append **Main menu** where appropriate. Back from a root button
-  returns to the product.
+  carrying `m:<actionUuid>:<n-1>` / `m:<actionUuid>:<n+1>` — each arrow names the menu it
+  pages and the exact page it shows, so paging cannot drift to another product's menu or an
+  unrelated message (§8.1). An arbitrarily large menu is never loaded into one message; this
+  bounds the response size and the customer's cognitive load. The practical ceiling on menu
+  size is enforced as a runtime guard (§11.3), not in the schema.
+- **Navigation row.** Every submenu appends **Back** (`b:<menuNodeUuid>`) and **Return to
+  product** (`p:<productUuid>`); the catalog root and the product card append a **Main
+  menu** (`home`) where appropriate. Back from a root button returns to the product card.
 - **Empty submenus are handled gracefully.** An `OPEN_SUBMENU` with zero *active* children
   still renders: the optional `menu_text` (or a localized generic `empty_menu` template if
   none is configured) is shown, followed by Back / Return to product. The customer is never
@@ -705,18 +755,21 @@ Messages already delivered to a customer contain buttons built from **whatever t
 configuration was at send time**. Telegram does not retroactively rewrite sent keyboards, so
 old messages can carry buttons whose configuration has since changed. The contract:
 
-- **Callback buttons are always re-validated.** Because `callback_data` is only an opaque id
-  and every fact is re-resolved server-side (§8.2), a stale button is *safe by
-  construction*: if its action was deleted, deactivated, re-parented to another product, or
-  now sits under a deactivated ancestor, the callback is answered with a short localized
-  "this option is no longer available" message and an offer to return to the product or the
-  main menu. It is never executed.
+- **Callback buttons are always re-validated.** Because `callback_data` is a self-scoping
+  identifier and every fact is re-resolved server-side (§8.1, §8.2), a stale button is *safe
+  by construction*: if its action or anchor was deleted, deactivated, re-parented to
+  another product, changed to a non-menu type, or now sits under a deactivated ancestor, the
+  callback is answered with a short localized "this option is no longer available" message
+  and an offer to return to the product or the main menu. It is never executed. Navigation
+  tokens are covered by the same rule — a stale `b:` / `m:` / `p:` token degrades to that
+  message rather than to a wrong menu.
 - **URL buttons cannot be retroactively changed.** A sent `OPEN_URL` button keeps pointing
   at the URL it had when it was sent. This is a Telegram limitation, documented as such:
   the admin's later edit applies to *future* keyboards only. Mitigation: URLs are validated
   at write time (§12.4), and information URLs are expected to be stable.
 - **No client-trusted state.** Nothing about the old message is trusted — not the keyboard,
-  not the label text, not the implied product. Only the action id is read from it.
+  not the label text, not the implied product or the "current" menu. Only the ids inside the
+  token are read, and each is re-validated before use.
 - **Old keyboards are never mass-expired.** There is no "invalidate all keyboards" job;
   per-tap re-validation is cheaper, simpler and sufficient.
 
@@ -787,6 +840,7 @@ stateDiagram-v2
     open --> closed: admin closes without resolving
     waiting_on_customer --> closed: admin closes
     closed --> [*]
+    closed --> open: admin reopens (explicit)
 ```
 
 ```sql
@@ -795,11 +849,15 @@ CREATE TYPE message_author   AS ENUM ('customer', 'admin');
 CREATE TYPE message_delivery AS ENUM ('pending', 'sent', 'failed');
 ```
 
-- `closed` is terminal; reopening is modelled as a new inquiry or an explicit status change
-  by the admin (the dashboard may set `status = 'open'` with `closed_at = NULL` — documented
-  as an admin action, not a customer one).
+- `closed` is terminal **for the customer**: nothing the customer does reopens it. If the
+  customer contacts the seller again after closure, the model creates a **new** inquiry with a
+  new `reference`, and the dashboard surfaces it as linked to the closed one (same customer,
+  same product) so the seller keeps the history in view. The **seller** may explicitly reopen a
+  closed inquiry from the dashboard (`status = 'open'`, `closed_at = NULL`) — an admin action,
+  never a customer one. See §19.3.
 - Transitions are validated in the write path against the diagram above; illegal
-  transitions are rejected before anything is written.
+  transitions are rejected before anything is written. Reopen is the single backwards edge in
+  the model and exists only on that admin path.
 - Status is a plain column, not an event log. An append-only `inquiry_event` audit table is
   the documented optional upgrade if a later phase needs to prove *who* changed status and
   *when* (§16.2) — it is not needed to operate the MVP.
@@ -833,8 +891,8 @@ CREATE TYPE message_delivery AS ENUM ('pending', 'sent', 'failed');
    via `telegram_update`, appends an `inquiry_message` (`author = 'customer'`), flips
    `status` to `open` and sets `last_reply_at`.
 3. **Admin replies from the dashboard.** The write path inserts an `inquiry_message`
-   (`author = 'admin'`, `delivery_status = 'pending'`) **in the same transaction** as the
-   status change to `waiting_on_customer`, then calls the Telegram API to push it to the
+   (`author = 'admin'`, `delivery_status = 'pending'`) **in the same `db.batch`** as the
+   status change to `waiting_on_customer` (§15.3), then calls the Telegram API to push it to the
    customer's chat. Success → `sent` + `telegram_message_id` + `delivered_at`. Failure →
    `failed` + `delivery_error`, and the dashboard shows the failure so the admin can retry.
 4. **Delivery failures are tracked, not hidden.** A failed admin reply stays `failed` with
@@ -970,26 +1028,42 @@ descendants in a product's interaction tree belong to the correct product" is gu
 construction, and there is no path — including a buggy admin tool — that can build a
 cross-product branch.
 
-### 11.3 Runtime safeguards without a schema depth cap
+### 11.3 Schema depth is unbounded; the UX and runtime are guarded
 
-The schema imposes **no** depth limit: there is no `depth` column, no `CHECK` on level, no
-trigger that rejects "too deep". The mandate is explicit that the database must not carry a
-fixed arbitrary hierarchy depth. Instead, the application enforces **soft, documented,
-adjustable** guards at write time and render time:
+The distinction the owner's requirement rests on, stated plainly:
 
-| Guard | Default | Purpose |
-| --- | --- | --- |
-| `MAX_ACTION_DEPTH` | **8** levels | Warns in the tree editor beyond this depth and refuses (with a clear message) beyond a hard stop (16), protecting the *customer* from an unusable menu and the *server* from unbounded recursion. |
-| `MAX_ACTIVE_CHILDREN` | **20** per submenu | Refuses to activate a 21st child; bounds menu size. |
-| `MENU_PAGE_SIZE` | **10** | Paginates menus (§8.3) so no message holds an unbounded keyboard. |
-| Ancestry-walk bound | **64** hops | The trigger's cycle-detection safety net (§11.2). |
-| `label` length | **64** chars | DB constraint; the practical Telegram button-text limit. |
-| `body` length | **4096** chars | DB constraint; the Telegram message-text limit. |
+- **The schema imposes no depth limit.** There is no `depth` column, no `CHECK` on level, no
+  trigger that rejects "too deep". The mandate is explicit that the database must not carry a
+  fixed arbitrary hierarchy depth, and it does not. A recursive CTE walks the adjacency list as
+  far as the data goes. **Nesting is unlimited in the data model.**
+- **Running the bot is bounded, deliberately.** An unbounded chat menu is not a usable product:
+  a 40-level Telegram keyboard is unreadable on a phone, and unbounded recursion is a
+  resource-exhaustion vector. So the application enforces **soft, documented, adjustable**
+  guards at write time and render time. These are **operational safeguards, not schema limits**.
+
+The two must not be conflated. The guards below never reject data the schema accepts; they
+shape what the *editor* lets the seller build and what the *renderer* will draw:
+
+| Guard | Default | Kind | Purpose |
+| --- | --- | --- | --- |
+| `MAX_ACTION_DEPTH` | **8** levels | Editor advisory + hard stop | Warns in the tree editor beyond 8 levels and refuses beyond a hard stop (16) — a *content-quality* guard protecting the customer from an unusable menu and the server from unbounded recursion when rendering an ancestor chain. |
+| `MAX_ACTIVE_CHILDREN` | **20** per submenu | Editor refusal | Refuses to activate a 21st child; bounds menu size. |
+| `MENU_PAGE_SIZE` | **10** | Render-time pagination | Paginates menus (§8.3) so no message holds an unbounded keyboard. |
+| Ancestry-walk bound | **64** hops | Trigger safety net | The trigger's cycle-detection ceiling (§11.2) — far above any real menu, it exists to bound a pathological walk, not to define a product limit. |
+| `label` length | **64** chars | DB constraint | The practical Telegram button-text limit. |
+| `body` length | **4096** chars | DB constraint | The Telegram message-text limit. |
 
 These are application constants, deliberately **not** database rows: putting them in
 `bot_setting` would invite the seller to set `MAX_ACTION_DEPTH = 9999` and reintroduce the
-resource-exhaustion problem the guard exists to prevent. They are clamped in code, and
-changing one is a reviewed code change.
+resource-exhaustion problem the guard exists to prevent. They are clamped in code, and changing
+one is a reviewed code change.
+
+**Why the numbers are safeguards rather than violations of "arbitrary depth".** The schema holds
+whatever the seller builds; the guards decide what the seller is *allowed to build* through the
+dashboard and what the bot will *render*. If the owner later wants deeper menus, raising
+`MAX_ACTION_DEPTH` is a one-line code change with no migration — the data model does not move.
+The defaults above are recommended starting points for the MVP, not architectural commitments;
+§19.4 records the decision and the trade-off explicitly for owner acceptance.
 
 ### 11.4 Why adjacency list, and what the scale-up path is
 
@@ -1022,17 +1096,22 @@ premature optimization is built.
 
 1. **`telegram_update.update_id UNIQUE`** — update-level dedup. The insert is the lock: if
    nothing was inserted, the update was already handled, so acknowledge and stop. The
-   business logic runs inside the same transaction and `processed_at` is set on commit. A
-   transient failure rolls the whole transaction back — including the dedup row — so the
-   next delivery is a genuine first attempt. `processing_error` records failures that are
-   retried rather than rolled back.
+   business logic runs in the **same non-interactive batch** as the dedup insert and
+   `processed_at` is set when the batch commits (§15.3). A transient failure rolls the whole
+   batch back — including the dedup row — so the next delivery is a genuine first attempt.
+   `processing_error` records failures that are retried rather than rolled back. Because the
+   batch is submitted as one unit, "acknowledge and stop" is expressed as *the remaining
+   statements being no-ops*: each is idempotent at its own site (points 2 and 3 below), so a
+   redelivery commits having changed nothing. This is why per-site idempotency — not just the
+   update-level dedup — carries the correctness load.
 2. **`inquiry_message.telegram_message_id UNIQUE`** — message-level dedup. A redelivered
    customer message cannot be stored twice.
 3. **The active-inquiry partial unique index** — makes `START_INQUIRY` resume-by-construction
    (§9.2). A duplicate create conflicts rather than producing a second thread.
 
 This is the same pattern the earlier draft used; it survives the simplification unchanged
-because it is the cheapest correct idempotency on Postgres.
+because it is the cheapest correct idempotency on Postgres — and, crucially, it is the pattern
+that makes atomic writes possible **without** interactive transactions (§15.3).
 
 ### 11.7 Deletion semantics — deliberately different per tree
 
@@ -1216,8 +1295,9 @@ Written to be reviewable by a Product Manager. Each step names the tables involv
    the validation chain (§8.2).
 2. An `OPEN_SUBMENU` button sends its optional localized `menu_text`, then renders its
    active children plus Back / Return to product.
-3. Navigation continues to any depth; every tap is self-describing, so the bot holds **no
-   navigation session state** (§10 in ARCHITECTURE terms — see §14.7 below).
+3. Navigation continues to any depth; every token names its own anchor, so the bot holds **no
+   navigation session state** even with several products or menu messages open at once
+   (§8.1, §14.7).
 4. `SHOW_DETAILS` shows `product_translation.details`; `SEND_TEMPLATE_MESSAGE` sends the
    button's localized `template_body` with placeholders resolved; `OPEN_URL` was rendered as
    a URL button; `NAVIGATE_CATALOG` jumps to another category/product.
@@ -1229,10 +1309,12 @@ The customer walks `Choose Options → Design → Landing Page → Basic → Ask
 1. The `START_INQUIRY` handler resolves the action, validates it and its ancestry.
 2. It walks the action's ancestor chain to build
    `["Choose Options","Design","Landing Page","Basic"]`.
-3. In one transaction: find the active inquiry for `(customer, product)` — there is at most
-   one (partial unique index) — or insert a new one with `product_snapshot` (name, price,
-   currency, category path) and `selected_options` frozen, and a generated unique
-   `reference`.
+3. In **one non-interactive batch** (§15.3): insert the inquiry — or resume the active one for
+   `(customer, product)`, of which there is at most one (partial unique index) — with
+   `product_snapshot` (name, price, currency, category path) and `selected_options` frozen, and
+   a generated unique `reference`. The `ON CONFLICT DO NOTHING` on the partial index makes the
+   create-or-resume a single idempotent write, so no interactive transaction is needed to
+   "check then insert".
 4. The bot confirms with the localized `inquiry_received` template, quoting `reference` and
    the displayed price, and the inquiry appears in the dashboard inbox.
 5. **No order and no payment exist. Nothing was purchased.** If the seller later re-prices
@@ -1247,7 +1329,7 @@ The customer walks `Choose Options → Design → Landing Page → Basic → Ask
 2. The seller opens the dashboard inbox (`inquiry` + `inquiry_message`), reads the frozen
    product context and the selected path alongside the thread, and replies.
 3. The reply inserts `inquiry_message` (`author = 'admin'`, `delivery_status = 'pending'`)
-   and sets `status = 'waiting_on_customer'` in the same transaction, then pushes to
+   and sets `status = 'waiting_on_customer'` in the same **`db.batch`** (§15.3), then pushes to
    Telegram. Success → `sent`; failure → `failed` + `delivery_error`, visible in the
    dashboard with a retry action.
 4. The seller resolves and closes the inquiry; `closed_at` is set. `closed` is terminal.
@@ -1272,22 +1354,26 @@ The customer walks `Choose Options → Design → Landing Page → Basic → Ask
 
 Telegram delivers update `4123456789` (a `callback_query`).
 
-1. `INSERT INTO telegram_update (update_id, …) ON CONFLICT (update_id) DO NOTHING`; check
-   the row count.
+1. `INSERT INTO telegram_update (update_id, …) ON CONFLICT (update_id) DO NOTHING` is the
+   **first statement of a `db.batch([...])`** (§15.3); the batch's response says whether a row
+   was created.
 2. **First delivery:** a row is inserted. The handler answers the callback query promptly,
-   resolves the action, runs the business logic inside the same transaction and sets
-   `processed_at` on commit.
-3. **Redelivery:** the insert conflicts, zero rows. The handler answers `200 OK` and does
-   nothing — no duplicate inquiry, no duplicate message, no double state change.
-4. **Transient failure:** the transaction rolls back, taking the `telegram_update` row with
-   it, so the next delivery is treated as the first. `processing_error` records the cause
-   for a retried failure.
+   resolves the action, and the handler's writes run in the **same batch**, with `processed_at`
+   set when the batch commits. Every write in that batch is idempotent at its own site (§11.6).
+3. **Redelivery:** the insert conflicts, zero rows. The remaining statements in the batch are
+   no-ops (each would double-write and cannot), so the batch commits having changed nothing.
+   The handler answers `200 OK` — no duplicate inquiry, no duplicate message, no double state
+   change.
+4. **Transient failure:** the batch rolls back, taking the `telegram_update` row with it, so
+   the next delivery is treated as the first. `processing_error` records the cause for a
+   retried failure.
 
 ### 14.7 What the bot does *not* store per navigation step
 
-Because `callback_data` is an opaque action id and every fact is re-resolved server-side,
-**submenu navigation requires zero server-side session state**. The durable state the bot
-keeps is exactly:
+Because every `callback_data` token is **self-scoping** — it names the action, menu node or
+product it refers to — submenu navigation needs **zero server-side session state**, even with
+several products or menu messages open at once (§8.1). The durable state the bot keeps is
+exactly:
 
 - `customer.selected_language_id` — the chosen language (on the customer row);
 - `customer.is_blocked` — whether sends are possible;
@@ -1315,7 +1401,7 @@ Drizzle — consulted as of October 2026).
 | Real Postgres? | Yes — full Postgres, standard connection string |
 | Vercel fit | Native; first-class Drizzle driver; `DATABASE_URL` + `DATABASE_URL_UNPOOLED` |
 | Free tier | Generous and usable (see below) |
-| Region | `aws-us-east-2`, to sit beside Vercel's default `iad1` region |
+| Region | `aws-us-east-2` (Ohio) — the closest available Neon region to Vercel's default `iad1` (Washington, D.C.); **not literally the same region or provider**, so cross-region latency is real but small. Region is fixed at Neon project creation and cannot be changed. |
 | Serverless pooling | PgBouncer transaction mode, up to 10,000 client connections, `-pooler` hostname |
 | Branching | Instant copy-on-write branches for dev/preview; schema-only branching available |
 | Backups / recovery | Instant restore (6 h history on Free), 1 manual snapshot |
@@ -1347,14 +1433,78 @@ request for $0.
 `preview/<git-branch>` database branch per preview deployment, with automatic cleanup when
 the Git branch is deleted — the single most important setting to enable).
 
-### 15.3 Connection strategy
+### 15.3 Connection strategy — and the transaction approach that makes it work
 
-- **Application reads/writes:** pooled connection string (`-pooler` hostname) via the
-  `@neondatabase/serverless` HTTP driver through Drizzle (`drizzle-orm/neon-http`).
-- **Migrations:** the **direct (unpooled)** connection, because DDL must not go through
-  transaction-mode pooling.
-- The design uses no session-level `SET`, no `LISTEN/NOTIFY`, no SQL-level `PREPARE` — the
-  known pooled-connection limitations.
+Verified against current official documentation **and the Drizzle driver source** (Neon
+serverless-driver docs, `drizzle-orm` `neon-http/session.ts`; consulted October 2026), because
+the choice determines whether the design's atomic writes are actually possible.
+
+**The constraint that must not be assumed away.** `drizzle-orm/neon-http` does **not** provide
+interactive transactions. In the driver source, `NeonHttpSession.transaction()` is literally:
+
+```ts
+override async transaction<T>(_transaction, _config = {}): Promise<T> {
+  throw new Error('No transactions support in neon-http driver');
+}
+```
+
+So the `db.transaction(async (tx) => { … })` callback form — the one where you can read, branch
+and conditionally write inside one server-side transaction — **cannot be used**. What the HTTP
+driver *does* support is `db.batch([...])`, which Drizzle maps onto the Neon HTTP driver's
+non-interactive batched transaction: a fixed list of statements sent in **one HTTP request**,
+executed server-side in a single transaction that commits atomically or rolls back atomically.
+This distinction is the reason this section exists.
+
+| Surface | Driver | Why |
+| --- | --- | --- |
+| **Application reads and writes** | `drizzle-orm/neon-http` over the pooled (`-pooler`) hostname | One HTTP request per query or per batch; no connection to hold open; the fastest option on Vercel serverless, and batching gives the atomicity the design needs |
+| **Migrations** | direct (**unpooled**) connection via `drizzle-kit` | DDL and long-running migration transactions must not go through PgBouncer transaction-mode pooling |
+| **Escape hatch (not used by default)** | `drizzle-orm/neon-serverless` over a WebSocket `Pool` | The only Drizzle/Neon route to *interactive* `db.transaction()`; kept as a documented fallback, not the default (see below) |
+
+**Chosen approach: HTTP + `db.batch()` for every atomic write.** The design's write paths are
+deliberately shaped so that no interactive transaction is required. The rule, applied
+throughout §8.2, §9 and §11.6:
+
+1. **Validate first, then write.** All reads needed to authorize an action (load the action,
+   its product, its ancestor chain, the customer, the language) happen as plain queries
+   *before* any write. Branching on their results is application logic — it runs in Node, not
+   in the database.
+2. **Every state-changing write is idempotent at its own site.** The one-row-lock pattern
+   (§11.6) is what makes a non-interactive batch safe: `INSERT … ON CONFLICT DO NOTHING`
+   against `telegram_update.update_id`, the `UNIQUE (inquiry_id, telegram_message_id)` key, and
+   the active-inquiry partial unique index each guarantee that a repeated statement is a no-op.
+   Idempotency therefore does **not** depend on the update-level dedup succeeding first.
+3. **One batch per unit of work.** The dedup insert, the handler's writes and the
+   `processed_at` update go into a **single `db.batch([...])`** — one server-side transaction.
+   If any statement fails, the whole batch rolls back, *including the dedup row*, so a
+   redelivery is treated as a first attempt (§14.6). If the update is a redelivery, the dedup
+   insert conflicts and every subsequent write no-ops; the batch commits having changed
+   nothing. Either way the outcome is identical to what an interactive transaction would
+   produce.
+4. **External side effects stay outside the transaction.** A Telegram send cannot be rolled
+   back, so it is dispatched *after* the batch commits, with `inquiry_message` (`delivery_status
+   = 'pending'`) as the durable record and `pending → sent | failed` tracking the outcome
+   (§9.4). A crash between commit and send leaves exactly one `pending` row, which is the
+   documented retry input — the same outbox discipline the design already specifies.
+
+**The paths this covers, explicitly:** inquiry create-or-resume with snapshot freezing (§14.3);
+customer message append plus status flip (§14.4); admin reply insert plus status update and the
+outbound send (§9.4, §14.4); update dedup with `processed_at` (§14.6). None of them needs to
+read a row it just wrote in order to decide what to write next — the one property interactive
+transactions exist for.
+
+**Escape hatch, and why it is not the default.** If Phase 03B meets a write path that truly
+requires read-then-branch-then-write inside one transaction, the answer is `drizzle-orm/
+neon-serverless` with a WebSocket `Pool`, which supports the full `db.transaction()` callback
+form. That costs a WebSocket dependency and per-request connection lifecycle (the pool must be
+created, used and closed within a single handler — WebSocket connections cannot outlive a
+request in serverless/edge runtimes, and Node.js needs a `ws` constructor on versions without a
+built-in `WebSocket`). **No path in this design needs it**, so the default stays HTTP-only:
+fewer moving parts, no WebSocket dependency, one round trip per unit of work.
+
+**Pooled-connection limitations respected:** the design uses no session-level `SET`, no
+`LISTEN/NOTIFY`, no SQL-level `PREPARE`, no cursors, no stored functions with inter-statement
+state — the known constraints of transaction-mode pooling and of the HTTP driver.
 
 ### 15.4 Environment isolation
 
@@ -1363,6 +1513,15 @@ the Git branch is deleted — the single most important setting to enable).
 | Local dev | A `dev` branch off `main` (or a local Postgres/docker container) | Neon CLI/API, schema-only or full branch |
 | Preview (per PR) | `preview/<git-branch>` branch | **Automatically** by the Neon-managed Vercel integration, auto-deleted with the Git branch |
 | Production | The `main` root branch | Created once; the only long-lived branch |
+
+**Preview branches must never carry real customer data.** The Neon-managed Vercel integration
+can branch with data, and that setting must stay **off** for this project. Preview branches are
+created **schema-only / empty** and seeded with synthetic fixtures from the repository, never
+with a copy of production conversations or customer rows. Rabet holds customer conversation text
+(§12.3); duplicating that into an ephemeral per-PR database — auto-deleted with the branch but
+fully readable by anyone with preview access — would be an unnecessary and avoidable exposure.
+This is a configuration guardrail recorded now so Phase 03B does not enable data-copying by
+accident.
 
 ---
 
@@ -1424,8 +1583,10 @@ Ordered so implementation can start without re-deciding anything.
 
 ### 17.1 Prerequisites (owner actions, not code)
 
-1. **Product sign-off** on the open decisions in §19, at minimum the support-category
-   localization question (§19.3) and the message retention window (§19.5).
+1. **Product confirmation** of the MVP decisions recorded in §19 — at minimum the
+   support-category localization default (§19.1), the single display currency (§19.6), the
+   menu-depth safeguards (§19.4) and the payload retention window (§19.5). Each already has a
+   recommended default, so this is confirmation, not new design.
 2. **A Neon account and project** created in `aws-us-east-2`, Free plan — no billing
    required. An account/provisioning action by the owner.
 3. **The Neon-managed Vercel integration** installed, linked to the one Vercel project, with
@@ -1439,7 +1600,10 @@ Ordered so implementation can start without re-deciding anything.
 ### 17.2 Implementation order (code, in Phase 03B)
 
 1. **Install** `drizzle-orm`, `drizzle-kit`, `@neondatabase/serverless`. Write
-   `drizzle.config.ts` and `src/db/client.ts` (pooled, serverless).
+   `drizzle.config.ts` and `src/db/client.ts` (pooled `neon-http`). **No interactive
+   `db.transaction()` is available on this driver** (§15.3) — every atomic write path is
+   implemented as `db.batch([...])` with per-site idempotency, and the client exposes no
+   `neon-serverless` WebSocket pool unless a path is later proven to need one.
 2. **Write the schema** in `src/db/schema/` grouped exactly by the domains of §2:
    `settings.ts` (`bot_setting`, `language`), `content.ts` (`message_template`,
    `message_translation`), `catalog.ts` (`category`, `category_translation`, `product`,
@@ -1494,43 +1658,90 @@ rules of §11 hold at the database level.
 | V-5 | Sending a message before showing more options | `OPEN_SUBMENU` carries an optional localized `menu_text` sent before its children — one button, no workflow engine | §5.2, §6 |
 | V-6 | Safe reordering and moving of tree nodes | ▲/▼ renumber siblings; partial unique indexes prevent duplicate order; Move re-validates ancestry, same-product containment and menu-capable parent | §10.3, §11.2, §13 |
 | V-7 | Disabled buttons and disabled ancestors | `is_active` per row; render filters active children; ancestor walk requires every ancestor active; children under a disabled parent are unreachable, shown as such in the editor | §11.5, §8.2 |
-| V-8 | Returning to previous levels | reserved `back` / `product` / `home` tokens re-resolved server-side; every submenu appends Back and Return to product | §8.1, §8.3 |
+| V-8 | Returning to previous levels | self-scoping `b:<actionUuid>` / `p:<productUuid>` / `home` tokens carry their own anchor, so Back and Return-to-product are unambiguous with several products or old messages open; every submenu appends them | §8.1, §8.3 |
 | V-9 | Translation fallback | one fallback chain: requested → default (English) → generic; default-language label required before activation | §7 |
-| V-10 | Stale Telegram buttons | `callback_data` is an opaque id re-resolved every tap; deleted/inactive/re-parented buttons answer "no longer available" instead of executing; URL buttons documented as un-updatable | §8.5 |
+| V-10 | Stale Telegram buttons | `callback_data` is a self-scoping id re-resolved and re-validated every tap; deleted/inactive/re-parented/type-changed anchors answer "no longer available" instead of executing; URL buttons documented as un-updatable | §8.1, §8.5 |
 | V-11 | Product-linked customer inquiries | `inquiry.product_id` + frozen `product_snapshot` + `selected_options`; resume-by-construction via partial uniqueness | §9.2, §14.3 |
 | V-12 | Mobile-friendly admin editing | hierarchical list, bottom sheets, button-based reorder, 44 px targets, live preview — no raw JSON, no flowchart library | §10 |
 | V-13 | Supported configuration needs no code change | all seven types are implemented handlers; adding buttons, levels, translations, orders and moves are data operations. **Adding a brand-new action type is the exception and does need implementation** (enum + handler + form) | §5.2, §10.5 |
 | V-14 | Catalog navigation ≠ button navigation | two separate tables, recursions and integrity rule sets; cross-tree jumps are the explicit `NAVIGATE_CATALOG` action with real FK targets | §4 vs §5, ADR-014 |
-| V-15 | Long button lists paginate | `MENU_PAGE_SIZE` (10) with `page:<n>` tokens; `MAX_ACTIVE_CHILDREN` (20) bounds menu size | §8.3, §11.3 |
+| V-15 | Long button lists paginate | `MENU_PAGE_SIZE` (10) with self-scoping `m:<actionUuid>:<n>` page tokens; `MAX_ACTIVE_CHILDREN` (20) bounds menu size | §8.3, §11.3 |
 | V-16 | Idempotent state-changing actions | the one-row-lock pattern in three places | §11.6 |
 | V-17 | Customer data minimization | `customer` has only Telegram-provided attributes; no analytics or profiling tables | §12.3, §2.1 |
 | V-18 | No payment, order or financial state in the MVP | none of those tables exist; price is a display attribute; inquiry is not a purchase | §1.1, §16 |
 
 ---
 
-## 19. Open decisions for the product owner
+## 19. Decisions recorded for the MVP (owner confirmation requested)
 
-1. **Support-category localization.** Categories are a `text[]` on the settings singleton and
-   are therefore **English-only** at MVP. Is that acceptable, or should Phase 03B create a
-   localizable `support_category` table from the start? (§16.2 has the promotion path; it is
-   cheap either way.)
-2. **Empty-submenu behaviour.** When an `OPEN_SUBMENU` has no active children, the design
-   shows the optional `menu_text` (or a generic `empty_menu` template) plus Back. Confirm
-   this is preferable to hiding the parent button from its own menu.
-3. **Inquiry reopen semantics.** `closed` is terminal; reopening is an explicit admin action
-   that clears `closed_at`. Confirm the seller prefers reopen-over-create, or whether every
-   contact should create a fresh inquiry.
-4. **Session revocation now or later.** With a database arriving, a `session` denylist
+These were open decisions; the review of 2026-10-12 asked for clear MVP decisions or
+recommended defaults rather than open questions. Each item below states the **decision taken**
+and what remains a genuine owner confirmation. None blocks Phase 03B schema generation — the
+schema already accommodates either answer.
+
+1. **Support-category localization — DECISION: English-only `text[]` at the MVP.**
+   `support_category` stays a `text[]` on the settings singleton, and its values are shown as
+   typed (English). Rationale: one seller, one dashboard form, and support categories are a
+   handful of short strings; a localizable table + translation rows for them would roughly
+   double the configuration surface for a benefit the English-first fallback chain (§7) already
+   delivers for product content. **Trade-off accepted:** if the seller enables Arabic, *product*
+   content renders in Arabic but *support categories* render in English — documented to the
+   seller, not hidden. If that becomes unacceptable, §16.2's promotion path is additive:
+   a `support_category` table with `category_translation` rows and a FK from `inquiry.category`;
+   `inquiry.category` stores the stable category id/string either way, so no conversation history
+   is rewritten. **Confirm: English-only support categories are acceptable for launch.**
+
+2. **Empty-submenu behaviour — DECISION: render with explanation + Back, never a dead end.**
+   When an `OPEN_SUBMENU` has no active children, the design shows the optional `menu_text` (or a
+   generic localized `empty_menu` template) plus Back / Return to product. Rationale: the customer
+   is never staring at a blank message, and the alternative — hiding the parent button from its
+   own menu — makes a configured branch silently unreachable, which is worse for both sides.
+   **Confirm: explanation + Back is preferable to hiding the parent.**
+
+3. **Inquiry reopen semantics — DECISION: reopen-by-seller, new-inquiry-by-customer.** `closed`
+   is terminal for the customer; a post-closure customer contact creates a **new** inquiry (new
+   `reference`), linked in the dashboard to the closed one. The **seller** may explicitly reopen
+   a closed inquiry (`status = 'open'`, `closed_at = NULL`) — the only backwards edge in the state
+   machine (§9.3). Rationale: resume-by-construction already covers the common case (an *active*
+   inquiry is resumed, never duplicated, §9.2); making closed re-openable by the customer would
+   conflate "resolved" with "forgotten" and would require the partial unique index to reach back
+   across closed rows. **Confirm: the seller prefers explicit reopen over every contact creating
+   a fresh inquiry.**
+
+4. **Menu depth — DECISION: unlimited schema nesting, guarded UI.** The schema has no depth cap
+   (§11.3); the dashboard warns beyond `MAX_ACTION_DEPTH = 8` and refuses beyond a hard stop of
+   16, with `MAX_ACTIVE_CHILDREN = 20` and `MENU_PAGE_SIZE = 10` bounding rendered menus. These
+   are **operational safeguards, not product limits**: raising any of them is a one-line code
+   change with no migration. Rationale: unbounded recursion is both a UX and a resource risk, and
+   the owner's "arbitrary depth" requirement is satisfied by the *data model*, not by the bot
+   rendering a 40-level keyboard. **Confirm: these defaults are acceptable, or name different
+   ones.**
+
+5. **Message retention — DECISION: keep conversation bodies indefinitely; prune the raw update
+   payload.** `inquiry_message.body` (the conversation itself) is retained as the record of the
+   service relationship, with `telegram_update.payload` (the raw webhook envelope) pruned on a
+   schedule after a retention window, keeping `update_id` / `update_type` / `processed_at` for the
+   audit trail (§12.3). Recommended default window: **90 days** for `telegram_update.payload`,
+   configurable later in code rather than in `bot_setting`. Rationale: the payload is diagnostic
+   bulk that loses value fast and is the largest storage consumer; conversation text is small,
+   durable and is the business record. **Confirm the 90-day payload window, or name another.**
+
+6. **One displayed currency — DECISION: single global `bot_setting.currency`, seeded `SAR`.**
+   The whole catalog is priced in one currency; per-product currency is the documented additive
+   path (§16.2). Rationale: one seller, one market; a single currency keeps price display,
+   snapshot formatting and templates uniform, and removes an entire class of cross-currency
+   presentation bugs. The `CHECK` allowlist (`SAR','USD','AED','EGP`) is extended by migration if
+   the seller's market changes. **Confirm: the seller prices the whole catalog in one currency,
+   and that currency is `SAR` (or name another).**
+
+7. **Session revocation now or later.** With a database arriving, a `session` denylist
    (ADR-009's documented limitation) and a durable login-attempt counter (ADR-011) become
-   cheap. Both are out of MVP scope by design; confirm they stay deferred.
-5. **Message retention window.** How long should `inquiry_message.body` and
-   `telegram_update.payload` be kept? This decides the prune job and the storage budget.
-6. **Neon plan at launch.** The Free plan suspends compute when CU-hours/egress are
+   cheap. Both are out of MVP scope by design; confirm they stay deferred. This one remains an
+   open decision rather than a recorded one because it is Phase-02 scope, not data-model scope.
+
+8. **Neon plan at launch.** The Free plan suspends compute when CU-hours/egress are
    exhausted. Confirm the product can tolerate a brief suspension window, or approve a paid
    plan before public launch.
-7. **One displayed currency.** The model uses a single `bot_setting.currency`. Confirm the
-   seller prices the whole catalog in one currency (per-product currency is the additive
-   path, §16.2).
 
 ---
 

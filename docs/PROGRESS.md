@@ -76,6 +76,36 @@ recorded as **ADR-013** (catalog + inquiries, not a checkout — including the T
 compliance guardrail) and **ADR-014** (two independent recursive hierarchies) in
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 
+#### Final design corrections (architecture review of 2026-10-12)
+
+A follow-up review of the 1,560-line design identified four corrections that this pass
+applied, **documentation only**, on the same PR:
+
+1. **Navigation callbacks were context-free.** The reserved `back` / `product` / `page:<n>`
+   tokens carried no product, menu or message identity, so with several products or menus open
+   the backend could not infer what they referred to — yet the design claimed navigation needed
+   no state. **Fixed:** tokens are now **self-scoping** (§8.1) — `b:<actionUuid>`,
+   `m:<actionUuid>:<n>`, `p:<productUuid>` carry their own anchor, all under 64 bytes, with
+   stale-anchor handling documented. Navigation genuinely needs zero session state now.
+2. **The transaction approach was assumed, not verified.** §15.3 chose `neon-http` while the
+   design's atomic writes needed multi-step transactions. **Verified against the Drizzle driver
+   source:** `db.transaction()` throws on `neon-http`; `db.batch([...])` is the supported
+   non-interactive batched transaction. §15.3 now documents one tested approach and reshapes
+   every write path to fit it, with `neon-serverless` as the documented escape hatch.
+3. **Depth promises contradicted the UX.** The schema promised arbitrary depth while the UI
+   warned at 8 and stopped at 16. §11.3 now separates the two explicitly: **unlimited schema
+   nesting, guarded UI and runtime** — the guards are operational safeguards raisable by a
+   one-line code change, not product limits. §19.4 records the decision for owner acceptance.
+4. **Hidden localization and currency assumptions.** Support categories were English-only
+   despite the optional Arabic bot, and the single display currency was an unstated default.
+   Both are now recorded as explicit MVP decisions with recommended defaults (§19.1, §19.6),
+   along with empty-menu behaviour (§19.2), inquiry reopening (§19.3) and message retention
+   (§19.5).
+
+Two smaller guardrails were also applied: preview database branches are documented as
+**schema-only — real customer data is never copied into them** (§15.4), and the Neon region is
+described accurately as *close to* rather than *the same as* Vercel's `iad1`.
+
 ### What the revised design delivers
 
 - **Simplified entity model.** Fourteen tables in seven domains — Configuration, Content,
@@ -102,19 +132,30 @@ compliance guardrail) and **ADR-014** (two independent recursive hierarchies) in
   creation** (`product_snapshot`, `selected_options`, write-once), so later catalog edits
   never rewrite a conversation. At most one active inquiry per customer per product —
   `START_INQUIRY` is resume-by-construction.
-- **Telegram navigation contract.** Opaque uuid `callback_data` (36 bytes, under the 64-byte
-  limit) re-resolved server-side on every tap; reserved `back` / `product` / `home` /
-  `page:<n>` tokens; one button per row; pagination; graceful empty-submenu handling;
-  documented stale-keyboard behaviour; prompt callback answers; idempotent state changes.
-- **Minimal durable state.** Submenu navigation needs **zero session state** (every callback
-   is self-describing), which fits Vercel serverless. The selected path is recovered from
-   the action's own ancestor chain at inquiry time.
+- **Telegram navigation contract.** Self-scoping `callback_data` tokens, all well under the
+  64-byte Bot API limit: an action's uuid (36 B) for action buttons, and `b:` / `m:` / `p:`
+  prefixed tokens that carry the action, menu node or product they refer to, so Back,
+  Return-to-product and pagination are unambiguous even with several products or old messages
+  open. One button per row; pagination; graceful empty-submenu handling; documented
+  stale-keyboard behaviour; prompt callback answers; idempotent state changes.
+- **Minimal durable state.** Submenu navigation needs **zero session state** — every token names
+  its own anchor, so no "current menu" is ever inferred — which fits Vercel serverless. The
+  selected path is recovered from the action's own ancestor chain at inquiry time.
 - **Localization.** One mechanism reused across categories, products, buttons and
   templates: one row per language with an English-first fallback chain; Arabic renders RTL.
+  (Support categories themselves stay English-only `text[]` at the MVP — §19.1 of
+  DATA_MODEL.md.)
+- **Atomic writes without interactive transactions.** Verified against the Drizzle driver
+  source: `neon-http` has **no** `db.transaction()` (it throws), so every atomic write path is
+  shaped as a `db.batch([...])` — a non-interactive batched transaction — with per-site
+  idempotency carrying the correctness load. `neon-serverless` (WebSocket) is the documented
+  escape hatch, not the default.
 - **Infrastructure & migration plan retained.** **Neon** managed PostgreSQL, Free plan,
-  `aws-us-east-2`, via the Neon-managed Vercel integration; Drizzle ORM + Kit with
-  generated, committed, human-reviewed SQL; production migrations by hand against the
-  unpooled connection; `drizzle-kit push` never used.
+  `aws-us-east-2` (the closest Neon region to Vercel's `iad1`, though not the same region),
+  via the Neon-managed Vercel integration; Drizzle ORM + Kit with generated, committed,
+  human-reviewed SQL; production migrations by hand against the unpooled connection;
+  `drizzle-kit push` never used; preview branches schema-only — real customer data is never
+  copied into them.
 
 ### What Phase 03A deliberately did not do
 
