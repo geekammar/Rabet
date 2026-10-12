@@ -21,7 +21,7 @@ migration.
 | Branch | `feat/phase-03b-database-foundation` |
 | Base | `main` @ `f6a7738` (merge of PR #5) |
 | Remote | `origin` → `https://github.com/geekammar/Rabet.git` |
-| Status | **Implemented and fully validated locally; PR open for review. Not merged.** |
+| Status | **Implemented, fully validated, CI green, PR #6 open for review. Not merged.** |
 | Production database | **None. Never created, never contacted.** No Neon project exists. |
 | Migrations run in production | **None.** The chain has only ever been applied to disposable clusters. |
 | Payment / order / invoice entities | **None, anywhere** (ADR-013) |
@@ -39,8 +39,9 @@ rewritten; all 03B-A1 work is preserved.
 
 | Commit | Contents |
 | --- | --- |
-| `7be9971` | 03B-A1 recovery checkpoint — schema, migrations, client, DB test suite, this handoff |
-| _(see §12 for the delivery SHA)_ | 03B-A2 — harness `--` fix, GitHub CI DB job, README/PROGRESS/ARCHITECTURE/`.env.example` updates |
+| `7be9971` | 03B-A1 recovery checkpoint — schema, migrations, client, DB test suite, the first handoff |
+| `f4e754e` | 03B-A2 delivery — harness `--` fix, GitHub CI DB job, README/PROGRESS/ARCHITECTURE/`.env.example` updates, final handoff |
+| `2bba9a7` | 03B-A2 CI fixes — the two root causes found by the first CI run (see §17) — **branch HEAD** |
 
 ---
 
@@ -455,11 +456,40 @@ app version; and never start a future phase without product-owner sign-off.
 
 | Item | Value |
 | --- | --- |
-| Pull Request | _(attached below after the PR is opened)_ |
-| Delivery commit (schema fix, CI, docs) | _(filled in after the commit)_ |
-| Branch HEAD at publication | _(filled in after the final push)_ |
-| GitHub CI status | _(checked after the push; see the PR checks tab)_ |
-| Vercel Preview | _(built automatically from the PR by the GitHub integration; check the PR's deployment status)_ |
+| Pull Request | **https://github.com/geekammar/Rabet/pull/6** (open, `MERGEABLE`, targets `main`) |
+| 03B-A1 recovery checkpoint | `7be9971` |
+| 03B-A2 delivery commit | `f4e754e` |
+| 03B-A2 CI fixes / **branch HEAD** | `2bba9a79197b16e41034e5900436770ce91fa407` |
+| GitHub CI | **Both jobs pass** — run `38276438435`: `Lint, typecheck, build, auth + unit tests` ✅ and `PostgreSQL service — migrations + DB integration tests` ✅ (1m each) |
+| Vercel Preview | The branch's last Vercel preview — built at the `7be9971` checkpoint, deployment `7014895539` — reports **success** ("Deployment has completed"). Vercel has not created a deployment record for the two 03B-A2 commits as of this check; the owner should confirm on the Vercel dashboard. This is outside the code path and does not gate the review — GitHub CI is the required gate and it is green. |
+
+### 17.1 The first CI run and how it was fixed (root causes, not symptoms)
+
+The first run of PR #6 (`38271860188`) failed **both** jobs. Each root cause was
+fixed on this same branch, the fixes were re-verified locally with the exact CI
+step sequence, and the second run passed.
+
+1. **`db` job — `ERR_AMBIGUOUS_MODULE_SYNTAX`.** The throwaway-database helper
+   inline in the workflow used top-level `await` together with `require()`, which
+   Node refuses to compile (the project has no `"type": "module"`). The awaits
+   are wrapped in an async IIFE — the exact form that was verified locally. This
+   was purely a YAML mistake: the locally-validated command used the IIFE and the
+   workflow did not.
+2. **`verify` job — the provisioning PTY test echoed the password.** This was a
+   genuine, latent race in `scripts/generate-admin-hash.mjs`, not a test defect,
+   and **no assertion was weakened to fix it**. `readHidden()` wrote the prompt
+   and only then switched stdin to raw mode. Because the prompt can be relayed
+   through the terminal and answered by the driving process while the script's
+   own synchronous block is still executing, the reply could reach the kernel's
+   line discipline while echo was still enabled — so the password was echoed.
+   This never reproduced locally (10/10 passes) because it depends on
+   cross-process scheduling, and it had passed on `main` by luck; the first PR
+   run exposed it. `setRawMode(true)` now runs **before** the prompt is written,
+   so no keystroke arriving in response to a prompt can ever be echoed. The
+   security property the test asserts is unchanged and the echo window is
+   strictly smaller.
+
+Neither fix touched a schema, migration, or integrity assertion.
 
 **The PR is ready for review. It must not be merged automatically, and no
 production database must be provisioned or migrated until the product owner
