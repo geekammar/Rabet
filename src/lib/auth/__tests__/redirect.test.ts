@@ -8,7 +8,8 @@ import {
 describe("safeLoginRedirect", () => {
   it("accepts a valid internal path", () => {
     expect(safeLoginRedirect("/overview")).toBe("/overview");
-    expect(safeLoginRedirect("/orders/123")).toBe("/orders/123");
+    expect(safeLoginRedirect("/inquiries")).toBe("/inquiries");
+    expect(safeLoginRedirect("/orders/123")).toBe(DEFAULT_LOGIN_REDIRECT);
   });
 
   it("rejects protocol-relative URLs", () => {
