@@ -5,8 +5,12 @@ handoff that preceded it.
 
 - **Branch:** `feat/admin-auth`
 - **Base:** `ddd525adff427ea5263e60f15b37437ca9149477` (Phase 01C merged into `main`)
-- **Status:** Phase 02A and 02B complete and committed. PR opened against `main`;
-  **not merged, not deployed to production, no version bumped.**
+- **Status:** Phase 02A and 02B complete, committed and **merged into `main`** as
+  [`5e3bc7e`](https://github.com/geekammar/Rabet/pull/3) (PR #3). Vercel Production is
+  Ready for that commit. No version was bumped. **Phase 02 is not marked fully accepted**:
+  the interactive device checks in [docs/PROGRESS.md](./PROGRESS.md) and the durable rate
+  limiter (§2) remain open and are tracked separately. Phase 03A designed the data model on
+  top of this baseline; see [docs/DATA_MODEL.md](./DATA_MODEL.md).
 
 Phase 02A recovered the interrupted authentication work and committed it as a
 checkpoint. Phase 02B — described below — performed the security validation,
