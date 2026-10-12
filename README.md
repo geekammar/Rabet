@@ -8,7 +8,7 @@ Rabet connects a Telegram bot — where customers browse an arbitrarily deep cat
 > foundation **implemented** on `feat/phase-03b-database-foundation`.
 > Phases 01 and 02 (UI shell and admin authentication) are merged into `main`.
 > Phase 03B implements the approved Phase 03A data model as real Drizzle schema,
-> two reviewed SQL migrations, a server-only Neon HTTP client and a 52-test
+> two reviewed SQL migrations, a server-only Neon HTTP client and a 53-test
 > PostgreSQL integration suite — fourteen tables across seven domains, with both
 > recursive trees, the inquiry snapshots and Telegram deduplication enforced by
 > triggers and indexes in the database. **No** production database has been
@@ -300,7 +300,7 @@ Development follows this fixed feature order.
 | **Phase 01** | Project foundation & UI shell | **Merged** |
 | **Phase 02** | Admin authentication | **Merged** (PR #3, `5e3bc7e`) — manual device checks and rate limiting remain open |
 | **Phase 03A** | Data model & recursive button architecture **design** | **Merged** (PR #4, `269cf7c`) — documentation only |
-| **Phase 03B** | Database schema, migrations & DB test foundation | **Implemented on `feat/phase-03b-database-foundation`** — schema + 2 migrations + client + 52 DB tests; awaiting product-owner review |
+| **Phase 03B** | Database schema, migrations & DB test foundation | **Implemented on `feat/phase-03b-database-foundation`** — schema + 2 migrations + client + 53 DB tests; awaiting product-owner review |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |

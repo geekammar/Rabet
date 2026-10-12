@@ -166,11 +166,18 @@ export function pgErrorMessage(error: unknown): string | undefined {
 /**
  * A monotonically increasing sibling order for fixtures.
  *
- * The two trees enforce unique `sort_order` among siblings — and, for roots,
- * globally — through partial unique indexes, so two fixtures that both default
- * to `0` collide on the index. This counter hands every fixture a fresh order
- * without each test having to think about it, which is also what the real write
- * path does: renumbering siblings so the order stays gapless and unique.
+ * The two trees enforce unique `sort_order` among siblings through partial
+ * unique indexes, so two fixtures that both default to `0` can collide. This
+ * counter hands every fixture a fresh order without each test having to think
+ * about it, which is also what the real write path does: renumbering siblings
+ * so the order stays gapless and unique.
+ *
+ * The scope of uniqueness differs by index, and the counter is safe for all of
+ * them: category sibling order is per parent, category *root* order is unique
+ * across every root in the table (`UNIQUE (sort_order) WHERE parent_id IS
+ * NULL`), while product-action root order is unique per product
+ * (`UNIQUE (product_id, sort_order) WHERE parent_action_id IS NULL`) — so a
+ * fresh value is always sufficient and never required between products.
  */
 let fixtureSequence = 0;
 

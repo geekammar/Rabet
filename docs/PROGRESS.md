@@ -23,7 +23,7 @@ test results and the production migration runbook.
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
 | **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #5](https://github.com/geekammar/Rabet/pull/5), `f6a7738`) — code complete and Production-ready; the **manual interactive device checks and the durable rate limiter remain open** (see below), so Phase 02 is not marked *fully accepted* |
 | **Phase 03A** | Data model & recursive button architecture **design** | ✅ **Merged into `main`** ([PR #4](https://github.com/geekammar/Rabet/pull/4), `269cf7c`) — documentation only |
-| **Phase 03B** | Database schema, migrations & DB test foundation | 🟦 **Implemented on `feat/phase-03b-database-foundation`** — 14 tables, 2 migrations, server-only client, 52 DB tests, all green; no production database created or contacted |
+| **Phase 03B** | Database schema, migrations & DB test foundation | 🟦 **Implemented on `feat/phase-03b-database-foundation`** — 14 tables, 2 migrations, server-only client, 53 DB tests, all green; no production database created or contacted |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
@@ -212,7 +212,7 @@ details in [PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md); this is the summary.
   `server-only`. Atomic multi-step writes are shaped as `db.batch([...])`
   because `db.transaction()` throws on this driver — verified against the driver
   source and asserted in the test suite.
-- **DB test foundation** — `tests/db/` (5 suites, 52 tests) running against real
+- **DB test foundation** — `tests/db/` (5 suites, 53 tests) running against real
   PostgreSQL via a disposable cluster (`scripts/db-test-postgres.mjs`), one
   throwaway database per test file, `DATABASE_URL` deliberately never read.
 - **CI** — a second GitHub Actions job (`db`) provides an isolated PostgreSQL
@@ -226,9 +226,9 @@ details in [PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md); this is the summary.
 | `npm run lint` | ✅ exit 0 |
 | `npm run typecheck` | ✅ exit 0 |
 | `npm run build` | ✅ exit 0 (with a test-only generated `AUTH_SECRET`) |
-| `npm run test` (no cluster) | ✅ **130 tests** — 84 passed, 46 skipped (the DB suites), 11 files |
-| `npm run test` (cluster designated) | ✅ **130 tests passed**, 0 skipped, 11 files |
-| `npm run test:db` | ✅ **52 DB tests passed** (5 files) |
+| `npm run test` (no cluster) | ✅ **131 tests** — 84 passed, 47 skipped (the DB suites), 11 files |
+| `npm run test` (cluster designated) | ✅ **131 tests passed**, 0 skipped, 11 files |
+| `npm run test:db` | ✅ **53 DB tests passed** (5 files) |
 | `npx drizzle-kit check` | ✅ "Everything's fine" against a freshly migrated throwaway DB |
 | `drizzle-kit generate` diff | ✅ SQL byte-identical to the committed chain |
 

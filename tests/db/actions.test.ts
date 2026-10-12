@@ -347,6 +347,34 @@ describe.skipIf(!shouldRun)("product action tree", () => {
     ).rejects.toMatchObject({ cause: { code: "23505" } });
   });
 
+  it("scopes root sort-order uniqueness per product, not globally", async () => {
+    // `product_action_root_sort_order_idx` is UNIQUE (product_id, sort_order)
+    // over root buttons — unlike `category_root_sort_order_idx`, which is
+    // globally unique. So two different products may each open their root
+    // menu at position 0 without colliding.
+    const productA = await insertProduct("root-scope-a");
+    const productB = await insertProduct("root-scope-b");
+
+    await expect(
+      insertAction({ productId: productA, actionType: "OPEN_SUBMENU", sortOrder: 0 }),
+    ).resolves.toBeDefined();
+
+    await expect(
+      insertAction({ productId: productB, actionType: "START_INQUIRY", sortOrder: 0 }),
+    ).resolves.toBeDefined();
+
+    // But a second root of the *same* product at position 0 is rejected, and
+    // the violation names the per-product root index specifically.
+    await expect(
+      insertAction({ productId: productA, actionType: "SHOW_DETAILS", sortOrder: 0 }),
+    ).rejects.toMatchObject({
+      cause: {
+        code: "23505",
+        constraint_name: "product_action_root_sort_order_idx",
+      },
+    });
+  });
+
   it("cascades: deleting a product removes its whole button tree", async () => {
     const productId = await insertProduct("cascade");
     const root = await insertAction({ productId, actionType: "OPEN_SUBMENU" });

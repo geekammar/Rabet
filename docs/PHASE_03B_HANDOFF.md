@@ -33,6 +33,13 @@ fixed one harness bug, wired the DB suites into GitHub CI, updated all
 documentation, and delivered the pull request. Nothing was discarded, reset or
 rewritten; all 03B-A1 work is preserved.
 
+**The product-owner review of PR #6 then caught one documentation error**, fixed
+in place on this same branch without touching any schema or migration SQL (§17.2):
+the Handoff claimed `product_action_root_sort_order_idx` was globally unique like
+`category_root_sort_order_idx`, when the checked-in SQL scopes it per product.
+The claims were corrected and a focused regression test was added, raising the
+suite to **53** DB tests.
+
 ---
 
 ## 2. Commits
@@ -122,10 +129,22 @@ Telegram dedup. **No payment, invoice or order entity exists anywhere**
 
 **The five partial unique indexes:** `category_sibling_sort_order_idx`,
 `category_root_sort_order_idx`, `product_action_sibling_sort_order_idx`,
-`product_action_root_sort_order_idx` (sibling-order uniqueness; the root indexes
-are global across every root, since Postgres treats a `NULL` parent as
-distinct), and `inquiry_active_per_customer_product_idx` (at most one active
-inquiry per customer per product — `START_INQUIRY` is resume-by-construction).
+`product_action_root_sort_order_idx` (sibling-order uniqueness in both trees),
+and `inquiry_active_per_customer_product_idx` (at most one active inquiry per
+customer per product — `START_INQUIRY` is resume-by-construction).
+
+The two **root** indexes differ in scope, and the distinction matters:
+
+- `category_root_sort_order_idx` is `UNIQUE (sort_order) WHERE parent_id IS NULL`
+  — **global** across every category root in the table, because Postgres treats
+  each root's `NULL` parent as distinct and the index carries no other column.
+- `product_action_root_sort_order_idx` is
+  `UNIQUE (product_id, sort_order) WHERE parent_action_id IS NULL` — unique
+  **per product**, so two different products may each have a root button at
+  `sort_order = 0`; only the roots of *one* product may not collide.
+
+In both trees the **sibling** indexes are scoped to one parent
+(`(parent_id, sort_order)` / `(parent_action_id, sort_order)`).
 
 ---
 
@@ -163,7 +182,7 @@ ever contacted.**
 | Generation equivalence | `drizzle-kit generate` into a temp folder | ✅ **SQL byte-identical** to `0000_initial_schema.sql`; snapshot structure identical |
 | Repeatable execution | `migration-chain.test.ts` — re-apply the chain | ✅ object fingerprint unchanged (no duplicated objects) |
 | Failure scenario | `migration-chain.test.ts` — a deliberately broken `0002` | ✅ rolls back atomically; the probe table does not survive; the journal is not polluted |
-| Integrity rules | `catalog` / `actions` / `inquiry` suites (52 tests) | ✅ all pass — every rejection asserts a specific SQLSTATE, the matching constraint, and that the write did not land |
+| Integrity rules | `catalog` / `actions` / `inquiry` suites (53 tests) | ✅ all pass — every rejection asserts a specific SQLSTATE, the matching constraint, and that the write did not land |
 
 ---
 
@@ -180,10 +199,10 @@ cd /root/projects/rabet
 npm run lint            # eslint        — exit 0
 npm run typecheck       # tsc --noEmit  — exit 0
 npm run build           # needs a throwaway AUTH_SECRET in CI; locally .env.local is read
-npm run test            # 130 tests: 84 passed, 46 skipped without a cluster
+npm run test            # 131 tests: 84 passed, 47 skipped without a cluster
 
 # ---- Database suites ----
-npm run test:db         # ONE command: disposable cluster → 52 DB tests → delete cluster
+npm run test:db         # ONE command: disposable cluster → 53 DB tests → delete cluster
 
 # or step by step
 node scripts/db-test-postgres.mjs start
@@ -194,7 +213,7 @@ node scripts/db-test-postgres.mjs stop
 # ---- Full suite including the DB suites ----
 node scripts/db-test-postgres.mjs start
 export RABET_TEST_PG_URL="$(node -e 'console.log(require("/tmp/rabet-test-pg.json").url)')"
-npm run test            # 130 tests, 0 skipped
+npm run test            # 131 tests, 0 skipped
 node scripts/db-test-postgres.mjs stop
 
 # ---- Migration consistency ----
@@ -205,14 +224,14 @@ DATABASE_URL=… npm run db:migrate && DATABASE_URL=… npm run db:check
 node scripts/db-test-postgres.mjs stop
 ```
 
-### Per-file DB test breakdown (52 tests)
+### Per-file DB test breakdown (53 tests)
 
 | Test file | Tests | Covers |
 | --- | --- | --- |
 | `tests/db/migration-chain.test.ts` | 7 | clean apply, journal, idempotent re-apply, trigger presence, partial indexes, atomic rollback of a broken migration, and that `drizzle-kit push` is wired into no script |
 | `tests/db/client.test.ts` | 6 | imports without `DATABASE_URL`, loud credential-free failures, no echo of the connection string, lazy memoization, `db.transaction()` throws on neon-http |
-| `tests/db/catalog.test.ts` | 10 | category tree: self-parent, cycle, deleted-parent, sibling/root order uniqueness, `RESTRICT` deletes, cascade of translations |
-| `tests/db/actions.test.ts` | 15 | button tree: cross-product parent, terminal parent, type-change-with-children, branch cascade scoping, navigation-target rules, HTTPS check |
+| `tests/db/catalog.test.ts` | 10 | category tree: self-parent, cycle, deleted-parent, sibling/root order uniqueness (category roots globally unique), `RESTRICT` deletes, cascade of translations |
+| `tests/db/actions.test.ts` | 16 | button tree: cross-product parent, terminal parent, type-change-with-children, branch cascade scoping, navigation-target rules, HTTPS check, and root sort-order uniqueness scoped **per product** (two products may each hold root `sort_order = 0`; a duplicate within one product is rejected on the named index) |
 | `tests/db/inquiry.test.ts` | 14 | snapshot immutability, one-active-inquiry, message dedup, `SET NULL` on product delete, `RESTRICT` on customer delete |
 
 ### Test-suite isolation guarantees
@@ -280,8 +299,8 @@ Design points:
 
 The exact `db`-job step sequence was reproduced locally against a disposable
 cluster (create DB → `db:migrate` → `db:check` → `npx vitest run tests/db`):
-migrations applied, check reported "Everything's fine", 52/52 DB tests passed,
-and the full suite ran 130/130 with the cluster designated.
+migrations applied, check reported "Everything's fine", 53/53 DB tests passed,
+and the full suite ran 131/131 with the cluster designated.
 
 ---
 
@@ -405,11 +424,16 @@ None blocking. Carried forward as knowledge:
    the *insert-side* FK breach and the *trigger-raised* violations are 23503.
    Any future error-mapping code must expect this. The tests assert the correct
    code at every site.
-2. **Root-level `sort_order` uniqueness is global.**
-   `category_root_sort_order_idx` and `product_action_root_sort_order_idx` are
-   unique across **every** root in the table, not one parent's children. Any
-   fixture or write path inserting a root must take a globally unique
-   `sort_order` — which is also what the real write path does.
+2. **Root-level `sort_order` uniqueness differs between the two trees.**
+   `category_root_sort_order_idx` is `UNIQUE (sort_order) WHERE parent_id IS
+   NULL`, so it is unique across **every** category root in the table, not just
+   one parent's children — any fixture or write path inserting a category root
+   must take a globally unique `sort_order`. `product_action_root_sort_order_idx`
+   is different: `UNIQUE (product_id, sort_order) WHERE parent_action_id IS
+   NULL`, so root button order is unique **per product** — two products may each
+   have a root at `sort_order = 0`, and only the roots of one product may not
+   collide. Any fixture or write path must respect the scope of the tree it is
+   writing; `tests/db/actions.test.ts` regression-tests both directions.
 3. **The `db.batch()` path is unexercised end-to-end.** See §8's documented
    limitation. It is verified at the driver level only.
 4. **No seed data exists.** `bot_setting`, `language` and `message_template`
@@ -461,7 +485,8 @@ app version; and never start a future phase without product-owner sign-off.
 | 03B-A1 recovery checkpoint | `7be9971` |
 | 03B-A2 delivery commit | `f4e754e` |
 | 03B-A2 CI fixes (last code commit) | `2bba9a79197b16e41034e5900436770ce91fa407` |
-| Branch tip | The handoff-finalization commit (this file); only documentation commits follow the code above. The live tip SHA is the newest commit on `feat/phase-03b-database-foundation` in PR #6 — it advances with documentation edits, so it is deliberately not hard-coded here. |
+| PR #6 review fix | The documentation-correction commit that follows `2bba9a7` (§17.2). Documentation + one new DB test only; no schema or migration SQL touched. |
+| Branch tip | The newest commit on `feat/phase-03b-database-foundation` in PR #6 — it advances with documentation edits, so it is deliberately not hard-coded here. |
 | GitHub CI | **Both jobs pass** — run `38276438435`: `Lint, typecheck, build, auth + unit tests` ✅ and `PostgreSQL service — migrations + DB integration tests` ✅ (1m each) |
 | Vercel Preview | The branch's last Vercel preview — built at the `7be9971` checkpoint, deployment `7014895539` — reports **success** ("Deployment has completed"). Vercel has not created a deployment record for the two 03B-A2 commits as of this check; the owner should confirm on the Vercel dashboard. This is outside the code path and does not gate the review — GitHub CI is the required gate and it is green. |
 
@@ -492,6 +517,44 @@ step sequence, and the second run passed.
    strictly smaller.
 
 Neither fix touched a schema, migration, or integrity assertion.
+
+### 17.2 The PR #6 review fix — a documentation correction, verified by a new test
+
+The product-owner review of PR #6 (2026-10-12) flagged one discrepancy between
+this Handoff and the checked-in SQL. **The SQL was correct; the documentation
+was wrong.** The claim, in §4.2 and §14, was that
+`product_action_root_sort_order_idx` is globally unique across every root of
+every product. The actual committed definitions are:
+
+- `drizzle/0000_initial_schema.sql`:
+  `CREATE UNIQUE INDEX "product_action_root_sort_order_idx" ON "product_action" USING btree ("product_id","sort_order") WHERE parent_action_id IS NULL`
+- `src/db/schema/actions.ts`: `uniqueIndex(...).on(table.productId, table.sortOrder).where(sql\`parent_action_id IS NULL\`)`
+
+So root button order is unique **per product** — two different products may each
+have a root button at `sort_order = 0`. Only `category_root_sort_order_idx`
+(`UNIQUE (sort_order) WHERE parent_id IS NULL`) is global, because the catalog
+root index carries no scoping column.
+
+What changed on this branch (no schema, no migration SQL, no integrity assertion
+touched — the migration files and `src/db/schema/` are byte-identical to the
+state CI last validated):
+
+1. **§4.2** now describes the scope of each root index explicitly, side by side.
+2. **§14 item 2** was retitled and rewritten: category roots are globally
+   unique, product-action roots are unique per product.
+3. **`tests/db/helpers.ts`** — the `nextOrder()` fixture comment no longer
+   implies product-action roots are globally unique (it did, which is what made
+   the Handoff claim plausible). The helper's behaviour is unchanged and remains
+   safe for every index scope.
+4. **`tests/db/actions.test.ts`** — one new focused regression test
+   ("scopes root sort-order uniqueness per product, not globally") asserts both
+   directions against real PostgreSQL: two products each insert a root at
+   `sort_order = 0` successfully, and a duplicate root within one product is
+   rejected with SQLSTATE `23505` naming `product_action_root_sort_order_idx`.
+
+Local re-verification on a disposable cluster: `53/53` DB tests pass and the full
+suite runs `131/131` with the cluster designated (`84` passed / `47` skipped
+without one — the DB suites skip, never fail). The fix re-triggers CI on PR #6.
 
 **The PR is ready for review. It must not be merged automatically, and no
 production database must be provisioned or migrated until the product owner

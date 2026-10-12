@@ -440,7 +440,7 @@ analytics structure.
 >
 > **Status (Phase 03B).** The approved design has since been **implemented** — Drizzle
 > schema in `src/db/schema`, two reviewed SQL migrations in `drizzle/`, the server-only
-> `neon-http` client in `src/db/client.ts`, and a 52-test PostgreSQL integration suite in
+> `neon-http` client in `src/db/client.ts`, and a 53-test PostgreSQL integration suite in
 > `tests/db`. Still **no** production database has been created or contacted, and no
 > migration has run anywhere but a disposable cluster. See
 > [PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md).
