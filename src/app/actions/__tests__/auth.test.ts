@@ -74,11 +74,11 @@ describe("login action — redirect allowlist", () => {
   });
 
   it("preserves a safe internal callbackUrl", async () => {
-    await login(undefined, formData({ ...VALID, callbackUrl: "/orders/123" }));
+    await login(undefined, formData({ ...VALID, callbackUrl: "/inquiries" }));
 
     expect(signIn).toHaveBeenCalledWith(
       "credentials",
-      expect.objectContaining({ redirectTo: "/orders/123" }),
+      expect.objectContaining({ redirectTo: "/inquiries" }),
     );
   });
 

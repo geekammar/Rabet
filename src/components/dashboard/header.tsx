@@ -20,7 +20,7 @@ export function Header() {
             aria-hidden="true"
             className="size-1.5 rounded-full bg-amber-500"
           />
-          Phase 2 · Preview
+          Discovery · Admin
         </Badge>
         <LogoutButton />
       </div>

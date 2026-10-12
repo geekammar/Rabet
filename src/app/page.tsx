@@ -1,15 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowRightIcon, Coins, LayoutDashboard, Store } from "lucide-react";
+import { ArrowRightIcon, ListTree, MessageSquareText, Store } from "lucide-react";
 
 import { Logo } from "@/components/brand/logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export const metadata: Metadata = {
-  title: "Rabet — Sell digital services through Telegram",
+  title: "Rabet — Digital product catalog for Telegram",
   description:
-    "Rabet is a lightweight Telegram-based digital services management system with a web dashboard for services, orders, customers and payments.",
+    "Rabet is a Telegram digital-product catalog with configurable menus and a dashboard for seller inquiries.",
 };
 
 const REPOSITORY_URL = "https://github.com/geekammar/Rabet";
@@ -17,21 +17,21 @@ const REPOSITORY_URL = "https://github.com/geekammar/Rabet";
 const features = [
   {
     icon: Store,
-    title: "Storefront inside Telegram",
+    title: "Digital product catalog",
     description:
-      "Customers browse your services and place orders without ever leaving the chat.",
+      "Planned: let customers browse products, categories and displayed prices inside Telegram.",
   },
   {
-    icon: LayoutDashboard,
-    title: "One dashboard for everything",
+    icon: ListTree,
+    title: "Configurable button trees",
     description:
-      "Manage services, orders, customers and payments from a single clean web interface.",
+      "Planned: build multi-level product menus with actions and messages from the dashboard.",
   },
   {
-    icon: Coins,
-    title: "Paid with Telegram Stars",
+    icon: MessageSquareText,
+    title: "Seller conversations",
     description:
-      "Digital goods sold inside Telegram are settled with Telegram Stars, as required by Telegram.",
+      "Planned: customers ask about products, and the seller responds through Rabet.",
   },
 ];
 
@@ -52,15 +52,15 @@ export default function LandingPage() {
               aria-hidden="true"
               className="size-1.5 rounded-full bg-amber-500"
             />
-            Phase 2 · Admin authentication
+            Catalog & inquiries · Discovery
           </span>
           <h1 className="mt-6 font-heading text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
-            Sell digital services through Telegram
+            Showcase digital products in Telegram
           </h1>
           <p className="mx-auto mt-5 max-w-xl text-base text-muted-foreground text-pretty sm:text-lg">
-            Rabet (رابط) connects a Telegram bot to a simple web dashboard, so
-            you can publish services, track orders and manage customers in one
-            place.
+            Rabet (رابط) is building a configurable product catalog with
+            nested Telegram menus and a seller inbox for customer inquiries.
+            No payment checkout is included in the discovery MVP.
           </p>
           <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Button asChild size="lg" className="h-11">
@@ -106,7 +106,7 @@ export default function LandingPage() {
 
       <footer className="border-t">
         <div className="mx-auto flex w-full max-w-5xl flex-col items-center justify-between gap-3 px-4 py-6 pb-[max(env(safe-area-inset-bottom),1.5rem)] text-sm text-muted-foreground sm:flex-row sm:px-6 lg:px-8">
-          <p>Rabet · Phase 2 — Discovery &amp; Development</p>
+          <p>Rabet · Discovery &amp; Development</p>
           <nav aria-label="Footer">
             <Link
               href={REPOSITORY_URL}

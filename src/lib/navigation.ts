@@ -1,11 +1,10 @@
 import {
   Bot,
-  CreditCard,
   LayoutDashboard,
+  MessageSquareText,
   Package,
   Send,
   Settings,
-  ShoppingCart,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -19,45 +18,38 @@ export type NavItem = {
 
 /**
  * Single source of truth for dashboard navigation.
- * Consumed by the desktop sidebar, the mobile navigation drawer and the
- * overview quick-links so the three can never drift apart.
+ * Consumed by desktop sidebar, mobile drawer, and overview quick-links.
  */
 export const navItems: NavItem[] = [
   {
     label: "Overview",
     href: "/overview",
     icon: LayoutDashboard,
-    description: "A summary of store activity.",
+    description: "A summary of catalog and conversation activity.",
   },
   {
-    label: "Services",
-    href: "/services",
+    label: "Catalog",
+    href: "/catalog",
     icon: Package,
-    description: "The digital services customers can order.",
+    description: "Digital products, categories, prices, and configurable buttons.",
   },
   {
-    label: "Orders",
-    href: "/orders",
-    icon: ShoppingCart,
-    description: "Incoming and completed orders.",
+    label: "Inquiries",
+    href: "/inquiries",
+    icon: MessageSquareText,
+    description: "Product questions and customer support conversations.",
   },
   {
     label: "Customers",
     href: "/customers",
     icon: Users,
-    description: "People who interact with the bot.",
-  },
-  {
-    label: "Payments",
-    href: "/payments",
-    icon: CreditCard,
-    description: "Payment records and balances.",
+    description: "People who interact with the Telegram bot.",
   },
   {
     label: "Bot Content",
     href: "/bot-content",
     icon: Bot,
-    description: "Editable bot messages and command texts.",
+    description: "Editable bot messages and language content.",
   },
   {
     label: "Telegram",
@@ -69,6 +61,6 @@ export const navItems: NavItem[] = [
     label: "Settings",
     href: "/settings",
     icon: Settings,
-    description: "Store-wide configuration.",
+    description: "Catalog and bot configuration.",
   },
 ];

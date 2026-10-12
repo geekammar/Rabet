@@ -4,7 +4,7 @@ import type { NextConfig } from "next";
  * Cache policy for authenticated dashboard routes.
  *
  * Dashboard pages are personalized — they are only reachable by the signed-in
- * admin and will later carry customer, order and payment data. Such responses
+ * admin and will later carry customer and inquiry data. Such responses
  * must never be stored in a shared CDN cache or the browser cache, otherwise a
  * private page could be served to a different visitor of the same cache, or
  * replayed after logout.
@@ -20,10 +20,9 @@ import type { NextConfig } from "next";
  */
 const dashboardPaths = [
   "/overview",
-  "/services",
-  "/orders",
+  "/catalog",
+  "/inquiries",
   "/customers",
-  "/payments",
   "/bot-content",
   "/telegram",
   "/settings",

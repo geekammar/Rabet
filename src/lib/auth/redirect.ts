@@ -29,10 +29,9 @@ export const DEFAULT_LOGIN_REDIRECT = "/overview";
  */
 const ALLOWED_PREFIXES = [
   "/overview",
-  "/services",
-  "/orders",
+  "/catalog",
+  "/inquiries",
   "/customers",
-  "/payments",
   "/bot-content",
   "/telegram",
   "/settings",

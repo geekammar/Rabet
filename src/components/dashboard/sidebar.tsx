@@ -18,10 +18,10 @@ export function Sidebar() {
       <DashboardNav className="flex-1 overflow-y-auto p-4" />
       <div className="border-t p-4 pb-[max(env(safe-area-inset-bottom),1rem)]">
         <p className="text-xs text-muted-foreground">
-          Phase 1 · UI shell preview
+          Discovery · Dashboard shell
         </p>
         <p className="mt-1 text-xs text-muted-foreground/70">
-          Not production-secure.
+          Product features coming soon.
         </p>
       </div>
     </aside>
