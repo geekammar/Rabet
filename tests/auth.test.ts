@@ -369,10 +369,9 @@ async function signOut(jar: CookieJar) {
 
 const DASHBOARD_PATHS = [
   "/overview",
-  "/services",
-  "/orders",
+  "/catalog",
+  "/inquiries",
   "/customers",
-  "/payments",
   "/bot-content",
   "/telegram",
   "/settings",

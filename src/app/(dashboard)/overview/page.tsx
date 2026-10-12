@@ -9,11 +9,11 @@ import { navItems } from "@/lib/navigation";
 
 export const metadata: Metadata = {
   title: "Overview",
-  description: "A snapshot of store activity in Rabet.",
+  description: "A snapshot of catalog and inquiry activity in Rabet.",
 };
 
 const operations = navItems.filter((item) =>
-  ["/services", "/orders", "/customers", "/payments"].includes(item.href),
+  ["/catalog", "/inquiries", "/customers"].includes(item.href),
 );
 
 const configuration = navItems.filter((item) =>
@@ -58,13 +58,13 @@ export default function OverviewPage() {
     <div className="space-y-8">
       <PageHeader
         title="Overview"
-        description="A snapshot of your store activity will be summarized here once services, orders and payments exist."
+        description="Catalog and inquiry activity will appear here as the features are implemented."
       />
 
       <EmptyState
         icon={LayoutDashboard}
         title="No activity yet"
-        description="This is Phase 1 of Rabet. The dashboard shell and navigation are in place, but no services, orders, customers or payments have been added. Operational data will appear here in later phases."
+        description="The secure dashboard shell is ready. Catalog management, inquiries and Telegram integration are planned for upcoming phases."
       />
 
       <section aria-labelledby="operations-heading" className="space-y-4">
@@ -74,7 +74,7 @@ export default function OverviewPage() {
         >
           Operations
         </h2>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {operations.map((item) => (
             <SectionCard
               key={item.href}

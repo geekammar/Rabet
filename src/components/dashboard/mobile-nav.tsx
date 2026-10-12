@@ -55,7 +55,7 @@ export function MobileNav() {
         </SheetClose>
         <div className="border-t p-4">
           <p className="text-xs text-muted-foreground">
-            Phase 1 · UI shell preview
+            Discovery · Catalog & inquiries
           </p>
         </div>
       </SheetContent>
