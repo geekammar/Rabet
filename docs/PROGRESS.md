@@ -1,14 +1,18 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 03A — Final data model & recursive button architecture (design only)**
+Current phase: **Phase 03B — Database schema, migrations & DB test foundation (implemented, in review)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
-[DATA_MODEL.md](./DATA_MODEL.md) for the database design delivered by this phase.
+[DATA_MODEL.md](./DATA_MODEL.md) for the approved database design,
+[PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md) for the implementation status,
+test results and the production migration runbook.
 
-> This file tracks the **Phase 02B** authentication pass and the **Phase 03A** data-model
-> design pass. Phase 01 and Phase 02 are merged into `main`; Phase 03A is a design-only
-> pass on its own branch.
+> This file tracks the **Phase 02B** authentication pass, the **Phase 03A**
+> data-model design pass and the **Phase 03B** database implementation. Phases
+> 01 and 02 are merged into `main`; Phase 03A is merged into `main`;
+> Phase 03B is on `feat/phase-03b-database-foundation`, awaiting product-owner
+> review.
 
 ---
 
@@ -17,9 +21,9 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
-| **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #3](https://github.com/geekammar/Rabet/pull/3), commit `5e3bc7e`) — code complete and Production-ready; the **manual interactive device checks and the durable rate limiter remain open** (see below), so Phase 02 is not marked *fully accepted* |
-| **Phase 03A** | Data model & recursive button architecture **design** | 🟦 **Revised design complete on `design/phase-03a-data-model`** — documentation only; no schema files, no migrations, no dependencies, no database |
-| Phase 03B | Database schema & migrations implementation | Not started — see [DATA_MODEL.md §17](./DATA_MODEL.md) for the implementation plan and prerequisites |
+| **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #5](https://github.com/geekammar/Rabet/pull/5), `f6a7738`) — code complete and Production-ready; the **manual interactive device checks and the durable rate limiter remain open** (see below), so Phase 02 is not marked *fully accepted* |
+| **Phase 03A** | Data model & recursive button architecture **design** | ✅ **Merged into `main`** ([PR #4](https://github.com/geekammar/Rabet/pull/4), `269cf7c`) — documentation only |
+| **Phase 03B** | Database schema, migrations & DB test foundation | 🟦 **Implemented on `feat/phase-03b-database-foundation`** — 14 tables, 2 migrations, server-only client, 53 DB tests, all green; no production database created or contacted |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
@@ -167,6 +171,80 @@ described accurately as *close to* rather than *the same as* Vercel's `iad1`.
 - No changes to application code, no version bump, and no deployment.
 
 The manual Phase 02 checks below are unchanged and were **not** claimed as passing.
+
+## What was done in Phase 03B
+
+The approved Phase 03A design implemented as real, tested database code. Full
+details in [PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md); this is the summary.
+
+### Delivered
+
+- **Drizzle schema** — `src/db/schema/`, seven modules, fourteen tables in the
+  seven approved domains, barrel-re-exported by `index.ts`:
+  - **Configuration** — `bot_setting` (singleton, `CHECK (id = 1)`, currency
+    allowlist `SAR/USD/AED/EGP`), `language` (`char(2)` unique code, `ltr`/`rtl`).
+  - **Content** — `message_template` (stable `key`), `message_translation` (one
+    row per template per language, 4096-char cap).
+  - **Catalog (Tree 1)** — `category` adjacency list (`parent_id`, no depth
+    cap), `category_translation`, `product` (displayed `numeric(18,2)` price,
+    non-negative), `product_translation`.
+  - **Buttons (Tree 2)** — `product_action` adjacency list
+    (`parent_action_id`), the 7-value `action_type` allowlist, HTTPS-only `url`
+    CHECK, mutually-exclusive navigation targets, `product_action_translation`
+    (64-char label cap).
+  - **People** — `customer` (Telegram `bigint` id unique, minimal attributes,
+    anonymization-ready).
+  - **Conversations** — `inquiry` (frozen `product_snapshot` /
+    `selected_options`, one-active-per-customer-per-product partial unique
+    index), `inquiry_message` (append-only, `UNIQUE (inquiry_id,
+    telegram_message_id)` dedup).
+  - **Integration** — `telegram_update` (`update_id` unique — the idempotency
+    lock).
+- **Migrations** — `drizzle/0000_initial_schema.sql` (all 14 tables, 4 enums,
+  19 FKs, every index including the five partial unique indexes) and
+  `drizzle/0001_tree_and_snapshot_integrity.sql` (idempotent trigger SQL for the
+  rules TypeScript cannot express: `touch_updated_at` on 11 tables,
+  `category_check_ancestry`, `product_action_check_ancestry`,
+  `product_action_guard_menu_capability`, `inquiry_freeze_context`), plus the
+  journal and snapshots in `drizzle/meta/`.
+- **Client** — `src/db/client.ts`: `drizzle-orm/neon-http` over Neon's pooled
+  HTTP endpoint (ADR-015), lazy `getDb()`, credential-free failure messages,
+  `server-only`. Atomic multi-step writes are shaped as `db.batch([...])`
+  because `db.transaction()` throws on this driver — verified against the driver
+  source and asserted in the test suite.
+- **DB test foundation** — `tests/db/` (5 suites, 53 tests) running against real
+  PostgreSQL via a disposable cluster (`scripts/db-test-postgres.mjs`), one
+  throwaway database per test file, `DATABASE_URL` deliberately never read.
+- **CI** — a second GitHub Actions job (`db`) provides an isolated PostgreSQL
+  service container, applies the migration chain, runs `db:check` for
+  schema/migration drift, and runs the DB suites via `RABET_TEST_PG_URL`.
+
+### Verification (all on the feature branch, against disposable clusters only)
+
+| Command | Result |
+| --- | --- |
+| `npm run lint` | ✅ exit 0 |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm run build` | ✅ exit 0 (with a test-only generated `AUTH_SECRET`) |
+| `npm run test` (no cluster) | ✅ **131 tests** — 84 passed, 47 skipped (the DB suites), 11 files |
+| `npm run test` (cluster designated) | ✅ **131 tests passed**, 0 skipped, 11 files |
+| `npm run test:db` | ✅ **53 DB tests passed** (5 files) |
+| `npx drizzle-kit check` | ✅ "Everything's fine" against a freshly migrated throwaway DB |
+| `drizzle-kit generate` diff | ✅ SQL byte-identical to the committed chain |
+
+### What Phase 03B deliberately did not do
+
+- **No production database** — no Neon project created, no `DATABASE_URL` set in
+  any environment, no migration run anywhere but a disposable cluster. This is
+  intentional and remains true; provisioning is a manual owner action with a
+  documented runbook.
+- **No write-path layer** — repository functions (`db.batch([...])` with
+  per-site idempotency) are the next phase; the schema is ready for them.
+- **No seed data** — Phase 03B inserts no production business defaults
+  (`bot_setting`, `language`, `message_template` rows are data, not schema).
+- **No Telegram handlers, no Button Tree Editor, no bot runtime** — Phases 05–09.
+- **No payment, order or invoice entity** anywhere (ADR-013).
+- No version bump and no deployment.
 
 ## What is done in Phase 01
 
@@ -323,7 +401,9 @@ outstanding sessions at once. See ADR-009.
 
 Per the current scope, the following are **absent by design**:
 
-- Database connections or schema (Drizzle / Neon) — Phase 03B.
+- Database **write-path layer** (repository functions over `db.batch([...])`) —
+  the schema, migrations and client from Phase 03B are ready for it; the next
+  phase after the DB foundation is merged.
 - Telegram API calls or webhooks (grammY) — Phase 06.
 - **Any payment, checkout, order or invoice functionality** — deferred, not started
   (ADR-013). The MVP is a catalog with seller inquiries; nothing is wired up and no

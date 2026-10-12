@@ -71,7 +71,6 @@ function readHidden(prompt) {
   return new Promise((resolve, reject) => {
     const { stdin, stdout } = process;
 
-    stdout.write(prompt);
     const bytes = [];
     let settled = false;
 
@@ -159,8 +158,15 @@ function readHidden(prompt) {
     stdin.on("data", onData);
     stdin.on("error", onError);
     stdin.on("close", onClose);
+    // Enter raw mode BEFORE the prompt is written. The prompt bytes can be
+    // relayed through the terminal to a driving process and answered while this
+    // synchronous block is still running, so switching the mode afterwards
+    // leaves a window in which the kernel's line discipline echoes the reply in
+    // cleartext. With the mode set first, no keystroke that arrives in response
+    // to the prompt can ever be echoed.
     stdin.setRawMode(true);
     stdin.resume();
+    stdout.write(prompt);
   });
 }
 

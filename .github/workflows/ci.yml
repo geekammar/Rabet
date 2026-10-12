@@ -6,13 +6,23 @@ on:
   pull_request:
     branches: [main]
 
-# Runs on every push to main and on pull requests targeting main.
-# No production secrets are required: the auth tests generate their own
-# throwaway AUTH_SECRET and Argon2id hash in-process (see tests/setup.ts), and
-# the build is given a safe test-only configuration below.
+# Two jobs, both required:
+#
+#   verify — install, lint, typecheck, build, and the unit + auth integration
+#            suite. No database is needed: the auth tests generate their own
+#            throwaway AUTH_SECRET and Argon2id hash in-process (tests/setup.ts).
+#
+#   db     — an isolated PostgreSQL service container, the migration chain
+#            applied to it, a schema/migration drift check, and the database
+#            integration suite. The database suites skip when no cluster is
+#            designated, so they need this job to run at all.
+#
+# No production secret or database is ever contacted. Every credential here is
+# generated per run or lives only in the throwaway service container.
+
 jobs:
   verify:
-    name: Install, lint, typecheck, build, test
+    name: Lint, typecheck, build, auth + unit tests
     runs-on: ubuntu-latest
 
     steps:
@@ -48,7 +58,97 @@ jobs:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run build
 
+      # Unit + auth integration suites. The database suites inside this run skip
+      # cleanly (no cluster is designated in this job); the `db` job runs them.
       - name: Unit and integration tests
         env:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run test
+
+  db:
+    name: PostgreSQL service — migrations + DB integration tests
+    runs-on: ubuntu-latest
+
+    # An isolated, throwaway PostgreSQL instance. The official image makes
+    # POSTGRES_USER a superuser, which the test harness needs because it creates
+    # and drops one database per test file. These credentials exist only inside
+    # this container, which is destroyed with the job. No external or production
+    # database is reachable from here.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: rabet
+          POSTGRES_PASSWORD: rabet
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rabet -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The test harness reads RABET_TEST_PG_URL and deliberately never reads
+      # DATABASE_URL, which may point at a shared or production cluster. Both
+      # point at the throwaway service container here.
+      - name: Wait for the PostgreSQL service
+        run: |
+          for attempt in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U rabet -d postgres -t 2 >/dev/null 2>&1; then
+              echo "PostgreSQL is accepting connections."
+              exit 0
+            fi
+            echo "Waiting for PostgreSQL… ($attempt)"
+            sleep 2
+          done
+          echo "PostgreSQL never became ready." >&2
+          exit 1
+
+      # Step "apply the migrations to the service": the committed chain, through
+      # the same journal-based CLI used locally, on a database created for this
+      # run and dropped right after.
+      - name: Apply the migration chain to a throwaway database
+        env:
+          DATABASE_URL: postgresql://rabet:rabet@localhost:5432/postgres
+        run: |
+          node -e "
+            const postgres = require('postgres');
+            (async () => {
+              const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+              await sql.unsafe('DROP DATABASE IF EXISTS rabet_ci_migrations');
+              await sql.unsafe('CREATE DATABASE rabet_ci_migrations');
+              await sql.end();
+            })();
+          "
+          DATABASE_URL="postgresql://rabet:rabet@localhost:5432/rabet_ci_migrations" npm run db:migrate
+
+      # Catches schema/migration drift: fails if the TypeScript schema and the
+      # committed SQL have diverged, so a forgotten `npm run db:generate` shows
+      # up here instead of at the next production migration.
+      - name: Check schema and migration consistency
+        env:
+          DATABASE_URL: postgresql://rabet:rabet@localhost:5432/rabet_ci_migrations
+        run: npm run db:check
+
+      # The database integration suites. Each test file gets its own database on
+      # the throwaway cluster, applies the full chain, asserts the integrity
+      # rules, and drops its database. `npm run test` skips these without a
+      # designated cluster, so they must run here.
+      - name: Database integration tests
+        env:
+          RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
+        run: npx vitest run tests/db
