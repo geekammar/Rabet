@@ -127,10 +127,12 @@ jobs:
         run: |
           node -e "
             const postgres = require('postgres');
-            const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-            await sql.unsafe('DROP DATABASE IF EXISTS rabet_ci_migrations');
-            await sql.unsafe('CREATE DATABASE rabet_ci_migrations');
-            await sql.end();
+            (async () => {
+              const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+              await sql.unsafe('DROP DATABASE IF EXISTS rabet_ci_migrations');
+              await sql.unsafe('CREATE DATABASE rabet_ci_migrations');
+              await sql.end();
+            })();
           "
           DATABASE_URL="postgresql://rabet:rabet@localhost:5432/rabet_ci_migrations" npm run db:migrate
 
