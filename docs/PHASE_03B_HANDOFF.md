@@ -41,7 +41,8 @@ rewritten; all 03B-A1 work is preserved.
 | --- | --- |
 | `7be9971` | 03B-A1 recovery checkpoint — schema, migrations, client, DB test suite, the first handoff |
 | `f4e754e` | 03B-A2 delivery — harness `--` fix, GitHub CI DB job, README/PROGRESS/ARCHITECTURE/`.env.example` updates, final handoff |
-| `2bba9a7` | 03B-A2 CI fixes — the two root causes found by the first CI run (see §17) — **branch HEAD** |
+| `2bba9a7` | 03B-A2 CI fixes — the two root causes found by the first CI run (see §17.1). **The last code commit.** |
+| _(tip)_ | The handoff-finalization commit that holds this file is the branch tip; its SHA is the newest commit on `feat/phase-03b-database-foundation` (see PR #6's commit list). Only documentation commits follow `2bba9a7`. |
 
 ---
 
@@ -459,7 +460,8 @@ app version; and never start a future phase without product-owner sign-off.
 | Pull Request | **https://github.com/geekammar/Rabet/pull/6** (open, `MERGEABLE`, targets `main`) |
 | 03B-A1 recovery checkpoint | `7be9971` |
 | 03B-A2 delivery commit | `f4e754e` |
-| 03B-A2 CI fixes / **branch HEAD** | `2bba9a79197b16e41034e5900436770ce91fa407` |
+| 03B-A2 CI fixes (last code commit) | `2bba9a79197b16e41034e5900436770ce91fa407` |
+| Branch tip | The handoff-finalization commit (this file); only documentation commits follow the code above. The live tip SHA is the newest commit on `feat/phase-03b-database-foundation` in PR #6 — it advances with documentation edits, so it is deliberately not hard-coded here. |
 | GitHub CI | **Both jobs pass** — run `38276438435`: `Lint, typecheck, build, auth + unit tests` ✅ and `PostgreSQL service — migrations + DB integration tests` ✅ (1m each) |
 | Vercel Preview | The branch's last Vercel preview — built at the `7be9971` checkpoint, deployment `7014895539` — reports **success** ("Deployment has completed"). Vercel has not created a deployment record for the two 03B-A2 commits as of this check; the owner should confirm on the Vercel dashboard. This is outside the code path and does not gate the review — GitHub CI is the required gate and it is green. |
 
