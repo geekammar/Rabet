@@ -4,17 +4,20 @@ A lightweight **Telegram digital-product catalog** with a mobile-first admin das
 
 Rabet connects a Telegram bot — where customers browse an arbitrarily deep catalog, interact with configurable product buttons, and open **inquiries** to the seller — to a clean dashboard where a single merchant manages the catalog, configures the button trees, and replies to customers.
 
-> **Status:** Phase 03A — Data model & recursive button architecture **design** (documentation only).
-> Phases 01 and 02 (UI shell and admin authentication) are merged into `main` and
-> Production is ready for the merged commit. Phase 03A delivers a reviewed data model — two
-> independent recursive hierarchies (catalog + interaction buttons), a configurable button
-> action system, a unified inquiry model, an infrastructure recommendation and a migration
-> plan — but deliberately **no** database, **no** schema code and **no** migrations yet
-> (that is Phase 03B). There is no Telegram integration yet, and **no payment processing at
-> all** — the MVP has no checkout, no orders and no invoices; an inquiry is a conversation,
-> not a purchase (ADR-013). The app is **not** production-secure until later phases land.
-> See [docs/PROGRESS.md](./docs/PROGRESS.md) and
-> [docs/DATA_MODEL.md](./docs/DATA_MODEL.md).
+> **Status:** Phase 03B — Database schema, migrations and the integration test
+> foundation **implemented** on `feat/phase-03b-database-foundation`.
+> Phases 01 and 02 (UI shell and admin authentication) are merged into `main`.
+> Phase 03B implements the approved Phase 03A data model as real Drizzle schema,
+> two reviewed SQL migrations, a server-only Neon HTTP client and a 52-test
+> PostgreSQL integration suite — fourteen tables across seven domains, with both
+> recursive trees, the inquiry snapshots and Telegram deduplication enforced by
+> triggers and indexes in the database. **No** production database has been
+> created or contacted, and **no** payment processing exists at all — the MVP has
+> no checkout, no orders and no invoices; an inquiry is a conversation, not a
+> purchase (ADR-013). The app is **not** production-secure until later phases
+> land. See [docs/PROGRESS.md](./docs/PROGRESS.md),
+> [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) and
+> [docs/PHASE_03B_HANDOFF.md](./docs/PHASE_03B_HANDOFF.md).
 ---
 
 ## Tech stack
@@ -24,39 +27,43 @@ Rabet connects a Telegram bot — where customers browse an arbitrarily deep cat
 | Framework | Next.js 16 (App Router, TypeScript, strict mode) |
 | UI | React 19, Tailwind CSS v4, shadcn/ui (radix-nova), lucide-react |
 | Validation | Zod |
-| Testing | Vitest |
-| ORM (planned) | Drizzle — designed in Phase 03A |
-| Database (planned) | PostgreSQL on Neon — designed in Phase 03A |
+| Testing | Vitest (+ real PostgreSQL for the DB integration suites) |
+| ORM | Drizzle ORM — schema in `src/db/schema`, migrations in `drizzle/` |
+| Database | PostgreSQL on Neon — `drizzle-orm/neon-http` client (ADR-015) |
 | Auth | Auth.js v5 (`next-auth@5.0.0-beta.32`), Credentials provider, JWT sessions |
 | Password hashing | Argon2id via `@node-rs/argon2` |
 | Telegram (planned) | grammY |
 | Hosting | Vercel |
 
-Phase 01 installed the framework and UI rows plus the base Vercel hosting project; Phase 02 added validation, testing, authentication and password hashing. Everything still marked _planned_ is deliberately absent — see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the reasoning.
+Phase 01 installed the framework and UI rows plus the base Vercel hosting project; Phase 02 added validation, testing, authentication and password hashing; Phase 03B added the ORM, the database client and the migration chain. Everything still marked _planned_ is deliberately absent — see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the reasoning.
 
 ## Project structure
 
 ```
 rabet/
-├── .github/workflows/     # CI (install, lint, typecheck, build)
-├── docs/                  # Architecture decisions and phase progress
+├── .github/workflows/     # CI (lint, typecheck, build, auth+unit tests, PostgreSQL DB job)
+├── docs/                  # Architecture decisions, data model and phase progress
 │   ├── ARCHITECTURE.md
-│   └── PROGRESS.md
+│   ├── DATA_MODEL.md
+│   ├── PROGRESS.md
+│   └── PHASE_03B_HANDOFF.md
+├── drizzle/               # Generated, reviewed SQL migrations (the source of truth)
+│   ├── 0000_initial_schema.sql
+│   ├── 0001_tree_and_snapshot_integrity.sql
+│   └── meta/              # Drizzle journal + snapshots
+├── drizzle.config.ts      # Drizzle Kit config (generate is offline; migrate needs DATABASE_URL)
 ├── public/
 │   └── icons/             # PWA icons (any, maskable, Apple touch)
-├── scripts/               # generate-pwa-icons.py — reproducible icon generator
+├── scripts/
+│   ├── db-test-postgres.mjs     # Disposable PostgreSQL cluster for DB tests
+│   ├── generate-admin-hash.mjs  # Local Argon2id hash provisioning helper
+│   └── generate-pwa-icons.py    # Reproducible icon generator
 ├── src/
 │   ├── app/
 │   │   ├── (auth)/login/    # Sign-in page (public)
 │   │   ├── (dashboard)/    # Dashboard route group (shared shell)
-│   │   │   ├── overview/
-│   │   │   ├── services/
-│   │   │   ├── orders/
-│   │   │   ├── customers/
-│   │   │   ├── payments/
-│   │   │   ├── bot-content/
-│   │   │   ├── telegram/
-│   │   │   ├── settings/
+│   │   │   ├── overview/  catalog/  inquiries/  customers/
+│   │   │   ├── bot-content/  telegram/  settings/
 │   │   │   ├── layout.tsx  # Sidebar + header shell + server-side auth gate
 │   │   │   ├── loading.tsx # Skeleton loader for the group
 │   │   │   └── error.tsx   # Error boundary for the group
@@ -77,6 +84,9 @@ rabet/
 │   │   ├── ui/             # shadcn/ui primitives
 │   │   ├── empty-state.tsx # Reusable empty state
 │   │   └── page-header.tsx # Reusable page header
+│   ├── db/                 # Database layer — server-only (Phase 03B)
+│   │   ├── client.ts       # `getDb()` — lazy neon-http Drizzle client
+│   │   └── schema/         # 14 tables in 7 domains + barrel index
 │   ├── lib/
 │   │   ├── auth/           # admin-config, credentials, session, redirect, schema, cache
 │   │   ├── navigation.ts   # Single source of truth for dashboard nav
@@ -84,10 +94,11 @@ rabet/
 │   ├── types/              # Auth.js type augmentation (role claim)
 │   ├── auth.ts             # Auth.js configuration (Credentials + JWT)
 │   └── proxy.ts            # Next.js 16 proxy — optimistic dashboard redirect
-├── scripts/
-│   ├── generate-admin-hash.mjs  # Local Argon2id hash provisioning helper
-│   └── generate-pwa-icons.py    # Reproducible icon generator
-├── tests/                  # Integration tests over the real production server
+├── tests/
+│   ├── auth.test.ts        # Auth integration suite (real production server)
+│   ├── generate-admin-hash.test.ts
+│   ├── db/                 # PostgreSQL integration suites (need a cluster)
+│   └── stubs/              # `server-only` no-op stub for Vitest
 ├── .env.example            # Required environment variables (placeholders only)
 ├── next.config.ts
 ├── tsconfig.json           # strict mode, @/* → ./src/*
@@ -144,10 +155,14 @@ Then `npm run dev` and sign in at `/login`.
 | `npm run start` | Serve the production build |
 | `npm run lint` | Run ESLint |
 | `npm run typecheck` | Run `tsc --noEmit` without emitting output |
-| `npm run test` | Run the Vitest unit + auth integration suites |
+| `npm run test` | Run every suite (unit + auth + DB). The DB suites **skip** when no cluster is designated |
 | `npm run test:auth` | Run only the auth integration suite (`tests/auth.test.ts`) |
+| `npm run test:db` | Start a disposable PostgreSQL cluster, run `tests/db` against it, then delete the cluster |
+| `npm run db:generate` | Generate SQL migrations from `src/db/schema` into `drizzle/` — offline, touches no database |
+| `npm run db:migrate` | Apply the committed migration chain to the database in `DATABASE_URL` |
+| `npm run db:check` | Verify the schema and the committed migrations are consistent (needs a database) |
 
-The integration suite builds the app and boots the real production server with a
+The auth integration suite builds the app and boots the real production server with a
 synthetic, throwaway configuration — no real secret, password or hash is used or
 printed. The listen ports are configurable so runs never collide:
 
@@ -162,16 +177,95 @@ RABET_TEST_PORT=4210 RABET_TEST_PORT_2=4211 npm run test:auth
 The suite reaps every server it spawns and removes its temp environment directory
 on the way out, on success and on failure.
 
+## Database
+
+Phase 03B implements the approved [data model](./docs/DATA_MODEL.md): fourteen
+tables across seven domains — bot configuration, localized content, hierarchical
+product categories, digital products with displayed prices, recursive
+product action-button trees, localized action labels, Telegram customers,
+product inquiries, inquiry messages and Telegram update deduplication. **No
+financial entity exists anywhere** (ADR-013).
+
+### Folder structure
+
+| Path | Contents |
+| --- | --- |
+| `src/db/schema/` | The Drizzle TypeScript schema — one module per domain, re-exported by `src/db/schema/index.ts` |
+| `src/db/client.ts` | `getDb()` — the lazy, `server-only` `drizzle-orm/neon-http` client (ADR-015) |
+| `drizzle/` | The generated, human-reviewed SQL migrations plus `meta/` (journal + snapshots) |
+| `drizzle.config.ts` | Drizzle Kit configuration |
+| `tests/db/` | PostgreSQL integration suites (one throwaway database per file) |
+| `scripts/db-test-postgres.mjs` | Disposable PostgreSQL cluster for local DB tests |
+
+### Generating migrations
+
+`npm run db:generate` reads the TypeScript schema and writes version-controlled
+SQL plus the journal and snapshot metadata to `drizzle/`. It is **offline** — it
+never touches a database. After editing `src/db/schema/`, regenerate, review the
+diff, then commit it: the migration files in `drizzle/` are the source of truth
+that CI applies. **Never use `drizzle-kit push`** — it is not wired into any
+script or CI step, by design.
+
+### Applying migrations to a disposable database
+
+Locally, PostgreSQL server tools and `npm run test:db` are enough — the script
+starts a throwaway `initdb` cluster on a random loopback port with trust auth,
+runs the suites, then deletes the whole data directory:
+
+```bash
+npm run test:db        # one command: start, test, stop + delete
+
+# or step by step
+node scripts/db-test-postgres.mjs start
+export RABET_TEST_PG_URL="$(node -e 'console.log(require("/tmp/rabet-test-pg.json").url)')"
+npx vitest run tests/db
+node scripts/db-test-postgres.mjs stop
+```
+
+To apply the chain to a database you already have (development only):
+
+```bash
+DATABASE_URL="postgresql://user:password@host/devdb" npm run db:migrate
+DATABASE_URL="postgresql://user:password@host/devdb" npm run db:check
+```
+
+### Running the DB tests
+
+The DB suites run against **real PostgreSQL** because every invariant they assert
+(ancestry triggers, partial unique indexes, write-once snapshots, cascades) is
+enforced by the server. They read `RABET_TEST_PG_URL` and **never** read
+`DATABASE_URL`, which may point at a shared or production cluster. With no
+cluster designated they skip cleanly, so `npm run test` stays green on any
+machine. CI provides an isolated PostgreSQL service container and sets
+`RABET_TEST_PG_URL` for them.
+
+In CI the DB job also runs `npm run db:check` to catch schema/migration drift.
+
+### Production migrations
+
+**No production database exists or has been contacted.** When one is provisioned,
+migrations are run **by hand** from the development VPS against the **unpooled**
+connection, after a manual snapshot — never from a Vercel build, never at
+application startup, and never through `drizzle-kit push`. The step-by-step
+operator runbook is in [docs/PHASE_03B_HANDOFF.md](./docs/PHASE_03B_HANDOFF.md).
+
 ## Environment variables
 
 `AUTH_SECRET`, `ADMIN_EMAIL` and `ADMIN_PASSWORD_HASH` are **required** in every
-environment (local, preview and production). `.env.example` documents all of
-them with placeholders and is the single source of truth; copy it to
-`.env.local` and fill in real values.
+environment (local, preview and production). `DATABASE_URL` is required only by
+the database layer and the migration scripts — the app **builds and serves every
+current route without it**, and `getDb()` fails loudly with a credential-free
+message on first use when it is absent. `.env.example` documents every variable
+with placeholders and is the single source of truth; copy it to `.env.local` and
+fill in real values.
 
 ```bash
 cp .env.example .env.local
 ```
+
+`RABET_TEST_PG_URL` is test-only: it designates the throwaway cluster the DB
+suites create and drop databases on. It is never read by the application and
+never points at `DATABASE_URL`.
 
 > Never commit real secrets. `.env*` files are git-ignored.
 
@@ -179,7 +273,8 @@ cp .env.example .env.local
 
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — stack, structure and architectural decisions.
 - [docs/PROGRESS.md](./docs/PROGRESS.md) — phase status, what is done and what is pending.
-- [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) — Phase 03A data model: the two recursive hierarchies (catalog + interaction buttons), the configurable button-action system, the inquiry model, security and integrity rules, infrastructure and migration plan.
+- [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) — the approved data model: the two recursive hierarchies (catalog + interaction buttons), the configurable button-action system, the inquiry model, security and integrity rules, infrastructure and migration plan.
+- [docs/PHASE_03B_HANDOFF.md](./docs/PHASE_03B_HANDOFF.md) — Phase 03B implementation status, migration files, test commands and results, and the production migration runbook.
 
 ## Development workflow
 
@@ -204,8 +299,8 @@ Development follows this fixed feature order.
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | **Merged** |
 | **Phase 02** | Admin authentication | **Merged** (PR #3, `5e3bc7e`) — manual device checks and rate limiting remain open |
-| **Phase 03A** | Data model & recursive button architecture **design** | **Revised design complete** — documentation only, no implementation |
-| Phase 03B | Database schema & migrations implementation | Not started |
+| **Phase 03A** | Data model & recursive button architecture **design** | **Merged** (PR #4, `269cf7c`) — documentation only |
+| **Phase 03B** | Database schema, migrations & DB test foundation | **Implemented on `feat/phase-03b-database-foundation`** — schema + 2 migrations + client + 52 DB tests; awaiting product-owner review |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |

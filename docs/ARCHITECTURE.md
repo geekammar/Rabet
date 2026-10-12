@@ -49,8 +49,8 @@ bot; the merchant interacts only with the dashboard.
 | Components | shadcn/ui (radix-nova) + lucide-react | Components are copied into the repo, not a dependency |
 | Validation | Zod | Installed in Phase 02 — sign-in input validation at the trust boundary |
 | Testing | Vitest | Installed in Phase 02 — unit + auth integration suites |
-| ORM | Drizzle | Planned — designed in Phase 03A, implemented in Phase 03B ([DATA_MODEL.md](./DATA_MODEL.md)) |
-| Database | PostgreSQL on Neon | Planned — designed in Phase 03A, implemented in Phase 03B ([DATA_MODEL.md](./DATA_MODEL.md)) |
+| ORM | Drizzle | Implemented in Phase 03B — schema in `src/db/schema`, migrations in `drizzle/` ([DATA_MODEL.md](./DATA_MODEL.md)) |
+| Database | PostgreSQL on Neon | Implemented in Phase 03B — `drizzle-orm/neon-http` client (ADR-015); no production database provisioned yet |
 | Auth | Auth.js v5 (`next-auth@5.0.0-beta.32`) | Installed in Phase 02 — one admin, Credentials provider, encrypted JWT sessions |
 | Password hashing | `@node-rs/argon2` | Installed in Phase 02 — Argon2id, OWASP-recommended parameters |
 | Telegram | grammY | Planned — bot framework and webhooks |
@@ -58,8 +58,36 @@ bot; the merchant interacts only with the dashboard.
 
 **Phase 01 installed the framework and UI rows plus the base Vercel hosting
 project; Phase 02 added validation, testing, authentication and password
-hashing.** Remaining future dependencies are intentionally absent so that
+hashing; Phase 03B implemented the ORM, the database client and the migration
+chain.** Remaining future dependencies are intentionally absent so that
 no dead code or half-wired modules exist before their phase begins.
+
+### 3.1 Database layer structure (Phase 03B)
+
+```
+src/db/
+├── client.ts        # `getDb()` — lazy, server-only neon-http Drizzle client
+└── schema/          # One module per domain, barrel-re-exported by index.ts
+    ├── settings.ts  # bot_setting (singleton), language
+    ├── content.ts   # message_template, message_translation
+    ├── catalog.ts   # category (Tree 1), category_translation, product, product_translation
+    ├── actions.ts   # product_action (Tree 2), product_action_translation, action_type enum
+    ├── customer.ts  # customer
+    ├── inquiry.ts   # inquiry, inquiry_message + their enums
+    ├── telegram.ts  # telegram_update (deduplication log)
+    └── index.ts     # barrel — import this, never an individual module
+
+drizzle/             # Generated, human-reviewed SQL — the committed source of truth
+├── 0000_initial_schema.sql               # 14 tables, 4 enums, 19 FKs, all indexes
+├── 0001_tree_and_snapshot_integrity.sql  # triggers: ancestry, menu capability, write-once snapshots
+└── meta/                                 # Drizzle journal + snapshots
+```
+
+The client imports `server-only`, so neither it nor any database credential can
+reach a browser bundle. It is created lazily through `getDb()`, so importing the
+module never requires `DATABASE_URL` — a production build and every current
+route work without a database configured, and the first real query fails loudly
+with a credential-free message instead (ADR-015).
 
 ## 3. Codebase structure
 
@@ -76,10 +104,9 @@ src/app/
 ├── favicon.ico           # Brand favicon, generated from the brand mark
 ├── (dashboard)/          # Route group — no URL prefix
 │   ├── overview/         # /overview
-│   ├── services/         # /services
-│   ├── orders/           # /orders
+│   ├── catalog/          # /catalog
+│   ├── inquiries/        # /inquiries
 │   ├── customers/        # /customers
-│   ├── payments/         # /payments
 │   ├── bot-content/      # /bot-content
 │   ├── telegram/         # /telegram
 │   └── settings/         # /settings
@@ -92,11 +119,11 @@ The dashboard lives in a **route group** so that:
 - A boundary exists for Phase 2 to attach authentication without touching the
   public landing page.
 
-> **Placeholder routes.** `/orders` and `/payments` exist only as placeholder pages from
-> Phase 01 and are **not** part of the MVP data model (ADR-013). They will be re-scoped or
-> removed in a later phase; no code change is made by Phase 03A, which is
-> documentation-only. `/services` is where the catalog and the Button Tree Editor will
-> eventually live.
+> **Re-scoped routes.** The Phase 01 placeholders `/orders`, `/payments` and
+> `/services` were removed when the shell was aligned with the catalog +
+> inquiries MVP (ADR-013); the sections above are the ones the data model
+> actually serves. `/catalog` is where the catalog and the Button Tree Editor
+> will live in Phase 05.
 
 ### Component layout
 
@@ -109,7 +136,9 @@ src/components/
 └── page-header.tsx
 
 public/icons/      # PWA icons served as-is (any + maskable + apple touch)
-scripts/           # generate-pwa-icons.py — stdlib-only icon generator
+scripts/           # generate-pwa-icons.py (icons), generate-admin-hash.mjs (Argon2id
+                   # provisioning), db-test-postgres.mjs (disposable DB test cluster)
+drizzle/           # Generated, reviewed SQL migrations (Phase 03B)
 ```
 
 ### Mobile-first shell
@@ -408,6 +437,13 @@ analytics structure.
 > was removed entirely and replaced by a **catalog + configurable recursive button tree +
 > inquiry** model. See **ADR-013** and **ADR-014** below, and
 > [DATA_MODEL.md](./DATA_MODEL.md). The design-only rule above is unchanged.
+>
+> **Status (Phase 03B).** The approved design has since been **implemented** — Drizzle
+> schema in `src/db/schema`, two reviewed SQL migrations in `drizzle/`, the server-only
+> `neon-http` client in `src/db/client.ts`, and a 52-test PostgreSQL integration suite in
+> `tests/db`. Still **no** production database has been created or contacted, and no
+> migration has run anywhere but a disposable cluster. See
+> [PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md).
 
 ### ADR-013 — Rabet is a catalog with inquiries, not a checkout (Phase 03A scope correction)
 
@@ -560,10 +596,23 @@ DATA_MODEL.md §15.3.
   - `src/app/actions/__tests__/auth.test.ts` covers the login and logout Server
     Actions with Auth.js mocked, proving the redirect allowlist is wired to the
     form action path and that failures collapse to one generic message.
-- Schema and migration tests against a Neon branch arrive in Phase 03.
-- Lint, typecheck, build **and** test are the CI gate as of Phase 02; formal
-  coverage thresholds, the security review and release hardening arrive in
-  Phase 10.
+  - `tests/db/` (Phase 03B) is a PostgreSQL integration suite that runs against
+    **real PostgreSQL** because every invariant it asserts is enforced by the
+    server. It creates one throwaway database per test file, applies the full
+    committed migration chain, and asserts the integrity rules: both trees'
+    ancestry (self-parent, cycle, cross-product parent, deleted-ancestor
+    rejection), terminal-parent rejection, sibling-order uniqueness, cascades,
+    write-once inquiry snapshots, one-active-inquiry-per-product, message
+    deduplication and the migration chain itself (clean apply, idempotent
+    re-application, atomic rollback of a failed migration). Locally it uses a
+    disposable cluster (`npm run test:db`); in CI, an isolated PostgreSQL
+    service container designated by `RABET_TEST_PG_URL`. The suites skip cleanly
+    when no cluster is designated, so `npm run test` stays green everywhere.
+  - Lint, typecheck, build **and** test are the CI gate as of Phase 02; Phase
+    03B added a second CI job that applies the migrations to a service
+    container, checks schema/migration consistency and runs the DB suites.
+    Formal coverage thresholds, the security review and release hardening
+    arrive in Phase 10.
 
 ## 7. Security considerations
 

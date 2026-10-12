@@ -254,16 +254,22 @@ function stop() {
   log("Stopped and the throwaway data directory was deleted.");
 }
 
-async function run([command, ...args]) {
+async function run(rest) {
+  // The documented form is `run -- <command...>`. `process.argv` keeps the
+  // literal `--`, so strip exactly one leading separator if it is present; the
+  // bare `run <command...>` form works too.
+  const args = rest.length > 0 && rest[0] === "--" ? rest.slice(1) : rest;
+  const [command, ...commandArgs] = args;
+
   if (!command) {
-    fail("'run' needs a command after '--', e.g. run -- npm run vitest tests/db");
+    fail("'run' needs a command after '--', e.g. run -- npx vitest run tests/db");
   }
 
   await start();
 
   const state = readState();
 
-  const child = spawn(command, args, {
+  const child = spawn(command, commandArgs, {
     stdio: "inherit",
     env: {
       ...process.env,

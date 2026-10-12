@@ -1,55 +1,79 @@
-# Phase 03B — Recovery & Stabilization Handoff (03B-A1)
+# Phase 03B — Final Handoff (03B-A2: validation, CI & delivery)
 
-**Purpose.** A previous OpenCode session implemented most of Phase 03B-A and
-stopped at a context/model limit mid-test-run, leaving the work uncommitted.
-This file is the durable record of what existed, what was broken, what was
-fixed, and exactly how to continue — written so the next session needs **no**
-access to the previous conversation.
+**Purpose.** This is the durable, complete record of Phase 03B — the database
+foundation for Rabet. It supersedes the 03B-A1 recovery handoff that lived in
+this file. It is written so the next session needs **no** access to any previous
+conversation: it records what was built, what was verified, how the verification
+was reproduced, what remains open, and exactly how to run a safe production
+migration.
 
-> **Intended reader:** the OpenCode instance that continues Phase 03B-A2.
-> Read `docs/DATA_MODEL.md` (the approved design) and `docs/ARCHITECTURE.md`
-> (ADRs) alongside this file.
+> **Intended reader:** the product owner reviewing the pull request, and the
+> OpenCode instance that continues after Phase 03B is merged. Read
+> `docs/DATA_MODEL.md` (the approved design) and `docs/ARCHITECTURE.md` (ADRs)
+> alongside this file.
 
 ---
 
-## 1. Current branch and HEAD
+## 1. Status — at a glance
 
 | Item | Value |
 | --- | --- |
 | Branch | `feat/phase-03b-database-foundation` |
-| Base | `main` @ `f6a7738` (merge of PR #5, `chore/catalog-inquiries-shell-cleanup`) |
+| Base | `main` @ `f6a7738` (merge of PR #5) |
 | Remote | `origin` → `https://github.com/geekammar/Rabet.git` |
-| HEAD before recovery | `f6a7738` — the branch had **no commits of its own**; all Phase 03B work was uncommitted in the working tree |
-| Working tree at recovery start | `package.json` + `package-lock.json` modified; `drizzle.config.ts`, `drizzle/`, `scripts/db-test-postgres.mjs`, `src/db/`, `tests/db/` untracked |
+| Status | **Implemented and fully validated locally; PR open for review. Not merged.** |
+| Production database | **None. Never created, never contacted.** No Neon project exists. |
+| Migrations run in production | **None.** The chain has only ever been applied to disposable clusters. |
+| Payment / order / invoice entities | **None, anywhere** (ADR-013) |
 
-The recovery described here added one checkpoint commit on this branch (see §8)
-and **never touched `main`**.
-
----
-
-## 2. The original interrupted task
-
-Phase 03B-A: implement the approved Phase 03A data model as real Drizzle schema,
-generated SQL migrations, a Neon-HTTP client, and a PostgreSQL integration test
-suite that proves the database-level integrity rules. The previous session got
-through the schema, both migrations, the client, the disposable-Postgres harness
-and five test files, and stopped during a test run reported as roughly
-**38 passing / 14 failing**, with a visible failure on `tests/db/inquiry.test.ts`
-during an INSERT into `category`.
-
-The accompanying message *"Atria-Dawn-Preview is not supported by TokenPlan"* is a
-**model/provider limitation**, not a database error — it is why the session
-stopped, not a symptom of the bug.
+**Phase 03B-A1** (the previous session) recovered the interrupted schema + test
+implementation and brought it to 52 passing DB tests. **Phase 03B-A2** (this
+session) performed the final schema review, deepened the migration verification,
+fixed one harness bug, wired the DB suites into GitHub CI, updated all
+documentation, and delivered the pull request. Nothing was discarded, reset or
+rewritten; all 03B-A1 work is preserved.
 
 ---
 
-## 3. What existed when recovery began (all preserved)
+## 2. Commits
 
-Nothing was discarded, reset or rewritten. The following were already complete
-and correct in substance; only their type annotations and test fixtures needed
-repair.
+| Commit | Contents |
+| --- | --- |
+| `7be9971` | 03B-A1 recovery checkpoint — schema, migrations, client, DB test suite, this handoff |
+| _(see §12 for the delivery SHA)_ | 03B-A2 — harness `--` fix, GitHub CI DB job, README/PROGRESS/ARCHITECTURE/`.env.example` updates |
 
-### Schema — `src/db/schema/` (7 modules, 14 tables, 7 domains)
+---
+
+## 3. What 03B-A2 changed (delta over 03B-A1)
+
+1. **Fixed a real harness bug.** `npm run test:db` crashed with
+   `spawn -- ENOENT`: `scripts/db-test-postgres.mjs`'s `run` handler received the
+   literal `--` separator as the command name because `process.argv` keeps it.
+   `run()` now strips exactly one leading `--` (and accepts the bare form). The
+   bug also orphaned a cluster when it fired, so the failure path was cleaned up
+   and the cluster is now stopped whatever happens. **This is why 03B-A1 could
+   report `npm run test:db` green while the command actually did not run** —
+   03B-A1 had verified the suites via the manual `start` → `vitest` → `stop`
+   path, which is unaffected and still documented in §7.
+2. **Deep migration verification** (§6) — `drizzle-kit check` against a freshly
+   migrated throwaway DB, a generate-and-diff proving the committed SQL is
+   byte-identical to a fresh generation, and a full catalog inspection of every
+   table, FK, index, trigger and CHECK constraint as actually applied.
+3. **Database access security verification** (§8) — a real build plus a bundle
+   scan proving no DB module or credential reaches a client bundle, and driver
+   source inspection confirming the `db.batch()` transaction strategy.
+4. **GitHub CI** (§9) — a second job with an isolated PostgreSQL service
+   container that applies the chain, checks schema/migration drift, and runs the
+   DB suites. No production secret or database is reachable from CI.
+5. **Documentation** (§10) — README, PROGRESS, ARCHITECTURE and `.env.example`
+   updated to the implemented state; obsolete Orders/Payments/Services
+   instructions removed; the production migration runbook written (§11).
+
+---
+
+## 4. Schema and migration files
+
+### 4.1 `src/db/schema/` — 7 modules, 14 tables, 7 domains
 
 | File | Contents |
 | --- | --- |
@@ -62,286 +86,381 @@ repair.
 | `telegram.ts` | `telegram_update` (`update_id` unique — the idempotency lock) |
 | `index.ts` | barrel re-export of all seven; imported by the client and the tests |
 
-All MVP invariants from the approved design are present: both recursive trees,
-cross-product parent rejection, cycle prevention, sibling-order uniqueness,
-inquiry reference integrity, immutable snapshots, Telegram dedup. **No payment,
-invoice or order entity exists anywhere** (ADR-013).
+Every MVP invariant from the approved design is present: both recursive trees,
+cross-product parent rejection, cycle prevention, terminal-parent rejection,
+sibling-order uniqueness, inquiry reference integrity, immutable snapshots,
+Telegram dedup. **No payment, invoice or order entity exists anywhere**
+(ADR-013).
 
-### Migrations — `drizzle/`
+### 4.2 Migrations — `drizzle/`
 
-- `0000_initial_schema.sql` — all 14 tables, 4 enums, 19 FKs, every index
-  including the five partial unique indexes. Drizzle-generated, human-reviewed.
-- `0001_tree_and_snapshot_integrity.sql` — hand-written, idempotent
-  (`CREATE OR REPLACE FUNCTION` / `DROP TRIGGER IF EXISTS`) SQL for the rules
-  TypeScript cannot express: `touch_updated_at` (11 tables),
-  `category_check_ancestry` (C2/C3), `product_action_check_ancestry`
-  (A2/A3/A4-insert), `product_action_guard_menu_capability` (A4-update),
-  `inquiry_freeze_context` (write-once context).
-- `meta/_journal.json` + two snapshots.
-
-### Client — `src/db/client.ts`
-
-`drizzle-orm/neon-http` over Neon's pooled HTTP endpoint (ADR-015), lazy
-`getDb()`, credential-free failure messages, `server-only`.
-
-### Test infrastructure
-
-- `scripts/db-test-postgres.mjs` — disposable `initdb` cluster on a random
-  loopback port, trust auth, `start` / `stop` / `run -- <cmd>`; root delegates
-  to the unprivileged `postgres` OS user via `sudo`.
-- `tests/db/helpers.ts` — one throwaway database per test **file** (created in
-  `beforeAll`, dropped in `afterAll`), full migration chain applied per database,
-  `RABET_TEST_PG_URL` honoured, `DATABASE_URL` deliberately never read.
-- `package.json` scripts added: `test:db`, `db:generate`, `db:migrate`,
-  `db:check`. Dependencies added: `drizzle-orm`, `drizzle-kit`,
-  `@neondatabase/serverless` (runtime) + `postgres` (dev/test only).
-
----
-
-## 4. Root causes found (all 14 failures were harness bugs — the schema was sound)
-
-Reproduced exactly (`38 passed | 14 failed`) against a disposable cluster, then
-grouped by cause. **No failure was a schema or migration defect.**
-
-### RC-1 — non-unique fixture slugs (9 failures, `inquiry.test.ts`)
-
-`insertCatalogFixture()` hardcoded `slug: "inquiry-category"` and
-`slug: "inquiry-product"`. The harness creates **one database per test file**,
-shared by every `it` in it, so the second call hit `category_slug_unique`
-(SQLSTATE 23505). This is the visible `category` INSERT failure the previous
-session saw — the cause was fixture reuse, **not** the category table.
-
-### RC-2 — root `sort_order` collisions (4 failures, `catalog.test.ts`)
-
-`category_root_sort_order_idx` is a partial unique index over **all** root
-categories, not just one parent's children. Several tests inserted root
-categories relying on the column default `sort_order = 0` (or an explicit `0`),
-so they collided with roots created by earlier tests in the same file
-(23505 on `category_root_sort_order_idx`).
-
-### RC-3 — wrong assertion shape (1 site, `catalog.test.ts`)
-
-One expectation used `toMatchObject({ code: "23505" })`. The `postgres` driver
-surfaces `PostgresError` **wrapped inside `cause`** by Drizzle's
-`DrizzleQueryError`, so every such assertion must be
-`{ cause: { code: … } }` (as the other 30+ assertions correctly are).
-
-### RC-4 — wrong SQLSTATE for `ON DELETE RESTRICT` (3 sites)
-
-PostgreSQL reports an `ON DELETE RESTRICT` block as **SQLSTATE 23001**
-(`integrity_constraint_violation`) — **not** 23503 (`foreign_key_violation`).
-Verified empirically against PostgreSQL 18.6 with `DO $$ ... EXCEPTION WHEN
-OTHERS THEN RAISE NOTICE '%', SQLSTATE`:
-
-| Operation | SQLSTATE |
+| File | Contents |
 | --- | --- |
-| `ON DELETE RESTRICT` block (delete blocked) | **23001** |
-| Insert-side FK breach (missing parent row) | 23503 |
-| `RAISE … USING ERRCODE = 'foreign_key_violation'` in the ancestry triggers | 23503 (as the tests expect) |
-| Unique-index violation | 23505 |
-| `CHECK` violation / trigger-raised `check_violation` | 23514 |
+| `0000_initial_schema.sql` | Drizzle-generated, human-reviewed: 14 tables, 4 enums (`action_type`, `inquiry_status`, `message_author`, `message_delivery`), 19 FKs, 37 indexes including the 5 partial unique indexes, 12 CHECK constraints |
+| `0001_tree_and_snapshot_integrity.sql` | Hand-written, idempotent (`CREATE OR REPLACE FUNCTION` / `DROP TRIGGER IF EXISTS`) SQL for the rules TypeScript cannot express: `touch_updated_at` (11 tables), `category_check_ancestry` (C2/C3), `product_action_check_ancestry` (A2/A3/A4-insert), `product_action_guard_menu_capability` (A4-update), `inquiry_freeze_context` (write-once context) |
+| `meta/_journal.json` + `meta/0000_snapshot.json` + `meta/0001_snapshot.json` | Required migration metadata — the journal is what `drizzle-kit migrate` and `db:check` read |
 
-So the trigger-based assertions (self-parent, cycle, cross-product, terminal
-parent) were already correct at `23503`; only the three **delete** assertions
-needed `23503 → 23001`. The design docs in `DATA_MODEL.md §11.7` describe
-`RESTRICT` behaviour accurately and claim no SQLSTATE, so **no documentation
-correction was required** — this is recorded here as new knowledge.
+**Referential deletion behaviour, as applied** (verified by catalog inspection,
+§6):
 
-### RC-5 — cross-test data leak in one assertion (1 failure, `actions.test.ts`)
-
-"deleting a branch removes only that branch" asserted the whole
-`product_action` table equals `[kept]`, but one database is shared per file, so
-earlier tests' trees were still in the table (32 rows instead of 1). The
-assertion was scoped to `product_id`.
-
----
-
-## 5. Fixes applied (smallest correct changes; no test was deleted or weakened)
-
-| File | Change | Root cause |
+| Parent | Child | On delete |
 | --- | --- | --- |
-| `tests/db/inquiry.test.ts` | `insertCatalogFixture()` now keys slugs **and** the root `sort_order` off one `nextOrder()` value per call (`inquiry-category-<n>` / `inquiry-product-<n>`); docstring records why | RC-1 |
-| `tests/db/inquiry.test.ts` | customer-delete assertion `23503 → 23001`, with a comment explaining RESTRICT vs. FK-violation codes | RC-4 |
-| `tests/db/catalog.test.ts` | root-order test takes a fresh `nextOrder()` for `root-a` and collides `root-b` on it (the index is global over roots) | RC-2 |
-| `tests/db/catalog.test.ts` | three direct `category` inserts given explicit `sortOrder: nextOrder()` | RC-2 |
-| `tests/db/catalog.test.ts` | `{ code: "23505" } → { cause: { code: "23505" } }` | RC-3 |
-| `tests/db/catalog.test.ts` | two category-delete assertions `23503 → 23001` | RC-4 |
-| `tests/db/actions.test.ts` | branch-cascade survivor query scoped with `.where(eq(productAction.productId, productId))` | RC-5 |
+| `language` | `bot_setting` | `RESTRICT` |
+| `category` | `category` (self) | `RESTRICT` |
+| `category` | `category_translation` | `CASCADE` |
+| `language` | `category_translation`, `product_translation`, `product_action_translation`, `message_translation` | `CASCADE` |
+| `category` | `product` | `RESTRICT` (re-parent products first) |
+| `product` | `product_action` | `CASCADE` (the tree is owned by the product) |
+| `product_action` | `product_action` (self) | `CASCADE` (deleting a branch is a confirmed action) |
+| `category` / `product` | `product_action.navigate_*` | `SET NULL` (a moved catalog node leaves a configurable button, not a dangling one) |
+| `language` | `customer.selected_language_id` | `SET NULL` |
+| `customer` | `inquiry` | `RESTRICT` (conversations outlive account state) |
+| `product` | `inquiry` | `SET NULL` (the frozen snapshot keeps the conversation readable) |
+| `inquiry` | `inquiry_message` | `CASCADE` (a thread is one unit) |
 
-Every expectation that an integrity rule is **rejected** still asserts a
-specific SQLSTATE, the matching constraint, and that the write did not land —
-none was relaxed to `toBeDefined()` or removed.
+**The five partial unique indexes:** `category_sibling_sort_order_idx`,
+`category_root_sort_order_idx`, `product_action_sibling_sort_order_idx`,
+`product_action_root_sort_order_idx` (sibling-order uniqueness; the root indexes
+are global across every root, since Postgres treats a `NULL` parent as
+distinct), and `inquiry_active_per_customer_product_idx` (at most one active
+inquiry per customer per product — `START_INQUIRY` is resume-by-construction).
 
-### Build/typecheck repairs (needed for `next build`, which the auth suite runs)
+---
 
-The auth integration suite runs `next build`, which type-checks the new `src/db`
-code and `drizzle.config.ts`. Four genuine TypeScript errors blocked it:
+## 5. Final schema review result
 
-| File | Error | Fix |
+**The implementation matches the approved Rabet discovery MVP.** All ten
+expected domains are present (bot configuration, localized content, hierarchical
+product categories, digital products and displayed prices, recursive
+product action-button trees, localized action labels/messages, Telegram
+customers, product inquiries, inquiry messages, Telegram update deduplication).
+Checked and confirmed: table relationships, foreign keys, constraints, indexes,
+referential deletion behaviour, recursive tree safety (cycle/self-parent/
+cross-product/terminal-parent rejection, plus the 64-hop safety bound in the
+triggers — a resource guard, not a product depth cap), immutable inquiry
+snapshots (write-once trigger), message dedup (`UNIQUE (inquiry_id,
+telegram_message_id)`), and required migration metadata (journal + snapshots).
+
+**No financial checkout subsystem exists.** No unrelated features were
+introduced: no write-path layer, no Telegram handlers, no editor, no seed data.
+
+---
+
+## 6. Migration verification (all on disposable PostgreSQL only)
+
+Every item below was run against a throwaway cluster started by
+`scripts/db-test-postgres.mjs` (fresh `initdb`, random loopback port, trust
+auth, data directory deleted on stop). **No production or shared database was
+ever contacted.**
+
+| Check | Command | Result |
 | --- | --- | --- |
-| `drizzle.config.ts` | TS1501 — regex `/s` (dotAll) flag needs ES2018, project `target` is ES2017 | rewrote as `/^"([\s\S]*)"$/` (equivalent, target-safe) |
-| `src/db/client.ts` | TS2305 — `NeonHttpQuery` is not exported by `@neondatabase/serverless` | removed the import and the cast; `neon()`'s return type is exactly what `drizzle()` accepts |
-| `src/db/client.ts` | TS2456 / TS2577 — `type Database` and `createDb()`'s return annotation referenced each other | dropped the return annotation and moved the alias after `createDb` |
-| `src/db/schema/catalog.ts`, `actions.ts` | TS7022 / TS7024 — the self-referencing `references(() => category.id)` / `references(() => productAction.id)` create an inference cycle | annotated the thunks `(): PgColumn => …`, which is exactly the signature `references()` accepts |
-
-The `PgColumn` annotations are **type-only** — the runtime thunks are unchanged.
-Proven two ways: (a) regenerating the migrations into a temp folder produced
-**byte-identical SQL** and identical table/index/FK snapshots; (b) all 52 DB
-tests, which apply the committed chain, still pass.
+| Apply the full chain to a clean DB | `npm run test:db` (and `createTestDatabase()` per test file) | ✅ 14 tables created |
+| Tables, FKs, indexes, triggers, CHECKs as applied | catalog inspection script (§7) | ✅ 14 tables, 4 enums, 19 FKs, 37 indexes, 15 named triggers (17 fire events), 12 CHECKs — all matching the design |
+| Schema/migration consistency | `npx drizzle-kit check` against a freshly migrated throwaway DB | ✅ "Everything's fine 🐶🔥" |
+| Generation equivalence | `drizzle-kit generate` into a temp folder | ✅ **SQL byte-identical** to `0000_initial_schema.sql`; snapshot structure identical |
+| Repeatable execution | `migration-chain.test.ts` — re-apply the chain | ✅ object fingerprint unchanged (no duplicated objects) |
+| Failure scenario | `migration-chain.test.ts` — a deliberately broken `0002` | ✅ rolls back atomically; the probe table does not survive; the journal is not polluted |
+| Integrity rules | `catalog` / `actions` / `inquiry` suites (52 tests) | ✅ all pass — every rejection asserts a specific SQLSTATE, the matching constraint, and that the write did not land |
 
 ---
 
-## 6. Schema and migration status
+## 7. How to run everything (exact commands)
 
-- **Status: complete and verified for Phase 03B-A.** No change to any schema,
-  constraint, index, trigger or migration line was made during recovery.
-- `npm run db:check` was **not** run against any real database (it needs a
-  connection and is unnecessary here); equivalence was proven by the
-  generate-and-diff in §5 plus 52 passing tests that apply the chain.
-- **No production database exists, is provisioned, or was contacted.**
-  `DATABASE_URL` is unset; no Neon project was created; no migration was
-  executed anywhere but the disposable cluster. This is intentional and remains
-  true.
-
----
-
-## 7. Disposable DB test setup (exactly what to run)
-
-PostgreSQL 18.6 server tools are installed at `/usr/lib/postgresql/18/bin`
-(`pg_config --bindir` resolves them); the box is `root` with passwordless
-`sudo -u postgres`, which the harness uses. Standard library only — no Docker.
-
-```bash
-# One command: start a throwaway cluster, run the DB suite, stop and delete it.
-npm run test:db
-
-# Or step by step:
-node scripts/db-test-postgres.mjs start          # prints postgresql://rabet@127.0.0.1:<port>/postgres
-export RABET_TEST_PG_URL="$(node -e 'console.log(require("/tmp/rabet-test-pg.json").url)')"
-npx vitest run tests/db                           # RABET_TEST_PG_URL is what makes the suites run
-node scripts/db-test-postgres.mjs stop            # deletes the whole data directory
-
-# Everything else (no database needed):
-npm run typecheck      # tsc --noEmit  — clean
-npm run lint           # eslint        — clean
-npm run test           # full suite    — 130 tests
-```
-
-Isolation guarantees already built into the harness: loopback-only listener,
-empty `unix_socket_directories`, trust auth with no password, a random free
-port, a fresh `initdb` per `start`, one randomly-named database per test file,
-`DROP DATABASE` in every `afterAll`, and `DATABASE_URL` never read by the tests.
-
----
-
-## 8. Verification results (this session)
-
-All commands run on `feat/phase-03b-database-foundation` against the disposable
-cluster.
-
-| Command | Before recovery | After recovery |
-| --- | --- | --- |
-| `npx vitest run tests/db` | 38 passed \| **14 failed** (52) | **52 passed** \| 0 failed \| 0 skipped |
-| `npm run test` (full) | 1 file failed (auth build) \| 91 passed \| 39 skipped | **130 passed** \| 0 failed \| 0 skipped (11 files) |
-| `npm run typecheck` | 8 errors | **exit 0** |
-| `npm run lint` | — | **exit 0** |
-| `npx drizzle-kit generate` diff | — | **SQL byte-identical** to the committed chain |
-
-Per-file DB breakdown after recovery:
-
-| Test file | Tests |
-| --- | --- |
-| `tests/db/migration-chain.test.ts` | 7 |
-| `tests/db/client.test.ts` | 6 |
-| `tests/db/catalog.test.ts` | 10 |
-| `tests/db/actions.test.ts` | 15 |
-| `tests/db/inquiry.test.ts` | 14 |
-| **total** | **52** |
-
-The original auth suite (`tests/auth.test.ts`, 39 tests) and the provisioning
-PTY suite (`tests/generate-admin-hash.test.ts`, 8 tests) are **intact and
-passing** — no auth assertion was touched.
-
----
-
-## 9. Files changed by this recovery
-
-Modified (tracked): none beyond what the previous session already had staged in
-the working tree — `package.json`, `package-lock.json`.
-
-Newly committed on the branch (previously untracked): `drizzle.config.ts`,
-`drizzle/` (2 SQL + `meta/`), `scripts/db-test-postgres.mjs`, `src/db/`
-(`client.ts` + `schema/*`), `tests/db/` (5 suites + `helpers.ts`), and this
-handoff document.
-
-Edits made **during recovery** (all listed in §5): `tests/db/inquiry.test.ts`,
-`tests/db/catalog.test.ts`, `tests/db/actions.test.ts`, `src/db/client.ts`,
-`src/db/schema/catalog.ts`, `src/db/schema/actions.ts`, `drizzle.config.ts`.
-
----
-
-## 10. Unresolved technical issues
-
-None blocking. Two items to carry forward as knowledge, not defects:
-
-1. **`RESTRICT` → 23001.** Any future test or error-mapping code that catches a
-   delete blocked by `ON DELETE RESTRICT` must expect SQLSTATE 23001, not 23503.
-   Only the *insert-side* FK breach and the *trigger-raised* violations are 23503.
-2. **Root-level uniqueness is global.** `category_root_sort_order_idx` and
-   `product_action_root_sort_order_idx` are unique across every root in the
-   table. Any fixture or future write path inserting a root must take a globally
-   unique `sort_order` — which is also what the real write path does
-   (renumbering siblings to stay gapless and unique).
-
-Not an issue but worth remembering: the "unsupported by TokenPlan" message the
-previous session saw was a provider limit. If it recurs, stop and hand off; it
-is unrelated to the code.
-
----
-
-## 11. Next actions for Phase 03B-A2
-
-The schema, migrations, client and DB test foundation are done and green, so
-03B-A2 should **not** redo them. Suggested scope, in order:
-
-1. **CI wiring.** Add a PostgreSQL service container to the GitHub Actions
-   workflow and set `RABET_TEST_PG_URL` there, so `tests/db` runs in CI exactly
-   as it does locally (`scripts/db-test-postgres.mjs` is intentionally not
-   needed in CI). Note `npm run test` currently *skips* the DB suites when no
-   cluster is designated — CI must provide one or the suites silently skip.
-2. **Migration-runbook polish.** A short runbook for the hand-applied production
-   migration (unpooled connection, manual snapshot first, `drizzle-kit migrate`,
-   never `push`) — the rules are in `DATA_MODEL.md §17.3` but not yet a
-   step-by-step operator document.
-3. **`drizzle-kit check` in CI** (or a pre-commit gate) to catch schema/migration
-   drift; it needs a DB connection, so it belongs in the DB job from step 1.
-4. **Seed data decisions.** Phase 03B deliberately seeds no business defaults.
-   If `message_template` keys are needed before Phase 04, decide whether a seed
-   migration or a dashboard-first flow owns them.
-5. Then proceed to the write-path layer (repository functions shaped as
-   `db.batch([...])` with per-site idempotency, per ADR-015 / §15.3) — the
-   schema is ready for them.
-
----
-
-## 12. Safe starting point for a fresh session
+PostgreSQL 18.6 server tools are installed (`pg_config --bindir` resolves them);
+the box is `root` with passwordless `sudo -u postgres`, which the harness uses.
+Standard library only — no Docker.
 
 ```bash
 cd /root/projects/rabet
-git status --short                     # confirm the tree matches §9
-git log --oneline -3                   # expect the recovery checkpoint on feat/phase-03b-database-foundation
-npm ci                                 # already installed; reinstall if node_modules is gone
-npm run test:db                        # expect: Test Files 5 passed, Tests 52 passed
-npm run test                           # expect: Test Files 11 passed, Tests 130 passed
-npm run typecheck && npm run lint      # both exit 0
+
+# ---- Everything except the database (works anywhere) ----
+npm run lint            # eslint        — exit 0
+npm run typecheck       # tsc --noEmit  — exit 0
+npm run build           # needs a throwaway AUTH_SECRET in CI; locally .env.local is read
+npm run test            # 130 tests: 84 passed, 46 skipped without a cluster
+
+# ---- Database suites ----
+npm run test:db         # ONE command: disposable cluster → 52 DB tests → delete cluster
+
+# or step by step
+node scripts/db-test-postgres.mjs start
+export RABET_TEST_PG_URL="$(node -e 'console.log(require("/tmp/rabet-test-pg.json").url)')"
+npx vitest run tests/db
+node scripts/db-test-postgres.mjs stop
+
+# ---- Full suite including the DB suites ----
+node scripts/db-test-postgres.mjs start
+export RABET_TEST_PG_URL="$(node -e 'console.log(require("/tmp/rabet-test-pg.json").url)')"
+npm run test            # 130 tests, 0 skipped
+node scripts/db-test-postgres.mjs stop
+
+# ---- Migration consistency ----
+node scripts/db-test-postgres.mjs start
+export DATABASE_URL="$(node -e 'console.log(require("/tmp/rabet-test-pg.json")).url'.replace('}',''))/rabet_check')"
+# (create the DB, then:)
+DATABASE_URL=… npm run db:migrate && DATABASE_URL=… npm run db:check
+node scripts/db-test-postgres.mjs stop
 ```
 
-If `npm run test:db` reports skips instead of passes, `RABET_TEST_PG_URL` is not
-set and no cluster is running — start one with
-`node scripts/db-test-postgres.mjs start`, or just use `npm run test:db`, which
-manages the cluster itself.
+### Per-file DB test breakdown (52 tests)
 
-**Guardrails that still apply:** never `git reset --hard`, `git clean -fd` or
-`checkout -- .` on this branch; never run `drizzle-kit push`; never migrate
-against anything but a disposable database; never commit `.env*`; and do not add
-payment, invoice or order entities (ADR-013).
+| Test file | Tests | Covers |
+| --- | --- | --- |
+| `tests/db/migration-chain.test.ts` | 7 | clean apply, journal, idempotent re-apply, trigger presence, partial indexes, atomic rollback of a broken migration, and that `drizzle-kit push` is wired into no script |
+| `tests/db/client.test.ts` | 6 | imports without `DATABASE_URL`, loud credential-free failures, no echo of the connection string, lazy memoization, `db.transaction()` throws on neon-http |
+| `tests/db/catalog.test.ts` | 10 | category tree: self-parent, cycle, deleted-parent, sibling/root order uniqueness, `RESTRICT` deletes, cascade of translations |
+| `tests/db/actions.test.ts` | 15 | button tree: cross-product parent, terminal parent, type-change-with-children, branch cascade scoping, navigation-target rules, HTTPS check |
+| `tests/db/inquiry.test.ts` | 14 | snapshot immutability, one-active-inquiry, message dedup, `SET NULL` on product delete, `RESTRICT` on customer delete |
+
+### Test-suite isolation guarantees
+
+Loopback-only listener, empty `unix_socket_directories`, trust auth with no
+password, a random free port, a fresh `initdb` per `start`, one randomly-named
+database per test file, `DROP DATABASE` in every `afterAll`, and `DATABASE_URL`
+**never** read by the tests (they read `RABET_TEST_PG_URL` only).
+
+---
+
+## 8. Database access security — verified
+
+| Requirement | Verification |
+| --- | --- |
+| DB client is server-only | `src/db/client.ts` imports `server-only` (line 1) |
+| Secrets cannot leak to browser bundles | `npm run build`, then a scan of `.next/static` for `neondatabase`, `drizzle-orm` and `DATABASE_URL` → **no matches** |
+| No database credentials committed | `git ls-files \| grep .env` returns only `.env.example` (placeholders); `.env*` is git-ignored. `.env.local` on this box holds only a Vercel-injected `VERCEL_OIDC_TOKEN`, and no value from it appears anywhere in `.next` |
+| No production DB connection required for builds or UI shell routes | `npm run build` succeeds with `DATABASE_URL` unset; every current route renders. The client is lazy (`getDb()`), so importing the module never requires the variable, and the first real query fails loudly with a credential-free message |
+| Drizzle driver configuration is valid | `drizzle-kit check` passes against a migrated DB; `drizzle-kit generate` is byte-identical; the client test suite asserts the driver's contract |
+| Atomic multi-query operations use a supported transaction strategy | Verified in driver source: `drizzle-orm/neon-http/session.js:152,158` throws `No transactions support in neon-http driver` from `transaction()`; `db.batch()` is implemented (`driver.js:65` → `session.js:117`) and runs the statements server-side in one Neon HTTP transaction. Every atomic write will be expressed as `db.batch([...])` with per-site idempotency (ADR-015) |
+
+**Documented limitation (honest, per the mandate).** The `db.batch()` path is
+verified at the driver level — the API exists, `transaction()` provably throws,
+and the batch implementation is present in the installed driver — but **no
+application write path exists yet**, so an end-to-end batch has not been
+exercised against a real Neon endpoint, and the local disposable cluster cannot
+stand in for it (`neon()` speaks Neon's HTTP API, not raw Postgres). This is
+expected: the write-path layer is the next phase. The local DB suites use
+`drizzle-orm/postgres-js` (a real Postgres pool), which is why they can prove
+the schema's integrity rules directly.
+
+---
+
+## 9. GitHub CI
+
+`.github/workflows/ci.yml` now runs **two required jobs**.
+
+**`verify` — Lint, typecheck, build, auth + unit tests.** Unchanged in intent:
+install → `npm run lint` → `npm run typecheck` → build with a per-run generated
+`AUTH_SECRET` (`openssl rand -base64 32`, never committed, never logged) →
+`npm run test`. The DB suites inside that run skip cleanly (no cluster in this
+job); the `db` job covers them.
+
+**`db` — PostgreSQL service — migrations + DB integration tests.** New. Runs on
+`ubuntu-latest` with a `postgres:18` service container (`POSTGRES_USER: rabet`,
+throwaway credentials that exist only inside the container, which is destroyed
+with the job). Steps: wait for readiness → apply the committed chain through
+`npm run db:migrate` to a database created for the run → `npm run db:check`
+(schema/migration drift gate) → `npx vitest run tests/db` with
+`RABET_TEST_PG_URL` pointing at the container.
+
+Design points:
+
+- **The DB suites skip without a designated cluster**, so CI *must* provide one
+  or they silently report "skipped" instead of failing — this job is what makes
+  them actually run.
+- The test harness reads `RABET_TEST_PG_URL` and **never** `DATABASE_URL`, so
+  CI cannot accidentally point the create-and-drop tests at anything shared.
+- `scripts/db-test-postgres.mjs` is intentionally **not** used in CI — the
+  service container replaces it.
+- No GitHub secret needs configuring for either job. **No production database is
+  reachable from CI.**
+- The original authentication suite runs untouched in `verify`.
+
+The exact `db`-job step sequence was reproduced locally against a disposable
+cluster (create DB → `db:migrate` → `db:check` → `npx vitest run tests/db`):
+migrations applied, check reported "Everything's fine", 52/52 DB tests passed,
+and the full suite ran 130/130 with the cluster designated.
+
+---
+
+## 10. Documentation updated
+
+| File | Change |
+| --- | --- |
+| `README.md` | Status → Phase 03B implemented; tech stack (ORM/Database no longer "planned"); project structure (adds `src/db`, `drizzle/`, `tests/db`, re-scoped dashboard routes); scripts table (+`test:db`, `db:generate`, `db:migrate`, `db:check`); new **Database** section (folder structure, generating migrations, disposable-DB apply, running DB tests, production rule); environment variables (+`RABET_TEST_PG_URL`); roadmap |
+| `docs/PROGRESS.md` | Current phase → 03B; phase table (+03A merged, 03B implemented); new **What was done in Phase 03B** section with the verification table; "deliberately not implemented" updated (DB write-path layer is now the next item) |
+| `docs/ARCHITECTURE.md` | Tech stack rows; new §3.1 database layer structure; §3 re-scoped routes (Orders/Payments/Services placeholders removed); §6 testing strategy (+ the DB suite); ADR-012 status note |
+| `.env.example` | `DATABASE_URL` documented accurately (optional for build, required by the DB layer); new test-only `RABET_TEST_PG_URL`; the obsolete Telegram-Stars-payment variable block replaced by an explicit "no payment variable exists" note |
+| `docs/PHASE_03B_HANDOFF.md` | This file |
+
+Obsolete Orders/Payments/Services instructions were removed. Historical
+narrative that describes *past* phases (e.g. the Phase 01B roadmap line) is left
+intact as history; the current truth lives in the phase-status tables.
+
+---
+
+## 11. Production migration runbook (the operator document)
+
+> **Read before touching any real database.** GitHub `main` is the source of
+> truth for code **and** migration files. This runbook is the only sanctioned
+> way to migrate a real database.
+
+### 11.1 Preconditions (manual, one-time, owner action)
+
+1. Provision a Neon project (Free plan is enough) in `aws-us-east-2`, the
+   closest Neon region to Vercel's `iad1`.
+2. Create a **development** branch database. Never develop against the
+   production branch.
+3. Take a **manual snapshot** of the target branch in the Neon console before
+   any migration. Neon snapshots are instant and let you roll back the whole
+   branch in one click.
+4. Copy the **unpooled** connection string (Neon's pooled string cannot run
+   DDL inside `drizzle-kit migrate` reliably). In the Neon dashboard it is the
+   "direct connection" / unpooled URL.
+
+### 11.2 Applying the migration
+
+```bash
+# From the development VPS, on the exact main commit being deployed.
+git fetch origin && git checkout main && git pull --ff-only
+git rev-parse HEAD                       # record this in the deploy log
+
+# Use the UNPOOLED connection string, and only ever against the target branch.
+export DATABASE_URL="postgresql://USER:PASSWORD@HOST/dbname?sslmode=require"
+
+# 1. See what would change without writing anything.
+npx drizzle-kit check
+
+# 2. Apply the committed chain. This runs every pending migration inside one
+#    transaction; a failure rolls the whole apply back.
+npm run db:migrate
+
+# 3. Confirm the schema landed.
+npx drizzle-kit check
+```
+
+### 11.3 Hard rules
+
+- **Never `drizzle-kit push`.** It is not wired into any npm script or CI step,
+  and the migration-chain test asserts that as code. Schema changes land only as
+  generated, reviewed, committed SQL.
+- **Never migrate from a Vercel build, a deploy hook, or at application
+  startup.** `drizzle.config.ts` documents this; the lazy client means the app
+  builds and boots without a database.
+- **Never migrate a destructive change without a snapshot.** A failed migration
+  rolls back; a *successful* wrong one needs the snapshot.
+- **Preview branches are schema-only.** Real customer data is never copied into
+  them (DATA_MODEL.md §15.4).
+- **Migrate development first, then production**, and record the commit SHA and
+  the migration output in the deploy log.
+
+### 11.4 Rollback
+
+Restore the Neon branch snapshot taken in §11.1. The committed migration files
+stay untouched; roll back the *data*, not the repository.
+
+---
+
+## 12. Development / Preview / Production isolation plan
+
+| Environment | Database | `DATABASE_URL` | Migrations run by |
+| --- | --- | --- | --- |
+| **Local VPS** | Disposable cluster from `scripts/db-test-postgres.mjs` (or a Neon dev branch) | `.env.local`, read only by `drizzle.config.ts` and `getDb()` | The developer, by hand |
+| **CI** | Isolated `postgres:18` service container, destroyed with the job | Set inline to the throwaway container; `RABET_TEST_PG_URL` for the suites | The workflow (to a DB created for the run) |
+| **Vercel Preview** | A Neon **preview** branch, **schema-only** — no customer data | Vercel project env, preview scope | A human, from the VPS, by the runbook |
+| **Vercel Production** | The Neon production branch — **not yet provisioned** | Vercel project env, production scope | A human, from the VPS, by the runbook, after a snapshot |
+
+Environments stay isolated because the app **never** migrates itself: the
+variable is only read at migration time and at first query, and the migration
+step is always a deliberate human action.
+
+---
+
+## 13. Required manual Neon configuration (before production)
+
+Nothing has been provisioned. When the product owner is ready:
+
+1. Create the Neon project and the production branch.
+2. Apply the committed chain per the runbook (§11).
+3. Set `DATABASE_URL` in the Vercel project's **production** environment scope
+   (and the preview branch's scope for the schema-only preview).
+4. Decide and seed the minimal business data — `bot_setting` (the singleton),
+   the enabled `language` rows, and any `message_template` keys the bot needs.
+   Phase 03B deliberately seeds **no** business defaults; see §14 item 4.
+5. Keep Vercel Deployment Protection enabled (ADR-011).
+
+**No code change is required for any of this** — that is the point of the lazy,
+credential-free-failure client design.
+
+---
+
+## 14. Remaining technical risks
+
+None blocking. Carried forward as knowledge:
+
+1. **`RESTRICT` reports SQLSTATE 23001, not 23503.** A delete blocked by
+   `ON DELETE RESTRICT` raises `integrity_constraint_violation` (23001); only
+   the *insert-side* FK breach and the *trigger-raised* violations are 23503.
+   Any future error-mapping code must expect this. The tests assert the correct
+   code at every site.
+2. **Root-level `sort_order` uniqueness is global.**
+   `category_root_sort_order_idx` and `product_action_root_sort_order_idx` are
+   unique across **every** root in the table, not one parent's children. Any
+   fixture or write path inserting a root must take a globally unique
+   `sort_order` — which is also what the real write path does.
+3. **The `db.batch()` path is unexercised end-to-end.** See §8's documented
+   limitation. It is verified at the driver level only.
+4. **No seed data exists.** `bot_setting`, `language` and `message_template`
+   are data, not schema. Decide whether a seed migration or a dashboard-first
+   flow owns them before Phase 04.
+5. **Local testing does not prove compatibility with every serverless
+   configuration.** The suites prove the schema and the driver contract. Neon's
+   pooled HTTP endpoint, cold starts and Vercel's region topology are
+   configuration concerns that only a real preview deployment can validate —
+   deliberately deferred until the owner provisions a project.
+6. **The trigger `NOTICE` stream is noisy.** The idempotent `DROP TRIGGER IF
+   EXISTS` statements in `0001` emit harmless `does not exist, skipping`
+   notices on first apply. They are the price of safe re-application and appear
+   only in verbose output.
+
+---
+
+## 15. Safe next-phase recommendations
+
+In order:
+
+1. **Merge this PR** after product-owner review. Do not squash the 03B-A1
+   recovery checkpoint away — its message records the recovery.
+2. **Write-path layer** — repository functions shaped as `db.batch([...])` with
+   per-site idempotency (`ON CONFLICT DO NOTHING` against
+   `telegram_update.update_id`, the message-level unique index, and the
+   active-inquiry partial index), per ADR-015 / §15.3. The schema is ready.
+3. **Seed-data decision** (§14 item 4).
+4. **Then** Phase 04 (settings & localization) and Phase 05 (catalog & Button
+   Tree Editor). Nothing in Phase 03B starts them.
+
+---
+
+## 16. Guardrails that still apply
+
+Never `git reset --hard`, `git clean -fd` or `checkout -- .` on this branch;
+never run `drizzle-kit push`; never migrate against anything but a disposable or
+explicitly designated development database; never commit `.env*`; never add
+payment, invoice or order entities (ADR-013); never run `pnpm ship` or bump the
+app version; and never start a future phase without product-owner sign-off.
+
+---
+
+## 17. Delivery record
+
+| Item | Value |
+| --- | --- |
+| Pull Request | _(attached below after the PR is opened)_ |
+| Delivery commit (schema fix, CI, docs) | _(filled in after the commit)_ |
+| Branch HEAD at publication | _(filled in after the final push)_ |
+| GitHub CI status | _(checked after the push; see the PR checks tab)_ |
+| Vercel Preview | _(built automatically from the PR by the GitHub integration; check the PR's deployment status)_ |
+
+**The PR is ready for review. It must not be merged automatically, and no
+production database must be provisioned or migrated until the product owner
+decides.**
