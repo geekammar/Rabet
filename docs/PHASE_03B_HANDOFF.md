@@ -485,10 +485,10 @@ app version; and never start a future phase without product-owner sign-off.
 | 03B-A1 recovery checkpoint | `7be9971` |
 | 03B-A2 delivery commit | `f4e754e` |
 | 03B-A2 CI fixes (last code commit) | `2bba9a79197b16e41034e5900436770ce91fa407` |
-| PR #6 review fix | The documentation-correction commit that follows `2bba9a7` (§17.2). Documentation + one new DB test only; no schema or migration SQL touched. |
+| PR #6 review fix | `67b77dd` — the documentation-correction commit that follows `2bba9a7` (§17.2). Documentation + one new DB test only; no schema or migration SQL touched. |
 | Branch tip | The newest commit on `feat/phase-03b-database-foundation` in PR #6 — it advances with documentation edits, so it is deliberately not hard-coded here. |
-| GitHub CI | **Both jobs pass** — run `38276438435`: `Lint, typecheck, build, auth + unit tests` ✅ and `PostgreSQL service — migrations + DB integration tests` ✅ (1m each) |
-| Vercel Preview | The branch's last Vercel preview — built at the `7be9971` checkpoint, deployment `7014895539` — reports **success** ("Deployment has completed"). Vercel has not created a deployment record for the two 03B-A2 commits as of this check; the owner should confirm on the Vercel dashboard. This is outside the code path and does not gate the review — GitHub CI is the required gate and it is green. |
+| GitHub CI | **Both jobs pass on the review-fix head `67b77dd`** — run `38288465571`: `Lint, typecheck, build, auth + unit tests` ✅ (1m12s) and `PostgreSQL service — migrations + DB integration tests` ✅ (57s, 53/53 DB tests). The prior runs (`38281494455`, `38276438435`, …) on the earlier heads were green too. |
+| Vercel Preview | The branch's live preview is **READY and healthy** at `rabet-git-feat-phase-03b-database-foundation-ammarj1.vercel.app` (responds `200` through Vercel SSO, i.e. Deployment Protection per ADR-011 is on). The last recorded deployment is for `ee67f34` (`7020094194`); Vercel has not posted a deployment record for the review-fix commit as of this check — the same documented lag it showed for the 03B-A2 commits. This is outside the code path — the change is documentation + a test file, which cannot alter the deployed bundle — and does not gate the review; GitHub CI is the required gate and it is green. |
 
 ### 17.1 The first CI run and how it was fixed (root causes, not symptoms)
 
@@ -554,7 +554,10 @@ state CI last validated):
 
 Local re-verification on a disposable cluster: `53/53` DB tests pass and the full
 suite runs `131/131` with the cluster designated (`84` passed / `47` skipped
-without one — the DB suites skip, never fail). The fix re-triggers CI on PR #6.
+without one — the DB suites skip, never fail); `lint`, `typecheck` and `build`
+are green with `DATABASE_URL` unset. CI re-ran on the pushed head `67b77dd`
+(run `38288465571`) and **both jobs passed**, the `db` job reporting `53/53` DB
+tests — the new regression test ran against real PostgreSQL in CI.
 
 **The PR is ready for review. It must not be merged automatically, and no
 production database must be provisioned or migrated until the product owner
