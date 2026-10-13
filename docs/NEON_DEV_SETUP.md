@@ -420,12 +420,26 @@ Where to store it:
 | Option | When | How |
 | --- | --- | --- |
 | **GitHub Environment secret (preferred)** | Your plan supports environments — public repositories, or GitHub Team / Pro for a private repository | Create an environment named `neon-dev` (Settings → Environments → New environment), add the secret there, and restrict **Deployment branches** to `Selected branches and tags` → `main`. Optionally add a required reviewer. The workflow's `environment` input already defaults to `neon-dev`. |
-| **Repository Actions secret** | Your plan has no environments (a private repository on GitHub Free) | Settings → Secrets and variables → Actions → New repository secret, name it `NEON_DEV_DATABASE_URL`, and run the workflow with the `environment` input left **blank**. |
+| **Repository Actions secret** | Your plan has no environments (a private repository on GitHub Free) | Settings → Secrets and variables → Actions → New repository secret, name it `NEON_DEV_DATABASE_URL`, and run the workflow with the `environment` input set to **`repository-secret`**. |
 
 Both paths feed the same runtime gates, so the safety properties do not depend
 on which one you use. The preferred path adds two things a repository secret
 cannot: the secret is invisible to every other workflow, and the environment
 can require a reviewer and restrict itself to `main`.
+
+The `environment` input is a fixed dropdown with exactly these two values — it
+is **not free text**, so an operator can never type a name that points the run
+at some other environment's secret:
+
+| `environment` input | Secret read from | Who can use it |
+| --- | --- | --- |
+| `neon-dev` (default) | the `neon-dev` GitHub Environment secret | Any plan that supports environments: **public repositories always**, and GitHub Team / Pro / Enterprise for a private repository |
+| `repository-secret` | the repository Actions secret | Any plan, including **GitHub Free on a private repository** (no environments available) |
+
+Choosing an environment cannot widen the workflow's permissions either:
+`permissions: contents: read` is pinned at the workflow level, and a GitHub
+Environment may hold secrets and protection rules but cannot grant the job a
+single scope the workflow did not already declare.
 
 Tightly scoped either way:
 
@@ -473,7 +487,7 @@ Expected results:
 | Runner cannot connect | `unreachable` — nothing was written | non-zero |
 
 If the runner cannot connect, exit safely: no write is attempted, and the run
-ends non-zero with credential-free guidance. See §17.
+ends non-zero with credential-free guidance. See §16.
 
 ### 15.3 How to run Migrate
 
@@ -566,6 +580,47 @@ None of these contacts the real `Rabet_dev`. The integration suite uses the
 same throwaway PostgreSQL cluster as the other database suites
 (`RABET_TEST_PG_URL`), with the pinned identity overridden to the throwaway
 target; the flow suite injects every external surface.
+
+### 15.7 The exact owner workflow, the first time
+
+This is the whole sequence, from a merged PR to a migrated development
+database. Every step is manual; nothing happens automatically on merge.
+
+1. **Merge PR #8** once its CI is green. Merging runs no migration — the
+   workflow has a `workflow_dispatch` trigger only.
+2. **Add the GitHub secret `NEON_DEV_DATABASE_URL`.** Its value is the
+   **Direct connection** (unpooled) string of `Rabet_dev` → branch
+   `Development` → database `neondb`, with `sslmode=require` (§3, §15.1).
+   In the Neon dashboard: Rabet_dev → Connection Details → the **Direct
+   connection** tab → copy. Paste it into the secret; the workflow never
+   prints it.
+   - If your plan supports environments, create the `neon-dev` environment
+     (Settings → Environments → New environment), add the secret there, and
+     restrict **Deployment branches** to `main`. Leave the workflow's
+     `environment` input on `neon-dev`.
+   - Otherwise add it under Settings → Secrets and variables → Actions → New
+     repository secret, and set the workflow's `environment` input to
+     `repository-secret`.
+3. **Open GitHub Actions** → Rabet → Actions → **"Neon DEV database"**.
+4. **Run it in inspect mode first.** Leave **mode** on `inspect`, run the
+   workflow, and read the report.
+5. **Confirm the target metadata.** The report must show database `neondb`,
+   the masked approved endpoint, the PostgreSQL version, and the role. If it
+   shows `refused`, the string in the secret is wrong (§16); fix the secret,
+   do not loosen the runner.
+6. **Check the pending migrations.** The report lists them by name — that is
+   the change a migrate run would make. Nothing has been written yet.
+7. **Run migrate mode.** Run the workflow again with **mode** `migrate` and
+   type `MIGRATE_RABET_DEV` into **confirm**. The runner re-checks every gate,
+   applies the pending chain through `npm run db:migrate`, then re-inspects
+   and validates the result instead of trusting the exit code.
+8. **Inspect again.** Run inspect once more and confirm "Pending migrations:
+   none" and that every validation check passed. The database is now ready.
+
+> If the first inspect fails to connect, **stop**. Report the networking
+> failure and do **not** run migrate — the runner never falls back to a
+> looser network path, and there is no workaround to add (§16). A failed run
+> writes nothing.
 
 ---
 

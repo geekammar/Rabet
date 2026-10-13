@@ -199,6 +199,7 @@ financial entity exists anywhere** (ADR-013).
 | `tests/wizard/` | The setup wizard's flow, CLI and committed-secret suites |
 | `scripts/db-test-postgres.mjs` | Disposable PostgreSQL cluster for local DB tests |
 | `scripts/setup-neon-dev.mjs` | The Neon development setup wizard (`npm run db:setup:dev`) |
+| `scripts/neon-dev-actions.mjs` | The GitHub Actions development-migration runner (`npm run db:dev:actions`) |
 
 ### Generating migrations
 
@@ -249,6 +250,17 @@ never repairs schema drift automatically, and never prints a connection string.
 The full operator guide — first VPS, replacement VPS, credential rotation,
 direct vs pooled URLs, drift and interrupted setups — is in
 [docs/NEON_DEV_SETUP.md](./docs/NEON_DEV_SETUP.md).
+
+**If the development machine cannot reach Neon on TCP 5432**, apply development
+migrations from GitHub Actions instead — a manual workflow
+(`.github/workflows/neon-dev-migrate.yml`, exposed as the "Neon DEV database"
+action) that reuses the wizard's tested inspection and migration logic. It is
+`workflow_dispatch` **only** (a merge to main never migrates anything),
+defaults to a read-only `inspect` mode, requires typing `MIGRATE_RABET_DEV`
+for `migrate`, pins the endpoint host and database name to the committed
+development identity, and never prints the connection string. The exact owner
+workflow — secret, inspect first, then migrate — is §15.7 of
+[docs/NEON_DEV_SETUP.md](./docs/NEON_DEV_SETUP.md#157-the-exact-owner-workflow-the-first-time).
 
 ### Running the DB tests
 

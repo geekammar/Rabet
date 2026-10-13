@@ -49,7 +49,7 @@
  * restricted to `main`, and a required reviewer if the owner wants one); the
  * workflow passes the environment name as an input. On a plan without
  * environments, use a repository Actions secret instead — the runtime gates
- * below apply identically either way. See docs/NEON_DEV_SETUP.md §16.
+ * below apply identically either way. See docs/NEON_DEV_SETUP.md §15.1.
  */
 
 import { pathToFileURL } from "node:url";
@@ -570,7 +570,7 @@ export async function runActions({
       io.line("");
       io.line(
         `FAIL ${DEV_URL_ENV} is not configured. Add it as a GitHub Actions ` +
-          "secret (see docs/NEON_DEV_SETUP.md §16). The value is the DIRECT / " +
+          "secret (see docs/NEON_DEV_SETUP.md §15.1). The value is the DIRECT / " +
           "unpooled connection string of the dedicated Rabet_dev project, and " +
           "it is read from the environment only — never from a workflow input " +
           "or the command line.",
@@ -669,7 +669,7 @@ export async function runActions({
       io.line(
         "No connection was opened and nothing was written. If the GitHub " +
           "runner also cannot reach the endpoint on TCP 5432, see " +
-          "docs/NEON_DEV_SETUP.md §17 for what to do.",
+          "docs/NEON_DEV_SETUP.md §16 for what to do.",
       );
 
       ctx.outcome = "unreachable";

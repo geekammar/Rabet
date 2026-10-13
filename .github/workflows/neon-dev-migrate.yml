@@ -57,16 +57,24 @@ on:
         default: ""
         required: false
       # NEON_DEV_DATABASE_URL is read from this GitHub Environment when set.
-      # Prefer the environment (a private-repository plan feature; free on
-      # public repositories) so the secret is scoped and can carry protection
-      # rules. On a plan without environments, leave this blank and store the
-      # secret as a repository Actions secret instead — the runtime gates are
-      # identical either way. See docs/NEON_DEV_SETUP.md §16.
+      # This is a fixed *choice*, not free text, so the operator can only ever
+      # pick the two documented secret sources: the `neon-dev` environment, or
+      # the repository Actions secret. A typed environment name can never point
+      # the run at some other environment's secret. See docs/NEON_DEV_SETUP.md
+      # §15.1.
+      #
+      # Choosing an environment cannot widen this workflow's permissions either:
+      # `permissions: contents: read` is pinned at the workflow level below, and
+      # a GitHub Environment may hold secrets and protection rules but cannot
+      # grant the job a single scope the workflow did not already declare.
       environment:
-        description: "GitHub Environment holding the secret (default neon-dev; blank = repository secret)."
-        type: string
+        description: "Where NEON_DEV_DATABASE_URL is stored: the neon-dev GitHub Environment, or a repository Actions secret."
+        type: choice
+        options:
+          - neon-dev
+          - repository-secret
         default: neon-dev
-        required: false
+        required: true
 
 # One development-migration run at a time. A queued run waits for the running
 # one instead of cancelling it, so an in-flight migration is never interrupted
@@ -82,7 +90,9 @@ jobs:
   neon-dev:
     name: ${{ inputs.mode == 'migrate' && 'Migrate' || 'Inspect' }} the Rabet DEV database
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    # `repository-secret` resolves to no environment at all, so the run then
+    # reads NEON_DEV_DATABASE_URL from the repository Actions secret.
+    environment: ${{ inputs.environment != 'repository-secret' && inputs.environment || '' }}
 
     steps:
       - name: Checkout
@@ -144,7 +154,7 @@ jobs:
         run: |
           echo "Neon DEV database — manual workflow on GitHub-hosted runners."
           echo "  mode:              ${{ inputs.mode }}"
-          echo "  secret:            NEON_DEV_DATABASE_URL (${{ inputs.environment == '' && 'repository Actions secret' || format('{0} environment secret', inputs.environment) }})"
+          echo "  secret:            NEON_DEV_DATABASE_URL (${{ inputs.environment == 'repository-secret' && 'repository Actions secret' || format('{0} environment secret', inputs.environment) }})"
           echo "  connection:        DIRECT / unpooled, TLS required, DEV host pinned"
           echo "  migrate command:   npm run db:migrate (never drizzle-kit push)"
           echo "No production database was contacted. CI's isolated PostgreSQL job is unaffected."
