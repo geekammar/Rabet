@@ -117,6 +117,21 @@ not a workflow run.
    Any database the wizard could actually cause — under any other name — still
    fails the assertion, so the property under test is not weakened.
 
+4. **`tests/db/neon-dev-actions.test.ts` — make the host-mismatch test
+   environment-independent (a third root cause, previously masked).** The test
+   built a wrong-host URL by rewriting the cluster host to the literal
+   `localhost` and asserted `pin.expectedHost !== "localhost"`. That held
+   locally (the disposable cluster binds `127.0.0.1`) but **not in CI**, where
+   the service container is `postgresql://rabet:rabet@localhost:5432/postgres`
+   — so the pin *was* `localhost`, the sanity assertion failed, and the test
+   would have been vacuous (the rewritten URL's host still matched the pin, so
+   the runner would have connected and inspected instead of refusing). It was
+   among the original eight failures, hidden behind the larger `refused` group.
+   The test now leaves the URL at the real, reachable cluster and derives the
+   approved endpoint as `not-the-endpoint.<cluster host>`, which provably
+   differs whatever the cluster is named. Proven both on `127.0.0.1` and under
+   a forced `localhost` `RABET_TEST_PG_URL`.
+
 ## 5. Neon identity correction
 
 The actual Neon account configuration is: project display name **Rabet_dev**,
@@ -157,7 +172,8 @@ auth, data directory deleted on stop; never the real Neon endpoint).
 | Runner + GitHub-guard unit tests, credential guard | `npx vitest run tests/wizard/neon-dev-actions.test.ts tests/wizard/no-committed-credentials.test.ts` | 38 passed |
 | Real disposable PostgreSQL: actions runner | `node scripts/db-test-postgres.mjs run -- npx vitest run tests/db/neon-dev-actions.test.ts` | 10 passed (all 8 previously failing) |
 | Same, with the exact CI `GITHUB_*` PR context injected | `… run -- env GITHUB_ACTIONS=true GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/8/merge …` | 10 passed |
-| Full DB suite (twice, after fix #3) | `node scripts/db-test-postgres.mjs run -- npx vitest run tests/db` | 78 passed, 2/2 runs |
+| Same, with the CI `localhost` cluster host forced | start the disposable cluster, then `RABET_TEST_PG_URL=postgresql://rabet@localhost:<port>/postgres npx vitest run tests/db/neon-dev-actions.test.ts` | 10 passed |
+| Full DB suite (twice, after fixes #3 and #4) | `node scripts/db-test-postgres.mjs run -- npx vitest run tests/db` | 78 passed, 2/2 runs |
 | Lint | `npm run lint` | clean |
 | Typecheck | `npm run typecheck` | clean |
 | Full unit suite (the `verify` job's set) | `npm run test` | 203 passed, 72 skipped (DB suites skip without a cluster) |
@@ -173,7 +189,8 @@ both jobs green — `verify` unchanged in substance, `db` now passing 78/78. See
 ## 7. Files changed
 
 - `scripts/neon-dev-actions.mjs` — `EXPECTED_DEV_DB_NAME` → `neondb` + doc comment.
-- `tests/db/neon-dev-actions.test.ts` — `cleanEnv()` isolates `GITHUB_*` (the CI fix).
+- `tests/db/neon-dev-actions.test.ts` — `cleanEnv()` isolates `GITHUB_*` (the CI fix);
+  the host-mismatch case is now environment-independent.
 - `tests/wizard/neon-dev-actions.test.ts` — fixture URLs → `neondb`; new
   `pull_request` rejection test.
 - `tests/db/wizard-reconnect.test.ts` — cluster snapshot scoped to the wizard's
@@ -241,7 +258,10 @@ first: an unexpected `refused` means a `GITHUB_*` variable is still reaching
 the runner (check `cleanEnv()`); an unexpected `manual-review` in a drift test
 means a previous run left a table behind (the throwaway database is created and
 dropped per file, so a crashed `test:db` can leave one — stop the disposable
-cluster with `node scripts/db-test-postgres.mjs stop` and re-run).
+cluster with `node scripts/db-test-postgres.mjs stop` and re-run); a
+`not to be 'localhost'` style failure means a test is still assuming the
+throwaway cluster is not on `localhost` — CI's service container is, so derive
+per-cluster values from `RABET_TEST_PG_URL` instead of hardcoding them.
 
 **Do not merge this PR as part of C1.** Do not run the Neon workflow, do not
 configure real secrets, do not run production migrations, do not run

@@ -367,15 +367,23 @@ describe.skipIf(!shouldRun)("target identity is enforced on a real URL", () => {
   it("refuses a URL whose host is not the pinned endpoint, before connecting", async () => {
     const db = await emptyDatabase();
 
-    // The URL is otherwise perfectly valid and the cluster is reachable; only
-    // the host does not match the pinned identity.
-    const otherHost = db.url.replace(/@[^/]+\//, "@localhost/");
-    const pin = pinnedTo(db.url);
+    // The URL is untouched and the cluster is reachable; only the approved
+    // endpoint is somewhere else, so the host check is the sole thing standing
+    // between this connection string and a real connection.
+    //
+    // The other endpoint is *derived* rather than hardcoded because the
+    // throwaway cluster is named differently per environment — CI's service
+    // container is `localhost`, the local disposable cluster is `127.0.0.1` —
+    // and a constant would silently make this test vacuous in one of them.
+    const parsed = wizard.parsePgUrl(db.url);
+    const pin = {
+      expectedHost: `not-the-endpoint.${parsed.host}`,
+      expectedDbName: parsed.dbname,
+    };
 
-    expect(otherHost).not.toBe(db.url);
-    expect(pin.expectedHost).not.toBe("localhost");
+    expect(pin.expectedHost).not.toBe(parsed.host);
 
-    const { result, calls } = await runReal({ url: otherHost, pin });
+    const { result, calls } = await runReal({ url: db.url, pin });
 
     expect(result.ok).toBe(false);
     expect(result.outcome).toBe("refused");
