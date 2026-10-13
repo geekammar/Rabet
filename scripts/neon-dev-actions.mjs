@@ -94,11 +94,14 @@ export const EXPECTED_DEV_HOST =
   "ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech";
 
 /**
- * The exact database name on that endpoint. Neon's default branch is named
- * `main`; this is the database identity the runner requires, and it is the
- * development database only — never a production-named database.
+ * The exact database name on that endpoint. The Neon project's *display* name
+ * is `Rabet_dev` and its branch is `Development`, but the SQL database inside
+ * it is named `neondb` — a project display name is not a database name, and
+ * confusing the two is exactly how a wrong target gets approved. This constant
+ * is the database identity the runner requires, and it is the development
+ * database only — never a production-named database.
  */
-export const EXPECTED_DEV_DB_NAME = "rabet_dev";
+export const EXPECTED_DEV_DB_NAME = "neondb";
 
 /** The phrase the workflow user must type to authorize migrate mode. */
 export const MIGRATE_CONFIRMATION = "MIGRATE_RABET_DEV";

@@ -71,11 +71,19 @@ type Throwaway = {
 };
 
 /**
- * The environment the runner sees: the ambient environment minus the two
- * variables that would make this not a clean run — `DATABASE_URL` (the runner
- * must receive the target only through NEON_DEV_DATABASE_URL) and
- * `RABET_TEST_PG_URL` (the disposable cluster's variable, which the sanitized
- * child environment never forwards).
+ * The environment the runner sees: the ambient environment minus the variables
+ * that would make this not a clean run:
+ *
+ * - `DATABASE_URL` — the runner must receive the target only through
+ *   `NEON_DEV_DATABASE_URL`;
+ * - `RABET_TEST_PG_URL` — the disposable cluster's variable, which the
+ *   sanitized child environment never forwards;
+ * - the `GITHUB_*` context variables — this suite exercises the runner's
+ *   *database* behavior, and on CI it runs under a `pull_request` event, which
+ *   the GitHub-context guard correctly refuses. Presenting a local context
+ *   here is the honest model: a test run is not a workflow run. The guard
+ *   itself — `workflow_dispatch` only, `main` only — is covered case by case by
+ *   tests/wizard/neon-dev-actions.test.ts.
  */
 function cleanEnv(url: string): Record<string, string> {
   const env: Record<string, string> = {};
@@ -84,6 +92,7 @@ function cleanEnv(url: string): Record<string, string> {
     if (typeof value !== "string") continue;
     if (key === "DATABASE_URL") continue;
     if (key === "RABET_TEST_PG_URL") continue;
+    if (key.startsWith("GITHUB_")) continue;
 
     env[key] = value;
   }

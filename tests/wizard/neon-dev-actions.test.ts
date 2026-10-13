@@ -35,11 +35,11 @@ expect(committed.length).toBe(wizard.EXPECTED_MIGRATION_TAGS.length);
 const FIXTURE_HOST = "ep-cool-name-12345.us-east-2.aws.neon.tech";
 
 /** A valid development URL against the pinned endpoint (host is a fixture). */
-const GOOD_URL = `postgresql://rabet_owner:s3cret@${FIXTURE_HOST}/rabet_dev`;
+const GOOD_URL = `postgresql://rabet_owner:s3cret@${FIXTURE_HOST}/neondb`;
 
 /** A pooled endpoint, so the pooled-rejection path gets its own message. */
 const POOLED_URL =
-  "postgresql://rabet_owner:s3cret@ep-cool-pooler-12345.us-east-2.aws.neon.tech/rabet_dev";
+  "postgresql://rabet_owner:s3cret@ep-cool-pooler-12345.us-east-2.aws.neon.tech/neondb";
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -283,8 +283,10 @@ describe("target validation happens before any connection", () => {
   it("refuses a host that is not the pinned development endpoint", async () => {
     // A different documented fixture host, so the string is otherwise valid
     // and reachable-looking — only the host does not match the pinned identity.
+    // The database name is the approved one, so the host is the sole reason
+    // this is refused.
     const other =
-      "postgresql://owner:secret@ep-cool-12345.us-east-2.aws.neon.tech/rabet_dev";
+      "postgresql://owner:secret@ep-cool-12345.us-east-2.aws.neon.tech/neondb";
 
     const { result, output, calls } = await run({
       scenario: emptyScenario(),
@@ -318,7 +320,10 @@ describe("target validation happens before any connection", () => {
   });
 
   it("refuses a database name that is not the development database", async () => {
-    const url = GOOD_URL.replace("/rabet_dev", "/neondb");
+    // The project's *display* name is Rabet_dev, but the SQL database is
+    // neondb — so the display name as a database is exactly the plausible
+    // mistake this gate has to refuse.
+    const url = GOOD_URL.replace("/neondb", "/rabet_dev");
 
     const { result, calls } = await run({ scenario: emptyScenario(), url });
 
@@ -328,9 +333,9 @@ describe("target validation happens before any connection", () => {
   });
 
   it("refuses a live database whose name differs from the string", async () => {
-    // The string names rabet_dev; the connected database is something else.
+    // The string names neondb; the connected database is something else.
     const scenario = emptyScenario();
-    scenario.dbName = "neondb";
+    scenario.dbName = "rabet_dev";
 
     const { result } = await run({ scenario });
 
@@ -339,7 +344,7 @@ describe("target validation happens before any connection", () => {
   });
 
   it("refuses a non-PostgreSQL connection string", () => {
-    const result = actions.validateDevUrl("https://example.com/rabet_dev");
+    const result = actions.validateDevUrl("https://example.com/neondb");
 
     expect(result.ok).toBe(false);
   });
@@ -380,7 +385,7 @@ describe("the connection string comes from the environment only", () => {
   });
 
   it("never echoes the connection string, even in a failure path", async () => {
-    const url = `postgresql://owner:sup3rs3cr3t@${FIXTURE_HOST}/rabet_dev`;
+    const url = `postgresql://owner:sup3rs3cr3t@${FIXTURE_HOST}/neondb`;
 
     const { output } = await run({ scenario: emptyScenario(), url });
 
@@ -502,6 +507,26 @@ describe("GitHub context restrictions", () => {
         GITHUB_ACTIONS: "true",
         GITHUB_EVENT_NAME: "push",
         GITHUB_REF: "refs/heads/main",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(migrateCalls(calls)).toHaveLength(0);
+  });
+
+  it("refuses a pull_request-triggered run before any connection", async () => {
+    // The exact context a PR check runs under: a `pull_request` event on the
+    // merge ref. The guard refuses it the same way it refuses a push, so a
+    // merge — or any event but a manual dispatch — can never reach the
+    // database. (This is the event the disposable integration suite runs
+    // under, which is why that harness presents a local context instead.)
+    const { result, calls } = await run({
+      scenario: emptyScenario(),
+      env: {
+        GITHUB_ACTIONS: "true",
+        GITHUB_EVENT_NAME: "pull_request",
+        GITHUB_REF: "refs/pull/8/merge",
       },
     });
 

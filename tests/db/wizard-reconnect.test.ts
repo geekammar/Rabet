@@ -63,6 +63,14 @@ const repo = process.cwd();
 /** Every throwaway directory created by a run, removed together at the end. */
 const trash: string[] = [];
 
+/**
+ * The throwaway database name prefixes the *other* database suites use. Each
+ * suite creates and drops its own databases on the shared cluster, and they
+ * run concurrently with this one, so this file's cluster-wide "no database was
+ * added" snapshot ignores them. See `databases()` below.
+ */
+const SIBLING_SUITE_PREFIXES = ["rabet_test_", "rabet_actions_"];
+
 afterAll(() => {
   for (const dir of trash) {
     rmSync(dir, { recursive: true, force: true });
@@ -101,12 +109,25 @@ async function createEmptyDatabase(label: string) {
     name,
     sql,
 
-    /** The databases that exist on the throwaway cluster, to prove none is added. */
+    /**
+     * The databases that exist on the throwaway cluster, to prove none is added.
+     *
+     * Vitest runs the database suites concurrently in separate workers, so a
+     * sibling file may legitimately be holding its own throwaway database for
+     * the duration of this snapshot window. Those databases are noise here:
+     * this suite is proving what the *wizard* did, and the wizard has no
+     * `CREATE DATABASE` capability — it can only operate on the connection
+     * string it is handed. Each sibling suite uses a distinct, documented
+     * throwaway prefix, so the comparison is scoped to everything else: any
+     * database the wizard could have caused (under any name) still fails it.
+     */
     async databases(): Promise<string[]> {
       const connection = postgres(base, { max: 1 });
       const rows = await connection`select datname from pg_database where datistemplate = false order by datname`;
       await connection.end();
-      return rows.map((row) => String(row.datname));
+      return rows
+        .map((row) => String(row.datname))
+        .filter((name) => !SIBLING_SUITE_PREFIXES.some((prefix) => name.startsWith(prefix)));
     },
 
     async close(): Promise<void> {

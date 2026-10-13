@@ -537,14 +537,18 @@ The runner refuses anything that is not the committed development target:
 | Constant | Value in `scripts/neon-dev-actions.mjs` |
 | --- | --- |
 | `EXPECTED_DEV_HOST` | `ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech` |
-| `EXPECTED_DEV_DB_NAME` | `rabet_dev` |
+| `EXPECTED_DEV_DB_NAME` | `neondb` |
 
-Both are committed constants, not runtime settings. **If the development
-endpoint or database changes, the runner fails closed** until those constants
-are updated in a reviewed commit on main — that is the deliberate, reviewed
-configuration update the task requires. A pooled endpoint, another Neon
-project, a production endpoint or a loopback address is refused before any
-connection is opened.
+Both are committed constants, not runtime settings. Note that the Neon
+**project display name** is `Rabet_dev` and its branch is `Development`, but
+the SQL database inside that project is named `neondb` — the display name is
+not a database name, and the host and the database name must **both** match
+before any connection is opened. **If the development endpoint or database
+changes, the runner fails closed** until those constants are updated in a
+reviewed commit on main — that is the deliberate, reviewed configuration
+update the task requires. A pooled endpoint, another Neon project, a
+production endpoint or a loopback address is refused before any connection is
+opened.
 
 ### 15.6 Verification of the workflow
 
