@@ -161,6 +161,7 @@ Then `npm run dev` and sign in at `/login`.
 | `npm run db:generate` | Generate SQL migrations from `src/db/schema` into `drizzle/` — offline, touches no database |
 | `npm run db:migrate` | Apply the committed migration chain to the database in `DATABASE_URL` |
 | `npm run db:check` | Verify the schema and the committed migrations are consistent (needs a database) |
+| `npm run db:setup:dev` | The one-command Neon **development** setup wizard — asks before any write, safe to re-run |
 
 The auth integration suite builds the app and boots the real production server with a
 synthetic, throwaway configuration — no real secret, password or hash is used or
@@ -195,7 +196,9 @@ financial entity exists anywhere** (ADR-013).
 | `drizzle/` | The generated, human-reviewed SQL migrations plus `meta/` (journal + snapshots) |
 | `drizzle.config.ts` | Drizzle Kit configuration |
 | `tests/db/` | PostgreSQL integration suites (one throwaway database per file) |
+| `tests/wizard/` | The setup wizard's flow, CLI and committed-secret suites |
 | `scripts/db-test-postgres.mjs` | Disposable PostgreSQL cluster for local DB tests |
+| `scripts/setup-neon-dev.mjs` | The Neon development setup wizard (`npm run db:setup:dev`) |
 
 ### Generating migrations
 
@@ -228,6 +231,24 @@ To apply the chain to a database you already have (development only):
 DATABASE_URL="postgresql://user:password@host/devdb" npm run db:migrate
 DATABASE_URL="postgresql://user:password@host/devdb" npm run db:check
 ```
+
+### Setting up the Neon development database
+
+The one-command wizard connects to the dedicated `Rabet_dev` project, inspects
+it read-only, and applies the committed chain **after asking**:
+
+```bash
+npm run db:setup:dev            # interactive setup
+npm run db:setup:dev -- --check # read-only preflight — no writes
+```
+
+It works identically on the first VPS and on every replacement VPS afterwards:
+it recognizes an already-configured database, repeats nothing, creates no new
+database, and leaves existing data untouched. It never runs `drizzle-kit push`,
+never repairs schema drift automatically, and never prints a connection string.
+The full operator guide — first VPS, replacement VPS, credential rotation,
+direct vs pooled URLs, drift and interrupted setups — is in
+[docs/NEON_DEV_SETUP.md](./docs/NEON_DEV_SETUP.md).
 
 ### Running the DB tests
 

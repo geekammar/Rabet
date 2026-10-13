@@ -6,13 +6,16 @@ Project stage: **Discovery & Development** (not commercial production)
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 [DATA_MODEL.md](./DATA_MODEL.md) for the approved database design,
 [PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md) for the implementation status,
-test results and the production migration runbook.
+test results and the production migration runbook,
+[NEON_DEV_SETUP.md](./NEON_DEV_SETUP.md) for the one-command development
+database setup wizard.
 
 > This file tracks the **Phase 02B** authentication pass, the **Phase 03A**
 > data-model design pass and the **Phase 03B** database implementation. Phases
 > 01 and 02 are merged into `main`; Phase 03A is merged into `main`;
 > Phase 03B is on `feat/phase-03b-database-foundation`, awaiting product-owner
-> review.
+> review. Its follow-up — the Neon development setup wizard (Phase 03B-B) — is
+> on `feat/neon-dev-setup-wizard`, also awaiting review.
 
 ---
 
@@ -24,6 +27,7 @@ test results and the production migration runbook.
 | **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #5](https://github.com/geekammar/Rabet/pull/5), `f6a7738`) — code complete and Production-ready; the **manual interactive device checks and the durable rate limiter remain open** (see below), so Phase 02 is not marked *fully accepted* |
 | **Phase 03A** | Data model & recursive button architecture **design** | ✅ **Merged into `main`** ([PR #4](https://github.com/geekammar/Rabet/pull/4), `269cf7c`) — documentation only |
 | **Phase 03B** | Database schema, migrations & DB test foundation | 🟦 **Implemented on `feat/phase-03b-database-foundation`** — 14 tables, 2 migrations, server-only client, 53 DB tests, all green; no production database created or contacted |
+| **Phase 03B-B** | Neon development setup wizard (`npm run db:setup:dev`) | 🟦 **Implemented on `feat/neon-dev-setup-wizard`** — one command for the first VPS and every replacement VPS; verified against real PostgreSQL, including the reconnect scenario; no Neon account or production database contacted |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |

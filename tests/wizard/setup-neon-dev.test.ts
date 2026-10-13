@@ -31,6 +31,7 @@ import os from "node:os";
 import path from "node:path";
 
 import * as wizard from "../../scripts/setup-neon-dev.mjs";
+import { fakeIo, type CommandCall, type RunResult } from "./harness";
 
 const root = process.cwd();
 
@@ -55,20 +56,6 @@ type Scenario = {
   treeFks: Array<{ name: string; table_name: string }>;
   connectFailures?: number;
   connectError?: Error;
-};
-
-type RunResult = {
-  code: number;
-  stdout?: string;
-  stderr?: string;
-  signal?: string | null;
-};
-
-type CommandCall = {
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-  stdin?: string;
 };
 
 /** A fully configured development database (the state after a good setup). */
@@ -214,77 +201,6 @@ function makeHttpConnect(scenario: Scenario) {
       // The HTTP driver holds no connection.
     },
   });
-}
-
-/**
- * Answers consumed in order. Prompts throw when nothing is queued, so a flow
- * that asks for something unexpected fails loudly instead of hanging.
- *
- * `exhausted` models an interrupted session: `isInputExhausted()` reports the
- * input stream has ended, which is how the real IO behaves when SSH dies or a
- * piped stdin runs out.
- */
-function fakeIo(answers: string[] = [], { exhausted = false } = {}) {
-  const queue = [...answers];
-  const output: string[] = [];
-  const prompts: string[] = [];
-  let index = 0;
-
-  const take = (message: string) => {
-    prompts.push(message);
-
-    const value = queue[index++];
-
-    if (value === undefined) {
-      throw new wizard.CancelledError(
-        `test: no answer queued for prompt: ${message}`,
-      );
-    }
-
-    return value;
-  };
-
-  return {
-    output,
-    prompts,
-    answers: queue,
-
-    write(text: string) {
-      output.push(String(text));
-    },
-
-    line(text = "") {
-      output.push(`${text}\n`);
-    },
-
-    async prompt({ message }: { message: string }) {
-      return String(take(message)).trim();
-    },
-
-    async confirm({
-      message,
-      default: defaultValue = false,
-    }: {
-      message: string;
-      default?: boolean;
-    }) {
-      return wizard.parseYesNo(take(message), defaultValue);
-    },
-
-    async confirmStrong({
-      message,
-      expected,
-    }: {
-      message: string;
-      expected: string;
-    }) {
-      return take(message) === expected;
-    },
-
-    isInputExhausted() {
-      return exhausted;
-    },
-  };
 }
 
 function fakeRunner(overrides: Record<string, RunResult> = {}) {
@@ -875,6 +791,26 @@ describe("wizard flows", () => {
     expect(result.outcome).toBe("failed");
   });
 
+  it("reports wrong credentials as credential-free guidance and never echoes the password", async () => {
+    const scenario = emptyScenario();
+    const password = "wrong-dev-password-xyz";
+
+    scenario.connectFailures = 100;
+    scenario.connectError = new Error(
+      "password authentication failed for user rabet_owner",
+    );
+
+    const { result, output } = await run(scenario, [
+      `postgresql://rabet_owner:${password}@ep-cool-12345.us-east-2.aws.neon.tech/rabet_dev`,
+      "n", // "Try connecting again?" → no
+    ]);
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("failed");
+    expect(output).toContain("rejected the credentials");
+    expect(output).not.toContain(password);
+  });
+
   it("retries and then succeeds after transient network failures", async () => {
     const scenario = emptyScenario();
 
@@ -1268,6 +1204,42 @@ describe("wizard flows", () => {
     expect(io.output.join(" ")).toContain("DATABASE_URL is already set");
   });
 
+  it("ignores a declined exported DATABASE_URL and never forwards it to a subprocess", async () => {
+    const scenario = emptyScenario();
+    const calls: CommandCall[] = [];
+
+    const result = await wizard.runWizard({
+      io: fakeIo([
+        "n", // "Use it?" → no: the exported value is not the dev database
+        "postgresql://rabet_owner:dev-pw@ep-cool-12345.us-east-2.aws.neon.tech/rabet_dev",
+        "y", // confirm the target
+        "y", // approve migrations
+        "n", // do not save to .env.local
+      ]),
+      connect: makeConnect(scenario),
+      httpConnect: makeHttpConnect(scenario),
+      runCommand: migratingRunner(scenario, {}, calls),
+      options: {},
+      root,
+      env: {
+        // A stale — or production — value already in the shell. It is never
+        // used unless the operator confirms it, and never forwarded otherwise.
+        DATABASE_URL:
+          "postgresql://prod-user:prod-pw@ep-cool-12345.us-east-2.aws.neon.tech/rabet_prod",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+
+    const migration = calls.find((call) =>
+      call.args.join(" ").includes("db:migrate"),
+    );
+
+    expect(migration?.env?.DATABASE_URL).toContain("dev-pw");
+    expect(migration?.env?.DATABASE_URL).not.toContain("prod-pw");
+    expect(migration?.env?.DATABASE_URL).not.toContain("rabet_prod");
+  });
+
   it("warns about uncommitted migration files and can stop", async () => {
     const scenario = emptyScenario();
 
@@ -1534,6 +1506,79 @@ describe("env.local persistence", () => {
     writeFileSync(target, "AUTH_SECRET=only\n");
 
     expect(wizard.readEnvLocalUrl(target)).toBeNull();
+  });
+
+  it("overwrites an existing .env.local DATABASE_URL only after asking, keeping unrelated values", async () => {
+    // A replacement VPS that already has a stale local credential: the wizard
+    // shows the masked current value, asks, and preserves everything else.
+    const dir = mkdtempSync(path.join(os.tmpdir(), "rabet-wizard-envflow-"));
+    const target = path.join(dir, ".env.local");
+    const url =
+      "postgresql://rabet_owner:dev-pw@ep-cool-12345.us-east-2.aws.neon.tech/rabet_dev";
+
+    cpSync(path.join(root, "drizzle"), path.join(dir, "drizzle"), {
+      recursive: true,
+    });
+    writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({ name: "rabet", version: "0.1.0", private: true }, null, 2),
+    );
+
+    // Present-enough package records so the dependency step does not prompt.
+    for (const pkg of [
+      "@neondatabase/serverless",
+      "drizzle-kit",
+      "drizzle-orm",
+    ]) {
+      mkdirSync(path.join(dir, "node_modules", pkg), { recursive: true });
+      writeFileSync(
+        path.join(dir, "node_modules", pkg, "package.json"),
+        JSON.stringify({ name: pkg, version: "0.0.0" }),
+      );
+    }
+
+    writeFileSync(
+      target,
+      [
+        "AUTH_SECRET=keep-me",
+        "ADMIN_EMAIL=admin@example.com",
+        "ADMIN_PASSWORD_HASH=$argon2id$keep-me",
+        "DATABASE_URL=postgresql://old:old@host/old",
+        "",
+      ].join("\n"),
+    );
+
+    const scenario = emptyScenario();
+
+    try {
+      const result = await wizard.runWizard({
+        io: fakeIo([
+          url,
+          "y", // confirm the development target
+          "y", // approve the migrations
+          "y", // replace the existing DATABASE_URL
+        ]),
+        connect: makeConnect(scenario),
+        httpConnect: makeHttpConnect(scenario),
+        runCommand: migratingRunner(scenario),
+        options: {},
+        root: dir,
+        env: {},
+      });
+
+      expect(result.ok).toBe(true);
+
+      const contents = readFileSync(target, "utf8");
+
+      expect(contents).toContain("AUTH_SECRET=keep-me");
+      expect(contents).toContain("ADMIN_EMAIL=admin@example.com");
+      expect(contents).toContain("ADMIN_PASSWORD_HASH=$argon2id$keep-me");
+      expect(contents).not.toContain("old:old");
+      expect(contents).toContain(`DATABASE_URL=${url}?sslmode=require`);
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

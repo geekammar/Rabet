@@ -10,15 +10,23 @@ on:
 #
 #   verify — install, lint, typecheck, build, and the unit + auth integration
 #            suite. No database is needed: the auth tests generate their own
-#            throwaway AUTH_SECRET and Argon2id hash in-process (tests/setup.ts).
+#            throwaway AUTH_SECRET and Argon2id hash in-process (tests/setup.ts),
+#            and the wizard flow tests drive every branch of the setup wizard
+#            through an injected IO/database/subprocess surface
+#            (tests/wizard/). The committed-secret guard
+#            (tests/wizard/no-committed-credentials.test.ts) also runs here.
 #
 #   db     — an isolated PostgreSQL service container, the migration chain
 #            applied to it, a schema/migration drift check, and the database
 #            integration suite. The database suites skip when no cluster is
-#            designated, so they need this job to run at all.
+#            designated, so they need this job to run at all. This job is also
+#            what proves the wizard against real PostgreSQL: first-time setup,
+#            the replacement-VPS reconnect, the read-only preflight and the
+#            pending-migration path (tests/db/wizard-*.test.ts).
 #
 # No production secret or database is ever contacted. Every credential here is
-# generated per run or lives only in the throwaway service container.
+# generated per run or lives only in the throwaway service container. The job
+# below refuses to start if any Neon or Vercel credential is configured.
 
 jobs:
   verify:
@@ -58,9 +66,10 @@ jobs:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run build
 
-      # Unit + auth integration suites. The database suites inside this run skip
-      # cleanly (no cluster is designated in this job); the `db` job runs them.
-      - name: Unit and integration tests
+      # Unit + auth integration suites, and the wizard flow suite. The database
+      # suites inside this run skip cleanly (no cluster is designated in this
+      # job); the `db` job runs them.
+      - name: Unit, auth and wizard tests
         env:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run test
@@ -101,6 +110,31 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # The gate: this job must never need, and can never use, a real Neon or
+      # Vercel credential. It runs before any database is contacted and fails
+      # closed if one is configured anywhere the job can see it.
+      - name: Confirm no Neon or Vercel credentials are required
+        run: |
+          node - <<'NODE'
+            const keys = Object.keys(process.env)
+              .filter((key) => /^(NEON|VERCEL)_/i.test(key));
+
+            if (keys.length > 0) {
+              console.error(
+                `Refusing to run: a Neon or Vercel credential is configured (${keys.join(", ")}). ` +
+                  "CI uses a throwaway PostgreSQL container only.",
+              );
+              process.exit(1);
+            }
+
+            if (/neon\.tech/i.test(process.env.DATABASE_URL ?? "")) {
+              console.error("Refusing to run: DATABASE_URL points at a Neon endpoint.");
+              process.exit(1);
+            }
+
+            console.log("No Neon or Vercel credential is configured. CI needs none.");
+          NODE
 
       # The test harness reads RABET_TEST_PG_URL and deliberately never reads
       # DATABASE_URL, which may point at a shared or production cluster. Both
@@ -148,7 +182,31 @@ jobs:
       # the throwaway cluster, applies the full chain, asserts the integrity
       # rules, and drops its database. `npm run test` skips these without a
       # designated cluster, so they must run here.
-      - name: Database integration tests
+      #
+      # This is also the only place the wizard runs against real PostgreSQL in
+      # CI: tests/db/wizard-sql.test.ts proves its read-only inspection SQL and
+      # the byte-for-byte migration-history comparison, and
+      # tests/db/wizard-reconnect.test.ts proves the replacement-VPS scenario —
+      # first-time setup from one fresh clone, a reconnect from a second fresh
+      # clone that repeats nothing and creates no database, a read-only
+      # `--check` preflight from a third, and a database with one new pending
+      # migration. No Neon account or credential is involved; the fixtures are
+      # fake endpoints and the cluster is destroyed with the job.
+      - name: Database integration tests (schema suites + wizard: first setup, replacement VPS, pending migration)
         env:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
         run: npx vitest run tests/db
+
+      - name: Report what this job ran
+        run: |
+          echo "db job — disposable PostgreSQL service container only."
+          echo "  - npm ci"
+          echo "  - credential gate: no Neon or Vercel credential configured"
+          echo "  - npm run db:migrate  (committed chain, throwaway database)"
+          echo "  - npm run db:check    (schema/migration drift gate)"
+          echo "  - vitest tests/db:"
+          echo "      schema suites: client, migration-chain, catalog, actions, inquiry"
+          echo "      wizard SQL:    read-only inspection, migration-history hashes"
+          echo "      wizard flows:  first setup, replacement-VPS reconnect,"
+          echo "                     read-only --check, one pending migration"
+          echo "No production or Neon database was contacted."

@@ -2205,6 +2205,10 @@ async function runApply(ctx) {
   // is safe to retry; anything ambiguous stops for manual review.
   const after = await inspectApplied(ctx);
 
+  // The report below describes the database as it is now, not as it was at
+  // inspection time, so the header does not under-report a run that succeeded.
+  ctx.state = after.state;
+
   // Report only what this run applied, not the whole applied prefix.
   ctx.writes.migrationsApplied = after.appliedTags.filter(
     (tag) => !beforeTags.includes(tag),
