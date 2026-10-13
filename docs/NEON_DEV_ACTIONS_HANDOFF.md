@@ -182,9 +182,12 @@ The contaminated-environment run is the direct reproduction and proof of the
 root cause: with the guard active and the harness unfiltered, those eight tests
 returned `refused`; with the harness fix, they pass.
 
-**CI:** the push that follows triggers PR #8's checks. The expected result is
-both jobs green — `verify` unchanged in substance, `db` now passing 78/78. See
-§8 for what to do if it is not.
+**CI result after this phase (run 38438422010, commit `1eba9dc`): both jobs
+green.** `verify` — Lint, typecheck, build, auth + unit tests: SUCCESS. `db` —
+PostgreSQL service: SUCCESS, `Test Files 8 passed (8)`, `Tests 78 passed (78)`,
+with `tests/db/neon-dev-actions.test.ts (10 tests)` passing in 2.9s. The only
+remaining annotations are GitHub's unrelated Node.js 20 / Ubuntu 26 deprecation
+advisories. PR #8 is still **OPEN** and **not merged**, per the brief.
 
 ## 7. Files changed
 
