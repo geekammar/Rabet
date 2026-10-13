@@ -24,6 +24,11 @@
  * drops databases. It reads `RABET_TEST_PG_URL` and never `DATABASE_URL`, and
  * it never contacts the real `Rabet_dev` — the pinned endpoint host and the
  * committed database name are both overridden to the throwaway target.
+ *
+ * Every throwaway database is created in `beforeAll` and dropped in `afterAll`,
+ * matching the lifecycle the other database suites use: databases are never
+ * created mid-test, because a sibling suite snapshots the cluster's database
+ * list inside its own test.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -41,6 +46,29 @@ const repo = process.cwd();
 /** The throwaway cluster's base URL and host. */
 const clusterUrl = testClusterUrl() ?? "";
 const clusterHost = wizard.parsePgUrl(clusterUrl).host ?? "127.0.0.1";
+
+/** A recorded subprocess invocation. */
+type CommandCall = {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+};
+
+/** The subprocess surface the runner accepts. */
+type RunCommand = (opts: {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}) => Promise<{ code: number; stdout?: string; stderr?: string }>;
+
+/** A throwaway database on the cluster, with the URL the runner is pinned to. */
+type Throwaway = {
+  url: string;
+  name: string;
+  sql: ReturnType<typeof postgres>;
+  close(): Promise<void>;
+};
 
 /**
  * The environment the runner sees: the ambient environment minus the two
@@ -74,21 +102,6 @@ function pinnedTo(url: string) {
     expectedDbName: parsed.dbname,
   };
 }
-
-/** A recorded subprocess invocation. */
-type CommandCall = {
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-};
-
-/** The subprocess surface the runner accepts. */
-type RunCommand = (opts: {
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-  cwd?: string;
-}) => Promise<{ code: number; stdout?: string; stderr?: string }>;
 
 /**
  * Runs the runner with the real wire-protocol driver and the real subprocess
@@ -144,14 +157,6 @@ async function runReal({
 
   return { result, output: output.join(""), calls };
 }
-
-/** A throwaway database on the cluster, with the URL the runner is pinned to. */
-type Throwaway = {
-  url: string;
-  name: string;
-  sql: ReturnType<typeof postgres>;
-  close(): Promise<void>;
-};
 
 /** Creates a brand-new EMPTY database — no migrations applied to it. */
 async function createEmptyDatabase(label: string): Promise<Throwaway> {
@@ -213,27 +218,73 @@ async function appTables(sql: ReturnType<typeof postgres>) {
   return rows.map((row) => String(row.name));
 }
 
-const databases: Throwaway[] = [];
+/** Applies the full committed chain to a throwaway database. */
+async function applyChain(db: Throwaway) {
+  const { drizzle } = await import("drizzle-orm/postgres-js");
+  const { migrate } = await import("drizzle-orm/postgres-js/migrator");
+  const path = await import("node:path");
+  const pool = postgres(db.url, { max: 1 });
 
-afterAll(async () => {
-  for (const db of databases) {
-    await db.close();
+  try {
+    await migrate(drizzle({ client: pool }), {
+      migrationsFolder: path.resolve(import.meta.dirname, "../../drizzle"),
+    });
+  } finally {
+    await pool.end();
   }
-});
+}
 
-beforeAll(() => {
+/**
+ * Returns the throwaway database to a completely empty state.
+ *
+ * Every scenario here needs a different starting state (empty, migrated,
+ * drifted), but the file holds exactly ONE database for its whole run —
+ * created in `beforeAll`, dropped in `afterAll` — so it never creates a
+ * database mid-run, which is what the sibling suites' cluster snapshots would
+ * observe. Rebuilding the schemas between scenarios is what makes that
+ * possible.
+ */
+async function resetToEmpty(db: Throwaway) {
+  await db.sql`drop schema if exists public cascade`;
+  await db.sql`drop schema if exists drizzle cascade`;
+  await db.sql`create schema public`;
+}
+
+// ---------------------------------------------------------------------------
+// One throwaway database, created up front and dropped at the end. A database
+// is never created while a sibling suite is mid-test.
+// ---------------------------------------------------------------------------
+
+let target: Throwaway | null = null;
+
+beforeAll(async () => {
   if (!shouldRun) return;
 
   expect(clusterHost.length).toBeGreaterThan(0);
+
+  target = await createEmptyDatabase("single");
 });
+
+afterAll(async () => {
+  await target?.close();
+
+  target = null;
+});
+
+/** The single throwaway database, reset to empty for the caller's scenario. */
+async function emptyDatabase(): Promise<Throwaway> {
+  if (!target) throw new Error("test: the throwaway database was not created");
+
+  await resetToEmpty(target);
+
+  return target;
+}
 
 // ---------------------------------------------------------------------------
 
 describe.skipIf(!shouldRun)("inspect mode on real PostgreSQL", () => {
   it("reports an empty database and both pending migrations, writing nothing", async () => {
-    const db = await createEmptyDatabase("inspect-empty");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     const before = await appTables(db.sql);
 
@@ -259,11 +310,8 @@ describe.skipIf(!shouldRun)("inspect mode on real PostgreSQL", () => {
   });
 
   it("recognizes an already-migrated database and lists nothing pending", async () => {
-    const db = await createEmptyDatabase("inspect-configured");
+    const db = await emptyDatabase();
 
-    databases.push(db);
-
-    // Apply the full committed chain first, the way a previous run did.
     await applyChain(db);
 
     const { result, calls } = await runReal({ url: db.url });
@@ -282,9 +330,7 @@ describe.skipIf(!shouldRun)("inspect mode on real PostgreSQL", () => {
   });
 
   it("reports schema drift without writing anything", async () => {
-    const db = await createEmptyDatabase("inspect-drift");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     await applyChain(db);
 
@@ -310,9 +356,7 @@ describe.skipIf(!shouldRun)("inspect mode on real PostgreSQL", () => {
 
 describe.skipIf(!shouldRun)("target identity is enforced on a real URL", () => {
   it("refuses a URL whose host is not the pinned endpoint, before connecting", async () => {
-    const db = await createEmptyDatabase("wronghost");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     // The URL is otherwise perfectly valid and the cluster is reachable; only
     // the host does not match the pinned identity.
@@ -332,9 +376,7 @@ describe.skipIf(!shouldRun)("target identity is enforced on a real URL", () => {
   });
 
   it("refuses a URL whose database name is not the pinned database", async () => {
-    const db = await createEmptyDatabase("wrongdb");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     const otherName = db.url.replace(/\/[^/]*$/, "/postgres");
 
@@ -347,9 +389,7 @@ describe.skipIf(!shouldRun)("target identity is enforced on a real URL", () => {
 
 describe.skipIf(!shouldRun)("migrate mode on real PostgreSQL", () => {
   it("applies the committed chain to an empty database and validates it", async () => {
-    const db = await createEmptyDatabase("migrate-empty");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     const { result, calls } = await runReal({
       url: db.url,
@@ -393,9 +433,7 @@ describe.skipIf(!shouldRun)("migrate mode on real PostgreSQL", () => {
   });
 
   it("re-runs against an up-to-date database and applies nothing", async () => {
-    const db = await createEmptyDatabase("migrate-rerun");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     await applyChain(db);
 
@@ -427,9 +465,7 @@ describe.skipIf(!shouldRun)("migrate mode on real PostgreSQL", () => {
   });
 
   it("refuses to migrate a drifted database", async () => {
-    const db = await createEmptyDatabase("migrate-drift");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     await applyChain(db);
 
@@ -449,9 +485,7 @@ describe.skipIf(!shouldRun)("migrate mode on real PostgreSQL", () => {
   });
 
   it("does not report success when the migration command fails, and redacts leaks", async () => {
-    const db = await createEmptyDatabase("migrate-fail");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     // A subprocess that fails and echoes a connection string, the way a driver
     // or CLI can. The runner must never relay it.
@@ -459,12 +493,7 @@ describe.skipIf(!shouldRun)("migrate mode on real PostgreSQL", () => {
 
     const calls: CommandCall[] = [];
 
-    const fakeRunCommand = async (opts: {
-      command: string;
-      args: string[];
-      env?: Record<string, string>;
-      cwd?: string;
-    }) => {
+    const fakeRunCommand: RunCommand = async (opts) => {
       calls.push({ command: opts.command, args: opts.args, env: opts.env });
 
       const script = opts.args.join(" ");
@@ -499,9 +528,7 @@ describe.skipIf(!shouldRun)("migrate mode on real PostgreSQL", () => {
   });
 
   it("refuses migrate mode without the confirmation phrase", async () => {
-    const db = await createEmptyDatabase("migrate-noconfirm");
-
-    databases.push(db);
+    const db = await emptyDatabase();
 
     const { result, calls } = await runReal({
       url: db.url,
@@ -517,23 +544,3 @@ describe.skipIf(!shouldRun)("migrate mode on real PostgreSQL", () => {
     expect(await appTables(db.sql)).toEqual([]);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Applies the full committed chain to a throwaway database. */
-async function applyChain(db: Throwaway) {
-  const pool = postgres(db.url, { max: 1 });
-  const { drizzle } = await import("drizzle-orm/postgres-js");
-  const { migrate } = await import("drizzle-orm/postgres-js/migrator");
-  const path = await import("node:path");
-
-  try {
-    await migrate(drizzle({ client: pool }), {
-      migrationsFolder: path.resolve(import.meta.dirname, "../../drizzle"),
-    });
-  } finally {
-    await pool.end();
-  }
-}
