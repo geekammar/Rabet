@@ -9,6 +9,11 @@ the very first time and on every replacement VPS afterwards.
 > It asks before it writes anything, it never touches production, and it never
 > runs `drizzle-kit push`. Re-running it is always safe.
 
+> **No outbound PostgreSQL from this VPS?** If the development machine cannot
+> reach the Neon endpoint on TCP 5432, run development migrations from GitHub
+> Actions instead — a manual, read-only-by-default workflow that reuses this
+> wizard's inspection and migration logic. See §15.
+
 ---
 
 ## 1. First VPS — the initial setup
@@ -376,3 +381,282 @@ Every claim above is backed by an automated test that runs in CI:
 No real Neon project is contacted by any of these. The integration tests use a
 throwaway PostgreSQL cluster (`RABET_TEST_PG_URL`), which is created and deleted
 per run.
+
+The two suites added for the GitHub Actions runner are listed in §15.6.
+
+---
+
+## 15. Running development migrations from GitHub Actions
+
+The development VPS is for coding. When it cannot reach the Neon endpoint on
+TCP 5432 (both IPv4 and IPv6 time out — a network condition on the VPS's
+outbound route, not a Neon problem), GitHub-hosted Actions runners can still
+reach it. This workflow moves *development migrations* to GitHub; it does not
+move development itself.
+
+The workflow file is `.github/workflows/neon-dev-migrate.yml`. It reuses this
+wizard's tested logic rather than replacing it — the runner
+(`scripts/neon-dev-actions.mjs`, exposed as `npm run db:dev:actions`) calls the
+same URL parsing and TLS enforcement, the same read-only inspection SQL, the
+same byte-for-byte migration-history comparison, the same sanitized child
+environment, and the same `npm run db:migrate` command. It adds no second
+migration engine and no interactive prompts.
+
+**It is triggered only by hand.** There is no `push`, `pull_request` or
+`schedule` trigger, so merging to main never migrates anything, and a Vercel
+build never migrates anything. Development migrations stay a deliberate action
+the owner takes after reviewing what is pending.
+
+### 15.1 Required secret — `NEON_DEV_DATABASE_URL`
+
+The connection string is read **from the GitHub Actions secret
+`NEON_DEV_DATABASE_URL`** — never from a workflow input and never from a
+command-line argument. It is the **Direct connection** (unpooled) string of the
+dedicated `Rabet_dev` project, exactly the one §3 tells you to copy, with
+`sslmode=require`.
+
+Where to store it:
+
+| Option | When | How |
+| --- | --- | --- |
+| **GitHub Environment secret (preferred)** | Your plan supports environments — public repositories, or GitHub Team / Pro for a private repository | Create an environment named `neon-dev` (Settings → Environments → New environment), add the secret there, and restrict **Deployment branches** to `Selected branches and tags` → `main`. Optionally add a required reviewer. The workflow's `environment` input already defaults to `neon-dev`. |
+| **Repository Actions secret** | Your plan has no environments (a private repository on GitHub Free) | Settings → Secrets and variables → Actions → New repository secret, name it `NEON_DEV_DATABASE_URL`, and run the workflow with the `environment` input set to **`repository-secret`**. |
+
+Both paths feed the same runtime gates, so the safety properties do not depend
+on which one you use. The preferred path adds two things a repository secret
+cannot: the secret is invisible to every other workflow, and the environment
+can require a reviewer and restrict itself to `main`.
+
+The `environment` input is a fixed dropdown with exactly these two values — it
+is **not free text**, so an operator can never type a name that points the run
+at some other environment's secret:
+
+| `environment` input | Secret read from | Who can use it |
+| --- | --- | --- |
+| `neon-dev` (default) | the `neon-dev` GitHub Environment secret | Any plan that supports environments: **public repositories always**, and GitHub Team / Pro / Enterprise for a private repository |
+| `repository-secret` | the repository Actions secret | Any plan, including **GitHub Free on a private repository** (no environments available) |
+
+Choosing an environment cannot widen the workflow's permissions either:
+`permissions: contents: read` is pinned at the workflow level, and a GitHub
+Environment may hold secrets and protection rules but cannot grant the job a
+single scope the workflow did not already declare.
+
+Tightly scoped either way:
+
+- `NEON_DEV_DATABASE_URL` is referenced by exactly one workflow
+  (`.github/workflows/neon-dev-migrate.yml`) and by no other file in the
+  repository.
+- The runner refuses the string unless its host is exactly the committed
+  development endpoint and its database is exactly the committed development
+  database (§15.5), so the same secret cannot be repurposed against another
+  target.
+- The value is never printed, never logged, and never passed to a subprocess on
+  the command line; it reaches `npm run db:migrate` only through a sanitized
+  child environment as `DATABASE_URL`, and every line the runner prints is
+  filtered.
+
+### 15.2 How to run Inspect (default, read-only)
+
+1. GitHub → **Rabet → Actions → "Neon DEV database"** → **Run workflow**.
+2. Leave **mode** on `inspect` (the default).
+3. Run it.
+4. Read the job output.
+
+Inspect performs **read-only statements only**: a connectivity probe, the
+PostgreSQL version, target identity verification, the table list, the Drizzle
+migration history, a byte-for-byte comparison of that history against the
+committed migration files, the list of pending migrations, and schema-drift
+detection. It runs no DDL, it does not modify the migration history, and it
+never calls `npm run db:migrate`.
+
+> `drizzle-kit check` is **not** a preview of the SQL that will run, and
+> inspect mode does not run it at all — the pending-migration list *is* the
+> preview. Migrate mode runs `drizzle-kit check` as a repository-metadata
+> consistency check only, clearly labelled as such.
+
+Expected results:
+
+| Target state | Outcome | Exit code |
+| --- | --- | --- |
+| Empty database (no tables) | `inspected` — lists both migrations as pending | 0 |
+| Partially applied | `inspected` — lists the missing migrations as pending | 0 |
+| Fully configured | `inspected` — "Pending migrations: none" | 0 |
+| Unknown tables / history matching nothing committed / ahead of the repository | `manual-review` — describes the drift, writes nothing | non-zero |
+| Wrong host, pooled endpoint, or wrong database in the secret | `refused` — before any connection is opened | non-zero |
+| Secret missing or empty | `not-configured` | non-zero |
+| Runner cannot connect | `unreachable` — nothing was written | non-zero |
+
+If the runner cannot connect, exit safely: no write is attempted, and the run
+ends non-zero with credential-free guidance. See §16.
+
+### 15.3 How to run Migrate
+
+1. **Run Inspect first** (§15.2) and read what it lists as pending. That is the
+   change you are about to make.
+2. GitHub → **Rabet → Actions → "Neon DEV database"** → **Run workflow**.
+3. Set **mode** to `migrate`.
+4. In **confirm**, type `MIGRATE_RABET_DEV` exactly. This is the explicit
+   authorization; the default mode stays `inspect`, so a missed or mistyped
+   confirmation runs nothing.
+5. Run it, then read the whole job output.
+
+Before it writes anything, migrate mode re-runs every gate:
+
+- the workflow's own input gate (a wrong confirmation fails before the secret is
+  even materialized);
+- the GitHub context — `workflow_dispatch` and `refs/heads/main` only;
+- the target identity — exact endpoint host, not pooled, exact database name,
+  TLS required, re-verified from the live `current_database()` rather than from
+  the string;
+- the committed migration chain — journal, snapshots and SQL files are
+  consistent;
+- the current database state — re-inspected, and **schema drift, a mismatched
+  migration history, a database ahead of the repository, a pooled connection or
+  a wrong host each refuse the run before any write**.
+
+Then it runs the existing `npm run db:migrate` with the verified development URL
+in the subprocess environment, and afterwards it **re-inspects the database
+rather than trusting the exit code** — verifying the fourteen tables, the
+indexes, the CHECK constraints, both recursive trees, and that the recorded
+history matches the committed files byte for byte. If anything is still
+pending, or any check fails, the run ends non-zero and says so plainly.
+
+Concurrent runs are prevented: a `concurrency` group named `neon-dev-migrate`
+queues a second run instead of running it alongside the first, and never
+cancels one in flight.
+
+### 15.4 How the VPS continues development afterwards
+
+Nothing about the VPS workflow changes. The VPS keeps cloning, coding, and
+generating migrations:
+
+```bash
+# On the VPS — offline, no database needed:
+npm run db:generate    # writes versioned SQL into drizzle/ + the journal
+git add drizzle/ && git commit && git push   # main is the single source of truth
+```
+
+Then run the workflow from GitHub to apply them. `npm run db:generate` never
+touches a database, so the VPS's inability to reach port 5432 is not in the way.
+
+For inspecting the database from the VPS, the same workflow's inspect mode is
+the route; for running the wizard's interactive flow, use any machine that can
+reach the endpoint (the wizard works identically from a laptop). The committed
+chain on main is the single source of truth for both.
+
+### 15.5 The pinned development identity
+
+The runner refuses anything that is not the committed development target:
+
+| Constant | Value in `scripts/neon-dev-actions.mjs` |
+| --- | --- |
+| `EXPECTED_DEV_HOST` | `ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech` |
+| `EXPECTED_DEV_DB_NAME` | `neondb` |
+
+Both are committed constants, not runtime settings. Note that the Neon
+**project display name** is `Rabet_dev` and its branch is `Development`, but
+the SQL database inside that project is named `neondb` — the display name is
+not a database name, and the host and the database name must **both** match
+before any connection is opened. **If the development endpoint or database
+changes, the runner fails closed** until those constants are updated in a
+reviewed commit on main — that is the deliberate, reviewed configuration
+update the task requires. A pooled endpoint, another Neon project, a
+production endpoint or a loopback address is refused before any connection is
+opened.
+
+### 15.6 Verification of the workflow
+
+| Claim | Test |
+| --- | --- |
+| Gates: wrong host, pooled URL, wrong database, bad confirmation, missing secret, non-`workflow_dispatch`, non-`main` | `tests/wizard/neon-dev-actions.test.ts` |
+| Inspect is strictly read-only (no DDL, no `db:migrate`, no history change) | `tests/wizard/neon-dev-actions.test.ts`, `tests/db/neon-dev-actions.test.ts` |
+| An empty database is migrated end to end and validated against real objects | `tests/db/neon-dev-actions.test.ts` |
+| A re-run against an up-to-date database applies nothing and preserves data | `tests/db/neon-dev-actions.test.ts` |
+| Schema drift is refused, never repaired | both suites |
+| A failed migration is never reported as success; leaks are redacted | both suites |
+| The child environment carries only the verified URL | both suites |
+
+None of these contacts the real `Rabet_dev`. The integration suite uses the
+same throwaway PostgreSQL cluster as the other database suites
+(`RABET_TEST_PG_URL`), with the pinned identity overridden to the throwaway
+target; the flow suite injects every external surface.
+
+### 15.7 The exact owner workflow, the first time
+
+This is the whole sequence, from a merged PR to a migrated development
+database. Every step is manual; nothing happens automatically on merge.
+
+1. **Merge PR #8** once its CI is green. Merging runs no migration — the
+   workflow has a `workflow_dispatch` trigger only.
+2. **Add the GitHub secret `NEON_DEV_DATABASE_URL`.** Its value is the
+   **Direct connection** (unpooled) string of `Rabet_dev` → branch
+   `Development` → database `neondb`, with `sslmode=require` (§3, §15.1).
+   In the Neon dashboard: Rabet_dev → Connection Details → the **Direct
+   connection** tab → copy. Paste it into the secret; the workflow never
+   prints it.
+   - If your plan supports environments, create the `neon-dev` environment
+     (Settings → Environments → New environment), add the secret there, and
+     restrict **Deployment branches** to `main`. Leave the workflow's
+     `environment` input on `neon-dev`.
+   - Otherwise add it under Settings → Secrets and variables → Actions → New
+     repository secret, and set the workflow's `environment` input to
+     `repository-secret`.
+3. **Open GitHub Actions** → Rabet → Actions → **"Neon DEV database"**.
+4. **Run it in inspect mode first.** Leave **mode** on `inspect`, run the
+   workflow, and read the report.
+5. **Confirm the target metadata.** The report must show database `neondb`,
+   the masked approved endpoint, the PostgreSQL version, and the role. If it
+   shows `refused`, the string in the secret is wrong (§16); fix the secret,
+   do not loosen the runner.
+6. **Check the pending migrations.** The report lists them by name — that is
+   the change a migrate run would make. Nothing has been written yet.
+7. **Run migrate mode.** Run the workflow again with **mode** `migrate` and
+   type `MIGRATE_RABET_DEV` into **confirm**. The runner re-checks every gate,
+   applies the pending chain through `npm run db:migrate`, then re-inspects
+   and validates the result instead of trusting the exit code.
+8. **Inspect again.** Run inspect once more and confirm "Pending migrations:
+   none" and that every validation check passed. The database is now ready.
+
+> If the first inspect fails to connect, **stop**. Report the networking
+> failure and do **not** run migrate — the runner never falls back to a
+> looser network path, and there is no workaround to add (§16). A failed run
+> writes nothing.
+
+---
+
+## 16. If the GitHub runner also cannot reach PostgreSQL port 5432
+
+The runner exits `unreachable`, writes nothing, and prints credential-free
+guidance. Work through these in order:
+
+1. **Confirm it is the same symptom, not the secret.** Run the workflow in
+   `inspect` mode. If the failure is `refused` (host, pooled, database or TLS),
+   the string in the secret is wrong — copy the **Direct connection** string
+   again from Rabet_dev → Connection Details (§3). If it is `unreachable`, it is
+   a network problem.
+2. **Re-run once.** Transient failures and cold-starting endpoints retry
+   automatically with a bounded backoff; a second manual run costs nothing and
+   writes nothing in inspect mode.
+3. **Check the endpoint is not suspended.** Neon scales compute to zero and can
+   suspend an idle endpoint; the first connection after suspension can take
+   longer than the probe allows. In the Neon dashboard: Rabet_dev → Settings →
+   check the compute is not suspended, and consider raising the
+   "Scale to zero" delay or enabling "Always-on" for the development branch.
+4. **Check Neon's IP allow list is not restricting the endpoint.** If the
+   project restricts which addresses may connect, GitHub-hosted runner IP
+   ranges change constantly, so an allow list that permits the VPS can exclude
+   the runner. In the Neon dashboard: Rabet_dev → Settings → IP Allow — an
+   empty allow list means no restriction.
+5. **Do not widen anything production to fix this.** The fix lives on the Neon
+   side (the allow list or the compute settings) or in the secret, never in a
+   looser runner. The pinned identity (§15.5) stays exactly as committed.
+6. **Fallback: run the wizard from a machine that can reach the endpoint.** Any
+   laptop with Node.js 22 and the repository cloned runs the same inspection
+   and migration through `npm run db:setup:dev` (§1–§3), and it is the same
+   committed chain on main. Nothing about the database changes because the
+   machine did.
+
+Whatever the cause, the database is untouched by a failed run: the runner
+connects read-only first and only writes after every gate passes, and a
+migration that fails mid-apply rolls back inside its transaction and is
+re-inspected from the database rather than from an exit code.

@@ -28,6 +28,7 @@ database setup wizard.
 | **Phase 03A** | Data model & recursive button architecture **design** | ✅ **Merged into `main`** ([PR #4](https://github.com/geekammar/Rabet/pull/4), `269cf7c`) — documentation only |
 | **Phase 03B** | Database schema, migrations & DB test foundation | 🟦 **Implemented on `feat/phase-03b-database-foundation`** — 14 tables, 2 migrations, server-only client, 53 DB tests, all green; no production database created or contacted |
 | **Phase 03B-B** | Neon development setup wizard (`npm run db:setup:dev`) | 🟦 **Implemented on `feat/neon-dev-setup-wizard`** — one command for the first VPS and every replacement VPS; verified against real PostgreSQL, including the reconnect scenario; no Neon account or production database contacted |
+| **Phase 03B-C** | Neon DEV GitHub Actions migration runner (`workflow_dispatch` only) | 🟦 **Implemented on `feat/phase-03b-neon-dev-actions-migrations`** ([PR #8](https://github.com/geekammar/Rabet/pull/8)) — manual inspect/migrate workflow on GitHub-hosted runners for the VPS that cannot reach Neon on TCP 5432; reuses the wizard's tested logic, pins the dev endpoint and database, 46 runner tests green (36 gate/flow + 10 real-PostgreSQL); **not merged** and the real `NEON_DEV_DATABASE_URL` secret is **not configured** |
 | Phase 04 | Settings & localization | Not started |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
