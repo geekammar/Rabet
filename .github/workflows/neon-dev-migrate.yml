@@ -1,0 +1,150 @@
+# Neon DEV database — manual inspect / migrate
+#
+# A safe, manual workflow that runs the Rabet *development* migrations on
+# GitHub-hosted runners instead of the development VPS (which cannot reach the
+# Neon endpoint on TCP 5432).
+#
+# It is triggered ONLY by hand. There is no `push`, `pull_request` or
+# `schedule` trigger, so a merge to main — or any other event — never migrates
+# anything. Development migrations stay a deliberate, reviewed action.
+#
+# Two modes, chosen in the "Run workflow" dropdown:
+#
+#   inspect (default) — strictly read-only: connectivity, PostgreSQL version,
+#                       target identity, tables, Drizzle migration history,
+#                       pending migrations and schema drift. No DDL.
+#   migrate           — revalidates the target, refuses drift and a mismatched
+#                       history, applies the committed chain through the
+#                       existing `npm run db:migrate`, then re-inspects the
+#                       database and validates the result instead of trusting
+#                       the exit code. Requires typing MIGRATE_RABET_DEV.
+#
+# Safety properties, enforced in the workflow and re-checked in code by
+# scripts/neon-dev-actions.mjs:
+#
+#   - main only. `workflow_dispatch` runs from the default branch, and the
+#     script additionally requires GITHUB_REF=refs/heads/main and
+#     GITHUB_EVENT_NAME=workflow_dispatch.
+#   - the Rabet DEV database only. The endpoint host and the database name are
+#     pinned to the committed development identity; a pooled endpoint, another
+#     project or a production endpoint is refused before any connection opens.
+#   - no automatic runs, no Vercel build migration, no `drizzle-kit push`.
+#   - the connection string is read from the NEON_DEV_DATABASE_URL secret in
+#     the environment only — never a workflow input, never a command-line
+#     argument — and is never printed.
+#   - minimum permissions: this workflow needs `contents: read` and nothing
+#     else. No deployment, no package or id-token scope.
+#
+# The existing CI workflow (.github/workflows/ci.yml) and its isolated
+# PostgreSQL service container are untouched.
+
+name: Neon DEV database
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "inspect = read-only report (default). migrate = apply pending development migrations."
+        type: choice
+        options:
+          - inspect
+          - migrate
+        default: inspect
+        required: true
+      confirm:
+        description: "Required only for migrate mode — type MIGRATE_RABET_DEV exactly."
+        type: string
+        default: ""
+        required: false
+      # NEON_DEV_DATABASE_URL is read from this GitHub Environment when set.
+      # Prefer the environment (a private-repository plan feature; free on
+      # public repositories) so the secret is scoped and can carry protection
+      # rules. On a plan without environments, leave this blank and store the
+      # secret as a repository Actions secret instead — the runtime gates are
+      # identical either way. See docs/NEON_DEV_SETUP.md §16.
+      environment:
+        description: "GitHub Environment holding the secret (default neon-dev; blank = repository secret)."
+        type: string
+        default: neon-dev
+        required: false
+
+# One development-migration run at a time. A queued run waits for the running
+# one instead of cancelling it, so an in-flight migration is never interrupted
+# mid-transaction.
+concurrency:
+  group: neon-dev-migrate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  neon-dev:
+    name: ${{ inputs.mode == 'migrate' && 'Migrate' || 'Inspect' }} the Rabet DEV database
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fail early, before any database contact, when the manual request is not
+      # valid. This gate sees no secret: mode and confirm are workflow inputs,
+      # not credentials, and validating them here means a wrong confirmation
+      # never even materializes the connection string.
+      - name: Validate the requested mode and confirmation
+        env:
+          RABET_MODE: ${{ inputs.mode }}
+          RABET_CONFIRM: ${{ inputs.confirm }}
+        run: |
+          node - <<'NODE'
+            const mode = process.env.RABET_MODE ?? "";
+            const confirm = process.env.RABET_CONFIRM ?? "";
+            const expected = "MIGRATE_RABET_DEV";
+
+            if (mode !== "inspect" && mode !== "migrate") {
+              console.error(
+                `Refusing to run: unknown mode "${mode}". ` +
+                  "Use \"inspect\" (read-only) or \"migrate\".",
+              );
+              process.exit(1);
+            }
+
+            if (mode === "migrate" && confirm !== expected) {
+              console.error(
+                "Refusing to run: migrate mode requires the confirmation phrase " +
+                  `${expected} in the "confirm" input. Re-run with mode inspect ` +
+                  "for a read-only report, or type the phrase exactly.",
+              );
+              process.exit(1);
+            }
+
+            console.log(`Requested mode: ${mode}.`);
+          NODE
+
+      # The runner. NEON_DEV_DATABASE_URL is passed through the environment and
+      # is never echoed; the script redacts every line it prints.
+      - name: ${{ inputs.mode == 'migrate' && 'Migrate' || 'Inspect' }} the development database
+        env:
+          NEON_DEV_DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
+          NEON_DEV_MODE: ${{ inputs.mode }}
+          NEON_DEV_MIGRATE_CONFIRM: ${{ inputs.confirm }}
+        run: node scripts/neon-dev-actions.mjs
+
+      - name: Report what this workflow is for
+        run: |
+          echo "Neon DEV database — manual workflow on GitHub-hosted runners."
+          echo "  mode:              ${{ inputs.mode }}"
+          echo "  secret:            NEON_DEV_DATABASE_URL (${{ inputs.environment == '' && 'repository Actions secret' || format('{0} environment secret', inputs.environment) }})"
+          echo "  connection:        DIRECT / unpooled, TLS required, DEV host pinned"
+          echo "  migrate command:   npm run db:migrate (never drizzle-kit push)"
+          echo "No production database was contacted. CI's isolated PostgreSQL job is unaffected."
