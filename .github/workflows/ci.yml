@@ -192,7 +192,7 @@ jobs:
       # `--check` preflight from a third, and a database with one new pending
       # migration. No Neon account or credential is involved; the fixtures are
       # fake endpoints and the cluster is destroyed with the job.
-      - name: Database integration tests (schema suites + wizard: first setup, replacement VPS, pending migration)
+      - name: "Database integration tests — schema suites plus wizard first setup, replacement VPS and pending migration"
         env:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
         run: npx vitest run tests/db
