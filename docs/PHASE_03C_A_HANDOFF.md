@@ -224,6 +224,80 @@ node scripts/db-test-postgres.mjs stop
 Then pick up §7 in order: watch CI, reconcile the handoff narrative if the owner
 wants it in `PROGRESS.md`, open the PR, and stop for review.
 
+---
+
+## 10. Phase 03C-A2 — Verification, security review and delivery
+
+The delivery slice. **No implementation, test or schema file was changed**; the
+working tree A1 left was verified as-is. A2 re-ran every check from a clean
+state on disposable PostgreSQL only, finalized the documentation, and opened the
+pull request. Real Neon and Production were never contacted.
+
+### Re-verification (all re-run by A2, disposable cluster only)
+
+| Command | Result |
+| --- | --- |
+| `npm run lint` | ✅ exit 0, no warnings |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm run test` (no cluster) | ✅ **239 passed / 130 skipped**, 24 files — DB suites skip cleanly |
+| `npm run test:db` | ✅ disposable cluster → `tests/db` → cluster deleted: **11 files, 136/136 passed** |
+| Full suite with a designated cluster (`npm run test`) | ✅ **369/369 passed, 24 files, 0 skipped** |
+| `npm run build` with `DATABASE_URL` **unset** | ✅ exit 0; scan of `.next/static` and `.next/server/app` finds no `neondatabase`, `drizzle-orm`, `server-only` or `DATABASE_URL` reference |
+| `npm run db:migrate` + `npm run db:check` on a throwaway database | ✅ "migrations applied successfully!" / **"Everything's fine 🐶🔥"** — no drift |
+| Secret scan of the full branch diff | ✅ only synthetic test fixtures and documentation; no credentials, no `.env*` |
+
+### Code review outcome
+
+The full diff (`main...HEAD`, 16 files, +3424/−35) was re-read against
+`docs/DATA_MODEL.md`. No defects were found; nothing was edited. The business
+rules confirmed in §4 cover every item the phase requires: explicit settings
+initialization, singleton behaviour, safe partial updates, the currency
+allowlist, the default-language "exists **and** is enabled" constraint (§12.5),
+language activation/deactivation with the `DEFAULT_LANGUAGE_REQUIRED` guard,
+translation persistence across disabling, template/translation upsert
+uniqueness, the English-first fallback chain with explicit `missing` results,
+and idempotency at every write site.
+
+### Security review outcome
+
+- **Server-only confirmed** — `server-only` is imported by all five modules in
+  `src/lib/data/`, and the post-build scan proves none of the layer reaches a
+  client bundle.
+- **No credentials in browsers** — no connection string, `DATABASE_URL` or
+  driver module appears in `.next/static`.
+- **No public write API** — no route was added or changed; the only existing
+  API surface (`/api/admin`) already calls `requireAdmin()` at its boundary, as
+  does the dashboard layout. The barrel documents that every future admin
+  mutation must do the same (ADR-010).
+- **No interactive transaction** — `db.transaction()` appears only in a test
+  asserting it *throws* on the neon-http driver; no data-layer path uses it or
+  `db.batch([...])`.
+- **No automatic writes** — no module-level query and no seed execution; the
+  build succeeds with `DATABASE_URL` unset, and no business row is ever
+  inserted by importing the layer.
+- **Authentication intact** — login and the dashboard routes build and run
+  unchanged; the auth suite passes.
+- **No new roles, tenants, payments or checkout** — no schema change (verified
+  by `drizzle-kit check`), no new dependency, no version bump.
+
+### Corrections made by A2
+
+Only documentation-accuracy fixes, no code:
+
+- `.github/workflows/ci.yml` — the `db` job's closing report now lists the
+  Phase 03C-A suites (`settings`, `languages`, `templates`) it actually runs;
+- `README.md` — the status block and the project-structure listing now point at
+  this handoff document alongside the Phase 03B one;
+- this section.
+
+### Delivery
+
+One pull request targeting `main` was created from this branch (see the PR link
+in the final report). **It is not merged** — it waits on product-owner approval,
+including the two open owner decisions of §7 item 4 (the currency choice and the
+Phase 04 template-key list). Phase 04 does not start until it is approved and
+merged.
+
 **Guardrails that still apply.** Never `git reset --hard`, `git clean -fd` or
 `checkout -- .` on this branch; never run `drizzle-kit push`; never migrate or
 seed against anything but a disposable or explicitly designated development

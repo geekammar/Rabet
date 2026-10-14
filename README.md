@@ -18,7 +18,8 @@ Rabet connects a Telegram bot — where customers browse an arbitrarily deep cat
 > all** — the MVP has no checkout, no orders and no invoices; an inquiry is a
 > conversation, not a purchase (ADR-013). The app is **not** production-secure
 > until later phases land. See [docs/PROGRESS.md](./docs/PROGRESS.md),
-> [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) and
+> [docs/DATA_MODEL.md](./docs/DATA_MODEL.md),
+> [docs/PHASE_03C_A_HANDOFF.md](./docs/PHASE_03C_A_HANDOFF.md) and
 > [docs/PHASE_03B_HANDOFF.md](./docs/PHASE_03B_HANDOFF.md).
 ---
 
@@ -48,6 +49,7 @@ rabet/
 │   ├── ARCHITECTURE.md
 │   ├── DATA_MODEL.md
 │   ├── PROGRESS.md
+│   ├── PHASE_03C_A_HANDOFF.md
 │   └── PHASE_03B_HANDOFF.md
 ├── drizzle/               # Generated, reviewed SQL migrations (the source of truth)
 │   ├── 0000_initial_schema.sql

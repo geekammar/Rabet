@@ -206,6 +206,7 @@ jobs:
           echo "  - npm run db:check    (schema/migration drift gate)"
           echo "  - vitest tests/db:"
           echo "      schema suites: client, migration-chain, catalog, actions, inquiry"
+          echo "      data layer:    settings, languages, templates (Phase 03C-A)"
           echo "      wizard SQL:    read-only inspection, migration-history hashes"
           echo "      wizard flows:  first setup, replacement-VPS reconnect,"
           echo "                     read-only --check, one pending migration"
