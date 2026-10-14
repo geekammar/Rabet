@@ -4,19 +4,22 @@ A lightweight **Telegram digital-product catalog** with a mobile-first admin das
 
 Rabet connects a Telegram bot — where customers browse an arbitrarily deep catalog, interact with configurable product buttons, and open **inquiries** to the seller — to a clean dashboard where a single merchant manages the catalog, configures the button trees, and replies to customers.
 
-> **Status:** Phase 03B — Database schema, migrations and the integration test
-> foundation **implemented** on `feat/phase-03b-database-foundation`.
-> Phases 01 and 02 (UI shell and admin authentication) are merged into `main`.
-> Phase 03B implements the approved Phase 03A data model as real Drizzle schema,
-> two reviewed SQL migrations, a server-only Neon HTTP client and a 53-test
-> PostgreSQL integration suite — fourteen tables across seven domains, with both
-> recursive trees, the inquiry snapshots and Telegram deduplication enforced by
-> triggers and indexes in the database. **No** production database has been
-> created or contacted, and **no** payment processing exists at all — the MVP has
-> no checkout, no orders and no invoices; an inquiry is a conversation, not a
-> purchase (ADR-013). The app is **not** production-secure until later phases
-> land. See [docs/PROGRESS.md](./docs/PROGRESS.md),
-> [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) and
+> **Status:** Phase 03C-A — the server-only **settings & localization data access
+> layer** implemented on `feat/phase-03c-settings-data-access`. Phases 01, 02,
+> 03A, 03B, 03B-B and 03B-C are merged into `main`: the Phase 03 schema
+> foundation (PR #6), the Neon development setup wizard (PR #7) and the Neon DEV
+> GitHub Actions migration runner (PR #8) are all on `main`, and the dedicated
+> Neon development database has the full migration chain applied and inspected.
+> Phase 03C-A adds the typed data-access layer for `bot_setting`, `language`,
+> `message_template` and `message_translation` — the functions the Phase 04
+> settings and bot-content forms will call, with their business rules proven
+> against real PostgreSQL — but **no dashboard UI yet**. **No** production
+> database has been created or contacted, and **no payment processing exists at
+> all** — the MVP has no checkout, no orders and no invoices; an inquiry is a
+> conversation, not a purchase (ADR-013). The app is **not** production-secure
+> until later phases land. See [docs/PROGRESS.md](./docs/PROGRESS.md),
+> [docs/DATA_MODEL.md](./docs/DATA_MODEL.md),
+> [docs/PHASE_03C_A_HANDOFF.md](./docs/PHASE_03C_A_HANDOFF.md) and
 > [docs/PHASE_03B_HANDOFF.md](./docs/PHASE_03B_HANDOFF.md).
 ---
 
@@ -46,6 +49,7 @@ rabet/
 │   ├── ARCHITECTURE.md
 │   ├── DATA_MODEL.md
 │   ├── PROGRESS.md
+│   ├── PHASE_03C_A_HANDOFF.md
 │   └── PHASE_03B_HANDOFF.md
 ├── drizzle/               # Generated, reviewed SQL migrations (the source of truth)
 │   ├── 0000_initial_schema.sql
@@ -89,6 +93,12 @@ rabet/
 │   │   └── schema/         # 14 tables in 7 domains + barrel index
 │   ├── lib/
 │   │   ├── auth/           # admin-config, credentials, session, redirect, schema, cache
+│   │   ├── data/           # Server-only data access layer (Phase 03C-A)
+│   │   │   ├── errors.ts        # typed errors + SQLSTATE mapping + safe messages
+│   │   │   ├── languages.ts     # language CRUD, enable/disable, default resolution
+│   │   │   ├── settings.ts      # bot_setting singleton: read/init/update
+│   │   │   ├── templates.ts     # message templates, translations, fallback chain
+│   │   │   └── index.ts         # barrel — the public surface; server-only
 │   │   ├── navigation.ts   # Single source of truth for dashboard nav
 │   │   └── utils.ts        # cn() class helper
 │   ├── types/              # Auth.js type augmentation (role claim)
@@ -200,6 +210,51 @@ financial entity exists anywhere** (ADR-013).
 | `scripts/db-test-postgres.mjs` | Disposable PostgreSQL cluster for local DB tests |
 | `scripts/setup-neon-dev.mjs` | The Neon development setup wizard (`npm run db:setup:dev`) |
 | `scripts/neon-dev-actions.mjs` | The GitHub Actions development-migration runner (`npm run db:dev:actions`) |
+
+### The data access layer (Phase 03C-A)
+
+`src/lib/data/` is the server-only data access layer over four of the fourteen
+tables: `bot_setting`, `language`, `message_template` and `message_translation`.
+It is the surface the Phase 04 settings and bot-content forms will call, and the
+pattern the catalog, button and conversation layers of later phases will follow.
+
+- **Every module imports `server-only`**, so none of it can reach a client
+  bundle. A Client Component must never import from `@/lib/data`; a Server
+  Component, Server Action or Route Handler imports the barrel.
+- **Every function takes the database client as its first argument** —
+  `readSettings(getDb())` in production, an injected PostgreSQL client in tests.
+  There is no module-level client creation and no module-level query, so
+  importing the layer never requires `DATABASE_URL` and a build cannot fail
+  because a database is unconfigured.
+- **No generic repository framework** — each function is one query with a
+  documented purpose; what is shared is the error vocabulary, not plumbing.
+- **Typed errors, safe messages.** Every failure is a `RabetDataError` with a
+  stable `code`; raw driver errors are mapped by SQLSTATE and their text (which
+  can carry the failed SQL and parameters) is never surfaced —
+  `toSafeErrorMessage()` is the funnel that guarantees it.
+- **Atomicity without interactive transactions.** Every write is a single
+  statement idempotent at its own site (`ON CONFLICT …`), which is what the
+  neon-http driver's constraint calls for (ADR-015). No Phase 03C-A path needs
+  `db.batch([...])`; the first path that genuinely does will use it.
+
+**Security boundary.** The layer performs no authorization check itself — by
+design, there is exactly one administrator and one trust decision, and it
+belongs to the caller. **Every future Admin Server Action and Route Handler that
+calls into `src/lib/data/` must call `requireAdmin()` (`src/lib/auth/session.ts`)
+at its entry boundary** (ADR-010). This phase exposes no unauthenticated
+database-writing endpoint and adds none.
+
+**The initialization contract.** No business data is seeded, automatically or
+otherwise. Settings come into existence through one explicit flow: create the
+default language (`ensureLanguage({ code: "en", …, isEnabled: true })`), then
+initialize settings with the owner's explicit values
+(`initializeSettings({ defaultLanguageCode, currency, displayName })`).
+Re-running either step is a safe no-op; initializing over an existing row is a
+`SETTINGS_ALREADY_INITIALIZED` error, never a silent overwrite; and which
+currency the seller uses is an owner decision — `SAR` is a documented
+recommendation, not a default. The full contract, including the interrupted-setup
+and duplication rules, is in
+[docs/PROGRESS.md](./docs/PROGRESS.md) ("The initialization contract").
 
 ### Generating migrations
 
@@ -333,8 +388,11 @@ Development follows this fixed feature order.
 | **Phase 01** | Project foundation & UI shell | **Merged** |
 | **Phase 02** | Admin authentication | **Merged** (PR #3, `5e3bc7e`) — manual device checks and rate limiting remain open |
 | **Phase 03A** | Data model & recursive button architecture **design** | **Merged** (PR #4, `269cf7c`) — documentation only |
-| **Phase 03B** | Database schema, migrations & DB test foundation | **Implemented on `feat/phase-03b-database-foundation`** — schema + 2 migrations + client + 53 DB tests; awaiting product-owner review |
-| Phase 04 | Settings & localization | Not started |
+| **Phase 03B** | Database schema, migrations & DB test foundation | **Merged** (PR #6) — schema + 2 migrations + client + 53 DB tests |
+| **Phase 03B-B** | Neon development setup wizard | **Merged** (PR #7) |
+| **Phase 03B-C** | Neon DEV GitHub Actions migration runner | **Merged** (PR #8) — a real DEV migration and a final read-only inspection have run |
+| **Phase 03C-A** | Server-only settings & localization data access | **Implemented on `feat/phase-03c-settings-data-access`** — data-access layer for 4 tables + the initialization contract + 94 new tests; awaiting product-owner review |
+| Phase 04 | Settings & localization **UI** | Not started — consumes the Phase 03C-A APIs |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
 | Phase 07 | Customer journey, inquiries & messaging | Not started |
