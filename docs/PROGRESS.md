@@ -1,21 +1,23 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 03B — Database schema, migrations & DB test foundation (implemented, in review)**
+Current phase: **Phase 03C-A — Server-only settings & localization data access (implemented, in review)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 [DATA_MODEL.md](./DATA_MODEL.md) for the approved database design,
-[PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md) for the implementation status,
-test results and the production migration runbook,
+[PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md) for the database foundation's
+implementation status, test results and the production migration runbook,
 [NEON_DEV_SETUP.md](./NEON_DEV_SETUP.md) for the one-command development
 database setup wizard.
 
 > This file tracks the **Phase 02B** authentication pass, the **Phase 03A**
-> data-model design pass and the **Phase 03B** database implementation. Phases
-> 01 and 02 are merged into `main`; Phase 03A is merged into `main`;
-> Phase 03B is on `feat/phase-03b-database-foundation`, awaiting product-owner
-> review. Its follow-up — the Neon development setup wizard (Phase 03B-B) — is
-> on `feat/neon-dev-setup-wizard`, also awaiting review.
+> data-model design pass, the **Phase 03B** database implementation and the
+> **Phase 03C-A** data-access layer. Phases 01, 02, 03A, 03B, 03B-B and 03B-C
+> are all merged into `main`: the Phase 03 schema foundation (PR #6), the Neon
+> development setup wizard (PR #7) and the Neon DEV GitHub Actions migration
+> runner (PR #8) are on `main` and the dedicated Neon development database has
+> the full chain applied and inspected. Phase 03C-A is on
+> `feat/phase-03c-settings-data-access`, awaiting product-owner review.
 
 ---
 
@@ -26,10 +28,11 @@ database setup wizard.
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
 | **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #5](https://github.com/geekammar/Rabet/pull/5), `f6a7738`) — code complete and Production-ready; the **manual interactive device checks and the durable rate limiter remain open** (see below), so Phase 02 is not marked *fully accepted* |
 | **Phase 03A** | Data model & recursive button architecture **design** | ✅ **Merged into `main`** ([PR #4](https://github.com/geekammar/Rabet/pull/4), `269cf7c`) — documentation only |
-| **Phase 03B** | Database schema, migrations & DB test foundation | 🟦 **Implemented on `feat/phase-03b-database-foundation`** — 14 tables, 2 migrations, server-only client, 53 DB tests, all green; no production database created or contacted |
-| **Phase 03B-B** | Neon development setup wizard (`npm run db:setup:dev`) | 🟦 **Implemented on `feat/neon-dev-setup-wizard`** — one command for the first VPS and every replacement VPS; verified against real PostgreSQL, including the reconnect scenario; no Neon account or production database contacted |
-| **Phase 03B-C** | Neon DEV GitHub Actions migration runner (`workflow_dispatch` only) | 🟦 **Implemented on `feat/phase-03b-neon-dev-actions-migrations`** ([PR #8](https://github.com/geekammar/Rabet/pull/8)) — manual inspect/migrate workflow on GitHub-hosted runners for the VPS that cannot reach Neon on TCP 5432; reuses the wizard's tested logic, pins the dev endpoint and database, 46 runner tests green (36 gate/flow + 10 real-PostgreSQL); **not merged** and the real `NEON_DEV_DATABASE_URL` secret is **not configured** |
-| Phase 04 | Settings & localization | Not started |
+| **Phase 03B** | Database schema, migrations & DB test foundation | ✅ **Merged into `main`** ([PR #6](https://github.com/geekammar/Rabet/pull/6)) — 14 tables, 2 migrations, server-only client, 53 DB tests; the dedicated Neon development database has the chain applied and inspected |
+| **Phase 03B-B** | Neon development setup wizard (`npm run db:setup:dev`) | ✅ **Merged into `main`** ([PR #7](https://github.com/geekammar/Rabet/pull/7)) — one command for the first VPS and every replacement VPS; verified against real PostgreSQL, including the reconnect scenario |
+| **Phase 03B-C** | Neon DEV GitHub Actions migration runner (`workflow_dispatch` only) | ✅ **Merged into `main`** ([PR #8](https://github.com/geekammar/Rabet/pull/8)) — manual inspect/migrate workflow on GitHub-hosted runners; a real DEV migration and a final read-only inspection have run successfully |
+| **Phase 03C-A** | Server-only settings & localization data access | 🟦 **Implemented on `feat/phase-03c-settings-data-access`** — the typed data-access layer for `bot_setting`, `language`, `message_template` and `message_translation`, with the explicit initialization contract and 94 new tests; no dashboard UI yet |
+| Phase 04 | Settings & localization **UI** | Not started — will consume the Phase 03C-A APIs (see "Exact prerequisites for Phase 04" below) |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
 | Phase 07 | Customer journey, inquiries & messaging | Not started |
@@ -251,6 +254,166 @@ details in [PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md); this is the summary.
 - **No payment, order or invoice entity** anywhere (ADR-013).
 - No version bump and no deployment.
 
+## What was done in Phase 03C-A
+
+The first slice of the write-path layer: a small, typed, **server-only** data
+access layer for the four configuration and content tables — `bot_setting`,
+`language`, `message_template`, `message_translation`. No dashboard UI, no
+Telegram handlers, no catalog or inquiry operations; just the functions Phase 04
+will call, with their rules proven against real PostgreSQL.
+
+### Delivered
+
+`src/lib/data/` — five modules, each importing `server-only`, each function
+taking the Drizzle client as an injectable parameter (production passes
+`getDb()`, tests pass a real PostgreSQL client):
+
+| Module | Surface |
+| --- | --- |
+| `errors.ts` | `RabetDataError` with a closed `DataErrorCode` set; `mapDatabaseError()` maps PostgreSQL by SQLSTATE class (walking Drizzle's `DrizzleQueryError` wrapper to the driver error underneath); `invalidInput()` converts Zod failures; `toSafeErrorMessage()` collapses *anything* unknown into one fixed, credential-free sentence. No raw driver error — whose message can carry the failed SQL and parameters — is ever surfaced. |
+| `settings.ts` | `readSettings`, `isConfigured`, `requireSettings`, `initializeSettings`, `updateSettings`; the `CURRENCIES` allowlist mirrored from the schema's `CHECK`; Zod schemas for both paths. |
+| `languages.ts` | `listLanguages`, `listEnabledLanguages`, `readLanguage`, `requireLanguage`, `ensureLanguage` (the prerequisite helper), `setLanguageEnabled`, `resolveDefaultLanguage`, `requireDefaultLanguage`. |
+| `templates.ts` | `readTemplate`, `requireTemplate`, `listTemplates`, `readTranslations`, `createTemplate`, `updateTemplate`, `saveTranslation`, and `resolveMessageText` — the DATA_MODEL.md §7 fallback chain returning an explicit `missing` result rather than a fabricated string. |
+| `index.ts` | The barrel and the layer's contract: server-only, one injected client, no generic repository, typed errors, and the requirement that every future Admin Server Action and Route Handler call `requireAdmin()` at its entry boundary (ADR-010). |
+
+### Business rules implemented (and tested)
+
+- **The singleton.** `bot_setting.id = 1` is enforced by the primary key *and*
+  `CHECK (id = 1)`; initialization inserts exactly that row.
+- **Explicit initialization.** Display name, currency and default language code
+  have **no** defaults in code or schema — nothing invents a business currency
+  or a bot name on the owner's behalf. `askForLanguage` and `supportCategory`
+  carry only non-business defaults (a boolean and an empty array).
+- **Duplicate initialization is an error**, not a silent update:
+  `SETTINGS_ALREADY_INITIALIZED`, and the existing row is left byte-identical.
+- **The default-language relationship.** Initialization and update both require
+  a language row that **exists and is enabled** (`LANGUAGE_NOT_FOUND` /
+  `LANGUAGE_NOT_ENABLED`) — the rule a `CHECK` cannot express (DATA_MODEL.md
+  §12.5).
+- **English is the primary/default language; Arabic is optional and RTL.**
+  `text_direction` is validated in code and constrained in the database.
+- **Disabling a language preserves its translations** — nothing is deleted;
+  `listEnabledLanguages` simply stops offering it.
+- **The active default language cannot be disabled** without first choosing
+  another valid default: `DEFAULT_LANGUAGE_REQUIRED`, and the row stays enabled.
+- **One row per template per language** — upsert on the unique index
+  `message_translation_template_language_idx`; repeated saves replace the body.
+- **Stable template keys.** Lowercase snake_case, validated before any query;
+  a key is never renamed, and re-creating a key never clobbers its content.
+- **The 4096-character cap** on message bodies is enforced by Zod before any
+  query *and* by the database's own `CHECK`.
+- **The fallback chain resolves in order** — requested language, then the
+  configured default, then an explicit `missing` result with a reason
+  (`template_missing` / `no_default_language` / `translation_missing`). No
+  business content is ever fabricated.
+- **Idempotency everywhere.** Every write is a single statement idempotent at
+  its own site (`ON CONFLICT DO NOTHING` / `DO UPDATE`), so no path needs an
+  interactive transaction and none uses one (ADR-015).
+
+### Verification (all on the feature branch, disposable PostgreSQL only)
+
+| Command | Result |
+| --- | --- |
+| `npm run lint` | ✅ exit 0, no warnings |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm run build` | ✅ exit 0 — with `DATABASE_URL` **unset**; no data-layer or database module reaches any client bundle (scan of `.next/static`) |
+| `npm run test` (cluster designated) | ✅ **369 tests passed**, 24 files, 0 skipped |
+| `npm run test` (no cluster) | ✅ the DB suites skip cleanly and never fail |
+| `npm run test:db` | ✅ disposable cluster → `tests/db` → cluster deleted |
+| `npx drizzle-kit check` | ✅ "Everything's fine" — no schema/migration drift (no schema or migration file was touched) |
+
+### New test coverage (94 tests)
+
+| File | Tests | Covers |
+| --- | --- | --- |
+| `src/lib/data/__tests__/errors.test.ts` | 17 | every SQLSTATE class maps to the right code; the wrapped `DrizzleQueryError` path; the original error survives on `cause`; connection strings and passwords never reach a safe message |
+| `src/lib/data/__tests__/validation.test.ts` | 17 | the Zod schemas: currency allowlist, display name, language code and direction, template key shape and length, the 4096-character body cap, and that initialization requires its identity values |
+| `src/lib/data/__tests__/driver-contract.test.ts` | 2 | the neon-http client exposes `db.batch()` and the integration client does not — the honest boundary on what the DB suites can exercise |
+| `tests/db/settings.test.ts` | 18 | empty state; explicit initialization; duplicate initialization; the singleton and currency `CHECK`s as real SQL; default-language validation; partial updates; idempotent repeats |
+| `tests/db/languages.test.ts` | 17 | registration and idempotent re-runs; listing enabled vs all; enabling/disabling; translations survive disabling; `DEFAULT_LANGUAGE_REQUIRED`; the direction `CHECK` as real SQL |
+| `tests/db/templates.test.ts` | 23 | template CRUD with stable keys; translation upsert; the one-row-per-language index and the 4096 `CHECK` as real SQL; every branch of the fallback chain |
+
+### The initialization contract (replaces the open seed-data decision)
+
+Phase 03B left "seed migration vs dashboard-first flow" as an open decision
+(its §14 item 4). Phase 03C-A resolves it in favour of an **explicit, code-level
+contract** — no seed migration, no automatic write to any database, and a future
+Phase 04 onboarding form that calls the approved flow. The contract:
+
+1. **Language prerequisites first.** A `language` row for the default language —
+   `en`, enabled — must exist before settings can be initialized. It is created
+   by `ensureLanguage({ code: "en", label: "English", textDirection: "ltr",
+   isEnabled: true })`, which is idempotent and **never overwrites** an existing
+   row, so re-running setup after the seller has edited anything changes
+   nothing. Arabic, when the seller wants it, is `ensureLanguage({ code: "ar",
+   label: "العربية", textDirection: "rtl" })` plus
+   `setLanguageEnabled({ code: "ar", isEnabled: true })`.
+2. **Values the owner must provide explicitly:** `displayName`, `currency` (one
+   of `SAR`/`USD`/`AED`/`EGP`) and `defaultLanguageCode`. `askForLanguage`,
+   `supportCategory` and `supportReplyTime` are optional and start from neutral
+   defaults.
+3. **When settings already exist:** `initializeSettings` throws
+   `SETTINGS_ALREADY_INITIALIZED` and changes nothing. The owner edits the
+   existing row through `updateSettings` instead.
+4. **When setup is interrupted:** nothing to repair. Each step is independently
+   idempotent — the language insert and the settings insert can both be retried
+   in any order, and a partial state is simply continued, not rolled back or
+   duplicated.
+5. **How duplication is prevented:** the settings singleton's primary key plus
+   `CHECK (id = 1)` at the database level, `ON CONFLICT DO NOTHING` at the
+   application level, and the typed error that reports the conflict.
+6. **What is still not decided:** which currency the seller uses. `SAR` is the
+   documented *recommendation* awaiting owner confirmation (DATA_MODEL.md
+   §19.6); the layer accepts any allowlisted member and inserts nothing on its
+   own. No template keys are created either — Phase 04 decides which strings the
+   bot needs and calls `createTemplate` for each.
+
+**No data was seeded into `Rabet_dev` or any other database by this phase.**
+The contract is code and documentation; the first invocation is a Phase 04 owner
+action.
+
+### What Phase 03C-A deliberately did not do
+
+- **No UI** — the dashboard `/settings` and `/bot-content` routes are unchanged
+  and still render their existing placeholders; no route queries the database at
+  render or build time.
+- **No new tables, no schema change, no migration** — `src/db/schema/` and
+  `drizzle/` are untouched (verified by `drizzle-kit check`).
+- **No catalog, product, inquiry, customer or Telegram write paths** — later
+  phases; the data-access pattern this phase establishes is the one they will
+  follow.
+- **No payment functionality** anywhere (ADR-013).
+- **No new npm dependency** — existing Drizzle and Zod only.
+- **No `db.batch([...])` call** — no path here needs several writes to commit
+  together; each write is one idempotent statement. The batch API is verified at
+  the driver level only (`driver-contract.test.ts`), which is documented as
+  such. The first path that genuinely needs atomicity will use it.
+- No version bump and no deployment.
+
+### Exact prerequisites for Phase 04
+
+Phase 04 (the settings & localization **UI**) can safely consume, with no further
+backend work:
+
+- `isConfigured(getDb())` to decide between the onboarding form and the settings
+  editor on `/settings`;
+- `ensureLanguage` → `initializeSettings` for the onboarding form, and
+  `updateSettings` for every subsequent edit;
+- `listLanguages` / `listEnabledLanguages` for the language tabs and toggles, and
+  `setLanguageEnabled` with its `DEFAULT_LANGUAGE_REQUIRED` error surfaced as a
+  form message;
+- `createTemplate` / `updateTemplate` / `readTranslations` /
+  `saveTranslation` for the `/bot-content` template editor, with
+  `readTranslations` giving one round trip per open template;
+- `resolveMessageText` for any future preview surface — it never fabricates a
+  string, so the UI must render the `missing` case honestly;
+- `RabetDataError.code` for field-level form messaging, and
+  `toSafeErrorMessage()` as the single funnel for anything unexpected.
+
+The one hard rule for Phase 04: **every Server Action and Route Handler that
+calls into this layer must call `requireAdmin()` first** (ADR-010). The layer
+performs no authorization itself, by design.
+
 ## What is done in Phase 01
 
 ### Foundation
@@ -406,9 +569,11 @@ outstanding sessions at once. See ADR-009.
 
 Per the current scope, the following are **absent by design**:
 
-- Database **write-path layer** (repository functions over `db.batch([...])`) —
-  the schema, migrations and client from Phase 03B are ready for it; the next
-  phase after the DB foundation is merged.
+- Database **write-path layer for the catalog, buttons, customers and
+  conversations** — Phase 03C-A delivered it for settings, languages and message
+  templates; the remaining tables get their own layers in Phases 05–09.
+- Dashboard UI for settings and bot content — Phase 04; the data-access APIs it
+  will call are in place (see "Exact prerequisites for Phase 04" above).
 - Telegram API calls or webhooks (grammY) — Phase 06.
 - **Any payment, checkout, order or invoice functionality** — deferred, not started
   (ADR-013). The MVP is a catalog with seller inquiries; nothing is wired up and no
@@ -426,7 +591,9 @@ Per the current scope, the following are **absent by design**:
   which appears once the manifest, icons and HTTPS criteria are met. No fake
   install affordances exist.
 - Dark-mode toggle (token sets exist; the toggle is deferred).
-- Localization / RTL (dashboard is English only; Arabic bot content is Phase 04).
+- Localization / RTL for the dashboard (the dashboard is English only; Arabic
+  *bot content* is data the dashboard edits — the `languages` and `templates`
+  APIs from Phase 03C-A are the surface, and the bot-side rendering is Phase 07).
 
 No fake data, no fake statistics and no non-functional buttons are present.
 

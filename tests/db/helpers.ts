@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import postgres, { type PostgresError } from "postgres";
+import postgres from "postgres";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
+import type { Database } from "@/db/client";
 import * as schema from "@/db/schema";
 
 /**
@@ -153,14 +154,47 @@ export async function createTestDatabase(label = "db"): Promise<TestDatabase> {
   };
 }
 
-/** Extracts the SQLSTATE code from a Postgres error, for assertions. */
+/**
+ * Extracts the SQLSTATE code from a caught database error.
+ *
+ * `drizzle-orm`'s shared session rethrows the driver error as a
+ * `DrizzleQueryError` with the original on `cause`, so the code is looked up one
+ * level deep as well as directly.
+ */
 export function pgErrorCode(error: unknown): string | undefined {
-  return (error as PostgresError | undefined)?.code;
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
+    if ("code" in current) {
+      const code = (current as Record<string, unknown>).code;
+
+      if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+    }
+
+    current = "cause" in current ? (current as { cause?: unknown }).cause : undefined;
+  }
+
+  return undefined;
 }
 
-/** Extracts the message from a Postgres error, for assertions. */
+/**
+ * Extracts the message from a caught database error.
+ *
+ * Returns the message of the deepest error in the `cause` chain — the driver
+ * error itself, which names the constraint — rather than Drizzle's
+ * `DrizzleQueryError` wrapper, whose message is the failed SQL and parameters.
+ */
 export function pgErrorMessage(error: unknown): string | undefined {
-  return (error as PostgresError | undefined)?.message;
+  let current: unknown = error;
+  let message: string | undefined;
+
+  for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
+    if (current instanceof Error) message = current.message;
+
+    current = "cause" in current ? (current as { cause?: unknown }).cause : undefined;
+  }
+
+  return message;
 }
 
 /**
@@ -197,3 +231,18 @@ export function uniqueLanguageCode(): string {
 }
 
 export { schema };
+
+/**
+ * Casts a `postgres-js` Drizzle client to the application's `Database` type.
+ *
+ * The data-access layer in `src/lib/data` is typed against the app's neon-http
+ * client (`Database` from `src/db/client.ts`); these suites drive real
+ * PostgreSQL through `drizzle-orm/postgres-js`. Both are Drizzle query builders
+ * that emit the same parameterized SQL, and the only differences are the driver
+ * session and the neon-only `batch()` method, which the data layer does not use
+ * (see `src/lib/data/__tests__/driver-contract.test.ts`). The cast is therefore
+ * a test seam, not a behaviour change.
+ */
+export function asAppDb(pgDb: PostgresJsDatabase<typeof schema>): Database {
+  return pgDb as unknown as Database;
+}

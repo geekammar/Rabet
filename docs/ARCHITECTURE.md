@@ -89,6 +89,63 @@ module never requires `DATABASE_URL` — a production build and every current
 route work without a database configured, and the first real query fails loudly
 with a credential-free message instead (ADR-015).
 
+### 3.2 Data access layer structure (Phase 03C-A)
+
+```
+src/lib/data/
+├── errors.ts        # RabetDataError + SQLSTATE mapping + safe message funnel
+├── languages.ts     # language registry, enable/disable, default resolution
+├── settings.ts      # bot_setting singleton — read / initialize / update
+├── templates.ts     # message templates, translations, fallback resolution
+└── index.ts         # the barrel — the public surface; imports `server-only`
+```
+
+The layer between the schema and the application. Four of the fourteen tables are
+covered (`bot_setting`, `language`, `message_template`, `message_translation`);
+the catalog, button, customer and conversation tables get their own layers in
+Phases 05–09.
+
+The rules the layer keeps, and which make it safe to build UI on:
+
+- **Server-only by construction.** Every module imports `server-only`, so no
+  data-access code and no database credential can reach a client bundle (verified
+  by a scan of `.next/static` after a production build). A Client Component must
+  never import `@/lib/data`.
+- **One injected client.** Every function takes the Drizzle client as its first
+  argument — `readSettings(getDb())` in production, a real PostgreSQL client in
+  the integration tests. There is no module-level client creation and no
+  module-level query, so importing the barrel never requires `DATABASE_URL`
+  (ADR-015) and no dashboard route queries the database by merely rendering.
+- **No generic repository framework.** Each function is one query with a
+  documented purpose; what is shared is the error vocabulary and the validation
+  schemas, not plumbing.
+- **Typed errors with safe messages.** Every failure is a `RabetDataError`
+  carrying a stable `DataErrorCode`. `mapDatabaseError()` converts a raw driver
+  error by SQLSTATE class — walking Drizzle's `DrizzleQueryError` wrapper to the
+  driver error, whose own message carries the failed SQL and parameters — and
+  `toSafeErrorMessage()` collapses anything unknown into one fixed sentence that
+  can hold no credential, identifier or SQL.
+- **Atomicity without interactive transactions.** Every write is a single
+  statement idempotent at its own site (`ON CONFLICT DO NOTHING` / `DO UPDATE`),
+  which is exactly the shape ADR-015 calls for. No Phase 03C-A path needs
+  `db.batch([...])`; the first write path that genuinely requires several
+  statements to commit together will use it, and never `db.transaction()`.
+
+**The authorization boundary.** The layer performs no authorization check itself,
+and this is deliberate: Rabet has exactly one administrator and one trust
+decision, which belongs at the call site. **Every Admin Server Action and Route
+Handler that calls into `src/lib/data/` must call `requireAdmin()**
+(`src/lib/auth/session.ts`) at its entry boundary** (ADR-010). The layer's
+`index.ts` records the rule where a new caller will read it. This phase exposes
+no unauthenticated database-writing endpoint and adds no route.
+
+**The initialization contract.** No business data is seeded. The `bot_setting`
+singleton comes into existence through one explicit, idempotent flow —
+`ensureLanguage` for the default language, then `initializeSettings` with the
+owner's explicit values — and re-running any step is a safe no-op. The full
+contract is documented in [PROGRESS.md](./PROGRESS.md), "The initialization
+contract".
+
 ## 3. Codebase structure
 
 The App Router is the structural backbone. Colocation keeps related files
@@ -608,6 +665,16 @@ DATA_MODEL.md §15.3.
     disposable cluster (`npm run test:db`); in CI, an isolated PostgreSQL
     service container designated by `RABET_TEST_PG_URL`. The suites skip cleanly
     when no cluster is designated, so `npm run test` stays green everywhere.
+  - `src/lib/data/__tests__/` (Phase 03C-A) covers the data-access layer's
+    error vocabulary (every SQLSTATE class, Drizzle's wrapped-error shape, and
+    that connection strings and passwords never reach a safe message), its Zod
+    validation schemas, and the driver contract that documents what the DB
+    suites cannot exercise (`db.batch()` exists on the neon-http client and not
+    on the integration client). The layer's own integration suites live in
+    `tests/db/{settings,languages,templates}.test.ts` and assert the real SQL
+    behaviour of the singleton, the currency allowlist, the text-direction rule,
+    the one-row-per-template-per-language index and the 4096-character cap —
+    plus every branch of the fallback chain.
   - Lint, typecheck, build **and** test are the CI gate as of Phase 02; Phase
     03B added a second CI job that applies the migrations to a service
     container, checks schema/migration consistency and runs the DB suites.
