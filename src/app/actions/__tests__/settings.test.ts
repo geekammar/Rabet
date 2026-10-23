@@ -205,6 +205,60 @@ describe("initializeStoreSettings Action — Explicit Values & Validation (Requi
     expect(mockInitializeSettings).not.toHaveBeenCalled();
   });
 
+  it("rejects malformed categories JSON during initialization with zero DB writes (including language creation)", async () => {
+    const res = await initializeStoreSettings(
+      undefined,
+      formData({
+        displayName: "My Store",
+        currency: "USD",
+        defaultLanguageCode: "en",
+        supportCategoriesJson: "{bad",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("malformed JSON");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
+    expect(mockInitializeSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-array categories JSON during initialization with zero DB writes", async () => {
+    const res = await initializeStoreSettings(
+      undefined,
+      formData({
+        displayName: "My Store",
+        currency: "USD",
+        defaultLanguageCode: "en",
+        supportCategoriesJson: "{}",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("expected an array");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
+    expect(mockInitializeSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects categories JSON containing non-string items during initialization with zero DB writes", async () => {
+    const res = await initializeStoreSettings(
+      undefined,
+      formData({
+        displayName: "My Store",
+        currency: "USD",
+        defaultLanguageCode: "en",
+        supportCategoriesJson: "[12]",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("every category must be a string");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
+    expect(mockInitializeSettings).not.toHaveBeenCalled();
+  });
+
   it("ensures English language exists and initializes settings with valid values", async () => {
     mockEnsureLanguage.mockResolvedValueOnce({
       id: "lang-en-id",
@@ -484,6 +538,114 @@ describe("updateStoreSettings Action — Updates, Checkboxes & Missing Fields", 
       expect.objectContaining({
         displayName: "Updated Store",
         supportCategory: [],
+      }),
+    );
+  });
+
+  it("rejects malformed categories JSON and preserves unrelated settings without writing to DB", async () => {
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Valid New Name",
+        supportCategoriesJson: "{bad",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("malformed JSON");
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-array categories JSON without modifying database", async () => {
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Valid New Name",
+        supportCategoriesJson: '{"key": "value"}',
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("expected an array");
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects categories array containing non-string or empty items without modifying database", async () => {
+    const resNumber = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Valid New Name",
+        supportCategoriesJson: "[12]",
+      }),
+    );
+
+    expect(resNumber.success).toBe(false);
+    expect(resNumber.code).toBe("INVALID_INPUT");
+    expect(resNumber.message).toContain("every category must be a string");
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+
+    const resEmpty = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Valid New Name",
+        supportCategoriesJson: '["   "]',
+      }),
+    );
+
+    expect(resEmpty.success).toBe(false);
+    expect(resEmpty.code).toBe("INVALID_INPUT");
+    expect(resEmpty.message).toContain("cannot be empty");
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+
+    const resLong = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Valid New Name",
+        supportCategoriesJson: JSON.stringify(["x".repeat(61)]),
+      }),
+    );
+
+    expect(resLong.success).toBe(false);
+    expect(resLong.code).toBe("INVALID_INPUT");
+    expect(resLong.message).toContain("cannot exceed 60 characters");
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects conflicting support category representations between fields and JSON", async () => {
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Valid New Name",
+        supportCategory: "Returns",
+        supportCategoriesJson: JSON.stringify(["Warranty"]),
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("Conflicting support categories representations");
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it("saves valid categories successfully when both representations match", async () => {
+    mockUpdateSettings.mockResolvedValueOnce({ id: 1 });
+
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Valid New Name",
+        supportCategory: ["Returns", "Warranty"],
+        supportCategoriesJson: JSON.stringify(["Returns", "Warranty"]),
+      }),
+    );
+
+    expect(res.success).toBe(true);
+    expect(mockUpdateSettings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        supportCategory: ["Returns", "Warranty"],
       }),
     );
   });

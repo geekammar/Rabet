@@ -108,7 +108,7 @@ export function LanguageSettingsCard({
                 variant="outline"
                 size="sm"
                 disabled
-                className="min-h-10 text-xs opacity-60"
+                className="min-h-11 px-4 text-xs opacity-60"
               >
                 Enabled (Required)
               </Button>
@@ -153,7 +153,7 @@ export function LanguageSettingsCard({
                 size="sm"
                 disabled={isPending || isArDefault}
                 onClick={() => handleToggle("ar", arLang?.isEnabled ?? false)}
-                className="min-h-10 text-xs"
+                className="min-h-11 px-4 text-xs"
               >
                 {isPending ? (
                   <Loader2 className="size-3 animate-spin mr-1" />

@@ -145,7 +145,7 @@ export function SupportCategoryManager({
                 type="button"
                 disabled={alreadyAdded}
                 onClick={() => handleAddCategory(suggestion)}
-                className={`inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                className={`inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3.5 py-2 text-xs font-medium transition-colors ${
                   alreadyAdded
                     ? "cursor-default border-muted bg-muted/40 text-muted-foreground opacity-60"
                     : "border-border bg-background text-foreground hover:bg-muted hover:border-foreground/30 active:scale-98"
@@ -207,7 +207,7 @@ export function SupportCategoryManager({
             return (
               <li
                 key={index}
-                className="flex items-center justify-between gap-2 rounded-lg border bg-card p-2 sm:px-3"
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-lg border bg-card p-2 sm:px-3"
               >
                 {isEditing ? (
                   <div className="flex flex-1 items-center gap-2">
@@ -225,13 +225,13 @@ export function SupportCategoryManager({
                       }}
                       autoFocus
                       maxLength={60}
-                      className="flex min-h-10 flex-1 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none focus-visible:border-ring focus-visible:ring-2"
+                      className="flex min-h-11 flex-1 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none focus-visible:border-ring focus-visible:ring-2"
                     />
                     <Button
                       type="button"
                       size="sm"
                       variant="default"
-                      className="min-h-10 min-w-10 px-2"
+                      className="min-h-11 min-w-11 px-2.5"
                       onClick={() => handleSaveEdit(index)}
                       title="Save"
                     >
@@ -241,7 +241,7 @@ export function SupportCategoryManager({
                       type="button"
                       size="sm"
                       variant="ghost"
-                      className="min-h-10 min-w-10 px-2"
+                      className="min-h-11 min-w-11 px-2.5"
                       onClick={() => setEditingIndex(null)}
                       title="Cancel"
                     >
@@ -250,17 +250,17 @@ export function SupportCategoryManager({
                   </div>
                 ) : (
                   <>
-                    <span className="flex-1 truncate text-sm font-medium text-foreground">
+                    <span className="flex-1 break-words text-sm font-medium text-foreground">
                       {cat}
                     </span>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
                       <Button
                         type="button"
                         size="icon"
                         variant="ghost"
                         disabled={index === 0}
                         onClick={() => handleMoveUp(index)}
-                        className="size-9 rounded-md text-muted-foreground hover:text-foreground disabled:opacity-30"
+                        className="size-11 min-h-11 min-w-11 rounded-md text-muted-foreground hover:text-foreground disabled:opacity-30"
                         title="Move Up"
                         aria-label={`Move ${cat} up`}
                       >
@@ -272,7 +272,7 @@ export function SupportCategoryManager({
                         variant="ghost"
                         disabled={index === categories.length - 1}
                         onClick={() => handleMoveDown(index)}
-                        className="size-9 rounded-md text-muted-foreground hover:text-foreground disabled:opacity-30"
+                        className="size-11 min-h-11 min-w-11 rounded-md text-muted-foreground hover:text-foreground disabled:opacity-30"
                         title="Move Down"
                         aria-label={`Move ${cat} down`}
                       >
@@ -283,7 +283,7 @@ export function SupportCategoryManager({
                         size="icon"
                         variant="ghost"
                         onClick={() => handleStartEdit(index)}
-                        className="size-9 rounded-md text-muted-foreground hover:text-foreground"
+                        className="size-11 min-h-11 min-w-11 rounded-md text-muted-foreground hover:text-foreground"
                         title="Edit"
                         aria-label={`Edit ${cat}`}
                       >
@@ -294,7 +294,7 @@ export function SupportCategoryManager({
                         size="icon"
                         variant="ghost"
                         onClick={() => handleRemoveCategory(index)}
-                        className="size-9 rounded-md text-destructive hover:bg-destructive/10"
+                        className="size-11 min-h-11 min-w-11 rounded-md text-destructive hover:bg-destructive/10"
                         title="Delete"
                         aria-label={`Delete ${cat}`}
                       >

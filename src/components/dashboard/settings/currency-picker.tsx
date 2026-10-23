@@ -115,7 +115,7 @@ export function CurrencyPicker({
 
           <label
             htmlFor="confirm-currency-change"
-            className="flex items-center gap-2.5 cursor-pointer pt-1 text-xs font-medium text-foreground"
+            className="flex min-h-11 items-center gap-2.5 cursor-pointer py-1 text-xs font-medium text-foreground"
           >
             <input
               id="confirm-currency-change"

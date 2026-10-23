@@ -76,58 +76,136 @@ function parseBooleanField(
   return false;
 }
 
+type ParseCategoriesResult =
+  | { kind: "omitted" }
+  | { kind: "valid"; categories: string[] }
+  | { kind: "invalid"; message: string };
+
 /**
- * Helper to extract support categories from FormData.
+ * Helper to extract and strictly validate support categories from FormData.
  *
  * Contract:
- * - If neither 'supportCategory' nor 'supportCategoriesJson' is present, returns `undefined`
+ * - If neither 'supportCategory' nor 'supportCategoriesJson' is present, returns { kind: "omitted" }
  *   (preserving existing categories in a partial update).
- * - If fields are present, extracts non-blank trimmed strings.
- * - If explicitly submitted with no items or empty JSON '[]', returns `[]`.
+ * - If explicitly submitted with empty JSON '[]', returns { kind: "valid", categories: [] }
+ *   (clearing categories).
+ * - If valid strings are submitted, trims and validates each (min 1, max 60 chars), returning { kind: "valid", categories }.
+ * - If malformed JSON, wrong structure, non-string items, empty strings, strings > 60 chars,
+ *   or conflicting values between representations are detected, returns { kind: "invalid", message }.
  */
-function parseSupportCategories(
-  formData: FormData,
-): string[] | undefined {
-  const hasCategoryFields =
-    formData.has("supportCategory") || formData.has("supportCategoriesJson");
+function parseSupportCategories(formData: FormData): ParseCategoriesResult {
+  const hasJson = formData.has("supportCategoriesJson");
+  const hasFields = formData.has("supportCategory");
 
-  if (!hasCategoryFields) {
-    return undefined;
+  if (!hasJson && !hasFields) {
+    return { kind: "omitted" };
   }
 
-  const allValues = formData.getAll("supportCategory");
-  const categories: string[] = [];
-
-  for (const val of allValues) {
-    if (typeof val === "string") {
-      const trimmed = val.trim();
-      if (trimmed.length > 0 && !categories.includes(trimmed)) {
-        categories.push(trimmed);
-      }
+  let jsonCategories: string[] | undefined;
+  if (hasJson) {
+    const rawJsonEntry = formData.get("supportCategoriesJson");
+    if (typeof rawJsonEntry !== "string") {
+      return {
+        kind: "invalid",
+        message: "Invalid support categories format: expected string data.",
+      };
     }
-  }
-
-  // Also check single 'supportCategoriesJson' if submitted via JSON state
-  const rawJson = formData.get("supportCategoriesJson");
-  if (typeof rawJson === "string" && rawJson.trim().length > 0) {
+    const rawJson = rawJsonEntry.trim();
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(rawJson);
-      if (Array.isArray(parsed)) {
-        for (const item of parsed) {
-          if (typeof item === "string") {
-            const trimmed = item.trim();
-            if (trimmed.length > 0 && !categories.includes(trimmed)) {
-              categories.push(trimmed);
-            }
-          }
-        }
-      }
+      parsed = JSON.parse(rawJson);
     } catch {
-      // Ignore JSON parse error, already captured by individual fields
+      return {
+        kind: "invalid",
+        message: "Invalid support categories format: malformed JSON.",
+      };
     }
+
+    if (!Array.isArray(parsed)) {
+      return {
+        kind: "invalid",
+        message: "Invalid support categories format: expected an array.",
+      };
+    }
+
+    const items: string[] = [];
+    for (const item of parsed) {
+      if (typeof item !== "string") {
+        return {
+          kind: "invalid",
+          message: "Invalid support category: every category must be a string.",
+        };
+      }
+      const trimmed = item.trim();
+      if (trimmed.length === 0) {
+        return {
+          kind: "invalid",
+          message: "Support category cannot be empty.",
+        };
+      }
+      if (trimmed.length > 60) {
+        return {
+          kind: "invalid",
+          message: "Support category cannot exceed 60 characters.",
+        };
+      }
+      if (!items.includes(trimmed)) {
+        items.push(trimmed);
+      }
+    }
+    jsonCategories = items;
   }
 
-  return categories;
+  let fieldCategories: string[] | undefined;
+  if (hasFields) {
+    const rawFieldEntries = formData.getAll("supportCategory");
+    const items: string[] = [];
+    for (const entry of rawFieldEntries) {
+      if (typeof entry !== "string") {
+        return {
+          kind: "invalid",
+          message: "Invalid support category input.",
+        };
+      }
+      const trimmed = entry.trim();
+      if (trimmed.length === 0) {
+        return {
+          kind: "invalid",
+          message: "Support category cannot be empty.",
+        };
+      }
+      if (trimmed.length > 60) {
+        return {
+          kind: "invalid",
+          message: "Support category cannot exceed 60 characters.",
+        };
+      }
+      if (!items.includes(trimmed)) {
+        items.push(trimmed);
+      }
+    }
+    fieldCategories = items;
+  }
+
+  // If both representations are provided, check for conflicts
+  if (jsonCategories !== undefined && fieldCategories !== undefined) {
+    if (
+      jsonCategories.length !== fieldCategories.length ||
+      !jsonCategories.every((v, i) => v === fieldCategories[i])
+    ) {
+      return {
+        kind: "invalid",
+        message: "Conflicting support categories representations submitted.",
+      };
+    }
+    return { kind: "valid", categories: jsonCategories };
+  }
+
+  if (jsonCategories !== undefined) {
+    return { kind: "valid", categories: jsonCategories };
+  }
+
+  return { kind: "valid", categories: fieldCategories! };
 }
 
 /**
@@ -216,19 +294,20 @@ export async function initializeStoreSettings(
   }
 
   const askForLanguage = parseBooleanField(formData, "askForLanguage") ?? true;
-  const supportCategory = parseSupportCategories(formData) ?? [];
-  for (const cat of supportCategory) {
-    if (cat.length > 60) {
-      return {
-        success: false,
-        code: "INVALID_INPUT",
-        message: "Support category cannot exceed 60 characters.",
-        errors: {
-          supportCategory: "Support category cannot exceed 60 characters.",
-        },
-      };
-    }
+
+  const categoriesResult = parseSupportCategories(formData);
+  if (categoriesResult.kind === "invalid") {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: categoriesResult.message,
+      errors: {
+        supportCategory: categoriesResult.message,
+      },
+    };
   }
+  const supportCategory =
+    categoriesResult.kind === "valid" ? categoriesResult.categories : [];
 
   const rawSupportReplyTime = formData.get("supportReplyTime")?.toString();
   const supportReplyTime =
@@ -384,22 +463,20 @@ export async function updateStoreSettings(
   // 4. Parse boolean askForLanguage (handles hidden "false" + checkbox "true", direct strings, or undefined if omitted)
   const askForLanguage = parseBooleanField(formData, "askForLanguage");
 
-  // 5. Parse support categories (undefined if omitted, [] if cleared, string[] if present)
-  const supportCategory = parseSupportCategories(formData);
-  if (supportCategory !== undefined) {
-    for (const cat of supportCategory) {
-      if (cat.length > 60) {
-        return {
-          success: false,
-          code: "INVALID_INPUT",
-          message: "Support category cannot exceed 60 characters.",
-          errors: {
-            supportCategory: "Support category cannot exceed 60 characters.",
-          },
-        };
-      }
-    }
+  // 5. Parse support categories (undefined if omitted, [] if cleared, string[] if present, error if invalid)
+  const categoriesResult = parseSupportCategories(formData);
+  if (categoriesResult.kind === "invalid") {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: categoriesResult.message,
+      errors: {
+        supportCategory: categoriesResult.message,
+      },
+    };
   }
+  const supportCategory =
+    categoriesResult.kind === "valid" ? categoriesResult.categories : undefined;
 
   // 6. Support reply time (undefined if omitted, null if blank, string if provided)
   let supportReplyTime: string | null | undefined;

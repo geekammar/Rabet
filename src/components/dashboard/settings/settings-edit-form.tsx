@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useRef } from "react";
+import { useActionState, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Save } from "lucide-react";
 
 import {
@@ -36,6 +36,11 @@ export function SettingsEditForm({
     SettingsActionResult,
     FormData
   >(updateStoreSettings, { success: false });
+
+  const [displayName, setDisplayName] = useState(settings.displayName);
+  const [supportReplyTime, setSupportReplyTime] = useState(
+    settings.supportReplyTime ?? ""
+  );
 
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -94,7 +99,8 @@ export function SettingsEditForm({
                 type="text"
                 required
                 maxLength={60}
-                defaultValue={settings.displayName}
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
                 placeholder="e.g. Acme Digital Goods"
                 className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
               />
@@ -190,7 +196,8 @@ export function SettingsEditForm({
                 name="supportReplyTime"
                 type="text"
                 maxLength={120}
-                defaultValue={settings.supportReplyTime ?? ""}
+                value={supportReplyTime}
+                onChange={(e) => setSupportReplyTime(e.target.value)}
                 placeholder="e.g. Typically replies within 24 hours"
                 className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
               />
