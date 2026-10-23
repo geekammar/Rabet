@@ -270,6 +270,63 @@ describe.skipIf(!shouldRun)("settings — updates", () => {
     expect(second.currency).toBe(first.currency);
     expect(second.defaultLanguageId).toBe(first.defaultLanguageId);
   });
+
+  it("persists askForLanguage false and toggles back to true", async () => {
+    const turnedFalse = await updateSettings(asAppDb(testDb!.db), {
+      askForLanguage: false,
+    });
+    expect(turnedFalse.askForLanguage).toBe(false);
+
+    const reloadedFalse = await readSettings(asAppDb(testDb!.db));
+    expect(reloadedFalse?.askForLanguage).toBe(false);
+
+    const turnedTrue = await updateSettings(asAppDb(testDb!.db), {
+      askForLanguage: true,
+    });
+    expect(turnedTrue.askForLanguage).toBe(true);
+
+    const reloadedTrue = await readSettings(asAppDb(testDb!.db));
+    expect(reloadedTrue?.askForLanguage).toBe(true);
+  });
+
+  it("rejects blank or whitespace-only displayName and preserves stored settings", async () => {
+    const before = await readSettings(asAppDb(testDb!.db));
+
+    await expect(
+      updateSettings(asAppDb(testDb!.db), { displayName: "" }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    await expect(
+      updateSettings(asAppDb(testDb!.db), { displayName: "    " }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    const after = await readSettings(asAppDb(testDb!.db));
+    expect(after?.displayName).toBe(before?.displayName);
+  });
+
+  it("explicitly clears supportCategory when empty array is provided and preserves when omitted", async () => {
+    // Set categories
+    await updateSettings(asAppDb(testDb!.db), {
+      supportCategory: ["Sales", "Billing"],
+    });
+    let current = await readSettings(asAppDb(testDb!.db));
+    expect(current?.supportCategory).toEqual(["Sales", "Billing"]);
+
+    // Update another field without supportCategory (omitted)
+    await updateSettings(asAppDb(testDb!.db), {
+      displayName: "Preserved Categories Store",
+    });
+    current = await readSettings(asAppDb(testDb!.db));
+    expect(current?.displayName).toBe("Preserved Categories Store");
+    expect(current?.supportCategory).toEqual(["Sales", "Billing"]);
+
+    // Explicitly clear categories
+    await updateSettings(asAppDb(testDb!.db), {
+      supportCategory: [],
+    });
+    current = await readSettings(asAppDb(testDb!.db));
+    expect(current?.supportCategory).toEqual([]);
+  });
 });
 
 describe.skipIf(!shouldRun)("settings — catalog price detection for currency safeguards", () => {

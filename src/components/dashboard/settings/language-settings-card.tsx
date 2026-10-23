@@ -60,8 +60,9 @@ export function LanguageSettingsCard({
           <CardTitle>Languages & Localization</CardTitle>
         </div>
         <CardDescription>
-          Configure bot languages. English is the primary default with automatic
-          fallback for missing translations. Arabic renders right-to-left (RTL).
+          Configure bot languages. English is initially selected. Missing
+          requested translations fall back to the configured default language.
+          Arabic renders right-to-left (RTL).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -98,8 +99,8 @@ export function LanguageSettingsCard({
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                Primary bot language. Required as the fallback foundation for all
-                messages.
+                Initially selected bot language. When set as default, serves as
+                the fallback for missing translations.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -175,9 +176,10 @@ export function LanguageSettingsCard({
               Fallback Behavior Note
             </span>
             <p>
-              If a customer interacts in Arabic and a specific bot message or product
-              translation has not been written yet, Rabet will automatically fall
-              back to the English version. No missing translations are ever fabricated.
+              English is initially selected as the default language. When a customer
+              interacts in another language and a requested translation has not been
+              written yet, Rabet falls back to the configured default language. If neither
+              translation exists, the result is explicitly missing — no content is fabricated.
             </p>
           </div>
         </div>

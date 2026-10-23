@@ -132,7 +132,7 @@ export function SettingsEditForm({
                 ))}
               </select>
               <p className="text-xs text-muted-foreground">
-                Must be an enabled language. Serves as the fallback for all bot copy.
+                Must be an enabled language. Serves as the fallback for missing translations when customers request another language.
               </p>
             </div>
           </CardContent>
@@ -149,6 +149,7 @@ export function SettingsEditForm({
           <CardContent className="space-y-6">
             {/* Ask for Language */}
             <div className="flex items-start gap-3 rounded-xl border p-4 bg-muted/20">
+              <input type="hidden" name="askForLanguage" value="false" />
               <input
                 id="ask-for-language"
                 name="askForLanguage"

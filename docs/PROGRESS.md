@@ -449,20 +449,24 @@ administrator interface backed by the approved Phase 03C-A data-access layer.
    - Does not rewrite product prices and leaves inquiry price snapshots intact.
 
 5. **Language Settings (`LanguageSettingsCard`)**:
-   - English (`en`, LTR) is the default and fallback foundation.
+   - English (`en`, LTR) is initially selected.
    - Arabic (`ar`, RTL) can be enabled or disabled on demand via `toggleLanguageAction`.
    - Prevents disabling the active default language (`DEFAULT_LANGUAGE_REQUIRED`).
    - Disabling a language preserves all existing translations.
-   - Explains the automatic fallback to English when translations are missing.
+   - Explains that missing requested translations fall back to the configured default language, and if neither translation exists, the result is explicitly missing.
 
 6. **Support Configuration (`SupportCategoryManager`)**:
    - Interactive mobile-first component for `bot_setting.support_category` (`text[]`).
    - Allows adding, editing, removing, and reordering categories.
    - Provides suggested example chips (*General Question*, *Product Support*) as clickable additions without silent database seeding.
-   - An empty category list remains valid.
+   - An empty category list remains valid and can be explicitly cleared.
 
-7. **Server Actions Security Boundary (`src/app/actions/settings.ts`)**:
-   - Every action asserts `await requireAdmin()` at entry before reading or writing data.
+7. **Server Actions Security Boundary & Form Contracts (`src/app/actions/settings.ts`)**:
+   - Every action asserts `await requireAdmin()` at entry before reading or writing data (ADR-010).
+   - Checkbox false persistence: uses a hidden input + checkbox contract parsed accurately so unchecked boxes persist `false` without clobbering partial updates.
+   - Blank store names: rejects empty or whitespace-only display names with validation errors, leaving stored settings unchanged.
+   - Explicit initialization values: requires `displayName`, `currency`, and `defaultLanguageCode` in the server request; fully validates all fields before any DB write; duplicate initialization preserves existing configuration.
+   - Neighboring form fields: distinguishes omitted fields (`undefined`) from explicitly cleared ones (such as empty categories `[]` or null reply times) during partial updates.
    - Uses `toSafeErrorMessage()` to collapse any unexpected driver error into a fixed safe string.
 
 ### Isolated Testing Requirements for Development & Preview Runtimes

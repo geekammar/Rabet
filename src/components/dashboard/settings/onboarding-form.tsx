@@ -127,7 +127,7 @@ export function OnboardingForm() {
                 <option value="ar">العربية (ar) — Right to Left</option>
               </select>
               <p className="text-xs text-muted-foreground">
-                English is the primary fallback foundation for all bot content and messages.
+                English is initially selected. Missing requested translations fall back to the configured default language. If neither translation exists, the result is explicitly missing.
               </p>
             </div>
           </CardContent>
@@ -149,6 +149,7 @@ export function OnboardingForm() {
           <CardContent className="space-y-6">
             {/* 4. Ask for language */}
             <div className="flex items-start gap-3 rounded-xl border p-4 bg-muted/20">
+              <input type="hidden" name="askForLanguage" value="false" />
               <input
                 id="ask-for-language"
                 name="askForLanguage"

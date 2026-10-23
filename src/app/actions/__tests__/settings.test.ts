@@ -60,41 +60,102 @@ function formData(entries: Record<string, string | string[]>): FormData {
   return fd;
 }
 
-describe("Settings Server Actions — authorization boundary", () => {
+describe("Settings Server Actions — authorization boundary (Requirement 7)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("rejects initializeStoreSettings when requireAdmin fails", async () => {
+  it("rejects initializeStoreSettings when requireAdmin fails, performing zero DB access", async () => {
     mockRequireAdmin.mockRejectedValueOnce(new Error("NEXT_REDIRECT"));
     await expect(
-      initializeStoreSettings(undefined, formData({ displayName: "Store" })),
+      initializeStoreSettings(
+        undefined,
+        formData({
+          displayName: "Store",
+          currency: "USD",
+          defaultLanguageCode: "en",
+        }),
+      ),
     ).rejects.toThrow("NEXT_REDIRECT");
+    expect(mockGetDb).not.toHaveBeenCalled();
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
     expect(mockInitializeSettings).not.toHaveBeenCalled();
   });
 
-  it("rejects updateStoreSettings when requireAdmin fails", async () => {
+  it("rejects updateStoreSettings when requireAdmin fails, performing zero DB access", async () => {
     mockRequireAdmin.mockRejectedValueOnce(new Error("NEXT_REDIRECT"));
     await expect(
       updateStoreSettings(undefined, formData({ displayName: "Updated" })),
     ).rejects.toThrow("NEXT_REDIRECT");
+    expect(mockGetDb).not.toHaveBeenCalled();
+    expect(mockRequireSettings).not.toHaveBeenCalled();
     expect(mockUpdateSettings).not.toHaveBeenCalled();
   });
 
-  it("rejects toggleLanguageAction when requireAdmin fails", async () => {
+  it("rejects toggleLanguageAction when requireAdmin fails, performing zero DB access", async () => {
     mockRequireAdmin.mockRejectedValueOnce(new Error("NEXT_REDIRECT"));
     await expect(toggleLanguageAction("ar", true)).rejects.toThrow("NEXT_REDIRECT");
+    expect(mockGetDb).not.toHaveBeenCalled();
     expect(mockSetLanguageEnabled).not.toHaveBeenCalled();
   });
 });
 
-describe("initializeStoreSettings Action", () => {
+describe("initializeStoreSettings Action — Explicit Values & Validation (Requirement 5 & 6)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockRequireAdmin.mockResolvedValue({ email: "admin@rabet.test", role: "admin" });
   });
 
-  it("rejects an invalid currency outside the allowlist", async () => {
+  it("rejects when displayName is missing, performing zero DB writes", async () => {
+    const res = await initializeStoreSettings(
+      undefined,
+      formData({
+        currency: "USD",
+        defaultLanguageCode: "en",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("required");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
+    expect(mockInitializeSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects when displayName is blank or whitespace-only, performing zero DB writes", async () => {
+    const res = await initializeStoreSettings(
+      undefined,
+      formData({
+        displayName: "   ",
+        currency: "USD",
+        defaultLanguageCode: "en",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toBe("Display name is required");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
+    expect(mockInitializeSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects when currency is missing, performing zero DB writes", async () => {
+    const res = await initializeStoreSettings(
+      undefined,
+      formData({
+        displayName: "My Store",
+        defaultLanguageCode: "en",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("required");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
+    expect(mockInitializeSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid currency outside the allowlist, performing zero DB writes", async () => {
     const res = await initializeStoreSettings(
       undefined,
       formData({
@@ -107,10 +168,44 @@ describe("initializeStoreSettings Action", () => {
     expect(res.success).toBe(false);
     expect(res.code).toBe("INVALID_INPUT");
     expect(res.message).toContain("Allowed options: SAR, USD, AED, EGP");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
     expect(mockInitializeSettings).not.toHaveBeenCalled();
   });
 
-  it("ensures English language exists and initializes settings with USD", async () => {
+  it("rejects when defaultLanguageCode is missing, performing zero DB writes", async () => {
+    const res = await initializeStoreSettings(
+      undefined,
+      formData({
+        displayName: "My Store",
+        currency: "USD",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("required");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
+    expect(mockInitializeSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unsupported default language code, performing zero DB writes", async () => {
+    const res = await initializeStoreSettings(
+      undefined,
+      formData({
+        displayName: "My Store",
+        currency: "USD",
+        defaultLanguageCode: "fr",
+      }),
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.code).toBe("INVALID_INPUT");
+    expect(res.message).toContain("Invalid or unsupported default language");
+    expect(mockEnsureLanguage).not.toHaveBeenCalled();
+    expect(mockInitializeSettings).not.toHaveBeenCalled();
+  });
+
+  it("ensures English language exists and initializes settings with valid values", async () => {
     mockEnsureLanguage.mockResolvedValueOnce({
       id: "lang-en-id",
       code: "en",
@@ -190,7 +285,7 @@ describe("initializeStoreSettings Action", () => {
     );
   });
 
-  it("safely handles duplicate initialization without crashing or leaking details", async () => {
+  it("safely handles duplicate initialization without crashing or leaking details (Requirement 6)", async () => {
     mockInitializeSettings.mockRejectedValueOnce(
       new RabetDataError(
         "SETTINGS_ALREADY_INITIALIZED",
@@ -223,6 +318,7 @@ describe("initializeStoreSettings Action", () => {
       formData({
         displayName: "Leak Test",
         currency: "USD",
+        defaultLanguageCode: "en",
       }),
     );
 
@@ -233,7 +329,7 @@ describe("initializeStoreSettings Action", () => {
   });
 });
 
-describe("updateStoreSettings Action — Currency Safeguards & Updates", () => {
+describe("updateStoreSettings Action — Updates, Checkboxes & Missing Fields", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockRequireAdmin.mockResolvedValue({ email: "admin@rabet.test", role: "admin" });
@@ -242,10 +338,157 @@ describe("updateStoreSettings Action — Currency Safeguards & Updates", () => {
       displayName: "Existing Store",
       currency: "USD",
       defaultLanguageId: "lang-en-id",
+      askForLanguage: true,
+      supportCategory: ["General Support"],
     });
   });
 
-  it("rejects currency change without confirmation when catalog prices exist", async () => {
+  it("persists false when checkbox is unchecked via hidden false input (Requirement 1: true -> false)", async () => {
+    mockUpdateSettings.mockResolvedValueOnce({ id: 1 });
+
+    // When an HTML checkbox is unchecked, only the hidden input value="false" is submitted
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Existing Store",
+        askForLanguage: "false",
+      }),
+    );
+
+    expect(res.success).toBe(true);
+    expect(mockUpdateSettings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ askForLanguage: false }),
+    );
+  });
+
+  it("persists true when checkbox is checked via hidden false + checkbox true (Requirement 2: false -> true)", async () => {
+    mockUpdateSettings.mockResolvedValueOnce({ id: 1 });
+
+    // When checked, the browser submits both the hidden input and the checkbox
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Existing Store",
+        askForLanguage: ["false", "true"],
+      }),
+    );
+
+    expect(res.success).toBe(true);
+    expect(mockUpdateSettings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ askForLanguage: true }),
+    );
+  });
+
+  it("preserves askForLanguage as undefined during a partial update where it is omitted", async () => {
+    mockUpdateSettings.mockResolvedValueOnce({ id: 1 });
+
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Only New Name",
+      }),
+    );
+
+    expect(res.success).toBe(true);
+    expect(mockUpdateSettings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        displayName: "Only New Name",
+        askForLanguage: undefined,
+      }),
+    );
+  });
+
+  it("rejects blank or whitespace-only displayName without modifying database (Requirement 4)", async () => {
+    const resEmpty = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "",
+      }),
+    );
+
+    expect(resEmpty.success).toBe(false);
+    expect(resEmpty.code).toBe("INVALID_INPUT");
+    expect(resEmpty.message).toBe("Display name is required");
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+
+    const resWhitespace = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "    ",
+      }),
+    );
+
+    expect(resWhitespace.success).toBe(false);
+    expect(resWhitespace.code).toBe("INVALID_INPUT");
+    expect(resWhitespace.message).toBe("Display name is required");
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it("allows omitting displayName during a partial update without wiping it (Requirement 3)", async () => {
+    mockUpdateSettings.mockResolvedValueOnce({ id: 1 });
+
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        supportReplyTime: "within 1 hour",
+      }),
+    );
+
+    expect(res.success).toBe(true);
+    expect(mockUpdateSettings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        displayName: undefined,
+        supportReplyTime: "within 1 hour",
+      }),
+    );
+  });
+
+  it("leaves support categories unchanged when omitted during a partial update (Requirement 3)", async () => {
+    mockUpdateSettings.mockResolvedValueOnce({ id: 1 });
+
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Updated Store",
+      }),
+    );
+
+    expect(res.success).toBe(true);
+    expect(mockUpdateSettings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        displayName: "Updated Store",
+        supportCategory: undefined,
+      }),
+    );
+  });
+
+  it("explicitly clears support categories when empty list is submitted (Requirement 3)", async () => {
+    mockUpdateSettings.mockResolvedValueOnce({ id: 1 });
+
+    const res = await updateStoreSettings(
+      undefined,
+      formData({
+        displayName: "Updated Store",
+        supportCategoriesJson: "[]",
+      }),
+    );
+
+    expect(res.success).toBe(true);
+    expect(mockUpdateSettings).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        displayName: "Updated Store",
+        supportCategory: [],
+      }),
+    );
+  });
+
+  it("rejects currency change without confirmation when catalog prices exist (Requirement 8)", async () => {
     mockHasCatalogPrices.mockResolvedValueOnce(true);
 
     const res = await updateStoreSettings(
@@ -306,28 +549,6 @@ describe("updateStoreSettings Action — Currency Safeguards & Updates", () => {
 
     expect(res.success).toBe(true);
     expect(mockUpdateSettings).toHaveBeenCalled();
-  });
-
-  it("updates support categories and reply time correctly", async () => {
-    mockUpdateSettings.mockResolvedValueOnce({ id: 1 });
-
-    const res = await updateStoreSettings(
-      undefined,
-      formData({
-        displayName: "Updated Store",
-        supportCategory: ["Sales Inquiry", "Technical Support"],
-        supportReplyTime: "Under 2 hours",
-      }),
-    );
-
-    expect(res.success).toBe(true);
-    expect(mockUpdateSettings).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        supportCategory: ["Sales Inquiry", "Technical Support"],
-        supportReplyTime: "Under 2 hours",
-      }),
-    );
   });
 });
 

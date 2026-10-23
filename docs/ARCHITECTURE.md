@@ -622,8 +622,9 @@ availability states (A: `DATABASE_URL` unset, B: DB unavailable/transient error,
 D: DB available and configured). USD is the approved initial form currency selection with strict safeguards
 against unintended price reinterpretation. When catalog products are present, changing store currency
 requires explicit confirmation. No currency conversion or price modification is performed. English is the
-primary default bot language with optional RTL Arabic enablement; disabling a language preserves its translations,
-and the active default cannot be disabled. Support categories are stored in `bot_setting.support_category` (`text[]`).
+initially selected bot language with optional RTL Arabic enablement; missing translations resolve through the
+configured default language (requested -> default -> explicitly missing), disabling a language preserves its
+translations, and the active default cannot be disabled. Support categories are stored in `bot_setting.support_category` (`text[]`).
 Bot Content message templates are reserved for Phase 04-B.
 
 **Rationale.**
