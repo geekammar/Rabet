@@ -1,10 +1,10 @@
 import "server-only";
 
-import { eq } from "drizzle-orm";
+import { eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Database } from "@/db/client";
-import { botSetting } from "@/db/schema";
+import { botSetting, product } from "@/db/schema";
 
 import {
   invalidInput,
@@ -302,4 +302,22 @@ export async function updateSettings(
     "Bot settings have not been initialized yet. Complete the initial setup " +
       "first.",
   );
+}
+
+/**
+ * True when the catalog contains at least one active product with a price.
+ *
+ * Used by the settings UI and actions to detect whether changing the store
+ * currency requires explicit confirmation, ensuring existing product prices
+ * are not silently reinterpreted in a new currency without the owner's consent
+ * (DATA_MODEL.md §19.6).
+ */
+export async function hasCatalogPrices(db: Database): Promise<boolean> {
+  const rows = await db
+    .select({ id: product.id })
+    .from(product)
+    .where(isNull(product.deletedAt))
+    .limit(1);
+
+  return rows.length > 0;
 }

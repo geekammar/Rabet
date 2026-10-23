@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { botSetting, language } from "@/db/schema";
+import { botSetting, category, language, product } from "@/db/schema";
 import {
   asAppDb,
   createTestDatabase,
@@ -11,6 +11,7 @@ import {
   type TestDatabase,
 } from "./helpers";
 import {
+  hasCatalogPrices,
   initializeSettings,
   isConfigured,
   readSettings,
@@ -268,5 +269,46 @@ describe.skipIf(!shouldRun)("settings — updates", () => {
     expect(second.displayName).toBe(first.displayName);
     expect(second.currency).toBe(first.currency);
     expect(second.defaultLanguageId).toBe(first.defaultLanguageId);
+  });
+});
+
+describe.skipIf(!shouldRun)("settings — catalog price detection for currency safeguards", () => {
+  it("detects when catalog contains active prices and when it is empty", async () => {
+    const db = asAppDb(testDb!.db);
+
+    // Initial state: no products exist
+    expect(await hasCatalogPrices(db)).toBe(false);
+
+    // Insert a category to satisfy foreign key
+    const [cat] = await db
+      .insert(category)
+      .values({
+        slug: "test-category",
+        isActive: true,
+      })
+      .returning();
+
+    // Insert a product with a displayed price
+    const [prod] = await db
+      .insert(product)
+      .values({
+        categoryId: cat.id,
+        slug: "test-product",
+        price: "49.99",
+        isActive: true,
+      })
+      .returning();
+
+    // Active product with price exists
+    expect(await hasCatalogPrices(db)).toBe(true);
+
+    // Soft delete the product
+    await db
+      .update(product)
+      .set({ deletedAt: new Date() })
+      .where(eq(product.id, prod.id));
+
+    // After soft-deletion, no active catalog prices exist
+    expect(await hasCatalogPrices(db)).toBe(false);
   });
 });

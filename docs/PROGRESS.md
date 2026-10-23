@@ -1,6 +1,6 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 03C-A — Server-only settings & localization data access (implemented, in review)**
+Current phase: **Phase 04-A — Store Settings & Onboarding UI (implemented, in review)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
@@ -16,8 +16,8 @@ database setup wizard.
 > are all merged into `main`: the Phase 03 schema foundation (PR #6), the Neon
 > development setup wizard (PR #7) and the Neon DEV GitHub Actions migration
 > runner (PR #8) are on `main` and the dedicated Neon development database has
-> the full chain applied and inspected. Phase 03C-A is on
-> `feat/phase-03c-settings-data-access`, awaiting product-owner review.
+> the full chain applied and inspected. Phase 03C-A was merged into `main` via PR #9.
+> Phase 04-A is on `feat/phase-04a-settings-ui`, awaiting product-owner review.
 
 ---
 
@@ -31,8 +31,9 @@ database setup wizard.
 | **Phase 03B** | Database schema, migrations & DB test foundation | ✅ **Merged into `main`** ([PR #6](https://github.com/geekammar/Rabet/pull/6)) — 14 tables, 2 migrations, server-only client, 53 DB tests; the dedicated Neon development database has the chain applied and inspected |
 | **Phase 03B-B** | Neon development setup wizard (`npm run db:setup:dev`) | ✅ **Merged into `main`** ([PR #7](https://github.com/geekammar/Rabet/pull/7)) — one command for the first VPS and every replacement VPS; verified against real PostgreSQL, including the reconnect scenario |
 | **Phase 03B-C** | Neon DEV GitHub Actions migration runner (`workflow_dispatch` only) | ✅ **Merged into `main`** ([PR #8](https://github.com/geekammar/Rabet/pull/8)) — manual inspect/migrate workflow on GitHub-hosted runners; a real DEV migration and a final read-only inspection have run successfully |
-| **Phase 03C-A** | Server-only settings & localization data access | 🟦 **Implemented on `feat/phase-03c-settings-data-access`** — the typed data-access layer for `bot_setting`, `language`, `message_template` and `message_translation`, with the explicit initialization contract and 94 new tests; no dashboard UI yet |
-| Phase 04 | Settings & localization **UI** | Not started — will consume the Phase 03C-A APIs (see "Exact prerequisites for Phase 04" below) |
+| **Phase 03C-A** | Server-only settings & localization data access | ✅ **Merged into `main`** ([PR #9](https://github.com/geekammar/Rabet/pull/9), `bead4ed`) — typed data-access layer for `bot_setting`, `language`, `message_template` and `message_translation`, with the explicit initialization contract |
+| **Phase 04-A** | Store Settings & Onboarding UI | 🟦 **Implemented on `feat/phase-04a-settings-ui`** — mobile-first Settings page, welcoming first-time onboarding, existing settings edit mode, USD default selection with currency safeguards, English default with RTL Arabic enablement, editable support categories, and clean database availability state handling (States A, B, C, D) |
+| Phase 04-B | Bot Content & message templates UI | Not started — reserved for the 7 canonical templates: `bot_welcome`, `support_welcome`, `support_received`, `inquiry_received`, `conversation_resolved`, `option_unavailable`, `empty_menu` |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
 | Phase 07 | Customer journey, inquiries & messaging | Not started |
@@ -413,6 +414,75 @@ backend work:
 The one hard rule for Phase 04: **every Server Action and Route Handler that
 calls into this layer must call `requireAdmin()` first** (ADR-010). The layer
 performs no authorization itself, by design.
+
+## What was done in Phase 04-A
+
+Phase 04-A replaces the `/settings` dashboard placeholder with a real, mobile-first
+administrator interface backed by the approved Phase 03C-A data-access layer.
+
+### Delivered
+
+1. **Settings Page with Four Database Availability States (`src/app/(dashboard)/settings/page.tsx`)**:
+   - **State A (`DATABASE_URL` not configured)**: Renders a clean "Database setup required"
+     administrator notice card without throwing or failing builds.
+   - **State B (DB unavailable / transient failure)**: Catches connection errors and renders
+     a safe, recoverable error state with a retry action and zero credential leakage.
+   - **State C (DB available, uninitialized)**: Renders the first-time store onboarding form.
+   - **State D (DB available, configured)**: Renders the editable store settings form and
+     the localization management card.
+
+2. **First-Time Store Onboarding (`OnboardingForm`)**:
+   - Welcoming first-time setup interface.
+   - Required fields: Store display name, display currency (pre-selecting **USD** with SAR, AED, EGP options), default bot language (English `en`).
+   - Optional fields: Ask customer for language prompt on launch, support categories, support reply-time description.
+   - Explicit initialization only via `initializeStoreSettings`: calls `ensureLanguage` for English, rejects duplicate initialization safely with `SETTINGS_ALREADY_INITIALIZED`, and never seeds fake business defaults.
+
+3. **Existing Settings Edit Mode (`SettingsEditForm`)**:
+   - Allows updating display name, display currency, default language, ask-for-language prompt, support categories, and reply-time description.
+   - Submits via `updateStoreSettings` Server Action with server-side validation and immediate revalidation.
+   - Preserves form state and provides clear success and error feedback.
+
+4. **Currency Change Safety (`CurrencyPicker`)**:
+   - USD is the approved initial selection.
+   - Explains clearly: *"Changing currency does not convert existing product prices."*
+   - When active catalog products are present (`hasCatalogPrices(db) === true`), changing currency requires explicit checkbox confirmation (`confirmCurrencyChange`).
+   - Does not rewrite product prices and leaves inquiry price snapshots intact.
+
+5. **Language Settings (`LanguageSettingsCard`)**:
+   - English (`en`, LTR) is the default and fallback foundation.
+   - Arabic (`ar`, RTL) can be enabled or disabled on demand via `toggleLanguageAction`.
+   - Prevents disabling the active default language (`DEFAULT_LANGUAGE_REQUIRED`).
+   - Disabling a language preserves all existing translations.
+   - Explains the automatic fallback to English when translations are missing.
+
+6. **Support Configuration (`SupportCategoryManager`)**:
+   - Interactive mobile-first component for `bot_setting.support_category` (`text[]`).
+   - Allows adding, editing, removing, and reordering categories.
+   - Provides suggested example chips (*General Question*, *Product Support*) as clickable additions without silent database seeding.
+   - An empty category list remains valid.
+
+7. **Server Actions Security Boundary (`src/app/actions/settings.ts`)**:
+   - Every action asserts `await requireAdmin()` at entry before reading or writing data.
+   - Uses `toSafeErrorMessage()` to collapse any unexpected driver error into a fixed safe string.
+
+### Isolated Testing Requirements for Development & Preview Runtimes
+
+- **Local VPS / Dev**: Run `npm run db:setup:dev` to connect and migrate an isolated Neon development branch (`Rabet_dev`).
+- **Preview Deployments**: Set `DATABASE_URL` in the Vercel project environment settings targeting an isolated branch/preview database.
+- **Production Safety**: No Production database was provisioned or connected during this phase.
+
+### Phase 04-B Message Template Plan (Reserved for 04-B)
+
+The `/bot-content` editor in Phase 04-B will manage the seven canonical message templates:
+1. `bot_welcome` — Main greeting when customer opens the bot
+2. `support_welcome` — Introduction displayed upon opening support
+3. `support_received` — Confirmation sent when customer submits a support inquiry
+4. `inquiry_received` — Confirmation sent when customer requests a product
+5. `conversation_resolved` — Message sent when seller resolves a conversation
+6. `option_unavailable` — Notice displayed if a selected option is disabled
+7. `empty_menu` — Fallback when a category or menu currently has no active items
+
+These templates remain unseeded and their editor will be implemented in Phase 04-B.
 
 ## What is done in Phase 01
 
