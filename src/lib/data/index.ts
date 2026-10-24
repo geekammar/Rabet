@@ -43,7 +43,9 @@ import "server-only";
 
 export * from "./actions";
 export * from "./catalog";
+export * from "./customer";
 export * from "./errors";
 export * from "./languages";
 export * from "./settings";
+export * from "./telegram";
 export * from "./templates";

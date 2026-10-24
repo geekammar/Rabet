@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:auth": "vitest run tests/auth.test.ts",
+    "test:telegram": "node scripts/db-test-postgres.mjs run -- npx vitest run tests/db/telegram-journey.test.ts tests/telegram-tokens.test.ts tests/telegram-transport.test.ts",
     "test:db": "node scripts/db-test-postgres.mjs run -- npx vitest run tests/db",
     "test:browser:bot-content": "node scripts/test-browser-acceptance.mjs",
     "test:browser:catalog": "node scripts/test-catalog-browser-acceptance.mjs",
