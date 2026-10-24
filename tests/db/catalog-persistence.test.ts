@@ -502,4 +502,160 @@ describe.skipIf(!shouldRun)("catalog persistence & integrity", () => {
     expect(prods[0].sortOrder).toBeLessThan(prods[1].sortOrder);
     expect(prods[1].sortOrder).toBeLessThan(prods[2].sortOrder);
   });
+
+  it("verifies category and product creation and subsequent editing under English default", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    // Create category with English default
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "en-default-cat",
+      translations: [{ languageId: defaultLangId, name: "EN Default Category" }],
+    });
+
+    const catAfterCreate = await readCatalogCategory(appDb, cat.categoryId);
+    expect(catAfterCreate?.translations.en?.name).toBe("EN Default Category");
+    expect(catAfterCreate?.translations.ar).toBeUndefined();
+
+    // Subsequent edit: add Arabic translation
+    await saveCatalogCategoryTranslation(appDb, {
+      categoryId: cat.categoryId,
+      languageId: arabicLangId,
+      name: "فئة بالإنجليزية أصلا",
+      description: "وصف عربي",
+    });
+
+    const catAfterEdit = await readCatalogCategory(appDb, cat.categoryId);
+    expect(catAfterEdit?.translations.en?.name).toBe("EN Default Category");
+    expect(catAfterEdit?.translations.ar?.name).toBe("فئة بالإنجليزية أصلا");
+    expect(catAfterEdit?.translations.ar?.description).toBe("وصف عربي");
+
+    // Create product with English default
+    const prod = await createCatalogProduct(appDb, {
+      categoryId: cat.categoryId,
+      slug: "en-default-prod",
+      price: "15.00",
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "EN Default Product",
+          description: "Desc",
+          details: "Details",
+        },
+      ],
+    });
+
+    const prodAfterCreate = await readCatalogProduct(appDb, prod.productId);
+    expect(prodAfterCreate?.translations.en?.name).toBe("EN Default Product");
+    expect(prodAfterCreate?.translations.ar).toBeUndefined();
+
+    // Subsequent edit: add Arabic translation
+    await saveCatalogProductTranslation(appDb, {
+      productId: prod.productId,
+      languageId: arabicLangId,
+      name: "منتج بالإنجليزية أصلا",
+      description: "وصف عربي",
+      details: "تفاصيل عربية",
+    });
+
+    const prodAfterEdit = await readCatalogProduct(appDb, prod.productId);
+    expect(prodAfterEdit?.translations.en?.name).toBe("EN Default Product");
+    expect(prodAfterEdit?.translations.ar?.name).toBe("منتج بالإنجليزية أصلا");
+    expect(prodAfterEdit?.translations.ar?.description).toBe("وصف عربي");
+  });
+
+  it("verifies category and product creation and subsequent editing under Arabic default", async () => {
+    const testDbAr = await createTestDatabase("catalog_persistence_ar_default");
+    try {
+      const arAppDb = asAppDb(testDbAr.db);
+
+      const arLang = await ensureLanguage(arAppDb, {
+        code: "ar",
+        label: "العربية",
+        textDirection: "rtl",
+        isEnabled: true,
+      });
+
+      const enLang = await ensureLanguage(arAppDb, {
+        code: "en",
+        label: "English",
+        textDirection: "ltr",
+        isEnabled: true,
+      });
+
+      await initializeSettings(arAppDb, {
+        displayName: "متجر عربي",
+        currency: "SAR",
+        defaultLanguageCode: "ar",
+      });
+
+      // 1. Create Category with Arabic as default language
+      const cat = await createCatalogCategory(arAppDb, {
+        parentId: null,
+        slug: "ar-root-cat",
+        translations: [
+          {
+            languageId: arLang.id,
+            name: "فئة عربية أصلية",
+            description: "وصف الفئة العربية",
+          },
+        ],
+      });
+
+      const catAfterCreate = await readCatalogCategory(arAppDb, cat.categoryId);
+      expect(catAfterCreate?.translations.ar?.name).toBe("فئة عربية أصلية");
+      expect(catAfterCreate?.translations.ar?.description).toBe("وصف الفئة العربية");
+      expect(catAfterCreate?.translations.en).toBeUndefined();
+      expect(Object.keys(catAfterCreate?.translations ?? {})).toEqual(["ar"]);
+
+      // Subsequent edit: add English translation to category
+      await saveCatalogCategoryTranslation(arAppDb, {
+        categoryId: cat.categoryId,
+        languageId: enLang.id,
+        name: "Original Arabic Category in English",
+        description: "English description",
+      });
+
+      const catAfterEdit = await readCatalogCategory(arAppDb, cat.categoryId);
+      expect(catAfterEdit?.translations.ar?.name).toBe("فئة عربية أصلية");
+      expect(catAfterEdit?.translations.en?.name).toBe("Original Arabic Category in English");
+
+      // 2. Create Product with Arabic as default language
+      const prod = await createCatalogProduct(arAppDb, {
+        categoryId: cat.categoryId,
+        slug: "ar-default-prod",
+        price: "75.00",
+        translations: [
+          {
+            languageId: arLang.id,
+            name: "منتج عربي أصلي",
+            description: "وصف موجز للمنتج",
+            details: "تفاصيل كاملة للمنتج",
+          },
+        ],
+      });
+
+      const prodAfterCreate = await readCatalogProduct(arAppDb, prod.productId);
+      expect(prodAfterCreate?.translations.ar?.name).toBe("منتج عربي أصلي");
+      expect(prodAfterCreate?.translations.ar?.description).toBe("وصف موجز للمنتج");
+      expect(prodAfterCreate?.translations.en).toBeUndefined();
+      expect(Object.keys(prodAfterCreate?.translations ?? {})).toEqual(["ar"]);
+
+      // Subsequent edit: add English translation to product
+      await saveCatalogProductTranslation(arAppDb, {
+        productId: prod.productId,
+        languageId: enLang.id,
+        name: "Original Arabic Product in English",
+        description: "English short desc",
+        details: "English full details",
+      });
+
+      const prodAfterEdit = await readCatalogProduct(arAppDb, prod.productId);
+      expect(prodAfterEdit?.translations.ar?.name).toBe("منتج عربي أصلي");
+      expect(prodAfterEdit?.translations.en?.name).toBe("Original Arabic Product in English");
+      expect(prodAfterEdit?.translations.en?.description).toBe("English short desc");
+    } finally {
+      await testDbAr.close();
+    }
+  });
 });

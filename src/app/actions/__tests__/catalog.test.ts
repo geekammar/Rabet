@@ -162,6 +162,67 @@ describe("Catalog Server Actions", () => {
         }),
       );
     });
+
+    it("creates a category with Arabic default language and no duplicate translation", async () => {
+      mockResolveDefaultLanguage.mockResolvedValueOnce({
+        id: "lang-ar-id",
+        code: "ar",
+        label: "العربية",
+        isEnabled: true,
+      });
+
+      mockCreateCatalogCategory.mockResolvedValueOnce({
+        categoryId: "cat-ar-1",
+        category: {
+          id: "cat-ar-1",
+          slug: "ar-category",
+          translations: {
+            ar: { id: "t-ar-1", languageId: "lang-ar-id", name: "إلكترونيات" },
+          },
+        },
+      });
+
+      const res = await createCategoryAction({
+        slug: "ar-category",
+        name: "إلكترونيات",
+        description: "وصف الفئة",
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateCatalogCategory).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          slug: "ar-category",
+          translations: [
+            {
+              languageId: "lang-ar-id",
+              name: "إلكترونيات",
+              description: "وصف الفئة",
+            },
+          ],
+        }),
+      );
+    });
+
+    it("rejects redundant arabicName when store default is already Arabic", async () => {
+      mockResolveDefaultLanguage.mockResolvedValueOnce({
+        id: "lang-ar-id",
+        code: "ar",
+        label: "العربية",
+        isEnabled: true,
+      });
+
+      const res = await createCategoryAction({
+        slug: "ar-category",
+        name: "إلكترونيات",
+        arabicName: "إلكترونيات مكررة",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.arabicName).toMatch(/already Arabic/i);
+      expect(mockCreateCatalogCategory).not.toHaveBeenCalled();
+    });
   });
 
   describe("createProductAction", () => {
@@ -294,6 +355,77 @@ describe("Catalog Server Actions", () => {
           ],
         }),
       );
+    });
+
+    it("creates product with Arabic default language and no duplicate translation", async () => {
+      mockResolveDefaultLanguage.mockResolvedValueOnce({
+        id: "lang-ar-id",
+        code: "ar",
+        label: "العربية",
+        isEnabled: true,
+      });
+
+      mockCreateCatalogProduct.mockResolvedValueOnce({
+        productId: "prod-ar-1",
+        product: {
+          id: "prod-ar-1",
+          categoryId: validCatId,
+          slug: "ar-prod",
+          price: "50.00",
+          translations: {
+            ar: { id: "pt-ar-1", languageId: "lang-ar-id", name: "منتج عربي" },
+          },
+        },
+      });
+
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "ar-prod",
+        price: "50.00",
+        name: "منتج عربي",
+        description: "وصف المنتج",
+        details: "تفاصيل المنتج",
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          categoryId: validCatId,
+          slug: "ar-prod",
+          price: "50.00",
+          translations: [
+            {
+              languageId: "lang-ar-id",
+              name: "منتج عربي",
+              description: "وصف المنتج",
+              details: "تفاصيل المنتج",
+            },
+          ],
+        }),
+      );
+    });
+
+    it("rejects redundant arabicName for product when store default is already Arabic", async () => {
+      mockResolveDefaultLanguage.mockResolvedValueOnce({
+        id: "lang-ar-id",
+        code: "ar",
+        label: "العربية",
+        isEnabled: true,
+      });
+
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "ar-prod",
+        price: "50.00",
+        name: "منتج عربي",
+        arabicName: "اسم مكرر",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.arabicName).toMatch(/already Arabic/i);
+      expect(mockCreateCatalogProduct).not.toHaveBeenCalled();
     });
   });
 

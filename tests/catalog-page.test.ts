@@ -105,4 +105,33 @@ describe("Catalog Page — Database Availability States & Zero Writes", () => {
     expect(element.props.categories).toEqual([]);
     expect(element.props.products).toEqual([]);
   });
+
+  it("renders State D with Arabic default language when configured", async () => {
+    process.env.DATABASE_URL = "postgresql://user:pass@localhost:5432/rabet";
+    mockIsConfigured.mockResolvedValueOnce(true);
+    mockReadSettings.mockResolvedValueOnce({
+      displayName: "متجري",
+      currency: "SAR",
+      defaultLanguageId: "lang-ar-id",
+    });
+    mockListLanguages.mockResolvedValueOnce([
+      { id: "lang-en-id", code: "en", label: "English", isEnabled: true },
+      { id: "lang-ar-id", code: "ar", label: "العربية", isEnabled: true },
+    ]);
+    mockResolveDefaultLanguage.mockResolvedValueOnce({
+      id: "lang-ar-id",
+      code: "ar",
+      label: "العربية",
+      textDirection: "rtl",
+      isEnabled: true,
+    });
+    mockListCatalogCategories.mockResolvedValueOnce([]);
+    mockListCatalogProducts.mockResolvedValueOnce([]);
+
+    const element = await CatalogPage();
+    expect(element.type.name).toBe("CatalogEditor");
+    expect(element.props.defaultLanguage.code).toBe("ar");
+    expect(element.props.defaultLanguage.textDirection).toBe("rtl");
+    expect(element.props.settings.currency).toBe("SAR");
+  });
 });

@@ -848,6 +848,173 @@ async function main() {
   log("Scenario 5 passed: Arabic editing uses RTL, exact content persisted on reload, and Arabic remains disabled.");
 
   // =========================================================================
+  // Scenario 5B: Unrelated language draft preservation (Categories & Products)
+  // =========================================================================
+  log("Scenario 5B: Testing unrelated language draft preservation across tabs...");
+
+  // 1. Category test:
+  // Switch to Arabic tab in category editor
+  await cdp.evaluate(`{
+    const tabs = Array.from(document.querySelectorAll('button'));
+    const arTab = tabs.find(b => b.innerText.includes('العربية'));
+    if (arTab) arTab.click();
+  }`);
+  await sleep(400);
+
+  // Type unsaved Arabic draft in category name
+  await setInputValue(cdp, '#cat-name-input', "مسودة فئة غير محفوظة");
+  await sleep(300);
+
+  // Switch to English tab in category editor
+  await cdp.evaluate(`{
+    const tabs = Array.from(document.querySelectorAll('button'));
+    const enTab = tabs.find(b => b.innerText.trim() === 'English');
+    if (enTab) enTab.click();
+  }`);
+  await sleep(400);
+
+  // Change English category name and save
+  await setInputValue(cdp, '#cat-name-input', "Software Tools Enhanced");
+  await sleep(300);
+  await cdp.evaluate(`document.querySelector('[data-testid="save-category-btn"]').click()`);
+  await sleep(1500);
+
+  // Switch back to Arabic tab in category editor and verify unsaved draft is intact
+  await cdp.evaluate(`{
+    const tabs = Array.from(document.querySelectorAll('button'));
+    const arTab = tabs.find(b => b.innerText.includes('العربية'));
+    if (arTab) arTab.click();
+  }`);
+  await sleep(400);
+
+  const retainedCatArDraft = await cdp.evaluate(`document.querySelector('#cat-name-input')?.value ?? ''`);
+  if (retainedCatArDraft !== "مسودة فئة غير محفوظة") {
+    await fail(
+      `Scenario 5B: Expected unsaved Arabic category draft 'مسودة فئة غير محفوظة' to be preserved after saving English, got: '${retainedCatArDraft}'`
+    );
+  }
+
+  // 2. Product test:
+  // Open product editor for code-studio
+  await cdp.evaluate(`
+    const editBtn = document.querySelector('[data-product-slug="code-studio"] button');
+    if (editBtn) editBtn.click();
+  `);
+  await sleep(500);
+
+  // Switch to Arabic tab in product editor
+  await cdp.evaluate(`{
+    const tabs = Array.from(document.querySelectorAll('button'));
+    const arTab = tabs.find(b => b.innerText.includes('العربية'));
+    if (arTab) arTab.click();
+  }`);
+  await sleep(400);
+
+  // Type unsaved Arabic draft in product name
+  await setInputValue(cdp, '#prod-name-input', "مسودة منتج غير محفوظة");
+  await sleep(300);
+
+  // Switch to English tab in product editor
+  await cdp.evaluate(`{
+    const tabs = Array.from(document.querySelectorAll('button'));
+    const enTab = tabs.find(b => b.innerText.trim() === 'English');
+    if (enTab) enTab.click();
+  }`);
+  await sleep(400);
+
+  // Save English product change (e.g. description)
+  await setInputValue(cdp, '#prod-desc-input', "Updated English description");
+  await sleep(300);
+  await cdp.evaluate(`document.querySelector('[data-testid="save-product-btn"]').click()`);
+  await sleep(1500);
+
+  // Switch back to Arabic tab in product editor and verify unsaved draft is intact
+  await cdp.evaluate(`{
+    const tabs = Array.from(document.querySelectorAll('button'));
+    const arTab = tabs.find(b => b.innerText.includes('العربية'));
+    if (arTab) arTab.click();
+  }`);
+  await sleep(400);
+
+  const retainedProdArDraft = await cdp.evaluate(`document.querySelector('#prod-name-input')?.value ?? ''`);
+  if (retainedProdArDraft !== "مسودة منتج غير محفوظة") {
+    await fail(
+      `Scenario 5B: Expected unsaved Arabic product draft 'مسودة منتج غير محفوظة' to be preserved after saving English, got: '${retainedProdArDraft}'`
+    );
+  }
+
+  // 3. Reload page and verify only the explicitly saved language changed in the database
+  log("Scenario 5B: Reloading page to verify database state only reflects explicitly saved changes...");
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(2000);
+
+  // Check database category: English was saved, Arabic was NOT saved as the draft
+  const [dbCatEn] = await pgClient`
+    SELECT ct.name FROM category_translation ct
+    JOIN category c ON ct.category_id = c.id
+    JOIN language l ON ct.language_id = l.id
+    WHERE c.slug = 'software' AND l.code = 'en'
+  `;
+  if (dbCatEn?.name !== "Software Tools Enhanced") {
+    await fail(
+      `Scenario 5B: Expected saved English category name 'Software Tools Enhanced', got: '${dbCatEn?.name}'`
+    );
+  }
+
+  const [dbCatAr] = await pgClient`
+    SELECT ct.name FROM category_translation ct
+    JOIN category c ON ct.category_id = c.id
+    JOIN language l ON ct.language_id = l.id
+    WHERE c.slug = 'software' AND l.code = 'ar'
+  `;
+  if (dbCatAr?.name === "مسودة فئة غير محفوظة") {
+    await fail("Scenario 5B: Unsaved Arabic category draft was unexpectedly committed to the database!");
+  }
+
+  // Check database product: English description was saved, Arabic name was NOT saved as the draft
+  const [dbProdEn] = await pgClient`
+    SELECT pt.name, pt.short_description FROM product_translation pt
+    JOIN product p ON pt.product_id = p.id
+    JOIN language l ON pt.language_id = l.id
+    WHERE p.slug = 'code-studio' AND l.code = 'en'
+  `;
+  if (dbProdEn?.short_description !== "Updated English description") {
+    await fail(
+      `Scenario 5B: Expected saved English product description 'Updated English description', got: '${dbProdEn?.short_description}'`
+    );
+  }
+
+  const [dbProdAr] = await pgClient`
+    SELECT pt.name FROM product_translation pt
+    JOIN product p ON pt.product_id = p.id
+    JOIN language l ON pt.language_id = l.id
+    WHERE p.slug = 'code-studio' AND l.code = 'ar'
+  `;
+  if (dbProdAr?.name === "مسودة منتج غير محفوظة") {
+    await fail("Scenario 5B: Unsaved Arabic product draft was unexpectedly committed to the database!");
+  }
+  if (dbProdAr?.name !== "محرر الأكواد الاحترافي") {
+    await fail(
+      `Scenario 5B: Expected previously saved Arabic product name 'محرر الأكواد الاحترافي', got: '${dbProdAr?.name}'`
+    );
+  }
+
+  // Re-open product editor for software category to prepare for Scenario 6
+  await cdp.evaluate(`
+    const childNode = document.querySelector('[data-category-slug="software"] button');
+    if (childNode) childNode.click();
+  `);
+  await sleep(600);
+
+  await cdp.evaluate(`
+    const editBtn = document.querySelector('[data-product-slug="code-studio"] button');
+    if (editBtn) editBtn.click();
+  `);
+  await sleep(500);
+
+  log("Scenario 5B passed: Unsaved language drafts preserved for category and product, and reload verified database isolation.");
+
+  // =========================================================================
   // Scenario 6: Reject invalid price/name; preserve input and database state;
   // test synthetic transport failure, draft preservation, and retry
   // =========================================================================

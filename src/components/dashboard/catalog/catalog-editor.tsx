@@ -65,8 +65,16 @@ export function CatalogEditor({
     return new Set(initialCategories.map((c) => c.id));
   });
 
-  // Active language tab in editors (defaults to 'en')
-  const [activeLangTab, setActiveLangTab] = useState<string>("en");
+  // Languages metadata
+  const arabicRegistered = languages.some((l) => l.code === "ar");
+  const arabicRow = languages.find((l) => l.code === "ar");
+  const arabicDisabled = arabicRow ? !arabicRow.isEnabled : false;
+  const defaultLangCode = defaultLanguage?.code ?? "en";
+  const defaultLangLabel = defaultLanguage?.label ?? (defaultLangCode === "ar" ? "العربية" : "English");
+  const defaultLangDir = defaultLanguage?.textDirection ?? (defaultLangCode === "ar" ? "rtl" : "ltr");
+
+  // Active language tab in editors (defaults to configured default language)
+  const [activeLangTab, setActiveLangTab] = useState<string>(defaultLangCode);
 
   // Dialog / Modal states
   const [isCreateCategoryOpen, setIsCreateCategoryOpen] = useState(false);
@@ -79,13 +87,6 @@ export function CatalogEditor({
 
   // Feedback states
   const [actionFeedback, setActionFeedback] = useState<CatalogActionResult | null>(null);
-
-  // Languages metadata
-  const arabicRegistered = languages.some((l) => l.code === "ar");
-  const arabicRow = languages.find((l) => l.code === "ar");
-  const arabicDisabled = arabicRow ? !arabicRow.isEnabled : false;
-  const defaultLangCode = defaultLanguage?.code ?? "en";
-  const defaultLangLabel = defaultLanguage?.label ?? "English";
 
   // Build hierarchy tree
   const { tree, flattened } = useMemo(() => {
@@ -204,8 +205,8 @@ export function CatalogEditor({
   // ==========================================
   const [newCatParentId, setNewCatParentId] = useState<string | null>(null);
   const [newCatSlug, setNewCatSlug] = useState("");
-  const [newCatNameEn, setNewCatNameEn] = useState("");
-  const [newCatDescEn, setNewCatDescEn] = useState("");
+  const [newCatDefaultName, setNewCatDefaultName] = useState("");
+  const [newCatDefaultDesc, setNewCatDefaultDesc] = useState("");
   const [newCatNameAr, setNewCatNameAr] = useState("");
   const [newCatDescAr, setNewCatDescAr] = useState("");
   const [newCatErrors, setNewCatErrors] = useState<Record<string, string>>({});
@@ -213,8 +214,8 @@ export function CatalogEditor({
   const handleOpenCreateCategory = (parentId: string | null = null) => {
     setNewCatParentId(parentId);
     setNewCatSlug("");
-    setNewCatNameEn("");
-    setNewCatDescEn("");
+    setNewCatDefaultName("");
+    setNewCatDefaultDesc("");
     setNewCatNameAr("");
     setNewCatDescAr("");
     setNewCatErrors({});
@@ -228,10 +229,10 @@ export function CatalogEditor({
         const res = await createCategoryAction({
           parentId: newCatParentId,
           slug: newCatSlug,
-          name: newCatNameEn,
-          description: newCatDescEn,
-          arabicName: newCatNameAr,
-          arabicDescription: newCatDescAr,
+          name: newCatDefaultName,
+          description: newCatDefaultDesc,
+          arabicName: defaultLangCode !== "ar" && newCatNameAr.trim() ? newCatNameAr : undefined,
+          arabicDescription: defaultLangCode !== "ar" && newCatDescAr.trim() ? newCatDescAr : undefined,
         });
 
         if (!res.success) {
@@ -262,14 +263,15 @@ export function CatalogEditor({
   // ==========================================
   const handleSaveCategory = () => {
     if (!selectedNode) return;
+    const submittedLang = activeLangTab;
     startTransition(async () => {
       try {
-        const activeTrans = catDraftTranslations[activeLangTab] ?? { name: "", description: "" };
+        const activeTrans = catDraftTranslations[submittedLang] ?? { name: "", description: "" };
         const res = await updateCategoryAction({
           categoryId: selectedNode.id,
           slug: catDraftSlug,
           isActive: catDraftIsActive,
-          languageCode: activeLangTab,
+          languageCode: submittedLang,
           name: activeTrans.name,
           description: activeTrans.description,
         });
@@ -278,10 +280,23 @@ export function CatalogEditor({
 
         if (res.success && res.category) {
           const authoritativeCategory = res.category;
+          // Update authoritative saved record in category tree
           setCategories((prev) =>
             prev.map((c) => (c.id === authoritativeCategory.id ? authoritativeCategory : c)),
           );
-          syncCategoryDraft(authoritativeCategory);
+          // Reconcile ONLY submitted fields and submitted language draft
+          setCatDraftSlug(authoritativeCategory.slug);
+          setCatDraftIsActive(authoritativeCategory.isActive);
+          setCatDraftTranslations((prev) => {
+            const savedTrans = authoritativeCategory.translations[submittedLang];
+            return {
+              ...prev,
+              [submittedLang]: {
+                name: savedTrans?.name ?? "",
+                description: savedTrans?.description ?? "",
+              },
+            };
+          });
         }
       } catch {
         setActionFeedback({
@@ -299,9 +314,9 @@ export function CatalogEditor({
   const [newProdCatId, setNewProdCatId] = useState<string>("");
   const [newProdSlug, setNewProdSlug] = useState("");
   const [newProdPrice, setNewProdPrice] = useState("");
-  const [newProdNameEn, setNewProdNameEn] = useState("");
-  const [newProdDescEn, setNewProdDescEn] = useState("");
-  const [newProdDetailsEn, setNewProdDetailsEn] = useState("");
+  const [newProdDefaultName, setNewProdDefaultName] = useState("");
+  const [newProdDefaultDesc, setNewProdDefaultDesc] = useState("");
+  const [newProdDefaultDetails, setNewProdDefaultDetails] = useState("");
   const [newProdNameAr, setNewProdNameAr] = useState("");
   const [newProdDescAr, setNewProdDescAr] = useState("");
   const [newProdDetailsAr, setNewProdDetailsAr] = useState("");
@@ -311,9 +326,9 @@ export function CatalogEditor({
     setNewProdCatId(selectedCategoryId ?? (categories[0]?.id || ""));
     setNewProdSlug("");
     setNewProdPrice("");
-    setNewProdNameEn("");
-    setNewProdDescEn("");
-    setNewProdDetailsEn("");
+    setNewProdDefaultName("");
+    setNewProdDefaultDesc("");
+    setNewProdDefaultDetails("");
     setNewProdNameAr("");
     setNewProdDescAr("");
     setNewProdDetailsAr("");
@@ -329,12 +344,12 @@ export function CatalogEditor({
           categoryId: newProdCatId,
           slug: newProdSlug,
           price: newProdPrice,
-          name: newProdNameEn,
-          description: newProdDescEn,
-          details: newProdDetailsEn,
-          arabicName: newProdNameAr,
-          arabicDescription: newProdDescAr,
-          arabicDetails: newProdDetailsAr,
+          name: newProdDefaultName,
+          description: newProdDefaultDesc,
+          details: newProdDefaultDetails,
+          arabicName: defaultLangCode !== "ar" && newProdNameAr.trim() ? newProdNameAr : undefined,
+          arabicDescription: defaultLangCode !== "ar" && newProdDescAr.trim() ? newProdDescAr : undefined,
+          arabicDetails: defaultLangCode !== "ar" && newProdDetailsAr.trim() ? newProdDetailsAr : undefined,
         });
 
         if (!res.success) {
@@ -362,9 +377,10 @@ export function CatalogEditor({
   // ==========================================
   const handleSaveProduct = () => {
     if (!selectedProduct) return;
+    const submittedLang = activeLangTab;
     startTransition(async () => {
       try {
-        const activeTrans = prodDraftTranslations[activeLangTab] ?? {
+        const activeTrans = prodDraftTranslations[submittedLang] ?? {
           name: "",
           description: "",
           details: "",
@@ -375,7 +391,7 @@ export function CatalogEditor({
           slug: prodDraftSlug,
           price: prodDraftPrice,
           isActive: prodDraftIsActive,
-          languageCode: activeLangTab,
+          languageCode: submittedLang,
           name: activeTrans.name,
           description: activeTrans.description,
           details: activeTrans.details,
@@ -385,21 +401,25 @@ export function CatalogEditor({
 
         if (res.success && res.product) {
           const authoritativeProduct = res.product;
+          // Update authoritative saved record in products list
           setProducts((prev) =>
             prev.map((p) => (p.id === authoritativeProduct.id ? authoritativeProduct : p)),
           );
+          // Reconcile ONLY submitted fields and submitted language draft
           setProdDraftSlug(authoritativeProduct.slug);
           setProdDraftPrice(authoritativeProduct.price);
           setProdDraftIsActive(authoritativeProduct.isActive);
-          const trans: Record<string, { name: string; description: string; details: string }> = {};
-          for (const [code, t] of Object.entries(authoritativeProduct.translations)) {
-            trans[code] = {
-              name: t.name ?? "",
-              description: t.description ?? "",
-              details: t.details ?? "",
+          setProdDraftTranslations((prev) => {
+            const savedTrans = authoritativeProduct.translations[submittedLang];
+            return {
+              ...prev,
+              [submittedLang]: {
+                name: savedTrans?.name ?? "",
+                description: savedTrans?.description ?? "",
+                details: savedTrans?.details ?? "",
+              },
             };
-          }
-          setProdDraftTranslations(trans);
+          });
         }
       } catch {
         setActionFeedback({
@@ -775,6 +795,7 @@ export function CatalogEditor({
                       <input
                         id="cat-slug-input"
                         type="text"
+                        disabled={isPending}
                         value={catDraftSlug}
                         onChange={(e) => setCatDraftSlug(e.target.value)}
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
@@ -791,6 +812,7 @@ export function CatalogEditor({
                         <input
                           id="cat-status-input"
                           type="checkbox"
+                          disabled={isPending}
                           checked={catDraftIsActive}
                           onChange={(e) => setCatDraftIsActive(e.target.checked)}
                           onClick={(e) => setCatDraftIsActive(e.currentTarget.checked)}
@@ -819,6 +841,7 @@ export function CatalogEditor({
                       <input
                         id="cat-name-input"
                         type="text"
+                        disabled={isPending}
                         value={catDraftTranslations[activeLangTab]?.name ?? ""}
                         onChange={(e) =>
                           setCatDraftTranslations((prev) => ({
@@ -843,6 +866,7 @@ export function CatalogEditor({
                       <textarea
                         id="cat-desc-input"
                         rows={2}
+                        disabled={isPending}
                         value={catDraftTranslations[activeLangTab]?.description ?? ""}
                         onChange={(e) =>
                           setCatDraftTranslations((prev) => ({
@@ -1006,6 +1030,7 @@ export function CatalogEditor({
                         <input
                           id="prod-slug-input"
                           type="text"
+                          disabled={isPending}
                           value={prodDraftSlug}
                           onChange={(e) => setProdDraftSlug(e.target.value)}
                           className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
@@ -1021,6 +1046,7 @@ export function CatalogEditor({
                           id="prod-price-input"
                           data-testid="price-input"
                           type="text"
+                          disabled={isPending}
                           value={prodDraftPrice}
                           onChange={(e) => setProdDraftPrice(e.target.value)}
                           className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
@@ -1037,6 +1063,7 @@ export function CatalogEditor({
                           <input
                             id="prod-status-input"
                             type="checkbox"
+                            disabled={isPending}
                             checked={prodDraftIsActive}
                             onChange={(e) => setProdDraftIsActive(e.target.checked)}
                             onClick={(e) => setProdDraftIsActive(e.currentTarget.checked)}
@@ -1059,11 +1086,13 @@ export function CatalogEditor({
                     >
                       <div className="space-y-1.5">
                         <label htmlFor="prod-name-input" className="text-xs font-medium">
-                          Product Name ({activeLangTab.toUpperCase()})
+                          Product Name ({activeLangTab.toUpperCase()}){" "}
+                          {activeLangTab === defaultLangCode && <span className="text-destructive">*</span>}
                         </label>
                         <input
                           id="prod-name-input"
                           type="text"
+                          disabled={isPending}
                           value={prodDraftTranslations[activeLangTab]?.name ?? ""}
                           onChange={(e) =>
                             setProdDraftTranslations((prev) => ({
@@ -1087,6 +1116,7 @@ export function CatalogEditor({
                         <input
                           id="prod-desc-input"
                           type="text"
+                          disabled={isPending}
                           value={prodDraftTranslations[activeLangTab]?.description ?? ""}
                           onChange={(e) =>
                             setProdDraftTranslations((prev) => ({
@@ -1110,6 +1140,7 @@ export function CatalogEditor({
                         <textarea
                           id="prod-details-input"
                           rows={3}
+                          disabled={isPending}
                           value={prodDraftTranslations[activeLangTab]?.details ?? ""}
                           onChange={(e) =>
                             setProdDraftTranslations((prev) => ({
@@ -1236,25 +1267,28 @@ export function CatalogEditor({
                 )}
               </div>
 
-              {/* English translation (required default) */}
-              <div className="space-y-3 rounded-xl border p-4 bg-muted/20">
+              {/* Default Language content */}
+              <div
+                className="space-y-3 rounded-xl border p-4 bg-muted/20"
+                dir={defaultLangDir}
+              >
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Default Language (English)
+                  Default Language ({defaultLangLabel})
                 </h3>
                 <div className="space-y-1.5">
-                  <label htmlFor="create-cat-name-en" className="text-xs font-medium">
+                  <label htmlFor="create-cat-name-default" className="text-xs font-medium">
                     Name <span className="text-destructive">*</span>
                   </label>
                   <input
-                    id="create-cat-name-en"
+                    id="create-cat-name-default"
                     data-testid="create-category-name"
                     type="text"
-                    value={newCatNameEn}
-                    onChange={(e) => setNewCatNameEn(e.target.value)}
+                    value={newCatDefaultName}
+                    onChange={(e) => setNewCatDefaultName(e.target.value)}
                     className={`w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 ${
                       newCatErrors.name ? "border-destructive" : ""
                     }`}
-                    placeholder="Category Name"
+                    placeholder={defaultLangCode === "ar" ? "اسم الفئة" : "Category Name"}
                   />
                   {newCatErrors.name && (
                     <p className="text-xs text-destructive">{newCatErrors.name}</p>
@@ -1262,22 +1296,24 @@ export function CatalogEditor({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label htmlFor="create-cat-desc-en" className="text-xs font-medium">
+                  <label htmlFor="create-cat-desc-default" className="text-xs font-medium">
                     Description
                   </label>
                   <textarea
-                    id="create-cat-desc-en"
+                    id="create-cat-desc-default"
                     rows={2}
-                    value={newCatDescEn}
-                    onChange={(e) => setNewCatDescEn(e.target.value)}
+                    value={newCatDefaultDesc}
+                    onChange={(e) => setNewCatDefaultDesc(e.target.value)}
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
-                    placeholder="Optional short description..."
+                    placeholder={
+                      defaultLangCode === "ar" ? "وصف اختياري..." : "Optional short description..."
+                    }
                   />
                 </div>
               </div>
 
-              {/* Optional Arabic */}
-              {arabicRegistered && (
+              {/* Optional Arabic (only when Arabic is registered AND not the default language) */}
+              {arabicRegistered && defaultLangCode !== "ar" && (
                 <div className="space-y-3 rounded-xl border p-4 bg-muted/20" dir="rtl">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     العربية (اختياري)
@@ -1423,25 +1459,28 @@ export function CatalogEditor({
                 </div>
               </div>
 
-              {/* Default Language (English) content */}
-              <div className="space-y-3 rounded-xl border p-4 bg-muted/20">
+              {/* Default Language content */}
+              <div
+                className="space-y-3 rounded-xl border p-4 bg-muted/20"
+                dir={defaultLangDir}
+              >
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Default Language (English)
+                  Default Language ({defaultLangLabel})
                 </h3>
                 <div className="space-y-1.5">
-                  <label htmlFor="create-prod-name-en" className="text-xs font-medium">
+                  <label htmlFor="create-prod-name-default" className="text-xs font-medium">
                     Name <span className="text-destructive">*</span>
                   </label>
                   <input
-                    id="create-prod-name-en"
+                    id="create-prod-name-default"
                     data-testid="create-product-name"
                     type="text"
-                    value={newProdNameEn}
-                    onChange={(e) => setNewProdNameEn(e.target.value)}
+                    value={newProdDefaultName}
+                    onChange={(e) => setNewProdDefaultName(e.target.value)}
                     className={`w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 ${
                       newProdErrors.name ? "border-destructive" : ""
                     }`}
-                    placeholder="Product Name"
+                    placeholder={defaultLangCode === "ar" ? "اسم المنتج" : "Product Name"}
                   />
                   {newProdErrors.name && (
                     <p className="text-xs text-destructive">{newProdErrors.name}</p>
@@ -1449,36 +1488,40 @@ export function CatalogEditor({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label htmlFor="create-prod-desc-en" className="text-xs font-medium">
+                  <label htmlFor="create-prod-desc-default" className="text-xs font-medium">
                     Short Description
                   </label>
                   <input
-                    id="create-prod-desc-en"
+                    id="create-prod-desc-default"
                     type="text"
-                    value={newProdDescEn}
-                    onChange={(e) => setNewProdDescEn(e.target.value)}
+                    value={newProdDefaultDesc}
+                    onChange={(e) => setNewProdDefaultDesc(e.target.value)}
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
-                    placeholder="Short summary for card"
+                    placeholder={
+                      defaultLangCode === "ar" ? "وصف مختصر..." : "Short summary for card"
+                    }
                   />
                 </div>
 
                 <div className="space-y-1.5">
-                  <label htmlFor="create-prod-details-en" className="text-xs font-medium">
+                  <label htmlFor="create-prod-details-default" className="text-xs font-medium">
                     Details
                   </label>
                   <textarea
-                    id="create-prod-details-en"
+                    id="create-prod-details-default"
                     rows={2}
-                    value={newProdDetailsEn}
-                    onChange={(e) => setNewProdDetailsEn(e.target.value)}
+                    value={newProdDefaultDetails}
+                    onChange={(e) => setNewProdDefaultDetails(e.target.value)}
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
-                    placeholder="Full product details..."
+                    placeholder={
+                      defaultLangCode === "ar" ? "تفاصيل المنتج..." : "Full product details..."
+                    }
                   />
                 </div>
               </div>
 
-              {/* Optional Arabic content */}
-              {arabicRegistered && (
+              {/* Optional Arabic content (only when Arabic is registered AND not the default language) */}
+              {arabicRegistered && defaultLangCode !== "ar" && (
                 <div className="space-y-3 rounded-xl border p-4 bg-muted/20" dir="rtl">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     العربية (اختياري)
@@ -1508,6 +1551,20 @@ export function CatalogEditor({
                       onChange={(e) => setNewProdDescAr(e.target.value)}
                       className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
                       placeholder="وصف مختصر..."
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label htmlFor="create-prod-details-ar" className="text-xs font-medium">
+                      التفاصيل بالعربية
+                    </label>
+                    <textarea
+                      id="create-prod-details-ar"
+                      rows={2}
+                      value={newProdDetailsAr}
+                      onChange={(e) => setNewProdDetailsAr(e.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                      placeholder="تفاصيل المنتج بالعربية..."
                     />
                   </div>
                 </div>
