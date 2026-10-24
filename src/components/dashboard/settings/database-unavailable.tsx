@@ -16,15 +16,19 @@ import {
  * State B: Displayed when the database is configured but temporarily unavailable or failing queries.
  */
 export function DatabaseUnavailable({
+  title = "Settings",
+  description = "Store-wide configuration and bot preferences.",
   message,
 }: {
+  title?: string;
+  description?: string;
   message?: string;
 }) {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Settings"
-        description="Store-wide configuration and bot preferences."
+        title={title}
+        description={description}
       />
 
       <Card className="border-destructive/30 bg-destructive/5">

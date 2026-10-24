@@ -18,12 +18,18 @@ import {
  * Informs the administrator cleanly without exposing server details or breaking
  * the page build.
  */
-export function DatabaseSetupRequired() {
+export function DatabaseSetupRequired({
+  title = "Settings",
+  description = "Store-wide configuration and bot preferences.",
+}: {
+  title?: string;
+  description?: string;
+} = {}) {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Settings"
-        description="Store-wide configuration and bot preferences."
+        title={title}
+        description={description}
       />
 
       <Card className="border-dashed border-warning/50 bg-warning/5">

@@ -1,23 +1,21 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 04-A — Store Settings & Onboarding UI (implemented, in review)**
+Current phase: **Phase 04-B — Bot Content & Message Templates UI (implemented, in review)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 [DATA_MODEL.md](./DATA_MODEL.md) for the approved database design,
-[PHASE_03B_HANDOFF.md](./PHASE_03B_HANDOFF.md) for the database foundation's
-implementation status, test results and the production migration runbook,
+[PHASE_04A_HANDOFF.md](./PHASE_04A_HANDOFF.md) for Store Settings & Onboarding UI handoff,
+[PHASE_04B_HANDOFF.md](./PHASE_04B_HANDOFF.md) for Global Bot Content Editor handoff,
 [NEON_DEV_SETUP.md](./NEON_DEV_SETUP.md) for the one-command development
 database setup wizard.
 
 > This file tracks the **Phase 02B** authentication pass, the **Phase 03A**
-> data-model design pass, the **Phase 03B** database implementation and the
-> **Phase 03C-A** data-access layer. Phases 01, 02, 03A, 03B, 03B-B and 03B-C
-> are all merged into `main`: the Phase 03 schema foundation (PR #6), the Neon
-> development setup wizard (PR #7) and the Neon DEV GitHub Actions migration
-> runner (PR #8) are on `main` and the dedicated Neon development database has
-> the full chain applied and inspected. Phase 03C-A was merged into `main` via PR #9.
-> Phase 04-A is on `feat/phase-04a-settings-ui`, awaiting product-owner review.
+> data-model design pass, the **Phase 03B** database implementation, the
+> **Phase 03C-A** data-access layer, the **Phase 04-A** Settings UI pass, and
+> the **Phase 04-B** Bot Content Editor pass. Phases 01, 02, 03A, 03B, 03B-B,
+> 03B-C, 03C-A, and 04-A are merged into `main`: Phase 04-A was merged into `main`
+> via PR #10. Phase 04-B is implemented on `feat/phase-04b-bot-content` awaiting review.
 
 ---
 
@@ -32,8 +30,8 @@ database setup wizard.
 | **Phase 03B-B** | Neon development setup wizard (`npm run db:setup:dev`) | ✅ **Merged into `main`** ([PR #7](https://github.com/geekammar/Rabet/pull/7)) — one command for the first VPS and every replacement VPS; verified against real PostgreSQL, including the reconnect scenario |
 | **Phase 03B-C** | Neon DEV GitHub Actions migration runner (`workflow_dispatch` only) | ✅ **Merged into `main`** ([PR #8](https://github.com/geekammar/Rabet/pull/8)) — manual inspect/migrate workflow on GitHub-hosted runners; a real DEV migration and a final read-only inspection have run successfully |
 | **Phase 03C-A** | Server-only settings & localization data access | ✅ **Merged into `main`** ([PR #9](https://github.com/geekammar/Rabet/pull/9), `bead4ed`) — typed data-access layer for `bot_setting`, `language`, `message_template` and `message_translation`, with the explicit initialization contract |
-| **Phase 04-A** | Store Settings & Onboarding UI | 🟦 **Implemented on `feat/phase-04a-settings-ui`** — mobile-first Settings page, welcoming first-time onboarding, existing settings edit mode, USD default selection with currency safeguards, English default with RTL Arabic enablement, editable support categories, and clean database availability state handling (States A, B, C, D) |
-| Phase 04-B | Bot Content & message templates UI | Not started — reserved for the 7 canonical templates: `bot_welcome`, `support_welcome`, `support_received`, `inquiry_received`, `conversation_resolved`, `option_unavailable`, `empty_menu` |
+| **Phase 04-A** | Store Settings & Onboarding UI | ✅ **Merged into `main`** ([PR #10](https://github.com/geekammar/Rabet/pull/10)) — mobile-first Settings page, welcoming first-time onboarding, existing settings edit mode, USD default selection with currency safeguards, English default with RTL Arabic enablement, editable support categories, and clean database availability state handling (States A, B, C, D) |
+| **Phase 04-B** | Bot Content & message templates UI | 🟦 **Implemented on `feat/phase-04b-bot-content`** — focused, usable global bot content editor for the 7 canonical templates (`bot_welcome`, `support_welcome`, `support_received`, `inquiry_received`, `conversation_resolved`, `option_unavailable`, `empty_menu`), pure non-recursive placeholder interpolation, explicit per-template/per-language saves, draft preservation, RTL Arabic editing, mobile 360px support, and 0 writes on load |
 | Phase 05 | Catalog & Button Tree Editor | Not started |
 | Phase 06 | Telegram bot onboarding | Not started |
 | Phase 07 | Customer journey, inquiries & messaging | Not started |

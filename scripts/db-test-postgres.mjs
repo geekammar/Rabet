@@ -35,7 +35,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-const STATE_FILE = path.join(os.tmpdir(), "rabet-test-pg.json");
+const STATE_FILE =
+  process.env.RABET_PG_STATE_FILE ?? path.join(os.tmpdir(), "rabet-test-pg.json");
 const PG_SUPERUSER = "rabet";
 const PG_OS_USER = process.env.PG_OS_USER ?? "postgres";
 const MAX_PORT_PROBES = 20;
@@ -131,6 +132,15 @@ function pgIsready(bin, port) {
 }
 
 async function start() {
+  const existing = readState();
+
+  if (existing) {
+    fail(
+      `A disposable PostgreSQL instance is already active (port ${existing.port}, datadir: ${existing.datadir}). ` +
+        "Stop it with 'node scripts/db-test-postgres.mjs stop' before starting a new one.",
+    );
+  }
+
   const bin = bindir();
   const datadir = path.join(os.tmpdir(), `rabet-pg-${process.pid}-${Date.now()}`);
 
@@ -228,11 +238,18 @@ function readState() {
   }
 }
 
-function stop() {
+function stop(expectedDatadir) {
   const state = readState();
 
   if (!state) {
     log("No disposable instance is recorded as running. Nothing to stop.");
+    return;
+  }
+
+  if (expectedDatadir && state.datadir !== expectedDatadir) {
+    log(
+      `State file refers to a different datadir (${state.datadir}) than requested (${expectedDatadir}). Preserving active instance.`,
+    );
     return;
   }
 
@@ -268,6 +285,7 @@ async function run(rest) {
   await start();
 
   const state = readState();
+  const ownedDatadir = state?.datadir;
 
   const child = spawn(command, commandArgs, {
     stdio: "inherit",
@@ -278,7 +296,7 @@ async function run(rest) {
   });
 
   child.on("exit", (code, signal) => {
-    stop();
+    stop(ownedDatadir);
 
     if (signal) {
       process.kill(process.pid, signal);
@@ -295,7 +313,7 @@ switch (mode) {
     await start();
     break;
   case "stop":
-    stop();
+    stop(rest[0]);
     break;
   case "run":
     await run(rest);
