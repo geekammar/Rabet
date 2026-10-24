@@ -1,6 +1,6 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 05-B1 — First Recursive Product Action Editor (implemented, in review)**
+Current phase: **Phase 05-B2 — Remaining Four Product Action Types (implemented, in review)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
@@ -9,6 +9,7 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 [PHASE_04B_HANDOFF.md](./PHASE_04B_HANDOFF.md) for Global Bot Content Editor handoff,
 [PHASE_05A_HANDOFF.md](./PHASE_05A_HANDOFF.md) for Category & Product Editor handoff,
 [PHASE_05B1_HANDOFF.md](./PHASE_05B1_HANDOFF.md) for First Recursive Product Action Editor handoff,
+[PHASE_05B2_HANDOFF.md](./PHASE_05B2_HANDOFF.md) for Remaining Four Product Action Types handoff,
 [NEON_DEV_SETUP.md](./NEON_DEV_SETUP.md) for the one-command development
 database setup wizard.
 
@@ -16,13 +17,14 @@ database setup wizard.
 > data-model design pass, the **Phase 03B** database implementation, the
 > **Phase 03C-A** data-access layer, the **Phase 04-A** Settings UI pass, the
 > **Phase 04-B** Bot Content Editor pass, the **Phase 05-A** Catalog Editor pass,
-> and the **Phase 05-B1** Product Action Editor pass.
-> Phases 01, 02, 03A, 03B, 03B-B, 03B-C, 03C-A, 04-A, 04-B, and 05-A are merged into `main`:
+> the **Phase 05-B1** Product Action Editor pass, and the **Phase 05-B2** Action Types pass.
+> Phases 01, 02, 03A, 03B, 03B-B, 03B-C, 03C-A, 04-A, 04-B, 05-A, and 05-B1 are merged into `main`:
 > Phase 04-A was merged into `main` via PR #10, Phase 04-B was merged into `main`
-> via PR #12 (`fd91ccdb6802ac06cfdc041a570990547ef50a37`), and Phase 05-A was merged into `main`
-> via PR #13 (`b9c1883bd3f608d736d89cf31971c7d62f16d132`). Phase 05-B1 is implemented
-> on `feat/phase-05b1-product-actions` awaiting review.
-> Note that full Phase 05 remains incomplete; remaining action types and tree maintenance belong to Phase 05-B2, Telegram bot runtime navigation belongs to Phase 06, and inquiries belong to Phase 07/09.
+> via PR #12 (`fd91ccdb6802ac06cfdc041a570990547ef50a37`), Phase 05-A was merged into `main`
+> via PR #13 (`b9c1883bd3f608d736d89cf31971c7d62f16d132`), and Phase 05-B1 was merged into `main`
+> via PR #14 (`c88430db2fb2b834d841cdbce85de64de0f35ae0`). Phase 05-B2 is implemented
+> on `feat/phase-05b2-action-types` awaiting review.
+> Note that full Phase 05 and the MVP remain incomplete: action tree maintenance (reparenting, reordering, deletion) remains separate, Telegram bot runtime navigation belongs to Phase 06, inquiries belong to Phase 07/09, and launch hardening belongs to Phase 10.
 
 ---
 
@@ -40,8 +42,9 @@ database setup wizard.
 | **Phase 04-A** | Store Settings & Onboarding UI | ✅ **Merged into `main`** ([PR #10](https://github.com/geekammar/Rabet/pull/10)) — mobile-first Settings page, welcoming first-time onboarding, existing settings edit mode, USD default selection with currency safeguards, English default with RTL Arabic enablement, editable support categories, and clean database availability state handling (States A, B, C, D) |
 | **Phase 04-B** | Bot Content & message templates UI | ✅ **Merged into `main`** ([PR #12](https://github.com/geekammar/Rabet/pull/12), `fd91ccdb6802ac06cfdc041a570990547ef50a37`) — focused, usable global bot content editor for the 7 canonical templates (`bot_welcome`, `support_welcome`, `support_received`, `inquiry_received`, `conversation_resolved`, `option_unavailable`, `empty_menu`), pure non-recursive placeholder interpolation, explicit per-template/per-language saves, draft preservation, RTL Arabic editing, mobile 360px support, and 0 writes on load |
 | **Phase 05-A** | First Usable Category & Product Editor | ✅ **Merged into `main`** ([PR #13](https://github.com/geekammar/Rabet/pull/13), `b9c1883bd3f608d736d89cf31971c7d62f16d132`) — first usable category & product slice: hierarchy tree with depth safeguard, inactive-ancestor visibility explanation, product creation/editing under non-deleted categories, exact decimal displayed price, atomic rollback persistence, truthful localization fallback, and mobile 360px support |
-| **Phase 05-B1** | First Recursive Product Action Editor | 🟦 **Implemented on `feat/phase-05b1-product-actions`** — recursive product action configuration slice: 3 approved action types (`OPEN_SUBMENU`, `SHOW_DETAILS`, `START_INQUIRY`), same-product hierarchy enforcement, submenu-only parenting, atomic Neon HTTP batch persistence, runtime safeguards (`ACTION_DEPTH_WARNING_THRESHOLD=8`, `MAX_ACTION_DEPTH=16`, `MAX_ACTIVE_CHILDREN=20`, `MAX_ACTION_DEPTH_SAFEGUARD=64`), draft preservation across languages, 0 writes on load, and 360px responsive UI with >=44px targets |
-| **Phase 05-B2** | Deferred Action Types & Action Tree Maintenance | Not started (deferred) — deferred action types (`SEND_TEMPLATE_MESSAGE`, `OPEN_URL`, `OPEN_SUPPORT`, `NAVIGATE_CATALOG`), reparenting/moving actions, manual reordering, and action archiving/deletion |
+| **Phase 05-B1** | First Recursive Product Action Editor | ✅ **Merged into `main`** ([PR #14](https://github.com/geekammar/Rabet/pull/14), `c88430db2fb2b834d841cdbce85de64de0f35ae0`) — recursive product action configuration slice: 3 approved action types (`OPEN_SUBMENU`, `SHOW_DETAILS`, `START_INQUIRY`), same-product hierarchy enforcement, submenu-only parenting, atomic Neon HTTP batch persistence, runtime safeguards (`ACTION_DEPTH_WARNING_THRESHOLD=8`, `MAX_ACTION_DEPTH=16`, `MAX_ACTIVE_CHILDREN=20`, `MAX_ACTION_DEPTH_SAFEGUARD=64`), draft preservation across languages, 0 writes on load, and 360px responsive UI with >=44px targets |
+| **Phase 05-B2** | Remaining Four Product Action Types | 🟦 **Implemented on `feat/phase-05b2-action-types` (in review)** — configuration and persistence for all four remaining approved action types (`SEND_TEMPLATE_MESSAGE`, `OPEN_URL`, `OPEN_SUPPORT`, `NAVIGATE_CATALOG`), safe interpolation, atomic type transition rollback, draft preservation, and mobile 360px support |
+| **Phase 05-B3** | Action Tree Maintenance | Not started (deferred) — reparenting/moving actions, manual reordering, and action archiving/deletion |
 | Phase 06 | Telegram bot onboarding & runtime navigation | Not started (deferred) |
 | Phase 07 | Customer journey, inquiries & messaging | Not started |
 | Phase 08 | Payment integration (**deferred** — Telegram Stars, future) | Deferred — see ADR-013 |

@@ -568,6 +568,9 @@ export function CatalogEditor({
           isCategoryActive={selectedNode?.effectiveVisibility ?? true}
           defaultLanguage={defaultLanguage}
           languages={languages}
+          categories={categories}
+          products={products}
+          settings={settings}
           onClose={handleCloseActionEditor}
         />
       </div>

@@ -15,6 +15,7 @@ export interface CatalogViewData {
   settings: {
     displayName: string;
     currency: string;
+    supportCategory?: string[];
   };
   defaultLanguage: ResolvedLanguage | null;
   languages: LanguageRow[];

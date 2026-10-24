@@ -15,6 +15,7 @@ const mockEditProductAction = vi.fn();
 const mockListProductActions = vi.fn();
 const mockListLanguages = vi.fn();
 const mockResolveDefaultLanguage = vi.fn();
+const mockReadSettings = vi.fn();
 
 vi.mock("@/lib/data", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/data")>();
@@ -25,6 +26,7 @@ vi.mock("@/lib/data", async (importOriginal) => {
     listProductActions: (...args: unknown[]) => mockListProductActions(...args),
     listLanguages: (...args: unknown[]) => mockListLanguages(...args),
     resolveDefaultLanguage: (...args: unknown[]) => mockResolveDefaultLanguage(...args),
+    readSettings: (...args: unknown[]) => mockReadSettings(...args),
   };
 });
 
@@ -54,6 +56,9 @@ describe("Product Action Server Actions", () => {
       code: "en",
       label: "English",
       isEnabled: true,
+    });
+    mockReadSettings.mockResolvedValue({
+      supportCategory: ["Returns", "Warranty"],
     });
   });
 
@@ -103,15 +108,15 @@ describe("Product Action Server Actions", () => {
       expect(mockCreateProductAction).not.toHaveBeenCalled();
     });
 
-    it("rejects deferred action types in this slice", async () => {
+    it("rejects arbitrary or invalid action types", async () => {
       const res = await createProductActionAction({
         productId: validProductId,
-        actionType: "OPEN_URL",
+        actionType: "CUSTOM_UNKNOWN_TYPE",
         label: "Link",
       });
 
       expect(res.success).toBe(false);
-      expect(res.errors?.actionType).toMatch(/deferred/i);
+      expect(res.errors?.actionType).toMatch(/invalid action type/i);
       expect(mockCreateProductAction).not.toHaveBeenCalled();
     });
 
@@ -152,7 +157,7 @@ describe("Product Action Server Actions", () => {
       expect(mockCreateProductAction).not.toHaveBeenCalled();
     });
 
-    it("rejects URL and navigation parameters in this slice", async () => {
+    it("rejects URL and navigation parameters on OPEN_SUBMENU", async () => {
       const res = await createProductActionAction({
         productId: validProductId,
         actionType: "OPEN_SUBMENU",
@@ -161,7 +166,7 @@ describe("Product Action Server Actions", () => {
       });
 
       expect(res.success).toBe(false);
-      expect(res.errors?.parameters).toMatch(/URL configuration is not supported/i);
+      expect(res.errors?.parameters).toMatch(/only permitted on OPEN_URL/i);
       expect(mockCreateProductAction).not.toHaveBeenCalled();
     });
 
@@ -567,6 +572,321 @@ describe("Product Action Server Actions", () => {
       expect(res.success).toBe(false);
       expect(res.code).toBe("NOT_FOUND");
       expect(res.message).toMatch(/does not exist or has been deleted/i);
+    });
+  });
+
+  describe("Phase 05-B2 New Action Types", () => {
+    describe("SEND_TEMPLATE_MESSAGE", () => {
+      it("requires nonblank template body in default language", async () => {
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          label: "Send Message",
+          templateBody: "",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("INVALID_INPUT");
+        expect(res.errors?.templateBody).toMatch(/required/i);
+      });
+
+      it("rejects unknown placeholders in template body", async () => {
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          label: "Send Message",
+          templateBody: "Hello {{unknown_placeholder}}",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("INVALID_INPUT");
+        expect(res.errors?.templateBody).toMatch(/unknown placeholder/i);
+      });
+
+      it("creates SEND_TEMPLATE_MESSAGE with valid placeholders", async () => {
+        mockCreateProductAction.mockResolvedValue({
+          actionId: validActionId,
+          action: { id: validActionId, actionType: "SEND_TEMPLATE_MESSAGE" },
+        });
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          label: "Send Message",
+          templateBody: "Hello {{customer_name}}, {{product_name}} is {{price}} at {{store_name}}.",
+        });
+
+        expect(res.success).toBe(true);
+        expect(mockCreateProductAction).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            actionType: "SEND_TEMPLATE_MESSAGE",
+            translations: expect.arrayContaining([
+              expect.objectContaining({
+                label: "Send Message",
+                templateBody: "Hello {{customer_name}}, {{product_name}} is {{price}} at {{store_name}}.",
+              }),
+            ]),
+          }),
+        );
+      });
+    });
+
+    describe("OPEN_URL", () => {
+      it("requires a valid HTTPS URL", async () => {
+        const invalidRes = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_URL",
+          label: "Open Docs",
+          url: "http://insecure.example.com",
+        });
+
+        expect(invalidRes.success).toBe(false);
+        expect(invalidRes.code).toBe("INVALID_INPUT");
+        expect(invalidRes.errors?.url).toMatch(/HTTPS/i);
+      });
+
+      it("creates OPEN_URL action with valid HTTPS URL", async () => {
+        mockCreateProductAction.mockResolvedValue({
+          actionId: validActionId,
+          action: { id: validActionId, actionType: "OPEN_URL" },
+        });
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_URL",
+          label: "Documentation",
+          url: "https://example.com/docs",
+        });
+
+        expect(res.success).toBe(true);
+        expect(mockCreateProductAction).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            actionType: "OPEN_URL",
+            url: "https://example.com/docs",
+          }),
+        );
+      });
+    });
+
+    describe("OPEN_SUPPORT", () => {
+      it("accepts configured support category", async () => {
+        mockCreateProductAction.mockResolvedValue({
+          actionId: validActionId,
+          action: { id: validActionId, actionType: "OPEN_SUPPORT" },
+        });
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_SUPPORT",
+          label: "Get Help",
+          supportCategory: "Returns",
+        });
+
+        expect(res.success).toBe(true);
+        expect(mockCreateProductAction).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            actionType: "OPEN_SUPPORT",
+            actionConfig: { support_category: "Returns" },
+          }),
+        );
+      });
+
+      it("rejects unconfigured support category", async () => {
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_SUPPORT",
+          label: "Get Help",
+          supportCategory: "NonexistentCategory",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("INVALID_INPUT");
+        expect(res.errors?.parameters).toMatch(/not configured in store settings/i);
+      });
+    });
+
+    describe("NAVIGATE_CATALOG", () => {
+      const validCatId = "c0000000-0000-0000-0000-000000000001";
+      const validTargetProdId = "d0000000-0000-0000-0000-000000000001";
+
+      it("requires either a category or a product target", async () => {
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "NAVIGATE_CATALOG",
+          label: "Jump",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("INVALID_INPUT");
+        expect(res.errors?.navigationTarget).toMatch(/requires either a category or a product/i);
+      });
+
+      it("rejects both category and product targets submitted together", async () => {
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "NAVIGATE_CATALOG",
+          label: "Jump",
+          navigateCategoryId: validCatId,
+          navigateProductId: validTargetProdId,
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("INVALID_INPUT");
+        expect(res.errors?.navigationTarget).toMatch(/cannot specify both/i);
+      });
+
+      it("creates NAVIGATE_CATALOG with valid category target", async () => {
+        mockCreateProductAction.mockResolvedValue({
+          actionId: validActionId,
+          action: { id: validActionId, actionType: "NAVIGATE_CATALOG" },
+        });
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "NAVIGATE_CATALOG",
+          label: "Jump to Category",
+          navigateCategoryId: validCatId,
+        });
+
+        expect(res.success).toBe(true);
+        expect(mockCreateProductAction).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            actionType: "NAVIGATE_CATALOG",
+            navigateCategoryId: validCatId,
+          }),
+        );
+      });
+    });
+
+    describe("Arabic default configuration", () => {
+      it("handles Arabic default store correctly", async () => {
+        mockResolveDefaultLanguage.mockResolvedValue({
+          id: "lang-ar-id",
+          code: "ar",
+          label: "العربية",
+          isEnabled: true,
+        });
+
+        mockCreateProductAction.mockResolvedValue({
+          actionId: validActionId,
+          action: { id: validActionId, actionType: "OPEN_URL" },
+        });
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_URL",
+          label: "رابط المتجر",
+          url: "https://example.com/ar",
+        });
+
+        expect(res.success).toBe(true);
+        expect(mockCreateProductAction).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            translations: expect.arrayContaining([
+              expect.objectContaining({
+                languageId: "lang-ar-id",
+                languageCode: "ar",
+                label: "رابط المتجر",
+              }),
+            ]),
+          }),
+        );
+      });
+    });
+
+    describe("Database Error Boundaries", () => {
+      it("sanitizes database acquisition errors without leaking connection details on create", async () => {
+        mockGetDb.mockImplementationOnce(() => {
+          throw new Error("connect ECONNREFUSED postgres://admin:secretPass@10.0.0.1:5432/rabet");
+        });
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_URL",
+          label: "Link",
+          url: "https://example.com",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("DATABASE_ERROR");
+        expect(res.message).toMatch(/could not be completed/i);
+        expect(res.message).not.toContain("secretPass");
+        expect(res.message).not.toContain("10.0.0.1");
+      });
+
+      it("sanitizes database acquisition errors without leaking connection details on update", async () => {
+        mockGetDb.mockImplementationOnce(() => {
+          throw new Error("connect ECONNREFUSED postgres://admin:secretPass@10.0.0.1:5432/rabet");
+        });
+
+        const res = await updateProductActionAction({
+          actionId: validActionId,
+          productId: validProductId,
+          actionType: "OPEN_URL",
+          isActive: true,
+          url: "https://example.com",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("DATABASE_ERROR");
+        expect(res.message).toMatch(/could not be completed/i);
+        expect(res.message).not.toContain("secretPass");
+        expect(res.message).not.toContain("10.0.0.1");
+      });
+
+      it("sanitizes readSettings rejection without leaking SQL diagnostics on create", async () => {
+        mockReadSettings.mockRejectedValueOnce(
+          new Error("syntax error at or near 'SELECT * FROM bot_setting'"),
+        );
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_SUPPORT",
+          label: "Support",
+          actionConfig: { support_category: "Returns" },
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("DATABASE_ERROR");
+        expect(res.message).toMatch(/could not be completed/i);
+        expect(res.message).not.toContain("SELECT");
+      });
+
+      it("sanitizes readSettings rejection without leaking SQL diagnostics on update", async () => {
+        mockReadSettings.mockRejectedValueOnce(
+          new Error("syntax error at or near 'SELECT * FROM bot_setting'"),
+        );
+
+        const res = await updateProductActionAction({
+          actionId: validActionId,
+          productId: validProductId,
+          actionType: "OPEN_SUPPORT",
+          isActive: true,
+          actionConfig: { support_category: "Returns" },
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("DATABASE_ERROR");
+        expect(res.message).toMatch(/could not be completed/i);
+        expect(res.message).not.toContain("SELECT");
+      });
+
+      it("rejects malformed local input without calling getDb or touching database", async () => {
+        const res = await createProductActionAction({
+          productId: "not-a-valid-uuid",
+          actionType: "INVALID_ACTION_TYPE" as unknown as "OPEN_SUBMENU",
+          label: "",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("INVALID_INPUT");
+        expect(mockGetDb).not.toHaveBeenCalled();
+      });
     });
   });
 });

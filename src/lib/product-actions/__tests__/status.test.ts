@@ -61,4 +61,58 @@ describe("resolveActionTranslationStatus", () => {
       isSaved: false,
     });
   });
+
+  describe("SEND_TEMPLATE_MESSAGE translation and body status", () => {
+    it("reports saved when both label and template body are persisted", () => {
+      const res = resolveActionTranslationStatus({
+        currentLang: "en",
+        actionType: "SEND_TEMPLATE_MESSAGE",
+        savedTranslations: {
+          en: { label: "Info", templateBody: "Hello {{store_name}}" },
+        },
+      });
+      expect(res.isSaved).toBe(true);
+      expect(res.isLabelSaved).toBe(true);
+      expect(res.isBodySaved).toBe(true);
+      expect(res.bodyStatusKind).toBe("saved");
+      expect(res.effectiveSavedBody).toBe("Hello {{store_name}}");
+    });
+
+    it("distinguishes saved label with fallback template body", () => {
+      const res = resolveActionTranslationStatus({
+        currentLang: "ar",
+        actionType: "SEND_TEMPLATE_MESSAGE",
+        savedTranslations: {
+          en: { label: "Info", templateBody: "Hello {{store_name}}" },
+          ar: { label: "معلومات", templateBody: "" },
+        },
+        defaultLanguageCode: "en",
+        defaultLanguageLabel: "English",
+      });
+      expect(res.isSaved).toBe(false);
+      expect(res.isLabelSaved).toBe(true);
+      expect(res.isBodySaved).toBe(false);
+      expect(res.bodyStatusKind).toBe("missing_with_fallback");
+      expect(res.effectiveSavedBody).toBe("Hello {{store_name}}");
+      expect(res.label).toContain("Body falls back to English");
+    });
+
+    it("distinguishes saved label with missing body and no fallback", () => {
+      const res = resolveActionTranslationStatus({
+        currentLang: "ar",
+        actionType: "SEND_TEMPLATE_MESSAGE",
+        savedTranslations: {
+          en: { label: "Info" },
+          ar: { label: "معلومات" },
+        },
+        defaultLanguageCode: "en",
+        defaultLanguageLabel: "English",
+      });
+      expect(res.isSaved).toBe(false);
+      expect(res.isLabelSaved).toBe(true);
+      expect(res.isBodySaved).toBe(false);
+      expect(res.bodyStatusKind).toBe("missing_no_fallback");
+      expect(res.effectiveSavedBody).toBe(null);
+    });
+  });
 });
