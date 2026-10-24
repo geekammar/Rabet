@@ -241,7 +241,7 @@ async function main() {
   const envDir = mkdtempSync(path.join(tmpdir(), "rabet-browser-"));
   const envFile = path.join(envDir, "test.env");
 
-  const testSyntheticNeonUrl = "postgresql://rabet_user:synthetic_pass@ep-test.neon.tech/rabet_db";
+  const testSyntheticNeonUrl = "postgresql://rabet_user:synthetic_pass@ep-example.neon.tech/rabet_db";
 
   writeFileSync(
     envFile,
