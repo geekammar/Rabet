@@ -61,3 +61,16 @@ it("does not expose db.batch on the integration client the DB suites use", () =>
 
   return pool.end();
 });
+
+it("proves executeAtomicBatch uses db.batch when present", async () => {
+  const { executeAtomicBatch } = await import("../catalog");
+
+  const mockBatch = vi.fn().mockResolvedValue(["res1", "res2"]);
+  const mockDb = { batch: mockBatch } as unknown as import("@/db/client").Database;
+
+  const queries = ["stmt1", "stmt2"] as unknown as Parameters<typeof executeAtomicBatch>[1];
+  const results = await executeAtomicBatch(mockDb, queries);
+
+  expect(mockBatch).toHaveBeenCalledWith(queries);
+  expect(results).toEqual(["res1", "res2"]);
+});
