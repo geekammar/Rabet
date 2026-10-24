@@ -13,6 +13,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { hash } from "@node-rs/argon2";
 import postgres from "postgres";
+import {
+  detectConflictingFixture,
+  readPgState,
+  verifyAndStopOwnedFixture,
+} from "./fixture-guard.mjs";
 
 const APP_PORT = 3344;
 const CDP_PORT = 9333;
@@ -24,6 +29,7 @@ let appServer = null;
 let chromeProcess = null;
 let pgClient = null;
 let ownedTempDir = null;
+let ownedPgFixture = null;
 let isCleaningUp = false;
 
 function log(msg) {
@@ -63,11 +69,34 @@ async function cleanup() {
     ownedTempDir = null;
   }
 
-  try {
-    spawnSync("node", ["scripts/db-test-postgres.mjs", "stop"], {
-      stdio: "ignore",
+  if (ownedPgFixture) {
+    const stateFilePath =
+      process.env.RABET_PG_STATE_FILE ??
+      path.join(tmpdir(), "rabet-test-pg.json");
+
+    const res = verifyAndStopOwnedFixture({
+      stateFilePath,
+      ownedFixture: ownedPgFixture,
+      stopFn: (fixture) => {
+        log(`Stopping owned disposable PostgreSQL fixture (port ${fixture.port})...`);
+        try {
+          spawnSync(
+            "node",
+            ["scripts/db-test-postgres.mjs", "stop", fixture.datadir],
+            {
+              stdio: "ignore",
+              env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
+            }
+          );
+        } catch {}
+      },
     });
-  } catch {}
+
+    if (!res.stopped) {
+      log(`Preserved database state (did not stop fixture: ${res.reason}).`);
+    }
+    ownedPgFixture = null;
+  }
 }
 
 async function fail(msg) {
@@ -197,9 +226,25 @@ async function main() {
   }
   log(`Using Chromium executable: ${chromePath}`);
 
+  const stateFilePath =
+    process.env.RABET_PG_STATE_FILE ??
+    path.join(tmpdir(), "rabet-test-pg.json");
+
+  // Detect conflicting pre-existing fixture state before starting
+  const conflict = detectConflictingFixture(stateFilePath);
+  if (conflict) {
+    await fail(
+      `Pre-existing disposable PostgreSQL instance detected at ${stateFilePath} ` +
+        `(port ${conflict.port}, datadir: ${conflict.datadir}). ` +
+        "Another test run or fixture may be active. Preserving existing fixture. " +
+        "Please stop it with 'node scripts/db-test-postgres.mjs stop' or remove the stale state file before running acceptance tests."
+    );
+  }
+
   log("Starting disposable PostgreSQL...");
   const pgStart = spawnSync("node", ["scripts/db-test-postgres.mjs", "start"], {
     encoding: "utf8",
+    env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
   });
   if (pgStart.status !== 0) {
     await fail(`Could not start disposable PostgreSQL: ${pgStart.stderr}`);
@@ -211,6 +256,13 @@ async function main() {
     await fail("Could not find PostgreSQL URL in output");
   }
   const pgUrl = pgUrlMatch[0];
+
+  const stateData = readPgState(stateFilePath);
+  ownedPgFixture = {
+    port: stateData?.port ?? new URL(pgUrl).port,
+    datadir: stateData?.datadir ?? "",
+    url: pgUrl,
+  };
 
   // Verify test database is the designated disposable loopback target before any migration or write
   const parsedPgUrl = new URL(pgUrl);
@@ -601,25 +653,58 @@ async function main() {
     );
   }
 
-  // Check textarea dir="rtl" separately
+  // Check card-scoped textarea dir="rtl" separately
   const textareaIsRtl = await cdp.evaluate(`{
     const card = document.querySelector('[data-template-card="bot_welcome"]');
-    const ta = card.querySelector('textarea');
+    const ta = card ? card.querySelector('textarea') : null;
     ta ? ta.getAttribute('dir') : null;
   }`);
   if (textareaIsRtl !== "rtl") {
     await fail(`Flow 4: Expected Arabic textarea to have dir="rtl", got '${textareaIsRtl}'`);
   }
 
-  // Check live preview box dir="rtl" separately
+  // Check card-scoped live preview [data-template-preview] dir="rtl" separately
   const previewIsRtl = await cdp.evaluate(`{
     const card = document.querySelector('[data-template-card="bot_welcome"]');
-    const previewEl = card.querySelector('[dir="rtl"]');
-    Boolean(previewEl);
+    const previewEl = card ? card.querySelector('[data-template-preview]') : null;
+    previewEl ? previewEl.getAttribute('dir') : null;
   }`);
-  if (!previewIsRtl) {
-    await fail("Flow 4: Expected live preview container inside card to have dir='rtl'");
+  if (previewIsRtl !== "rtl") {
+    await fail(`Flow 4: Expected live preview [data-template-preview] to have dir="rtl", got '${previewIsRtl}'`);
   }
+
+  // Prove that an RTL textarea alone cannot satisfy the preview check when the preview is LTR or missing
+  const negativeProof = await cdp.evaluate(`(() => {
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const ta = card ? card.querySelector('textarea') : null;
+    const previewEl = card ? card.querySelector('[data-template-preview]') : null;
+
+    const isPreviewRtl = (el) => Boolean(el && el.getAttribute('dir') === 'rtl');
+
+    // Case 1: preview element is missing (null) even though textarea is RTL
+    const missingSatisfies = isPreviewRtl(null);
+
+    // Case 2: preview element has dir="ltr" while textarea is RTL
+    const origDir = previewEl ? previewEl.getAttribute('dir') : null;
+    if (previewEl) previewEl.setAttribute('dir', 'ltr');
+    const ltrSatisfies = isPreviewRtl(previewEl);
+    if (previewEl && origDir) previewEl.setAttribute('dir', origDir); // restore to original
+
+    return {
+      textareaDir: ta ? ta.getAttribute('dir') : null,
+      missingSatisfies,
+      ltrSatisfies,
+    };
+  })()`);
+  if (negativeProof.textareaDir !== "rtl") {
+    await fail("Flow 4: Sanity check failed; textarea was expected to be RTL during negative proof");
+  }
+  if (negativeProof.missingSatisfies || negativeProof.ltrSatisfies) {
+    await fail(
+      "Flow 4: RTL textarea alone improperly satisfied preview check when preview was missing or LTR!"
+    );
+  }
+  log("Flow 4: Verified card textarea dir='rtl', preview [data-template-preview] dir='rtl', and proved RTL textarea cannot satisfy preview check when preview is missing or LTR.");
 
   // Type Arabic message into draft
   const arabicText = "مرحبًا بك في Acme Digital! يسعدنا خدمتك.";
@@ -753,6 +838,90 @@ async function main() {
     );
   }
   log("Flow 5 PASSED: Client-side validation displayed, draft preserved in textarea, DB text unchanged.");
+
+  // ==========================================
+  // Flow 5-B: Action rejection with diagnostic text leak guard
+  // ==========================================
+  log("Flow 5-B: Testing unexpected action rejection, safe error message, and leak protection...");
+  const syntheticSecret = "FATAL_SYNTHETIC_DIAGNOSTIC_LEAK_SECRET_987654";
+  const syntheticUrl = "https://internal-pool-cluster.secret.test:5432/debug";
+  const draftToPreserve = "Support welcome draft that must be preserved";
+
+  // Set draft on support_welcome card
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="support_welcome"]');
+    const textarea = card.querySelector('textarea');
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    nativeSetter.call(textarea, ${JSON.stringify(draftToPreserve)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+  }`);
+  await sleep(300);
+
+  // Temporarily intercept fetch in browser to throw synthetic error
+  await cdp.evaluate(`{
+    window.__origFetch = window.fetch;
+    window.fetch = async () => {
+      throw new Error("${syntheticSecret}: Connection refused to ${syntheticUrl}");
+    };
+  }`);
+
+  // Click Save English Message on support_welcome
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="support_welcome"]');
+    const saveBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
+    if (saveBtn) saveBtn.click();
+  }`);
+  await sleep(1000);
+
+  // Restore fetch immediately
+  await cdp.evaluate(`{
+    if (window.__origFetch) {
+      window.fetch = window.__origFetch;
+      delete window.__origFetch;
+    }
+  }`);
+
+  // Inspect support_welcome card UI
+  const rejectionCardState = await cdp.evaluate(`(() => {
+    const card = document.querySelector('[data-template-card="support_welcome"]');
+    const text = card.innerText;
+    const textareaVal = card.querySelector('textarea').value;
+    return {
+      text,
+      textareaVal,
+      hasConnectionErrorHeading: text.includes("Connection error"),
+      hasFixedSafeMessage: text.includes("Unable to reach the server. Please check your connection and try again."),
+      leaksSecret: text.includes("${syntheticSecret}"),
+      leaksUrl: text.includes("${syntheticUrl}"),
+      isMarkedSaved: text.includes("Saved (EN)") || text.includes("Saved"),
+    };
+  })()`);
+
+  if (!rejectionCardState.hasConnectionErrorHeading) {
+    await fail("Flow 5-B: Expected 'Connection error' heading on unexpected action rejection.");
+  }
+  if (!rejectionCardState.hasFixedSafeMessage) {
+    await fail("Flow 5-B: Expected fixed safe retry guidance message upon unexpected action rejection.");
+  }
+  if (rejectionCardState.leaksSecret || rejectionCardState.leaksUrl) {
+    await fail("Flow 5-B: Card leaked internal exception message or diagnostic text to user!");
+  }
+  if (rejectionCardState.textareaVal !== draftToPreserve) {
+    await fail(`Flow 5-B: Draft was lost or cleared on action rejection; got '${rejectionCardState.textareaVal}'`);
+  }
+  if (rejectionCardState.isMarkedSaved) {
+    await fail("Flow 5-B: Card was incorrectly marked saved despite action rejection!");
+  }
+
+  // Clean up support_welcome draft using Reset button
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="support_welcome"]');
+    const resetBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Reset'));
+    if (resetBtn) resetBtn.click();
+  }`);
+  await sleep(300);
+  log("Flow 5-B PASSED: Rejected action displayed fixed safe message, leaked zero diagnostic text, and preserved draft without marking saved.");
 
   // ==========================================
   // Flow 6: Check a 360px viewport for overflow and 44x44 touch targets

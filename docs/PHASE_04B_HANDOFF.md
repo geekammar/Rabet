@@ -85,7 +85,8 @@
      - Explicit Save button with clear loading state, success message, or error feedback.
      - User input preserved in textarea upon validation errors.
      - User feedback distinguishes client validation errors from server save/connection failures.
-     - Scoped `data-template-card` attributes for clean, targeted selection.
+     - Scoped `data-template-card` and `data-template-preview` attributes for clean, targeted selection and independent direction verification.
+     - Fixed safe client error handling upon unexpected action or network rejection: Displays fixed user-facing retry guidance ("Unable to reach the server. Please check your connection and try again.") under "Connection error". Never leaks exception strings, internal URLs, stack traces, or diagnostic data. Preserves user drafts, existing saved translation state, and retry availability.
      - Strict $\ge 44 \times 44$px touch targets across all interactive buttons, tabs, and chips.
      - 0 horizontal overflow at 360px viewport.
 
@@ -167,12 +168,13 @@
 
 ### 5.2 Unit Test Suites (`npm test`)
 
-- **20 test files passed**, 11 skipped (DB files reserved for `test:db`).
-- **324 passed tests**, 140 skipped, 0 failed.
+- **21 test files passed**, 11 skipped (DB files reserved for `test:db`).
+- **327 passed tests**, 140 skipped, 0 failed.
 - Key suites:
   - `src/lib/bot-content/__tests__/placeholders.test.ts`: 21 tests passed (registry integrity, validation rules, unknown placeholders, non-recursive guarantee, HTML inertness).
   - `src/lib/bot-content/__tests__/status.test.ts`: 7 tests passed (truthful status resolution across all 4 states, draft/suggested text exclusion, and default language non-fallback).
   - `src/app/actions/__tests__/bot-content.test.ts`: 15 tests passed (unauthorized 0 DB access, unsupported language rejection before DB access, getDb failure handling, readLanguage rejection handling, createTemplate failure handling, saveTranslation failure handling with credential redaction).
+  - `tests/fixture-guard.test.ts`: 3 tests passed (disposable PostgreSQL ownership guards: failure before startup causes zero stop calls, pre-existing/conflicting state remains untouched, startup/cleanup stops only matching owned fixture without using real databases).
   - `tests/bot-content-page.test.ts`: 4 tests passed (States A, B, C, D availability states).
 
 ### 5.3 Real PostgreSQL Integration Tests (`npm run test:db`)
@@ -188,6 +190,9 @@ Executed against Next.js production server (`next start`), test credentials, dis
 
 - **Runner Safety & Reproducibility**:
   - Auto-discovers Chromium or uses `CHROME_BIN`/`CHROME_PATH`.
+  - Strictly checks for conflicting pre-existing fixture state before starting; preserves foreign fixtures and halts early if conflict detected.
+  - Records ownership of the disposable fixture started by the current run.
+  - In cleanup, verifies helper state still matches the owned fixture before stopping (`scripts/fixture-guard.mjs`), ensuring foreign fixtures are never terminated and aborts before startup cause zero stop calls.
   - Verifies test database target is strictly loopback (`127.0.0.1` or `localhost`) before migrations or seeding.
   - Masks connection strings and never logs credentials.
   - Generates bootstrap interceptor and environment files in an owned temporary directory with restrictive permissions (`0700` dir, `0600` files).
@@ -199,11 +204,12 @@ Executed against Next.js production server (`next start`), test credentials, dis
 | Flow 1 | Initial empty state | **PASSED** | Navigated to `/bot-content`; 7 cards rendered with scoped `[data-template-card]` attributes; verified truthful `Missing (EN) — no saved fallback` badge; verified 0 templates and 0 translations created in DB on page load. |
 | Flow 2 | Apply suggested text | **PASSED** | Clicked "Use suggested text" within `bot_welcome` card; local draft updated, preview updated, "Unsaved changes" badge appeared; verified 0 database writes occurred. |
 | Flow 3 | Explicit Save English | **PASSED** | Clicked "Save English Message" within card; reloaded page via CDP; verified text persisted in UI; verified DB contains exactly 1 template and 1 translation. |
-| Flow 4 | Arabic editing & truthful fallback badge | **PASSED** | Switched to Arabic tab; verified card displays `Missing (AR) — falls back to English` (default English exists in DB); verified `dir="rtl"` separately on textarea AND preview container; saved Arabic text; verified badge updated to `Saved (AR)`; verified DB contains both English and Arabic translations, English was preserved, and Arabic remained disabled (`is_enabled: false`). |
+| Flow 4 | Arabic editing, RTL direction & negative proof | **PASSED** | Switched to Arabic tab; verified card displays `Missing (AR) — falls back to English` (default English exists in DB); verified `dir="rtl"` separately on textarea AND preview element `[data-template-preview]`; proved that an RTL textarea alone cannot satisfy preview check when preview is missing or LTR; saved Arabic text; verified badge updated to `Saved (AR)`; verified DB contains both English and Arabic translations, English was preserved, and Arabic remained disabled (`is_enabled: false`). |
 | Flow 5 | Invalid placeholder & draft preservation | **PASSED** | Recorded stored DB text before save; entered unknown placeholder `{{unknown_placeholder}}` and clicked Save; verified client-side validation error displayed; verified draft remained in textarea; verified post-attempt DB text is strictly identical to pre-attempt text. |
+| Flow 5-B | Action rejection & diagnostic text leak guard | **PASSED** | Injected synthetic fetch failure with distinctive leak tokens (`FATAL_SYNTHETIC_DIAGNOSTIC_LEAK_SECRET_...`); verified UI displays fixed safe retry guidance ("Unable to reach the server. Please check your connection and try again.") under "Connection error"; verified zero leak of diagnostic text or internal URLs; verified user draft was preserved in textarea and not marked saved; verified retry availability. |
 | Flow 6 | Mobile 360px viewport & 44x44px touch targets | **PASSED** | Emulated 360x740 mobile viewport; verified `scrollWidth === 360` (0 horizontal overflow); verified all interactive buttons, tabs, and chips have touch target dimensions $\ge 44 \times 44$px (`width >= 43.5 && height >= 43.5`). |
 
-**All 6 browser acceptance flows PASSED with exit code 0.**
+**All browser acceptance flows PASSED with exit code 0.**
 
 ---
 

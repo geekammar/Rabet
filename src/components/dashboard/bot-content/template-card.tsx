@@ -205,14 +205,12 @@ export function TemplateCard({
             [currentLang]: currentDraft.trim(),
           }));
         }
-      } catch (err) {
+      } catch {
         setActionResult({
           success: false,
           code: "CONNECTION_FAILED",
           message:
-            err instanceof Error && err.message
-              ? `Save failed: ${err.message}`
-              : "Unable to reach the server. Please check your connection and try again.",
+            "Unable to reach the server. Please check your connection and try again.",
         });
       }
     });
@@ -445,6 +443,7 @@ export function TemplateCard({
           </div>
 
           <div
+            data-template-preview
             dir={isRtl ? "rtl" : "ltr"}
             className={`min-h-12 rounded-md border bg-background/80 p-3 text-sm text-foreground whitespace-pre-wrap break-words ${
               isRtl ? "text-right leading-relaxed" : "text-left"
