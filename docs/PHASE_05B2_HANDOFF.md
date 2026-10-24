@@ -34,6 +34,11 @@ No database migrations or schema alterations were performed. Existing columns on
   - Global bot message template keys and permissions remain unchanged.
 - **Preview & Drafts:**
   - Administrative preview renders with clearly identified sample context (`Customer Name`, product name, store display name, formatted price).
+  - Nonblank current-language draft: previews current draft with sample interpolation using that language's direction, identified as a draft/sample preview.
+  - Empty optional-language draft: directly previews the SAVED default-language body (not the saved optional body and not an unsaved default draft) using the default-language direction. Explicitly identified as a draft fallback preview that applies upon saving with an empty body.
+  - No saved default-language body: displays a clear no-saved-fallback notification.
+  - Empty default-language draft: displays required-body feedback without visually substituting an older saved body.
+  - Persisted status badges remain separate from the draft preview and describe authoritative saved records.
   - Draft inputs are preserved across language tabs.
   - Default-language body is authoritatively required when creating, activating, or converting to this type. Evaluated dynamically against store default language.
   - Safe deactivation of invalid actions is allowed without throwing.
@@ -118,11 +123,11 @@ In the edit drawer, changing the type selector displays an informative warning b
 
 1. **ESLint (`npm run lint`):** Passed with 0 errors and 0 warnings.
 2. **TypeScript (`npm run typecheck`):** Passed with 0 errors.
-3. **Unit Tests (`npm test`):** Passed (30 test files passed, 474 tests passed, 0 failures).
-4. **Database Integration (`npm run test:db`):** Passed (15 test files passed, 177 tests passed against disposable PostgreSQL, 0 failures).
+3. **Unit Tests (`npm test`):** Passed (30 passed, 14 skipped of 44 test files; 474 passed, 171 skipped of 645 tests; 0 failures).
+4. **Database Integration (`npm run test:db`):** Passed (15 passed, 0 skipped of 15 test files; 177 passed, 0 skipped of 177 tests against disposable PostgreSQL, 0 failures).
 5. **Schema Drift Check (`npm run db:check`):** Passed (`Everything's fine 🐶🔥`, 0 schema drift).
 6. **Production Build (`env -u DATABASE_URL npm run build`):** Succeeded with DATABASE_URL unset.
-7. **Browser Acceptance (`npm run test:browser:actions`):** All 11 scenarios passed, including Scenario 11 verifying UI creation, configuration, draft preservation, reload persistence in DOM and PostgreSQL, validation failure rejection, safe navigation deactivation with soft-deleted target, and 360px touch targets (>=44x44px).
+7. **Browser Acceptance (`npm run test:browser:actions`):** All 11 scenarios passed, including Scenario 11 verifying UI creation, configuration, draft preservation, reload persistence in DOM and PostgreSQL, validation failure rejection, safe navigation deactivation with soft-deleted target, 360px touch targets (>=44x44px), and optional-language draft clearing preview alignment to saved default fallback.
 
 ---
 

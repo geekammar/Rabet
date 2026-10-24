@@ -1880,6 +1880,109 @@ async function main() {
     await fail("Scenario 11: Unsaved Arabic draft template body was committed to database!");
   }
 
+  // 9B. Optional-language draft clearing preview alignment and fallback verification
+  log("Scenario 11: Testing optional-language cleared draft preview alignment and saved fallback...");
+  // First, set an unsaved edit in the English (default) draft to verify it is NOT used as fallback
+  await cdp.evaluate(`(() => {
+    const enBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('English'));
+    if (enBtn) enBtn.click();
+  })()`);
+  await sleep(300);
+
+  await setInputValue(
+    cdp,
+    '[data-testid="edit-action-template-body-input"]',
+    "UNSAVED EN DRAFT: Special promo for {{customer_name}}"
+  );
+  await sleep(300);
+
+  // Switch to Arabic (optional-language) tab and clear its draft
+  await cdp.evaluate(`(() => {
+    const arBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('العربية'));
+    if (arBtn) arBtn.click();
+  })()`);
+  await sleep(300);
+
+  await setInputValue(cdp, '[data-testid="edit-action-template-body-input"]', "");
+  await sleep(300);
+
+  // Inspect preview element in DOM
+  const previewStateAr = await cdp.evaluate(`(() => {
+    const headerEl = document.querySelector('[data-testid="edit-action-template-body-preview-header"]');
+    const previewEl = document.querySelector('[data-testid="edit-action-template-body-preview"]');
+    if (!headerEl || !previewEl) return null;
+    return {
+      header: headerEl.innerText.trim(),
+      body: previewEl.innerText.trim(),
+      dir: previewEl.getAttribute('dir'),
+    };
+  })()`);
+
+  if (!previewStateAr) {
+    await fail("Scenario 11: Template message preview elements not found in DOM for Arabic tab");
+  }
+  if (!previewStateAr.header || !previewStateAr.body) {
+    await fail(`Scenario 11: Preview header or body is empty: ${JSON.stringify(previewStateAr)}`);
+  }
+
+  // Assert preview contains saved default-language body (interpolated: "Updated offer for Sarah Ahmed: ...")
+  if (!previewStateAr.body.includes("Updated offer for Sarah Ahmed")) {
+    await fail(`Scenario 11: Expected preview to contain saved default-language body, got: '${previewStateAr.body}'`);
+  }
+
+  // Assert it does NOT contain the old optional-language body
+  if (previewStateAr.body.includes("مرحباً") || previewStateAr.body.includes("تفاصيل")) {
+    await fail(`Scenario 11: Preview improperly displays old optional-language body: '${previewStateAr.body}'`);
+  }
+
+  // Assert unsaved edit in default-language draft is NOT used as saved fallback
+  if (previewStateAr.body.includes("UNSAVED EN DRAFT")) {
+    await fail(`Scenario 11: Preview improperly used unsaved default-language draft: '${previewStateAr.body}'`);
+  }
+
+  // Assert heading identifies an unsaved draft fallback preview
+  if (
+    !previewStateAr.header.toLowerCase().includes("draft fallback preview") ||
+    !previewStateAr.header.includes("English")
+  ) {
+    await fail(`Scenario 11: Preview header does not identify unsaved draft fallback preview: '${previewStateAr.header}'`);
+  }
+
+  // Assert correct direction (English default language direction is 'ltr')
+  if (previewStateAr.dir !== "ltr") {
+    await fail(`Scenario 11: Expected preview dir='ltr' for English fallback, got '${previewStateAr.dir}'`);
+  }
+
+  // Verify clearing the draft alone performs NO database write
+  const [dbArBeforeSave] = await pgClient`
+    SELECT template_body FROM product_action_translation
+    WHERE action_id = ${dbMsg.id} AND language_id = (SELECT id FROM language WHERE code = 'ar')
+  `;
+  if (!dbArBeforeSave?.template_body?.includes("مرحباً {{customer_name}}!")) {
+    await fail("Scenario 11: Clearing Arabic draft in UI triggered premature database mutation!");
+  }
+
+  // Save the optional-body clearing while on the Arabic tab
+  await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
+  await sleep(1500);
+
+  // Verify in PostgreSQL: Arabic body is null/cleared, while English body remains unchanged
+  const [dbArAfterSave] = await pgClient`
+    SELECT template_body FROM product_action_translation
+    WHERE action_id = ${dbMsg.id} AND language_id = (SELECT id FROM language WHERE code = 'ar')
+  `;
+  if (dbArAfterSave?.template_body !== null && dbArAfterSave?.template_body !== "") {
+    await fail(`Scenario 11: Expected Arabic template_body to be null/cleared in DB, got: '${dbArAfterSave?.template_body}'`);
+  }
+
+  const [dbEnAfterSave] = await pgClient`
+    SELECT template_body FROM product_action_translation
+    WHERE action_id = ${dbMsg.id} AND language_id = ${langEn.id}
+  `;
+  if (!dbEnAfterSave?.template_body?.includes("Updated offer for {{customer_name}}: {{product_name}} is {{price}} at {{store_name}}.")) {
+    await fail(`Scenario 11: English template_body was improperly mutated when saving Arabic clearing: '${dbEnAfterSave?.template_body}'`);
+  }
+
   // 10. Invalid default-body rejection
   log("Scenario 11: Testing invalid default message body rejection...");
   // Switch to English tab
@@ -1892,6 +1995,26 @@ async function main() {
   // Clear English template body on active button and attempt to save
   await setInputValue(cdp, '[data-testid="edit-action-template-body-input"]', "");
   await sleep(300);
+
+  // Assert empty default-language preview does not substitute older saved body
+  const previewStateEmptyEn = await cdp.evaluate(`(() => {
+    const headerEl = document.querySelector('[data-testid="edit-action-template-body-preview-header"]');
+    const previewEl = document.querySelector('[data-testid="edit-action-template-body-preview"]');
+    if (!headerEl || !previewEl) return null;
+    return {
+      header: headerEl.innerText.trim(),
+      body: previewEl.innerText.trim(),
+    };
+  })()`);
+
+  if (
+    !previewStateEmptyEn?.header.includes("Default language message body") ||
+    !previewStateEmptyEn?.body.includes("No message content entered") ||
+    previewStateEmptyEn?.body.includes("Updated offer")
+  ) {
+    await fail(`Scenario 11: Empty default-language draft improperly substituted older saved body: ${JSON.stringify(previewStateEmptyEn)}`);
+  }
+
   await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
   await sleep(1000);
 

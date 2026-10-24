@@ -1508,42 +1508,60 @@ export function ProductActionEditor({
                         const currentDraft =
                           editDraftTranslations[activeLangTab]?.templateBody ?? "";
                         const hasCurrentDraft = currentDraft.trim().length > 0;
-                        const status = resolveActionTranslationStatus({
-                          currentLang: activeLangTab,
-                          savedTranslations: selectedNode.translations,
-                          actionType: editActionType,
-                          defaultLanguageCode: defaultLangCode,
-                          defaultLanguageLabel: defaultLangLabel,
-                        });
+                        const activeLanguageObj = languages.find(
+                          (l) => l.code === activeLangTab
+                        );
+                        const activeLangDir: "ltr" | "rtl" =
+                          activeLanguageObj?.textDirection === "rtl" ||
+                          activeLangTab === "ar"
+                            ? "rtl"
+                            : "ltr";
+
+                        const savedDefaultTrans =
+                          selectedNode.translations[defaultLangCode];
+                        const savedDefaultBody =
+                          savedDefaultTrans?.templateBody?.trim() || null;
 
                         let previewHeader = `Preview with sample values (not Telegram delivery):`;
                         let previewText = "";
-                        let isFallback = false;
+                        let previewDir: "ltr" | "rtl" = activeLangDir;
 
                         if (hasCurrentDraft) {
                           previewHeader = `Sample preview of current ${activeLangTab.toUpperCase()} draft (not Telegram delivery):`;
-                          previewText = interpolateActionTemplate(currentDraft, sampleContext);
+                          previewText = interpolateActionTemplate(
+                            currentDraft,
+                            sampleContext
+                          );
+                          previewDir = activeLangDir;
                         } else if (activeLangTab === defaultLangCode) {
                           previewHeader = `Default language message body (required for active button):`;
                           previewText = "";
-                        } else if (status.effectiveSavedBody) {
-                          previewHeader = `Fallback preview from saved ${defaultLangLabel} message body:`;
-                          previewText = interpolateActionTemplate(status.effectiveSavedBody, sampleContext);
-                          isFallback = true;
+                          previewDir = defaultLangDir;
+                        } else if (savedDefaultBody) {
+                          previewHeader = `Draft fallback preview from saved ${defaultLangLabel} message body (applies if saved empty):`;
+                          previewText = interpolateActionTemplate(
+                            savedDefaultBody,
+                            sampleContext
+                          );
+                          previewDir = defaultLangDir;
                         } else {
                           previewHeader = `Message body preview (${activeLangTab.toUpperCase()}):`;
                           previewText = "";
+                          previewDir = activeLangDir;
                         }
 
                         return (
                           <div className="rounded-xl border bg-muted/30 p-3 space-y-1">
                             <div className="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
                               <Info className="size-3.5" />
-                              <span>{previewHeader}</span>
+                              <span data-testid="edit-action-template-body-preview-header">
+                                {previewHeader}
+                              </span>
                             </div>
                             <div
                               className="text-xs p-2.5 rounded bg-background border whitespace-pre-wrap break-words"
-                              dir={isFallback ? defaultLangDir : activeLangTab === "ar" ? "rtl" : "ltr"}
+                              dir={previewDir}
+                              data-testid="edit-action-template-body-preview"
                             >
                               {previewText || (
                                 <span className="text-muted-foreground italic">
