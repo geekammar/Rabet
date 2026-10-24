@@ -4,28 +4,39 @@ import {
   type ValidationResult,
 } from "@/lib/catalog/validation";
 import {
-  DEFERRED_ACTION_TYPES,
   MAX_ACTION_LABEL_LENGTH,
   MAX_ACTION_MENU_TEXT_LENGTH,
   SUPPORTED_ACTION_TYPES,
-  type DeferredActionType,
   type SupportedActionType,
 } from "./constants";
+import {
+  interpolateActionTemplate,
+  validateActionTemplateBody,
+  type ActionTemplateValidationResult,
+} from "./templates";
 
-export { validateBoolean, validateUuid, type ValidationResult };
+export {
+  countCharacters,
+  interpolateActionTemplate,
+  validateActionTemplateBody,
+  validateBoolean,
+  validateUuid,
+  type ActionTemplateValidationResult,
+  type ValidationResult,
+};
 
 /**
  * Counts Unicode code points (characters), matching PostgreSQL length() behaviour
  * on multi-byte characters and surrogate pairs.
  */
-export function countCharacters(str: string): number {
+function countCharacters(str: string): number {
   return Array.from(str).length;
 }
 
 /**
- * Validates action type against the Phase 05-B1 narrow scope.
- * Accepts: OPEN_SUBMENU, SHOW_DETAILS, START_INQUIRY.
- * Distinguishes deferred approved types from arbitrary invalid inputs.
+ * Validates action type against the complete set of approved action types.
+ * Accepts: OPEN_SUBMENU, SHOW_DETAILS, START_INQUIRY, SEND_TEMPLATE_MESSAGE,
+ *          OPEN_URL, OPEN_SUPPORT, NAVIGATE_CATALOG.
  */
 export function validateActionType(raw: unknown): ValidationResult<SupportedActionType> {
   if (typeof raw !== "string") {
@@ -36,13 +47,6 @@ export function validateActionType(raw: unknown): ValidationResult<SupportedActi
 
   if (SUPPORTED_ACTION_TYPES.includes(trimmed as SupportedActionType)) {
     return { success: true, data: trimmed as SupportedActionType };
-  }
-
-  if (DEFERRED_ACTION_TYPES.includes(trimmed as DeferredActionType)) {
-    return {
-      success: false,
-      error: `Action type "${trimmed}" is deferred and not supported in this release.`,
-    };
   }
 
   return {
@@ -121,129 +125,296 @@ export function validateActionMenuText(
 }
 
 /**
+ * Validates an HTTPS URL for OPEN_URL using the WHATWG URL parser.
+ *
+ * Rules (DATA_MODEL.md §12.4):
+ * - Absolute HTTPS URL (protocol === "https:")
+ * - Valid hostname
+ * - No embedded credentials (username / password)
+ * - Reject javascript:, data:, file:, http: and malformed inputs
+ * - No whitespace or control characters
+ */
+export function validateHttpsUrl(raw: unknown): ValidationResult<string> {
+  if (typeof raw !== "string") {
+    return { success: false, error: "URL must be a string." };
+  }
+
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return { success: false, error: "URL is required for OPEN_URL actions." };
+  }
+
+  // Reject whitespace or control characters
+  if (/[\s\x00-\x1F\x7F]/.test(trimmed)) {
+    return {
+      success: false,
+      error: "URL cannot contain spaces or control characters.",
+    };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { success: false, error: "Invalid URL format." };
+  }
+
+  if (parsed.protocol !== "https:") {
+    return {
+      success: false,
+      error: `URL must use the HTTPS protocol (https://). Received protocol "${parsed.protocol}".`,
+    };
+  }
+
+  if (!parsed.hostname || parsed.hostname.length === 0) {
+    return { success: false, error: "URL must have a valid hostname." };
+  }
+
+  if (parsed.username || parsed.password) {
+    return {
+      success: false,
+      error: "URL cannot contain embedded credentials (username or password).",
+    };
+  }
+
+  return { success: true, data: trimmed };
+}
+
+/**
  * Validates the actionConfig payload.
- * In Phase 05-B1, actionConfig may be omitted or the approved empty plain object {}.
- * Rejects nonempty objects, arrays, primitives, and arbitrary strings.
- * Explicitly parses and validates FormData representations (e.g. "" or "{}").
+ *
+ * - OPEN_SUPPORT: accepts {} or {"support_category": string}.
+ * - All other action types: must be empty plain object {} or omitted.
  */
 export function validateActionConfig(
   raw: unknown,
+  actionTypeOrIsFormData: SupportedActionType | boolean = "OPEN_SUBMENU",
   isFormData = false,
-): ValidationResult<Record<string, never>> {
-  if (raw === undefined || raw === null) {
+  availableCategories?: string[],
+): ValidationResult<Record<string, unknown>> {
+  let actionType: SupportedActionType = "OPEN_SUBMENU";
+  let formFlag = isFormData;
+
+  if (typeof actionTypeOrIsFormData === "boolean") {
+    formFlag = actionTypeOrIsFormData;
+  } else if (typeof actionTypeOrIsFormData === "string") {
+    actionType = actionTypeOrIsFormData;
+  }
+
+  let configObj: unknown = raw;
+
+  if (configObj === undefined || configObj === null) {
     return { success: true, data: {} };
   }
 
-  if (isFormData && typeof raw === "string") {
-    const trimmed = raw.trim();
+  if (formFlag && typeof configObj === "string") {
+    const trimmed = configObj.trim();
     if (trimmed.length === 0 || trimmed === "{}") {
       return { success: true, data: {} };
     }
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
       try {
-        const parsed = JSON.parse(trimmed);
-        if (
-          typeof parsed === "object" &&
-          parsed !== null &&
-          !Array.isArray(parsed) &&
-          Object.keys(parsed).length === 0
-        ) {
-          return { success: true, data: {} };
-        }
+        configObj = JSON.parse(trimmed);
       } catch {
-        // parse failed
+        return {
+          success: false,
+          error: "actionConfig must be a valid JSON object or empty.",
+        };
       }
+    } else {
+      return {
+        success: false,
+        error: "actionConfig must be a valid JSON object or empty.",
+      };
     }
-    return {
-      success: false,
-      error: "actionConfig must be an empty plain object or omitted.",
-    };
   }
 
-  if (typeof raw !== "object" || raw === null) {
-    return {
-      success: false,
-      error: "actionConfig must be an empty plain object or omitted.",
-    };
-  }
-
-  if (Array.isArray(raw)) {
+  if (Array.isArray(configObj)) {
     return {
       success: false,
       error: "actionConfig cannot be an array.",
     };
   }
 
-  if (Object.prototype.toString.call(raw) !== "[object Object]") {
+  if (typeof configObj !== "object" || configObj === null) {
     return {
       success: false,
-      error: "actionConfig must be a plain object.",
+      error:
+        actionType === "OPEN_SUPPORT"
+          ? "actionConfig must be a plain object."
+          : "actionConfig must be an empty plain object or omitted.",
     };
   }
 
-  if (Object.keys(raw as object).length > 0) {
+  if (Object.prototype.toString.call(configObj) !== "[object Object]") {
     return {
       success: false,
-      error: "Custom actionConfig properties are not supported in this slice.",
+      error:
+        actionType === "OPEN_SUPPORT"
+          ? "actionConfig must be a plain object."
+          : "actionConfig must be an empty plain object or omitted.",
     };
   }
 
-  return { success: true, data: {} };
+  const keys = Object.keys(configObj as Record<string, unknown>);
+
+  if (actionType !== "OPEN_SUPPORT") {
+    if (keys.length > 0) {
+      return {
+        success: false,
+        error: `Custom actionConfig properties are not supported on ${actionType}.`,
+      };
+    }
+    return { success: true, data: {} };
+  }
+
+  // actionType === "OPEN_SUPPORT"
+  if (keys.length === 0) {
+    return { success: true, data: {} };
+  }
+
+  if (keys.length > 1 || keys[0] !== "support_category") {
+    return {
+      success: false,
+      error: 'OPEN_SUPPORT actionConfig only accepts optional "support_category".',
+    };
+  }
+
+  const categoryVal = (configObj as Record<string, unknown>).support_category;
+  if (categoryVal === null || categoryVal === undefined || categoryVal === "") {
+    return { success: true, data: {} };
+  }
+
+  if (typeof categoryVal !== "string") {
+    return {
+      success: false,
+      error: "support_category in actionConfig must be a string.",
+    };
+  }
+
+  const trimmedCat = categoryVal.trim();
+  if (trimmedCat.length === 0 || trimmedCat.length > 60) {
+    return {
+      success: false,
+      error: "support_category must be between 1 and 60 characters.",
+    };
+  }
+
+  if (availableCategories && availableCategories.length > 0) {
+    if (!availableCategories.includes(trimmedCat)) {
+      return {
+        success: false,
+        error: `Support category "${trimmedCat}" is not configured in store settings.`,
+      };
+    }
+  }
+
+  return { success: true, data: { support_category: trimmedCat } };
 }
 
 /**
- * Validates incompatible parameters for the Phase 05-B1 action types.
- * Rejects menuText on terminal actions (in all submitted languages),
- * non-null URL or navigation targets, and invalid actionConfig.
+ * Validates incompatible parameters for all action types.
+ *
+ * Enforces type-specific contracts:
+ * - OPEN_SUBMENU: accepts menuText; rejects url, targets, custom config, templateBody.
+ * - SEND_TEMPLATE_MESSAGE: accepts templateBody; rejects menuText, url, targets, custom config.
+ * - OPEN_URL: accepts url; rejects menuText, templateBody, targets, custom config.
+ * - OPEN_SUPPORT: accepts optional support_category; rejects menuText, templateBody, url, targets.
+ * - NAVIGATE_CATALOG: accepts exactly one target; rejects menuText, templateBody, url, custom config.
+ * - SHOW_DETAILS / START_INQUIRY: rejects menuText, templateBody, url, targets, custom config.
  */
 export function validateActionParameters(input: {
   actionType: SupportedActionType;
   menuText?: string | null;
   arabicMenuText?: string | null;
+  templateBody?: string | null;
+  arabicTemplateBody?: string | null;
   url?: unknown;
   navigateCategoryId?: unknown;
   navigateProductId?: unknown;
   actionConfig?: unknown;
   isFormData?: boolean;
+  availableCategories?: string[];
 }): ValidationResult<void> {
-  const isTerminal = input.actionType !== "OPEN_SUBMENU";
+  const { actionType } = input;
 
-  if (isTerminal) {
-    const hasDefaultMenuText =
-      input.menuText !== undefined &&
+  // 1. Submenu text: OPEN_SUBMENU only
+  const hasMenuText =
+    (input.menuText !== undefined &&
       input.menuText !== null &&
-      input.menuText.trim().length > 0;
-    const hasArabicMenuText =
-      input.arabicMenuText !== undefined &&
+      input.menuText.trim().length > 0) ||
+    (input.arabicMenuText !== undefined &&
       input.arabicMenuText !== null &&
-      input.arabicMenuText.trim().length > 0;
+      input.arabicMenuText.trim().length > 0);
 
-    if (hasDefaultMenuText || hasArabicMenuText) {
-      return {
-        success: false,
-        error: `Submenu message is only permitted on OPEN_SUBMENU actions, not on ${input.actionType}.`,
-      };
-    }
-  }
-
-  if (input.url !== undefined && input.url !== null) {
+  if (actionType !== "OPEN_SUBMENU" && hasMenuText) {
     return {
       success: false,
-      error: "URL configuration is not supported in this slice.",
+      error: `Submenu message is only permitted on OPEN_SUBMENU actions, not on ${actionType}.`,
     };
   }
 
-  if (
-    (input.navigateCategoryId !== undefined && input.navigateCategoryId !== null) ||
-    (input.navigateProductId !== undefined && input.navigateProductId !== null)
-  ) {
+  // 2. Template body: SEND_TEMPLATE_MESSAGE only
+  const hasTemplateBody =
+    (input.templateBody !== undefined &&
+      input.templateBody !== null &&
+      input.templateBody.trim().length > 0) ||
+    (input.arabicTemplateBody !== undefined &&
+      input.arabicTemplateBody !== null &&
+      input.arabicTemplateBody.trim().length > 0);
+
+  if (actionType !== "SEND_TEMPLATE_MESSAGE" && hasTemplateBody) {
     return {
       success: false,
-      error: "Catalog navigation configuration is not supported in this slice.",
+      error: `Message body is only permitted on SEND_TEMPLATE_MESSAGE actions, not on ${actionType}.`,
     };
   }
 
-  const configRes = validateActionConfig(input.actionConfig, input.isFormData);
+  // 3. URL: OPEN_URL only
+  const hasUrl =
+    input.url !== undefined &&
+    input.url !== null &&
+    String(input.url).trim().length > 0;
+
+  if (actionType !== "OPEN_URL" && hasUrl) {
+    return {
+      success: false,
+      error: `URL configuration is only permitted on OPEN_URL actions, not on ${actionType}.`,
+    };
+  }
+
+  // 4. Navigation targets: NAVIGATE_CATALOG only
+  const hasNavCat =
+    input.navigateCategoryId !== undefined &&
+    input.navigateCategoryId !== null &&
+    String(input.navigateCategoryId).trim().length > 0;
+
+  const hasNavProd =
+    input.navigateProductId !== undefined &&
+    input.navigateProductId !== null &&
+    String(input.navigateProductId).trim().length > 0;
+
+  if (actionType !== "NAVIGATE_CATALOG" && (hasNavCat || hasNavProd)) {
+    return {
+      success: false,
+      error: `Navigation targets are only permitted on NAVIGATE_CATALOG actions, not on ${actionType}.`,
+    };
+  }
+
+  if (actionType === "NAVIGATE_CATALOG" && hasNavCat && hasNavProd) {
+    return {
+      success: false,
+      error: "Cannot specify both a category and a product navigation target.",
+    };
+  }
+
+  // 5. Config validation
+  const configRes = validateActionConfig(
+    input.actionConfig,
+    actionType,
+    input.isFormData,
+    input.availableCategories,
+  );
   if (!configRes.success) {
     return {
       success: false,

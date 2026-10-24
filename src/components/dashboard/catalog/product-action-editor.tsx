@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   FolderTree,
+  Info,
   Loader2,
   Plus,
   RefreshCw,
@@ -32,19 +33,21 @@ import {
 } from "@/components/ui/card";
 import type { LanguageRow, ResolvedLanguage } from "@/lib/data";
 import {
+  ACTION_MESSAGE_PLACEHOLDERS,
   MAX_ACTION_LABEL_LENGTH,
   MAX_ACTION_MENU_TEXT_LENGTH,
+  MAX_ACTION_TEMPLATE_BODY_LENGTH,
   MAX_ACTIVE_CHILDREN,
-  SUPPORTED_ACTION_TYPES,
   type SupportedActionType,
 } from "@/lib/product-actions/constants";
 import { resolveActionTranslationStatus } from "@/lib/product-actions/status";
+import { interpolateActionTemplate } from "@/lib/product-actions/templates";
 import {
   buildActionHierarchy,
   type HierarchyActionNode,
   type RawActionNode,
 } from "@/lib/product-actions/tree";
-import type { CatalogProductRecord } from "./types";
+import type { CatalogCategoryRecord, CatalogProductRecord } from "./types";
 
 interface ProductActionEditorProps {
   product: CatalogProductRecord;
@@ -53,6 +56,13 @@ interface ProductActionEditorProps {
   isCategoryActive: boolean;
   defaultLanguage: ResolvedLanguage | null;
   languages: LanguageRow[];
+  categories?: CatalogCategoryRecord[];
+  products?: CatalogProductRecord[];
+  settings?: {
+    displayName: string;
+    currency: string;
+    supportCategory?: string[];
+  };
   onClose: () => void;
 }
 
@@ -63,6 +73,9 @@ export function ProductActionEditor({
   isCategoryActive,
   defaultLanguage,
   languages,
+  categories = [],
+  products = [],
+  settings,
   onClose,
 }: ProductActionEditorProps) {
   const [actions, setActions] = useState<RawActionNode[]>([]);
@@ -104,11 +117,16 @@ export function ProductActionEditor({
 
   const [prevProductId, setPrevProductId] = useState(product.id);
 
-  // Edit Form Draft State
+  // Edit Form State
   const [editActionType, setEditActionType] = useState<SupportedActionType>("OPEN_SUBMENU");
   const [editIsActive, setEditIsActive] = useState(true);
+  const [editUrl, setEditUrl] = useState("");
+  const [editSupportCategory, setEditSupportCategory] = useState("");
+  const [editNavTargetKind, setEditNavTargetKind] = useState<"category" | "product">("category");
+  const [editNavTargetId, setEditNavTargetId] = useState("");
+
   const [editDraftTranslations, setEditDraftTranslations] = useState<
-    Record<string, { label: string; menuText: string }>
+    Record<string, { label: string; menuText: string; templateBody: string }>
   >({});
 
   // Reset local state if product changes
@@ -239,15 +257,41 @@ export function ProductActionEditor({
     });
   }, [actions, isProductActive, isCategoryActive, activeLangTab, defaultLangCode]);
 
+  // Build category paths for target pickers
+  const categoryPaths = useMemo(() => {
+    const catMap = new Map<string, CatalogCategoryRecord>(
+      categories.map((c) => [c.id, c]),
+    );
+
+    const getPath = (c: CatalogCategoryRecord): string => {
+      const names: string[] = [];
+      let current: CatalogCategoryRecord | undefined = c;
+      const visited = new Set<string>();
+
+      while (current && !visited.has(current.id)) {
+        visited.add(current.id);
+        const name =
+          current.translations[defaultLangCode]?.name ||
+          current.translations["en"]?.name ||
+          current.slug;
+        names.unshift(name);
+        current = current.parentId ? catMap.get(current.parentId) : undefined;
+      }
+      return names.join(" > ");
+    };
+
+    const result = new Map<string, { path: string; record: CatalogCategoryRecord }>();
+    for (const cat of categories) {
+      result.set(cat.id, { path: getPath(cat), record: cat });
+    }
+    return result;
+  }, [categories, defaultLangCode]);
+
   // Selected action node
   const selectedNode = useMemo(() => {
     if (!editingActionId) return null;
     return flattened.find((a) => a.id === editingActionId) ?? null;
   }, [flattened, editingActionId]);
-
-  const isSelectedUnsupported =
-    selectedNode !== null &&
-    !SUPPORTED_ACTION_TYPES.includes(selectedNode.actionType as SupportedActionType);
 
   const toggleExpand = (id: string) => {
     setExpandedNodeIds((prev) => {
@@ -261,11 +305,28 @@ export function ProductActionEditor({
   const syncEditDraft = (node: HierarchyActionNode) => {
     setEditActionType(node.actionType as SupportedActionType);
     setEditIsActive(node.isActive);
-    const trans: Record<string, { label: string; menuText: string }> = {};
+    setEditUrl(node.url ?? "");
+
+    const config = (node.actionConfig as { support_category?: string } | null) ?? {};
+    setEditSupportCategory(config.support_category ?? "");
+
+    if (node.navigateProductId) {
+      setEditNavTargetKind("product");
+      setEditNavTargetId(node.navigateProductId);
+    } else if (node.navigateCategoryId) {
+      setEditNavTargetKind("category");
+      setEditNavTargetId(node.navigateCategoryId);
+    } else {
+      setEditNavTargetKind("category");
+      setEditNavTargetId("");
+    }
+
+    const trans: Record<string, { label: string; menuText: string; templateBody: string }> = {};
     for (const [code, t] of Object.entries(node.translations)) {
       trans[code] = {
         label: t.label ?? "",
         menuText: t.menuText ?? "",
+        templateBody: t.templateBody ?? "",
       };
     }
     setEditDraftTranslations(trans);
@@ -289,9 +350,14 @@ export function ProductActionEditor({
     const targetProductId = currentProductIdRef.current;
     const targetVersion = ++saveVersionRef.current;
     const submittedLang = activeLangTab;
-    const draft = editDraftTranslations[submittedLang] || { label: "", menuText: "" };
+    const draft = editDraftTranslations[submittedLang] || {
+      label: "",
+      menuText: "",
+      templateBody: "",
+    };
     const submittedLabel = draft.label;
     const submittedMenuText = draft.menuText;
+    const submittedTemplateBody = draft.templateBody;
 
     isMutationActiveRef.current = true;
 
@@ -305,6 +371,21 @@ export function ProductActionEditor({
           languageCode: submittedLang,
           label: submittedLabel,
           menuText: editActionType === "OPEN_SUBMENU" ? submittedMenuText : null,
+          templateBody:
+            editActionType === "SEND_TEMPLATE_MESSAGE" ? submittedTemplateBody : null,
+          url: editActionType === "OPEN_URL" ? editUrl : null,
+          navigateCategoryId:
+            editActionType === "NAVIGATE_CATALOG" && editNavTargetKind === "category"
+              ? (editNavTargetId || null)
+              : null,
+          navigateProductId:
+            editActionType === "NAVIGATE_CATALOG" && editNavTargetKind === "product"
+              ? (editNavTargetId || null)
+              : null,
+          actionConfig:
+            editActionType === "OPEN_SUPPORT"
+              ? (editSupportCategory ? { support_category: editSupportCategory } : {})
+              : {},
         });
 
         if (
@@ -326,6 +407,19 @@ export function ProductActionEditor({
 
           setEditActionType(authoritative.actionType as SupportedActionType);
           setEditIsActive(authoritative.isActive);
+          setEditUrl(authoritative.url ?? "");
+
+          const authoritativeConfig =
+            (authoritative.actionConfig as { support_category?: string } | null) ?? {};
+          setEditSupportCategory(authoritativeConfig.support_category ?? "");
+
+          if (authoritative.navigateProductId) {
+            setEditNavTargetKind("product");
+            setEditNavTargetId(authoritative.navigateProductId);
+          } else if (authoritative.navigateCategoryId) {
+            setEditNavTargetKind("category");
+            setEditNavTargetId(authoritative.navigateCategoryId);
+          }
 
           // Reconcile ONLY submitted language draft, preserving text entered after submission
           setEditDraftTranslations((prev) => {
@@ -333,7 +427,8 @@ export function ProductActionEditor({
             if (
               currentDraft &&
               (currentDraft.label !== submittedLabel ||
-                currentDraft.menuText !== submittedMenuText)
+                currentDraft.menuText !== submittedMenuText ||
+                currentDraft.templateBody !== submittedTemplateBody)
             ) {
               return prev; // User entered new text during save; do not overwrite!
             }
@@ -343,6 +438,7 @@ export function ProductActionEditor({
               [submittedLang]: {
                 label: savedTrans?.label ?? "",
                 menuText: savedTrans?.menuText ?? "",
+                templateBody: savedTrans?.templateBody ?? "",
               },
             };
           });
@@ -372,8 +468,15 @@ export function ProductActionEditor({
   const [createIsActive, setCreateIsActive] = useState(true);
   const [createLabel, setCreateLabel] = useState("");
   const [createMenuText, setCreateMenuText] = useState("");
+  const [createTemplateBody, setCreateTemplateBody] = useState("");
+  const [createUrl, setCreateUrl] = useState("");
+  const [createSupportCategory, setCreateSupportCategory] = useState("");
+  const [createNavTargetKind, setCreateNavTargetKind] = useState<"category" | "product">("category");
+  const [createNavTargetId, setCreateNavTargetId] = useState("");
+
   const [createArabicLabel, setCreateArabicLabel] = useState("");
   const [createArabicMenuText, setCreateArabicMenuText] = useState("");
+  const [createArabicTemplateBody, setCreateArabicTemplateBody] = useState("");
 
   const handleOpenCreate = (parentId: string | null = null) => {
     if (isReadActiveRef.current || isMutationActiveRef.current || isBusy) {
@@ -384,8 +487,14 @@ export function ProductActionEditor({
     setCreateIsActive(true);
     setCreateLabel("");
     setCreateMenuText("");
+    setCreateTemplateBody("");
+    setCreateUrl("");
+    setCreateSupportCategory("");
+    setCreateNavTargetKind("category");
+    setCreateNavTargetId("");
     setCreateArabicLabel("");
     setCreateArabicMenuText("");
+    setCreateArabicTemplateBody("");
     setIsCreateOpen(true);
     setActionFeedback(null);
   };
@@ -406,6 +515,8 @@ export function ProductActionEditor({
           isActive: createIsActive,
           label: createLabel,
           menuText: createType === "OPEN_SUBMENU" ? createMenuText : null,
+          templateBody:
+            createType === "SEND_TEMPLATE_MESSAGE" ? createTemplateBody : null,
           arabicLabel:
             arabicRegistered && defaultLangCode !== "ar" && createArabicLabel.trim().length > 0
               ? createArabicLabel
@@ -417,6 +528,26 @@ export function ProductActionEditor({
             createArabicMenuText.trim().length > 0
               ? createArabicMenuText
               : undefined,
+          arabicTemplateBody:
+            createType === "SEND_TEMPLATE_MESSAGE" &&
+            arabicRegistered &&
+            defaultLangCode !== "ar" &&
+            createArabicTemplateBody.trim().length > 0
+              ? createArabicTemplateBody
+              : undefined,
+          url: createType === "OPEN_URL" ? createUrl : null,
+          navigateCategoryId:
+            createType === "NAVIGATE_CATALOG" && createNavTargetKind === "category"
+              ? (createNavTargetId || null)
+              : null,
+          navigateProductId:
+            createType === "NAVIGATE_CATALOG" && createNavTargetKind === "product"
+              ? (createNavTargetId || null)
+              : null,
+          actionConfig:
+            createType === "OPEN_SUPPORT"
+              ? (createSupportCategory ? { support_category: createSupportCategory } : {})
+              : {},
         });
 
         if (targetProductId !== currentProductIdRef.current) {
@@ -428,7 +559,6 @@ export function ProductActionEditor({
         if (res.success && res.action) {
           setActions((prev) => [...prev, res.action!]);
           setIsCreateOpen(false);
-          // Automatically expand parent if created under parent
           if (createParentActionId) {
             setExpandedNodeIds((prev) => new Set([...prev, createParentActionId]));
           }
@@ -446,6 +576,24 @@ export function ProductActionEditor({
       }
     });
   };
+
+  // Helper sample context for template live preview
+  const sampleContext = useMemo(() => {
+    const storeName = settings?.displayName?.trim() || "Acme Digital";
+    const prodName =
+      product.translations[activeLangTab]?.name ||
+      product.translations[defaultLangCode]?.name ||
+      product.slug;
+    const currency = settings?.currency ?? "USD";
+    const price = `${currency} ${product.price}`;
+
+    return {
+      store_name: storeName,
+      product_name: prodName,
+      customer_name: "Sarah Ahmed",
+      price,
+    };
+  }, [settings, product, activeLangTab, defaultLangCode]);
 
   // Render Action Node
   const renderActionNode = (node: HierarchyActionNode) => {
@@ -496,7 +644,7 @@ export function ProductActionEditor({
             >
               <FolderTree className="size-4 shrink-0 text-primary/70" />
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="truncate text-sm font-medium">
                     {node.translations[activeLangTab]?.label ||
                       node.translations[defaultLangCode]?.label ||
@@ -509,7 +657,15 @@ export function ProductActionEditor({
                       ? "Details"
                       : node.actionType === "START_INQUIRY"
                       ? "Inquiry"
-                      : `Unsupported (${node.actionType})`}
+                      : node.actionType === "SEND_TEMPLATE_MESSAGE"
+                      ? "Message"
+                      : node.actionType === "OPEN_URL"
+                      ? "URL"
+                      : node.actionType === "OPEN_SUPPORT"
+                      ? "Support"
+                      : node.actionType === "NAVIGATE_CATALOG"
+                      ? "Navigate"
+                      : node.actionType}
                   </Badge>
                 </div>
               </div>
@@ -584,7 +740,7 @@ export function ProductActionEditor({
   };
 
   return (
-    <div className="space-y-6 w-full min-w-0" data-testid="product-action-editor">
+    <div className="space-y-6 w-full min-w-0 overflow-x-hidden" data-testid="product-action-editor">
       {/* Top Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b pb-4">
         <div className="space-y-1">
@@ -738,7 +894,7 @@ export function ProductActionEditor({
                       No buttons configured
                     </p>
                     <p className="text-xs text-muted-foreground max-w-sm mx-auto">
-                      Create a root submenu, product details button, or inquiry button to let customers interact with this product in Telegram.
+                      Create buttons to let customers interact with this product in Telegram.
                     </p>
                   </div>
                   <Button
@@ -786,15 +942,15 @@ export function ProductActionEditor({
               </CardHeader>
 
               <CardContent className="p-4 space-y-4">
-                {/* Unsupported action notice */}
-                {isSelectedUnsupported && (
+                {/* Type transition warning */}
+                {selectedNode.actionType !== editActionType && (
                   <div
                     role="alert"
                     className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800"
                   >
                     <AlertTriangle className="size-4 shrink-0 text-amber-600 mt-0.5" />
                     <span>
-                      This button has unsupported action type &quot;{selectedNode.actionType}&quot; and cannot be edited in this slice. Its configuration and translations are preserved read-only.
+                      Changing action type will remove incompatible saved configuration (such as message bodies, URLs, or navigation targets) upon saving.
                     </span>
                   </div>
                 )}
@@ -826,7 +982,6 @@ export function ProductActionEditor({
                     value={editActionType}
                     disabled={
                       isBusy ||
-                      isSelectedUnsupported ||
                       (selectedNode.actionType === "OPEN_SUBMENU" &&
                         selectedNode.children.length > 0)
                     }
@@ -838,6 +993,10 @@ export function ProductActionEditor({
                     <option value="OPEN_SUBMENU">OPEN_SUBMENU (Submenu with child buttons)</option>
                     <option value="SHOW_DETAILS">SHOW_DETAILS (Display product description & details)</option>
                     <option value="START_INQUIRY">START_INQUIRY (Customer thread for this product)</option>
+                    <option value="SEND_TEMPLATE_MESSAGE">SEND_TEMPLATE_MESSAGE (Send customized message)</option>
+                    <option value="OPEN_URL">OPEN_URL (Open external HTTPS web link)</option>
+                    <option value="OPEN_SUPPORT">OPEN_SUPPORT (Open general support conversation)</option>
+                    <option value="NAVIGATE_CATALOG">NAVIGATE_CATALOG (Jump to category or product)</option>
                   </select>
                   {selectedNode.actionType === "OPEN_SUBMENU" &&
                     selectedNode.children.length > 0 && (
@@ -853,7 +1012,7 @@ export function ProductActionEditor({
                     type="checkbox"
                     id="edit-is-active"
                     checked={editIsActive}
-                    disabled={isBusy || isSelectedUnsupported}
+                    disabled={isBusy}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditIsActive(e.target.checked)}
                     className="size-5 rounded border-gray-300 text-primary focus:ring-primary min-h-11 min-w-11 disabled:opacity-60"
                   />
@@ -865,14 +1024,182 @@ export function ProductActionEditor({
                   </label>
                 </div>
 
-                {/* Submenu child limit notice if near limit */}
+                {/* Submenu child limit notice */}
                 {selectedNode.actionType === "OPEN_SUBMENU" && (
                   <p className="text-xs text-muted-foreground">
                     Children: {selectedNode.activeChildCount} active / {selectedNode.childCount} total (limit {MAX_ACTIVE_CHILDREN} active)
                   </p>
                 )}
 
-                {/* Language Tabs */}
+                {/* TYPE-SPECIFIC CONFIGURATION: OPEN_URL */}
+                {editActionType === "OPEN_URL" && (
+                  <div className="space-y-1.5 pt-2 border-t">
+                    <label htmlFor="edit-action-url" className="text-xs font-semibold">
+                      HTTPS Web Link <span className="text-destructive">*</span>
+                    </label>
+                    <input
+                      id="edit-action-url"
+                      data-testid="edit-action-url-input"
+                      type="url"
+                      value={editUrl}
+                      disabled={isBusy}
+                      onChange={(e) => setEditUrl(e.target.value)}
+                      placeholder="https://example.com/info"
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Opens an external web page. Must use HTTPS. Cannot be used for payments or checkout.
+                    </p>
+                  </div>
+                )}
+
+                {/* TYPE-SPECIFIC CONFIGURATION: OPEN_SUPPORT */}
+                {editActionType === "OPEN_SUPPORT" && (
+                  <div className="space-y-1.5 pt-2 border-t">
+                    <label htmlFor="edit-action-support-category" className="text-xs font-semibold">
+                      Support Category (Optional)
+                    </label>
+                    <select
+                      id="edit-action-support-category"
+                      data-testid="edit-action-support-category-select"
+                      value={editSupportCategory}
+                      disabled={isBusy}
+                      onChange={(e) => setEditSupportCategory(e.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    >
+                      <option value="">General Support (No category)</option>
+                      {(settings?.supportCategory ?? []).map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      ))}
+                      {/* Truthfully show unavailable category if previously configured but deleted in settings */}
+                      {editSupportCategory &&
+                        !(settings?.supportCategory ?? []).includes(editSupportCategory) && (
+                          <option value={editSupportCategory}>
+                            [Unavailable] {editSupportCategory}
+                          </option>
+                        )}
+                    </select>
+                    {editSupportCategory &&
+                      !(settings?.supportCategory ?? []).includes(editSupportCategory) && (
+                        <p className="text-[11px] text-amber-600">
+                          Previously configured category &quot;{editSupportCategory}&quot; is no longer configured in store settings. You may clear or replace it.
+                        </p>
+                      )}
+                  </div>
+                )}
+
+                {/* TYPE-SPECIFIC CONFIGURATION: NAVIGATE_CATALOG */}
+                {editActionType === "NAVIGATE_CATALOG" && (
+                  <div className="space-y-3 pt-2 border-t">
+                    <div className="space-y-1.5">
+                      <label htmlFor="edit-action-nav-kind" className="text-xs font-semibold">
+                        Navigation Destination Kind
+                      </label>
+                      <select
+                        id="edit-action-nav-kind"
+                        data-testid="edit-action-nav-kind-select"
+                        value={editNavTargetKind}
+                        disabled={isBusy}
+                        onChange={(e) => {
+                          setEditNavTargetKind(e.target.value as "category" | "product");
+                          setEditNavTargetId("");
+                        }}
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      >
+                        <option value="category">Category</option>
+                        <option value="product">Product</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label htmlFor="edit-action-nav-target" className="text-xs font-semibold">
+                        Select Target {editNavTargetKind === "category" ? "Category" : "Product"} <span className="text-destructive">*</span>
+                      </label>
+                      <select
+                        id="edit-action-nav-target"
+                        data-testid="edit-action-nav-target-select"
+                        value={editNavTargetId}
+                        disabled={isBusy}
+                        onChange={(e) => setEditNavTargetId(e.target.value)}
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      >
+                        <option value="">-- Choose destination --</option>
+                        {editNavTargetKind === "category"
+                          ? categories.map((cat) => {
+                              const path = categoryPaths.get(cat.id)?.path || cat.slug;
+                              return (
+                                <option key={cat.id} value={cat.id}>
+                                  {path} {!cat.isActive ? "(Inactive)" : ""}
+                                </option>
+                              );
+                            })
+                          : products.map((prod) => {
+                              const name =
+                                prod.translations[defaultLangCode]?.name ||
+                                prod.translations["en"]?.name ||
+                                prod.slug;
+                              const catPath = prod.categoryId
+                                ? categoryPaths.get(prod.categoryId)?.path
+                                : "";
+                              return (
+                                <option key={prod.id} value={prod.id}>
+                                  {name} {catPath ? `(${catPath})` : ""} {!prod.isActive ? "(Inactive)" : ""}
+                                </option>
+                              );
+                            })}
+                      </select>
+                    </div>
+
+                    {/* Target status / warning */}
+                    {(() => {
+                      if (!editNavTargetId) {
+                        return (
+                          <p className="text-[11px] text-muted-foreground">
+                            Catalog navigation jumps customer to the selected item.
+                          </p>
+                        );
+                      }
+                      if (editNavTargetKind === "category") {
+                        const cat = categories.find((c) => c.id === editNavTargetId);
+                        if (!cat) {
+                          return (
+                            <p className="text-[11px] text-destructive">
+                              Target category no longer exists or has been deleted.
+                            </p>
+                          );
+                        }
+                        if (!cat.isActive) {
+                          return (
+                            <p className="text-[11px] text-amber-600">
+                              Selected category is currently inactive and hidden from customers.
+                            </p>
+                          );
+                        }
+                      } else {
+                        const prod = products.find((p) => p.id === editNavTargetId);
+                        if (!prod) {
+                          return (
+                            <p className="text-[11px] text-destructive">
+                              Target product no longer exists or has been deleted.
+                            </p>
+                          );
+                        }
+                        if (!prod.isActive) {
+                          return (
+                            <p className="text-[11px] text-amber-600">
+                              Selected product is currently inactive and hidden from customers.
+                            </p>
+                          );
+                        }
+                      }
+                      return null;
+                    })()}
+                  </div>
+                )}
+
+                {/* Language Tabs & Localized Content */}
                 <div className="space-y-3 pt-2 border-t">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-semibold">Localized Content</label>
@@ -946,7 +1273,7 @@ export function ProductActionEditor({
                       data-testid="edit-action-label-input"
                       dir={activeLangTab === "ar" ? "rtl" : "ltr"}
                       value={editDraftTranslations[activeLangTab]?.label ?? ""}
-                      disabled={isBusy || isSelectedUnsupported}
+                      disabled={isBusy}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         const val = e.target.value;
                         setEditDraftTranslations((prev) => ({
@@ -954,6 +1281,7 @@ export function ProductActionEditor({
                           [activeLangTab]: {
                             label: val,
                             menuText: prev[activeLangTab]?.menuText ?? "",
+                            templateBody: prev[activeLangTab]?.templateBody ?? "",
                           },
                         }));
                       }}
@@ -968,7 +1296,7 @@ export function ProductActionEditor({
                   </div>
 
                   {/* Localized Submenu Message (OPEN_SUBMENU only) */}
-                  {editActionType === "OPEN_SUBMENU" ? (
+                  {editActionType === "OPEN_SUBMENU" && (
                     <div className="space-y-1.5">
                       <div className="flex justify-between items-center">
                         <label
@@ -987,7 +1315,7 @@ export function ProductActionEditor({
                         data-testid="edit-action-menu-text-input"
                         dir={activeLangTab === "ar" ? "rtl" : "ltr"}
                         value={editDraftTranslations[activeLangTab]?.menuText ?? ""}
-                        disabled={isBusy || isSelectedUnsupported}
+                        disabled={isBusy}
                         onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
                           const val = e.target.value;
                           setEditDraftTranslations((prev) => ({
@@ -995,6 +1323,7 @@ export function ProductActionEditor({
                             [activeLangTab]: {
                               label: prev[activeLangTab]?.label ?? "",
                               menuText: val,
+                              templateBody: prev[activeLangTab]?.templateBody ?? "",
                             },
                           }));
                         }}
@@ -1007,11 +1336,110 @@ export function ProductActionEditor({
                         }
                       />
                     </div>
-                  ) : (
+                  )}
+
+                  {/* Localized Template Body (SEND_TEMPLATE_MESSAGE only) */}
+                  {editActionType === "SEND_TEMPLATE_MESSAGE" && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label
+                          htmlFor="edit-action-template-body"
+                          className="text-xs font-medium"
+                        >
+                          Message Body ({activeLangTab.toUpperCase()}){" "}
+                          {activeLangTab === defaultLangCode && (
+                            <span className="text-destructive">*</span>
+                          )}
+                        </label>
+                        <span className="text-[10px] text-muted-foreground font-mono">
+                          {Array.from(editDraftTranslations[activeLangTab]?.templateBody || "").length}/
+                          {MAX_ACTION_TEMPLATE_BODY_LENGTH}
+                        </span>
+                      </div>
+                      <textarea
+                        id="edit-action-template-body"
+                        data-testid="edit-action-template-body-input"
+                        dir={activeLangTab === "ar" ? "rtl" : "ltr"}
+                        value={editDraftTranslations[activeLangTab]?.templateBody ?? ""}
+                        disabled={isBusy}
+                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
+                          const val = e.target.value;
+                          setEditDraftTranslations((prev) => ({
+                            ...prev,
+                            [activeLangTab]: {
+                              label: prev[activeLangTab]?.label ?? "",
+                              menuText: prev[activeLangTab]?.menuText ?? "",
+                              templateBody: val,
+                            },
+                          }));
+                        }}
+                        rows={4}
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60 font-mono text-xs"
+                        placeholder={
+                          activeLangTab === "ar"
+                            ? "أهلاً {{customer_name}}! تفاصيل المنتج: {{product_name}} بسعر {{price}}."
+                            : "Hello {{customer_name}}! Here are details for {{product_name}} priced at {{price}}."
+                        }
+                      />
+
+                      {/* Supported Placeholder helper chips */}
+                      <div className="space-y-1">
+                        <p className="text-[11px] text-muted-foreground font-medium">
+                          Supported placeholders (click to insert):
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                          {ACTION_MESSAGE_PLACEHOLDERS.map((ph) => (
+                            <button
+                              key={ph}
+                              type="button"
+                              onClick={() => {
+                                const current = editDraftTranslations[activeLangTab]?.templateBody ?? "";
+                                const updated = `${current}{{${ph}}}`;
+                                setEditDraftTranslations((prev) => ({
+                                  ...prev,
+                                  [activeLangTab]: {
+                                    label: prev[activeLangTab]?.label ?? "",
+                                    menuText: prev[activeLangTab]?.menuText ?? "",
+                                    templateBody: updated,
+                                  },
+                                }));
+                              }}
+                              className="text-[10px] font-mono px-2 py-0.5 rounded border bg-muted/60 hover:bg-muted text-foreground"
+                            >
+                              {`{{${ph}}}`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Safe Preview Box */}
+                      <div className="rounded-xl border bg-muted/30 p-3 space-y-1">
+                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+                          <Info className="size-3.5" />
+                          <span>Preview with sample values (not Telegram delivery):</span>
+                        </div>
+                        <div
+                          className="text-xs p-2.5 rounded bg-background border whitespace-pre-wrap break-words"
+                          dir={activeLangTab === "ar" ? "rtl" : "ltr"}
+                        >
+                          {interpolateActionTemplate(
+                            editDraftTranslations[activeLangTab]?.templateBody ||
+                              (activeLangTab !== defaultLangCode
+                                ? editDraftTranslations[defaultLangCode]?.templateBody || ""
+                                : ""),
+                            sampleContext,
+                          ) || <span className="text-muted-foreground italic">No message content</span>}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Read-only explanations for SHOW_DETAILS & START_INQUIRY */}
+                  {(editActionType === "SHOW_DETAILS" || editActionType === "START_INQUIRY") && (
                     <div className="rounded-xl border bg-muted/40 p-3 text-xs text-muted-foreground">
                       {editActionType === "SHOW_DETAILS" ? (
                         <p>
-                          <strong>SHOW_DETAILS:</strong> Displays the product&apos;s existing localized description and details. No custom menu message is needed.
+                          <strong>SHOW_DETAILS:</strong> Displays the product&apos;s localized description and details. No custom menu message is needed.
                         </p>
                       ) : (
                         <p>
@@ -1036,7 +1464,7 @@ export function ProductActionEditor({
                   <Button
                     type="button"
                     onClick={handleSaveEdit}
-                    disabled={isBusy || isSelectedUnsupported}
+                    disabled={isBusy}
                     className="min-h-11 gap-2"
                     data-testid="save-action-btn"
                   >
@@ -1108,6 +1536,10 @@ export function ProductActionEditor({
                   <option value="OPEN_SUBMENU">OPEN_SUBMENU (Submenu with child buttons)</option>
                   <option value="SHOW_DETAILS">SHOW_DETAILS (Display product description & details)</option>
                   <option value="START_INQUIRY">START_INQUIRY (Customer thread for this product)</option>
+                  <option value="SEND_TEMPLATE_MESSAGE">SEND_TEMPLATE_MESSAGE (Send customized message)</option>
+                  <option value="OPEN_URL">OPEN_URL (Open external HTTPS web link)</option>
+                  <option value="OPEN_SUPPORT">OPEN_SUPPORT (Open general support conversation)</option>
+                  <option value="NAVIGATE_CATALOG">NAVIGATE_CATALOG (Jump to category or product)</option>
                 </select>
               </div>
 
@@ -1129,6 +1561,116 @@ export function ProductActionEditor({
                   Create as Active
                 </label>
               </div>
+
+              {/* TYPE-SPECIFIC CREATE FIELDS: OPEN_URL */}
+              {createType === "OPEN_URL" && (
+                <div className="space-y-1.5 pt-2 border-t">
+                  <label htmlFor="create-action-url" className="text-xs font-semibold">
+                    HTTPS Web Link <span className="text-destructive">*</span>
+                  </label>
+                  <input
+                    id="create-action-url"
+                    data-testid="create-action-url-input"
+                    type="url"
+                    value={createUrl}
+                    disabled={isBusy}
+                    onChange={(e) => setCreateUrl(e.target.value)}
+                    placeholder="https://example.com/info"
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    External link for information pages. Must use HTTPS. Cannot be used for payments or checkout.
+                  </p>
+                </div>
+              )}
+
+              {/* TYPE-SPECIFIC CREATE FIELDS: OPEN_SUPPORT */}
+              {createType === "OPEN_SUPPORT" && (
+                <div className="space-y-1.5 pt-2 border-t">
+                  <label htmlFor="create-action-support-category" className="text-xs font-semibold">
+                    Support Category (Optional)
+                  </label>
+                  <select
+                    id="create-action-support-category"
+                    data-testid="create-action-support-category-select"
+                    value={createSupportCategory}
+                    disabled={isBusy}
+                    onChange={(e) => setCreateSupportCategory(e.target.value)}
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                  >
+                    <option value="">General Support (No category)</option>
+                    {(settings?.supportCategory ?? []).map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* TYPE-SPECIFIC CREATE FIELDS: NAVIGATE_CATALOG */}
+              {createType === "NAVIGATE_CATALOG" && (
+                <div className="space-y-3 pt-2 border-t">
+                  <div className="space-y-1.5">
+                    <label htmlFor="create-action-nav-kind" className="text-xs font-semibold">
+                      Navigation Destination Kind
+                    </label>
+                    <select
+                      id="create-action-nav-kind"
+                      data-testid="create-action-nav-kind-select"
+                      value={createNavTargetKind}
+                      disabled={isBusy}
+                      onChange={(e) => {
+                        setCreateNavTargetKind(e.target.value as "category" | "product");
+                        setCreateNavTargetId("");
+                      }}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    >
+                      <option value="category">Category</option>
+                      <option value="product">Product</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label htmlFor="create-action-nav-target" className="text-xs font-semibold">
+                      Select Target {createNavTargetKind === "category" ? "Category" : "Product"} <span className="text-destructive">*</span>
+                    </label>
+                    <select
+                      id="create-action-nav-target"
+                      data-testid="create-action-nav-target-select"
+                      value={createNavTargetId}
+                      disabled={isBusy}
+                      onChange={(e) => setCreateNavTargetId(e.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    >
+                      <option value="">-- Choose destination --</option>
+                      {createNavTargetKind === "category"
+                        ? categories.map((cat) => {
+                            const path = categoryPaths.get(cat.id)?.path || cat.slug;
+                            return (
+                              <option key={cat.id} value={cat.id}>
+                                {path} {!cat.isActive ? "(Inactive)" : ""}
+                              </option>
+                            );
+                          })
+                        : products.map((prod) => {
+                            const name =
+                              prod.translations[defaultLangCode]?.name ||
+                              prod.translations["en"]?.name ||
+                              prod.slug;
+                            const catPath = prod.categoryId
+                              ? categoryPaths.get(prod.categoryId)?.path
+                              : "";
+                            return (
+                              <option key={prod.id} value={prod.id}>
+                                {name} {catPath ? `(${catPath})` : ""} {!prod.isActive ? "(Inactive)" : ""}
+                              </option>
+                            );
+                          })}
+                    </select>
+                  </div>
+                </div>
+              )}
 
               {/* Default Language Label */}
               <div className="space-y-1.5">
@@ -1193,6 +1735,73 @@ export function ProductActionEditor({
                 </div>
               )}
 
+              {/* Default Language Template Body (SEND_TEMPLATE_MESSAGE only) */}
+              {createType === "SEND_TEMPLATE_MESSAGE" && (
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <label
+                      htmlFor="create-action-template-body"
+                      className="text-xs font-semibold"
+                    >
+                      Message Body ({defaultLangLabel}) <span className="text-destructive">*</span>
+                    </label>
+                    <span className="text-[10px] text-muted-foreground font-mono">
+                      {Array.from(createTemplateBody).length}/{MAX_ACTION_TEMPLATE_BODY_LENGTH}
+                    </span>
+                  </div>
+                  <textarea
+                    id="create-action-template-body"
+                    data-testid="create-action-template-body-input"
+                    dir={defaultLangDir}
+                    value={createTemplateBody}
+                    disabled={isBusy}
+                    onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCreateTemplateBody(e.target.value)}
+                    rows={3}
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60 font-mono text-xs"
+                    placeholder={
+                      defaultLangCode === "ar"
+                        ? "أهلاً {{customer_name}}! تفاصيل المنتج: {{product_name}} بسعر {{price}}."
+                        : "Hello {{customer_name}}! Here are details for {{product_name}} priced at {{price}}."
+                    }
+                  />
+
+                  {/* Placeholder chips */}
+                  <div className="space-y-1">
+                    <p className="text-[11px] text-muted-foreground font-medium">
+                      Supported placeholders:
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      {ACTION_MESSAGE_PLACEHOLDERS.map((ph) => (
+                        <button
+                          key={ph}
+                          type="button"
+                          onClick={() => setCreateTemplateBody((prev) => `${prev}{{${ph}}}`)}
+                          className="text-[10px] font-mono px-2 py-0.5 rounded border bg-muted/60 hover:bg-muted text-foreground"
+                        >
+                          {`{{${ph}}}`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Preview Box */}
+                  <div className="rounded-xl border bg-muted/30 p-2.5 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+                      <Info className="size-3.5" />
+                      <span>Preview with sample values:</span>
+                    </div>
+                    <div
+                      className="text-xs p-2 rounded bg-background border whitespace-pre-wrap break-words"
+                      dir={defaultLangDir}
+                    >
+                      {interpolateActionTemplate(createTemplateBody, sampleContext) || (
+                        <span className="text-muted-foreground italic">No message content</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Optional Arabic fields if registered & default is not Arabic */}
               {arabicRegistered && defaultLangCode !== "ar" && (
                 <div className="border-t pt-3 space-y-3">
@@ -1237,6 +1846,28 @@ export function ProductActionEditor({
                         rows={2}
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                         placeholder="رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
+                      />
+                    </div>
+                  )}
+
+                  {createType === "SEND_TEMPLATE_MESSAGE" && (
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="create-action-ar-template-body"
+                        className="text-xs font-medium"
+                      >
+                        Message Body (Arabic)
+                      </label>
+                      <textarea
+                        id="create-action-ar-template-body"
+                        data-testid="create-action-ar-template-body-input"
+                        dir="rtl"
+                        value={createArabicTemplateBody}
+                        disabled={isBusy}
+                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCreateArabicTemplateBody(e.target.value)}
+                        rows={3}
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60 font-mono text-xs"
+                        placeholder="أهلاً {{customer_name}}! تفاصيل المنتج: {{product_name}} بسعر {{price}}."
                       />
                     </div>
                   )}

@@ -4,6 +4,8 @@ import { and, eq, isNull, ne, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
+  botSetting,
+  category,
   language,
   product,
   productAction,
@@ -12,7 +14,6 @@ import {
 import {
   MAX_ACTION_DEPTH,
   MAX_ACTIVE_CHILDREN,
-  SUPPORTED_ACTION_TYPES,
   type SupportedActionType,
 } from "@/lib/product-actions/constants";
 import { executeAtomicBatch } from "./catalog";
@@ -20,7 +21,7 @@ import { mapDatabaseError, RabetDataError } from "./errors";
 
 /**
  * ===========================================================================
- * Server-only product action data access functions (Phase 05-B1).
+ * Server-only product action data access functions (Phase 05-B1 & Phase 05-B2).
  * ===========================================================================
  */
 
@@ -56,11 +57,16 @@ export interface CreateProductActionData {
   parentActionId?: string | null;
   actionType: SupportedActionType;
   isActive?: boolean;
+  url?: string | null;
+  navigateCategoryId?: string | null;
+  navigateProductId?: string | null;
+  actionConfig?: Record<string, unknown>;
   translations: Array<{
     languageId: string;
     languageCode: string;
     label: string;
     menuText?: string | null;
+    templateBody?: string | null;
   }>;
 }
 
@@ -69,11 +75,16 @@ export interface EditProductActionData {
   productId: string;
   actionType: SupportedActionType;
   isActive: boolean;
+  url?: string | null;
+  navigateCategoryId?: string | null;
+  navigateProductId?: string | null;
+  actionConfig?: Record<string, unknown>;
   translation?: {
     languageId: string;
     languageCode: string;
     label: string;
     menuText?: string | null;
+    templateBody?: string | null;
   };
 }
 
@@ -317,7 +328,75 @@ export async function createProductAction(
       }
     }
 
-    // 4. Deterministic next sibling sort order
+    // 4. Type-specific pre-insert target validation
+    if (input.actionType === "NAVIGATE_CATALOG") {
+      const catId = input.navigateCategoryId?.trim() || null;
+      const prodId = input.navigateProductId?.trim() || null;
+
+      if (!catId && !prodId) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "NAVIGATE_CATALOG requires either a category or a product navigation target.",
+        );
+      }
+      if (catId && prodId) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "Cannot specify both a category and a product navigation target.",
+        );
+      }
+
+      if (catId) {
+        const [targetCat] = await db
+          .select({ id: category.id, deletedAt: category.deletedAt })
+          .from(category)
+          .where(eq(category.id, catId))
+          .limit(1);
+
+        if (!targetCat || targetCat.deletedAt !== null) {
+          throw new RabetDataError(
+            "NOT_FOUND",
+            "Referenced navigation target category does not exist or has been deleted.",
+          );
+        }
+      }
+
+      if (prodId) {
+        const [targetProd] = await db
+          .select({ id: product.id, deletedAt: product.deletedAt })
+          .from(product)
+          .where(eq(product.id, prodId))
+          .limit(1);
+
+        if (!targetProd || targetProd.deletedAt !== null) {
+          throw new RabetDataError(
+            "NOT_FOUND",
+            "Referenced navigation target product does not exist or has been deleted.",
+          );
+        }
+      }
+    }
+
+    if (input.actionType === "OPEN_SUPPORT" && input.actionConfig) {
+      const cat = (input.actionConfig as { support_category?: string }).support_category;
+      if (cat && typeof cat === "string" && cat.trim().length > 0) {
+        const [settings] = await db
+          .select({ supportCategory: botSetting.supportCategory })
+          .from(botSetting)
+          .where(eq(botSetting.id, 1))
+          .limit(1);
+
+        const configured = settings?.supportCategory ?? [];
+        if (!configured.includes(cat.trim())) {
+          throw new RabetDataError(
+            "INVALID_INPUT",
+            `Support category "${cat.trim()}" is not configured in store settings.`,
+          );
+        }
+      }
+    }
+
+    // 5. Deterministic next sibling sort order
     const [maxOrderRow] = await db
       .select({ maxOrder: sql<number | null>`max(${productAction.sortOrder})` })
       .from(productAction)
@@ -333,7 +412,7 @@ export async function createProductAction(
     const nextSortOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
     const actionId = globalThis.crypto.randomUUID();
 
-    // 5. Build atomic batch with concurrency-safe active limit check
+    // 6. Build atomic batch with concurrency-safe active limit check
     const batchQueries: unknown[] = [];
 
     if (isActive) {
@@ -398,10 +477,19 @@ export async function createProductAction(
       actionType: input.actionType,
       sortOrder: nextSortOrder,
       isActive,
-      actionConfig: sql`'{}'::jsonb`,
-      url: null,
-      navigateCategoryId: null,
-      navigateProductId: null,
+      url: input.actionType === "OPEN_URL" ? (input.url?.trim() ?? null) : null,
+      navigateCategoryId:
+        input.actionType === "NAVIGATE_CATALOG"
+          ? (input.navigateCategoryId?.trim() ?? null)
+          : null,
+      navigateProductId:
+        input.actionType === "NAVIGATE_CATALOG"
+          ? (input.navigateProductId?.trim() ?? null)
+          : null,
+      actionConfig:
+        input.actionType === "OPEN_SUPPORT" && input.actionConfig
+          ? input.actionConfig
+          : sql`'{}'::jsonb`,
     });
 
     const translationInserts = input.translations.map((t) =>
@@ -411,7 +499,10 @@ export async function createProductAction(
         languageId: t.languageId,
         label: t.label,
         menuText: input.actionType === "OPEN_SUBMENU" ? (t.menuText ?? null) : null,
-        templateBody: null,
+        templateBody:
+          input.actionType === "SEND_TEMPLATE_MESSAGE"
+            ? (t.templateBody ?? null)
+            : null,
       }),
     );
 
@@ -494,15 +585,8 @@ export async function editProductAction(
       );
     }
 
-    // 3. Reject edit attempts against existing deferred/unsupported action types
-    if (!SUPPORTED_ACTION_TYPES.includes(existing.actionType as SupportedActionType)) {
-      throw new RabetDataError(
-        "INVALID_INPUT",
-        `Action has unsupported type "${existing.actionType}" and cannot be edited in this slice.`,
-      );
-    }
-
-    // 4. Prevent changing actionType away from OPEN_SUBMENU if children exist
+    // 3. Prevent changing actionType away from OPEN_SUBMENU if children exist
+    const isTypeChange = existing.actionType !== input.actionType;
     if (
       existing.actionType === "OPEN_SUBMENU" &&
       input.actionType !== "OPEN_SUBMENU"
@@ -518,6 +602,142 @@ export async function editProductAction(
           "INVALID_INPUT",
           `Button has ${childCount} child button(s), so its type cannot change away from OPEN_SUBMENU.`,
         );
+      }
+    }
+
+    // 4. Validate destination type parameters and targets
+    let urlToSet: string | null = null;
+    let navCatToSet: string | null = null;
+    let navProdToSet: string | null = null;
+    let configToSet: unknown = sql`'{}'::jsonb`;
+
+    if (input.actionType === "OPEN_URL") {
+      urlToSet =
+        input.url !== undefined
+          ? (input.url?.trim() ?? null)
+          : (isTypeChange ? null : existing.url);
+
+      if (input.isActive && (!urlToSet || urlToSet.trim().length === 0)) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "URL is required before an OPEN_URL action can be activated.",
+        );
+      }
+    } else if (input.actionType === "NAVIGATE_CATALOG") {
+      navCatToSet =
+        input.navigateCategoryId !== undefined
+          ? (input.navigateCategoryId?.trim() ?? null)
+          : (isTypeChange ? null : existing.navigateCategoryId);
+
+      navProdToSet =
+        input.navigateProductId !== undefined
+          ? (input.navigateProductId?.trim() ?? null)
+          : (isTypeChange ? null : existing.navigateProductId);
+
+      if (navCatToSet && navProdToSet) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "Cannot specify both a category and a product navigation target.",
+        );
+      }
+
+      if (input.isActive) {
+        if (!navCatToSet && !navProdToSet) {
+          throw new RabetDataError(
+            "INVALID_INPUT",
+            "A valid category or product navigation target is required before activating NAVIGATE_CATALOG.",
+          );
+        }
+
+        if (navCatToSet) {
+          const [targetCat] = await db
+            .select({ id: category.id, deletedAt: category.deletedAt })
+            .from(category)
+            .where(eq(category.id, navCatToSet))
+            .limit(1);
+
+          if (!targetCat || targetCat.deletedAt !== null) {
+            throw new RabetDataError(
+              "INVALID_INPUT",
+              "Cannot activate action: target category does not exist or has been deleted.",
+            );
+          }
+        }
+
+        if (navProdToSet) {
+          const [targetProd] = await db
+            .select({ id: product.id, deletedAt: product.deletedAt })
+            .from(product)
+            .where(eq(product.id, navProdToSet))
+            .limit(1);
+
+          if (!targetProd || targetProd.deletedAt !== null) {
+            throw new RabetDataError(
+              "INVALID_INPUT",
+              "Cannot activate action: target product does not exist or has been deleted.",
+            );
+          }
+        }
+      } else {
+        // Safe deactivation: if target was explicitly submitted, validate it
+        if (input.navigateCategoryId !== undefined && navCatToSet) {
+          const [targetCat] = await db
+            .select({ id: category.id, deletedAt: category.deletedAt })
+            .from(category)
+            .where(eq(category.id, navCatToSet))
+            .limit(1);
+
+          if (!targetCat || targetCat.deletedAt !== null) {
+            throw new RabetDataError(
+              "NOT_FOUND",
+              "Referenced navigation target category does not exist or has been deleted.",
+            );
+          }
+        }
+
+        if (input.navigateProductId !== undefined && navProdToSet) {
+          const [targetProd] = await db
+            .select({ id: product.id, deletedAt: product.deletedAt })
+            .from(product)
+            .where(eq(product.id, navProdToSet))
+            .limit(1);
+
+          if (!targetProd || targetProd.deletedAt !== null) {
+            throw new RabetDataError(
+              "NOT_FOUND",
+              "Referenced navigation target product does not exist or has been deleted.",
+            );
+          }
+        }
+      }
+    } else if (input.actionType === "OPEN_SUPPORT") {
+      if (input.actionConfig !== undefined) {
+        configToSet = input.actionConfig ?? {};
+      } else {
+        configToSet = isTypeChange ? {} : existing.actionConfig;
+      }
+
+      if (
+        configToSet &&
+        typeof configToSet === "object" &&
+        "support_category" in (configToSet as Record<string, unknown>)
+      ) {
+        const cat = (configToSet as { support_category?: string }).support_category;
+        if (cat && typeof cat === "string" && cat.trim().length > 0 && input.actionConfig !== undefined) {
+          const [settings] = await db
+            .select({ supportCategory: botSetting.supportCategory })
+            .from(botSetting)
+            .where(eq(botSetting.id, 1))
+            .limit(1);
+
+          const configured = settings?.supportCategory ?? [];
+          if (!configured.includes(cat.trim())) {
+            throw new RabetDataError(
+              "INVALID_INPUT",
+              `Support category "${cat.trim()}" is not configured in store settings.`,
+            );
+          }
+        }
       }
     }
 
@@ -581,28 +801,86 @@ export async function editProductAction(
       }
     }
 
+    // 6. Base action update
     const actionUpdate = db
       .update(productAction)
       .set({
         actionType: input.actionType,
         isActive: input.isActive,
+        url: urlToSet,
+        navigateCategoryId: navCatToSet,
+        navigateProductId: navProdToSet,
+        actionConfig: configToSet,
         updatedAt: sql`now()`,
       })
       .where(eq(productAction.id, input.actionId));
 
     queries.push(actionUpdate);
 
+    // 7. Type transition cleanup across ALL existing translations
+    if (isTypeChange) {
+      if (input.actionType !== "OPEN_SUBMENU" && existing.actionType === "OPEN_SUBMENU") {
+        queries.push(
+          db
+            .update(productActionTranslation)
+            .set({ menuText: null, updatedAt: sql`now()` })
+            .where(eq(productActionTranslation.actionId, input.actionId)),
+        );
+      }
+      if (
+        input.actionType !== "SEND_TEMPLATE_MESSAGE" &&
+        existing.actionType === "SEND_TEMPLATE_MESSAGE"
+      ) {
+        queries.push(
+          db
+            .update(productActionTranslation)
+            .set({ templateBody: null, updatedAt: sql`now()` })
+            .where(eq(productActionTranslation.actionId, input.actionId)),
+        );
+      }
+    }
+
+    // 8. Update or upsert the submitted translation
     if (input.translation) {
+      const existingTrans = existing.translations[input.translation.languageCode];
+
+      let menuTextToSet: string | null = null;
+      if (input.actionType === "OPEN_SUBMENU") {
+        if (input.translation.menuText !== undefined) {
+          menuTextToSet = input.translation.menuText ?? null;
+        } else {
+          menuTextToSet = isTypeChange ? null : (existingTrans?.menuText ?? null);
+        }
+      }
+
+      let templateBodyToSet: string | null = null;
+      if (input.actionType === "SEND_TEMPLATE_MESSAGE") {
+        if (input.translation.templateBody !== undefined) {
+          templateBodyToSet = input.translation.templateBody ?? null;
+        } else {
+          templateBodyToSet = isTypeChange ? null : (existingTrans?.templateBody ?? null);
+        }
+      }
+
       const updateSet: Record<string, unknown> = {
         label: input.translation.label,
         updatedAt: sql`now()`,
       };
 
-      if (input.translation.menuText !== undefined) {
-        updateSet.menuText =
-          input.actionType === "OPEN_SUBMENU"
-            ? (input.translation.menuText ?? null)
-            : null;
+      if (input.actionType === "OPEN_SUBMENU") {
+        if (input.translation.menuText !== undefined || isTypeChange) {
+          updateSet.menuText = menuTextToSet;
+        }
+      } else {
+        updateSet.menuText = null;
+      }
+
+      if (input.actionType === "SEND_TEMPLATE_MESSAGE") {
+        if (input.translation.templateBody !== undefined || isTypeChange) {
+          updateSet.templateBody = templateBodyToSet;
+        }
+      } else {
+        updateSet.templateBody = null;
       }
 
       const translationUpsert = db
@@ -612,11 +890,8 @@ export async function editProductAction(
           actionId: input.actionId,
           languageId: input.translation.languageId,
           label: input.translation.label,
-          menuText:
-            input.actionType === "OPEN_SUBMENU"
-              ? (input.translation.menuText ?? null)
-              : null,
-          templateBody: null,
+          menuText: menuTextToSet,
+          templateBody: templateBodyToSet,
         })
         .onConflictDoUpdate({
           target: [

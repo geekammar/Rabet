@@ -34,6 +34,7 @@ type CatalogViewResult =
         settings: {
           displayName: string;
           currency: string;
+          supportCategory?: string[];
         };
         defaultLanguage: Awaited<ReturnType<typeof resolveDefaultLanguage>>;
         languages: Awaited<ReturnType<typeof listLanguages>>;
@@ -74,6 +75,7 @@ async function loadCatalogViewData(): Promise<CatalogViewResult> {
         settings: {
           displayName: settings.displayName,
           currency: settings.currency,
+          supportCategory: settings.supportCategory,
         },
         defaultLanguage,
         languages,

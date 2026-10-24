@@ -11,15 +11,19 @@ import {
   listProductActions,
   type ProductActionRecord,
   RabetDataError,
+  readSettings,
   resolveDefaultLanguage,
   toSafeErrorMessage,
 } from "@/lib/data";
 import {
+  validateActionConfig,
   validateActionLabel,
   validateActionMenuText,
   validateActionParameters,
+  validateActionTemplateBody,
   validateActionType,
   validateBoolean,
+  validateHttpsUrl,
   validateUuid,
 } from "@/lib/product-actions/validation";
 
@@ -42,12 +46,15 @@ export type CreateProductActionInput =
       isActive?: unknown;
       label: unknown;
       menuText?: unknown;
+      templateBody?: unknown;
       arabicLabel?: unknown;
       arabicMenuText?: unknown;
+      arabicTemplateBody?: unknown;
       url?: unknown;
       navigateCategoryId?: unknown;
       navigateProductId?: unknown;
       actionConfig?: unknown;
+      supportCategory?: unknown;
     };
 
 export type UpdateProductActionInput =
@@ -60,10 +67,12 @@ export type UpdateProductActionInput =
       languageCode?: unknown;
       label?: unknown;
       menuText?: unknown;
+      templateBody?: unknown;
       url?: unknown;
       navigateCategoryId?: unknown;
       navigateProductId?: unknown;
       actionConfig?: unknown;
+      supportCategory?: unknown;
     };
 
 function extractField(source: unknown, field: string): unknown {
@@ -130,12 +139,20 @@ export async function createProductActionAction(
   const rawIsActive = extractField(input, "isActive");
   const rawLabel = extractField(input, "label");
   const rawMenuText = extractField(input, "menuText");
+  const rawTemplateBody = extractField(input, "templateBody");
   const rawArabicLabel = extractField(input, "arabicLabel");
   const rawArabicMenuText = extractField(input, "arabicMenuText");
+  const rawArabicTemplateBody = extractField(input, "arabicTemplateBody");
   const rawUrl = extractField(input, "url");
   const rawNavCat = extractField(input, "navigateCategoryId");
   const rawNavProd = extractField(input, "navigateProductId");
-  const rawConfig = extractField(input, "actionConfig");
+  let rawConfig = extractField(input, "actionConfig");
+  const rawSupportCategory = extractField(input, "supportCategory");
+
+  if (rawSupportCategory !== undefined && rawConfig === undefined) {
+    const trimmedCat = String(rawSupportCategory).trim();
+    rawConfig = trimmedCat.length > 0 ? { support_category: trimmedCat } : {};
+  }
 
   const errors: Record<string, string> = {};
 
@@ -182,15 +199,75 @@ export async function createProductActionAction(
     label = labelRes.data;
   }
 
+  // Type-specific field validations
   let menuText: string | null = null;
-  const menuTextRes = validateActionMenuText(rawMenuText, "Default language");
-  if (!menuTextRes.success) {
-    errors.menuText = menuTextRes.error;
-  } else {
-    menuText = menuTextRes.data;
+  let templateBody: string | null = null;
+  let validatedUrl: string | null = null;
+  let navCategoryId: string | null = null;
+  let navProductId: string | null = null;
+
+  if (typeRes.success) {
+    const actionType = typeRes.data;
+
+    if (actionType === "OPEN_SUBMENU") {
+      const menuTextRes = validateActionMenuText(rawMenuText, "Default language");
+      if (!menuTextRes.success) {
+        errors.menuText = menuTextRes.error;
+      } else {
+        menuText = menuTextRes.data;
+      }
+    } else if (actionType === "SEND_TEMPLATE_MESSAGE") {
+      const bodyRes = validateActionTemplateBody(rawTemplateBody, {
+        required: true,
+        languageLabel: "Default language",
+      });
+      if (!bodyRes.success) {
+        errors.templateBody = bodyRes.error!;
+      } else {
+        templateBody = bodyRes.data!;
+      }
+    } else if (actionType === "OPEN_URL") {
+      const urlRes = validateHttpsUrl(rawUrl);
+      if (!urlRes.success) {
+        errors.url = urlRes.error;
+      } else {
+        validatedUrl = urlRes.data;
+      }
+    } else if (actionType === "NAVIGATE_CATALOG") {
+      const hasCat =
+        rawNavCat !== undefined &&
+        rawNavCat !== null &&
+        String(rawNavCat).trim().length > 0;
+      const hasProd =
+        rawNavProd !== undefined &&
+        rawNavProd !== null &&
+        String(rawNavProd).trim().length > 0;
+
+      if (!hasCat && !hasProd) {
+        errors.navigationTarget =
+          "NAVIGATE_CATALOG requires either a category or a product navigation target.";
+      } else if (hasCat && hasProd) {
+        errors.navigationTarget =
+          "Cannot specify both a category and a product navigation target.";
+      } else if (hasCat) {
+        const catRes = validateUuid(rawNavCat, "Navigation category ID");
+        if (!catRes.success) {
+          errors.navigateCategoryId = catRes.error;
+        } else {
+          navCategoryId = catRes.data;
+        }
+      } else if (hasProd) {
+        const prodRes = validateUuid(rawNavProd, "Navigation product ID");
+        if (!prodRes.success) {
+          errors.navigateProductId = prodRes.error;
+        } else {
+          navProductId = prodRes.data;
+        }
+      }
+    }
   }
 
-  // Optional Arabic
+  // Optional Arabic validations
   let arabicLabel: string | null = null;
   if (
     rawArabicLabel !== undefined &&
@@ -206,27 +283,83 @@ export async function createProductActionAction(
   }
 
   let arabicMenuText: string | null = null;
-  const arMenuTextRes = validateActionMenuText(rawArabicMenuText, "Arabic");
-  if (!arMenuTextRes.success) {
-    errors.arabicMenuText = arMenuTextRes.error;
-  } else {
-    arabicMenuText = arMenuTextRes.data;
+  if (typeRes.success && typeRes.data === "OPEN_SUBMENU") {
+    const arMenuTextRes = validateActionMenuText(rawArabicMenuText, "Arabic");
+    if (!arMenuTextRes.success) {
+      errors.arabicMenuText = arMenuTextRes.error;
+    } else {
+      arabicMenuText = arMenuTextRes.data;
+    }
+
+    if (arabicMenuText && !arabicLabel) {
+      errors.arabicLabel =
+        "Arabic button label is required when Arabic submenu message is provided.";
+    }
   }
 
-  if (arabicMenuText && !arabicLabel) {
-    errors.arabicLabel = "Arabic button label is required when Arabic submenu message is provided.";
+  let arabicTemplateBody: string | null = null;
+  if (typeRes.success && typeRes.data === "SEND_TEMPLATE_MESSAGE") {
+    if (
+      rawArabicTemplateBody !== undefined &&
+      rawArabicTemplateBody !== null &&
+      String(rawArabicTemplateBody).trim().length > 0
+    ) {
+      const arBodyRes = validateActionTemplateBody(rawArabicTemplateBody, {
+        required: false,
+        languageLabel: "Arabic",
+      });
+      if (!arBodyRes.success) {
+        errors.arabicTemplateBody = arBodyRes.error!;
+      } else {
+        arabicTemplateBody = arBodyRes.data!;
+      }
+
+      if (arabicTemplateBody && !arabicLabel) {
+        errors.arabicLabel =
+          "Arabic button label is required when Arabic message body is provided.";
+      }
+    }
   }
+
+  // Pre-load store settings for validation of support category only when OPEN_SUPPORT
+  const db = getDb();
+  let availableCategories: string[] = [];
+  if (typeRes.success && typeRes.data === "OPEN_SUPPORT") {
+    const settings = await readSettings(db);
+    availableCategories = settings?.supportCategory ?? [];
+  }
+
+  // Check if raw values were submitted for incompatible parameter check
+  const submittedMenuText =
+    rawMenuText !== undefined && rawMenuText !== null && String(rawMenuText).trim().length > 0
+      ? String(rawMenuText).trim()
+      : null;
+  const submittedArabicMenuText =
+    rawArabicMenuText !== undefined && rawArabicMenuText !== null && String(rawArabicMenuText).trim().length > 0
+      ? String(rawArabicMenuText).trim()
+      : null;
+  const submittedTemplateBody =
+    rawTemplateBody !== undefined && rawTemplateBody !== null && String(rawTemplateBody).trim().length > 0
+      ? String(rawTemplateBody).trim()
+      : null;
+  const submittedArabicTemplateBody =
+    rawArabicTemplateBody !== undefined && rawArabicTemplateBody !== null && String(rawArabicTemplateBody).trim().length > 0
+      ? String(rawArabicTemplateBody).trim()
+      : null;
 
   if (typeRes.success) {
     const paramRes = validateActionParameters({
       actionType: typeRes.data,
-      menuText,
-      arabicMenuText,
+      menuText: submittedMenuText,
+      arabicMenuText: submittedArabicMenuText,
+      templateBody: submittedTemplateBody,
+      arabicTemplateBody: submittedArabicTemplateBody,
       url: rawUrl,
       navigateCategoryId: rawNavCat,
       navigateProductId: rawNavProd,
       actionConfig: rawConfig,
       isFormData,
+      availableCategories,
     });
     if (!paramRes.success) {
       errors.parameters = paramRes.error;
@@ -243,7 +376,6 @@ export async function createProductActionAction(
   }
 
   try {
-    const db = getDb();
     const [languages, defaultLanguage] = await Promise.all([
       listLanguages(db),
       resolveDefaultLanguage(db),
@@ -255,7 +387,8 @@ export async function createProductActionAction(
       return {
         success: false,
         code: "SETTINGS_NOT_INITIALIZED",
-        message: "Store default language is not configured. Please complete store setup in Settings.",
+        message:
+          "Store default language is not configured. Please complete store setup in Settings.",
       };
     }
 
@@ -263,7 +396,8 @@ export async function createProductActionAction(
       return {
         success: false,
         code: "INVALID_INPUT",
-        message: "The store's default language is already Arabic; do not submit redundant Arabic fields.",
+        message:
+          "The store's default language is already Arabic; do not submit redundant Arabic fields.",
         errors: { arabicLabel: "Store default language is already Arabic." },
       };
     }
@@ -274,6 +408,7 @@ export async function createProductActionAction(
         languageCode: defaultLangCode,
         label,
         menuText,
+        templateBody,
       },
     ];
 
@@ -292,14 +427,27 @@ export async function createProductActionAction(
         languageCode: "ar",
         label: arabicLabel,
         menuText: arabicMenuText,
+        templateBody: arabicTemplateBody,
       });
     }
+
+    // Config object preparation
+    const parsedConfig = validateActionConfig(
+      rawConfig,
+      typeRes.data!,
+      isFormData,
+      availableCategories,
+    );
 
     const result = await createProductAction(db, {
       productId: prodIdRes.data,
       parentActionId,
       actionType: typeRes.data!,
       isActive,
+      url: validatedUrl,
+      navigateCategoryId: navCategoryId,
+      navigateProductId: navProductId,
+      actionConfig: parsedConfig.success ? parsedConfig.data : {},
       translations: translationsToInsert,
     });
 
@@ -338,10 +486,17 @@ export async function updateProductActionAction(
   const rawLangCode = extractField(input, "languageCode");
   const rawLabel = extractField(input, "label");
   const rawMenuText = extractField(input, "menuText");
+  const rawTemplateBody = extractField(input, "templateBody");
   const rawUrl = extractField(input, "url");
   const rawNavCat = extractField(input, "navigateCategoryId");
   const rawNavProd = extractField(input, "navigateProductId");
-  const rawConfig = extractField(input, "actionConfig");
+  let rawConfig = extractField(input, "actionConfig");
+  const rawSupportCategory = extractField(input, "supportCategory");
+
+  if (rawSupportCategory !== undefined && rawConfig === undefined) {
+    const trimmedCat = String(rawSupportCategory).trim();
+    rawConfig = trimmedCat.length > 0 ? { support_category: trimmedCat } : {};
+  }
 
   const errors: Record<string, string> = {};
 
@@ -366,11 +521,22 @@ export async function updateProductActionAction(
   }
 
   const isTranslationSubmitted =
-    rawLabel !== undefined || rawMenuText !== undefined;
+    rawLabel !== undefined ||
+    rawMenuText !== undefined ||
+    rawTemplateBody !== undefined;
 
   let langCode: string | undefined;
   let label: string | undefined;
   let menuText: string | null | undefined = undefined;
+  let templateBody: string | null | undefined = undefined;
+
+  // Pre-load store settings for support category validation only when OPEN_SUPPORT
+  const db = getDb();
+  let availableCategories: string[] = [];
+  if (typeRes.success && typeRes.data === "OPEN_SUPPORT") {
+    const settings = await readSettings(db);
+    availableCategories = settings?.supportCategory ?? [];
+  }
 
   if (isTranslationSubmitted) {
     if (typeof rawLangCode !== "string" || rawLangCode.trim().length === 0) {
@@ -411,22 +577,124 @@ export async function updateProductActionAction(
       }
     }
 
-    if (typeRes.success && typeRes.data !== "OPEN_SUBMENU") {
-      if (menuText !== undefined && menuText !== null && menuText.trim().length > 0) {
-        errors.menuText = `Submenu message is only permitted on OPEN_SUBMENU actions, not on ${typeRes.data}.`;
+    if (rawTemplateBody === undefined) {
+      templateBody = undefined;
+    } else if (
+      rawTemplateBody === null ||
+      (typeof rawTemplateBody === "string" && rawTemplateBody.trim().length === 0)
+    ) {
+      templateBody = null;
+    } else {
+      const bodyRes = validateActionTemplateBody(rawTemplateBody, {
+        required: false,
+        languageLabel: langLabel,
+      });
+      if (!bodyRes.success) {
+        errors.templateBody = bodyRes.error!;
+      } else {
+        templateBody = bodyRes.data!;
       }
+    }
+
+    if (typeRes.success) {
+      if (typeRes.data !== "OPEN_SUBMENU") {
+        if (menuText !== undefined && menuText !== null && menuText.trim().length > 0) {
+          errors.menuText = `Submenu message is only permitted on OPEN_SUBMENU actions, not on ${typeRes.data}.`;
+        }
+      }
+      if (typeRes.data !== "SEND_TEMPLATE_MESSAGE") {
+        if (
+          templateBody !== undefined &&
+          templateBody !== null &&
+          templateBody.trim().length > 0
+        ) {
+          errors.templateBody = `Message body is only permitted on SEND_TEMPLATE_MESSAGE actions, not on ${typeRes.data}.`;
+        }
+      }
+    }
+  }
+
+  // Type-specific field validations
+  let validatedUrl: string | null | undefined = undefined;
+  if (rawUrl !== undefined) {
+    if (rawUrl === null || String(rawUrl).trim().length === 0) {
+      validatedUrl = null;
+    } else {
+      const urlRes = validateHttpsUrl(rawUrl);
+      if (!urlRes.success) {
+        errors.url = urlRes.error;
+      } else {
+        validatedUrl = urlRes.data;
+      }
+    }
+  }
+
+  let navCategoryId: string | null | undefined = undefined;
+  if (rawNavCat !== undefined) {
+    if (rawNavCat === null || String(rawNavCat).trim().length === 0) {
+      navCategoryId = null;
+    } else {
+      const catRes = validateUuid(rawNavCat, "Navigation category ID");
+      if (!catRes.success) {
+        errors.navigateCategoryId = catRes.error;
+      } else {
+        navCategoryId = catRes.data;
+      }
+    }
+  }
+
+  let navProductId: string | null | undefined = undefined;
+  if (rawNavProd !== undefined) {
+    if (rawNavProd !== null && String(rawNavProd).trim().length > 0) {
+      const prodRes = validateUuid(rawNavProd, "Navigation product ID");
+      if (!prodRes.success) {
+        errors.navigateProductId = prodRes.error;
+      } else {
+        navProductId = prodRes.data;
+      }
+    } else if (rawNavProd === null || String(rawNavProd).trim().length === 0) {
+      navProductId = null;
+    }
+  }
+
+  if (typeRes.success && typeRes.data === "NAVIGATE_CATALOG") {
+    if (
+      navCategoryId &&
+      navProductId
+    ) {
+      errors.navigationTarget =
+        "Cannot specify both a category and a product navigation target.";
+    }
+  }
+
+  let parsedConfig: Record<string, unknown> | undefined = undefined;
+  if (rawConfig !== undefined) {
+    const configRes = validateActionConfig(
+      rawConfig,
+      typeRes.success ? typeRes.data : "OPEN_SUBMENU",
+      isFormData,
+      availableCategories,
+    );
+    if (!configRes.success) {
+      errors.actionConfig = configRes.error;
+    } else {
+      parsedConfig = configRes.data;
     }
   }
 
   if (typeRes.success) {
     const paramRes = validateActionParameters({
       actionType: typeRes.data,
-      menuText: isTranslationSubmitted && typeof menuText === "string" ? menuText : null,
+      menuText:
+        isTranslationSubmitted && typeof menuText === "string" ? menuText : null,
+      templateBody:
+        isTranslationSubmitted && typeof templateBody === "string" ? templateBody : null,
       url: rawUrl,
       navigateCategoryId: rawNavCat,
       navigateProductId: rawNavProd,
       actionConfig: rawConfig,
       isFormData,
+      availableCategories,
     });
     if (!paramRes.success) {
       errors.parameters = paramRes.error;
@@ -449,7 +717,6 @@ export async function updateProductActionAction(
   }
 
   try {
-    const db = getDb();
     const languages = await listLanguages(db);
 
     let translationToUpdate:
@@ -458,6 +725,7 @@ export async function updateProductActionAction(
           languageCode: string;
           label: string;
           menuText?: string | null;
+          templateBody?: string | null;
         }
       | undefined;
 
@@ -486,6 +754,7 @@ export async function updateProductActionAction(
         languageCode: targetLang.code,
         label,
         menuText: menuText === undefined ? undefined : menuText,
+        templateBody: templateBody === undefined ? undefined : templateBody,
       };
     }
 
@@ -494,6 +763,10 @@ export async function updateProductActionAction(
       productId: prodIdRes.data,
       actionType: typeRes.data!,
       isActive: activeRes.data!,
+      url: validatedUrl,
+      navigateCategoryId: navCategoryId,
+      navigateProductId: navProductId,
+      actionConfig: parsedConfig,
       translation: translationToUpdate,
     });
 

@@ -28,7 +28,7 @@ export interface ResolveActionStatusOptions {
   readonly savedTranslations: Readonly<
     Record<
       string,
-      | { label: string; menuText?: string | null }
+      | { label: string; menuText?: string | null; templateBody?: string | null }
       | undefined
     >
   >;
