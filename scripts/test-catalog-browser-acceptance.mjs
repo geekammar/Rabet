@@ -896,10 +896,10 @@ async function main() {
 
   // 2. Product test:
   // Open product editor for code-studio
-  await cdp.evaluate(`
-    const editBtn = document.querySelector('[data-product-slug="code-studio"] button');
-    if (editBtn) editBtn.click();
-  `);
+  await cdp.evaluate(`{
+    const btn = document.querySelector('[data-product-slug="code-studio"] button');
+    if (btn) btn.click();
+  }`);
   await sleep(500);
 
   // Switch to Arabic tab in product editor
@@ -973,14 +973,14 @@ async function main() {
 
   // Check database product: English description was saved, Arabic name was NOT saved as the draft
   const [dbProdEn] = await pgClient`
-    SELECT pt.name, pt.short_description FROM product_translation pt
+    SELECT pt.name, pt.description FROM product_translation pt
     JOIN product p ON pt.product_id = p.id
     JOIN language l ON pt.language_id = l.id
     WHERE p.slug = 'code-studio' AND l.code = 'en'
   `;
-  if (dbProdEn?.short_description !== "Updated English description") {
+  if (dbProdEn?.description !== "Updated English description") {
     await fail(
-      `Scenario 5B: Expected saved English product description 'Updated English description', got: '${dbProdEn?.short_description}'`
+      `Scenario 5B: Expected saved English product description 'Updated English description', got: '${dbProdEn?.description}'`
     );
   }
 
@@ -1000,16 +1000,16 @@ async function main() {
   }
 
   // Re-open product editor for software category to prepare for Scenario 6
-  await cdp.evaluate(`
+  await cdp.evaluate(`{
     const childNode = document.querySelector('[data-category-slug="software"] button');
     if (childNode) childNode.click();
-  `);
+  }`);
   await sleep(600);
 
-  await cdp.evaluate(`
-    const editBtn = document.querySelector('[data-product-slug="code-studio"] button');
-    if (editBtn) editBtn.click();
-  `);
+  await cdp.evaluate(`{
+    const btn = document.querySelector('[data-product-slug="code-studio"] button');
+    if (btn) btn.click();
+  }`);
   await sleep(500);
 
   log("Scenario 5B passed: Unsaved language drafts preserved for category and product, and reload verified database isolation.");
