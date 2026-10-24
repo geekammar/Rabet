@@ -14,16 +14,16 @@ import {
   validateUuid,
 } from "@/lib/catalog/validation";
 import {
+  type CatalogCategoryRecord,
+  type CatalogProductRecord,
   createCatalogCategory,
   createCatalogProduct,
+  editCatalogCategory,
+  editCatalogProduct,
   listLanguages,
   RabetDataError,
   resolveDefaultLanguage,
-  saveCatalogCategoryTranslation,
-  saveCatalogProductTranslation,
   toSafeErrorMessage,
-  updateCatalogCategory,
-  updateCatalogProduct,
 } from "@/lib/data";
 
 export type CatalogActionResult = {
@@ -33,6 +33,8 @@ export type CatalogActionResult = {
   errors?: Record<string, string>;
   categoryId?: string;
   productId?: string;
+  category?: CatalogCategoryRecord;
+  product?: CatalogProductRecord;
 };
 
 export type CreateCategoryActionInput =
@@ -197,11 +199,21 @@ export async function createCategoryAction(
     ]);
 
     const defaultLangId = defaultLanguage?.id;
-    if (!defaultLangId) {
+    const defaultLangCode = defaultLanguage?.code;
+    if (!defaultLangId || !defaultLangCode) {
       return {
         success: false,
         code: "SETTINGS_NOT_INITIALIZED",
         message: "Store default language is not configured. Please complete store setup in Settings.",
+      };
+    }
+
+    if (defaultLangCode === "ar" && arabicName) {
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        message: "The store's default language is already Arabic; do not submit redundant Arabic fields.",
+        errors: { arabicName: "Store default language is already Arabic." },
       };
     }
 
@@ -213,15 +225,21 @@ export async function createCategoryAction(
       },
     ];
 
-    if (arabicName) {
+    if (arabicName && defaultLangCode !== "ar") {
       const arabicLang = languages.find((l) => l.code === "ar");
-      if (arabicLang) {
-        translationsToInsert.push({
-          languageId: arabicLang.id,
-          name: arabicName,
-          description: arabicDescription,
-        });
+      if (!arabicLang) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          message: "Arabic is not a registered language in this store.",
+          errors: { arabicName: "Arabic is not registered in this store." },
+        };
       }
+      translationsToInsert.push({
+        languageId: arabicLang.id,
+        name: arabicName,
+        description: arabicDescription,
+      });
     }
 
     const result = await createCatalogCategory(db, {
@@ -234,6 +252,7 @@ export async function createCategoryAction(
     return {
       success: true,
       categoryId: result.categoryId,
+      category: result.category,
       message: "Category created successfully.",
     };
   } catch (error) {
@@ -263,6 +282,7 @@ export async function createCategoryAction(
 
 /**
  * Updates category base fields (slug, isActive) and optionally saves translation for the specified language.
+ * Uses atomic batch update to ensure base fields and translation commit or roll back together.
  */
 export async function updateCategoryAction(
   input: UpdateCategoryActionInput,
@@ -294,27 +314,48 @@ export async function updateCategoryAction(
     slug = slugRes.data;
   }
 
-  const isActive = validateBoolean(rawIsActive);
+  const isActiveRes = validateBoolean(rawIsActive, "Active status");
+  let isActive = false;
+  if (!isActiveRes.success) {
+    errors.isActive = isActiveRes.error;
+  } else {
+    isActive = isActiveRes.data;
+  }
 
-  // Check language and name if provided
-  const languageCode = typeof rawLanguageCode === "string" ? rawLanguageCode.trim() : "en";
+  // Translation update contract:
+  // If either name or description is explicitly provided, validate as translation update.
+  // If neither is provided, treat as base-only update.
+  const isTranslationSubmitted =
+    rawName !== undefined || rawDescription !== undefined;
+
+  let languageCode: string | null = null;
   let name: string | null = null;
   let description: string | null = null;
 
-  if (rawName !== undefined && rawName !== null && String(rawName).trim().length > 0) {
-    const nameRes = validateName(rawName, languageCode.toUpperCase());
+  if (isTranslationSubmitted) {
+    if (typeof rawLanguageCode !== "string" || rawLanguageCode.trim().length === 0) {
+      errors.languageCode = "Language code is required when updating translations.";
+    } else {
+      languageCode = rawLanguageCode.trim().toLowerCase();
+      if (languageCode !== "en" && languageCode !== "ar") {
+        errors.languageCode = `Language '${languageCode}' is not supported by the catalog editor.`;
+      }
+    }
+
+    const langLabel = (languageCode ?? "the selected language").toUpperCase();
+    const nameRes = validateName(rawName, langLabel);
     if (!nameRes.success) {
       errors.name = nameRes.error;
     } else {
       name = nameRes.data;
     }
-  }
 
-  const descRes = validateDescription(rawDescription, languageCode.toUpperCase());
-  if (!descRes.success) {
-    errors.description = descRes.error;
-  } else {
-    description = descRes.data;
+    const descRes = validateDescription(rawDescription, langLabel);
+    if (!descRes.success) {
+      errors.description = descRes.error;
+    } else {
+      description = descRes.data;
+    }
   }
 
   if (Object.keys(errors).length > 0) {
@@ -329,26 +370,42 @@ export async function updateCategoryAction(
   try {
     const db = getDb();
     const languages = await listLanguages(db);
-    const targetLanguage = languages.find((l) => l.code === languageCode);
 
-    await updateCatalogCategory(db, categoryId, {
-      slug,
-      isActive,
-    });
+    let translationInput: {
+      languageId: string;
+      name: string;
+      description?: string | null;
+    } | null = null;
 
-    if (name && targetLanguage) {
-      await saveCatalogCategoryTranslation(db, {
-        categoryId,
+    if (isTranslationSubmitted && languageCode && name) {
+      const targetLanguage = languages.find((l) => l.code === languageCode);
+      if (!targetLanguage) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          message: `Language '${languageCode}' is not registered in this store.`,
+          errors: { languageCode: `Language '${languageCode}' is not registered.` },
+        };
+      }
+      translationInput = {
         languageId: targetLanguage.id,
         name,
         description,
-      });
+      };
     }
+
+    const result = await editCatalogCategory(db, {
+      categoryId,
+      slug,
+      isActive,
+      translation: translationInput,
+    });
 
     revalidatePath("/catalog");
     return {
       success: true,
       categoryId,
+      category: result.category,
       message: "Category updated successfully.",
     };
   } catch (error) {
@@ -445,7 +502,11 @@ export async function createProductAction(
 
   // Optional Arabic
   let arabicName: string | null = null;
-  if (rawArabicName !== undefined && rawArabicName !== null && String(rawArabicName).trim().length > 0) {
+  if (
+    rawArabicName !== undefined &&
+    rawArabicName !== null &&
+    String(rawArabicName).trim().length > 0
+  ) {
     const arNameRes = validateName(rawArabicName, "Arabic");
     if (!arNameRes.success) {
       errors.arabicName = arNameRes.error;
@@ -487,11 +548,21 @@ export async function createProductAction(
     ]);
 
     const defaultLangId = defaultLanguage?.id;
-    if (!defaultLangId) {
+    const defaultLangCode = defaultLanguage?.code;
+    if (!defaultLangId || !defaultLangCode) {
       return {
         success: false,
         code: "SETTINGS_NOT_INITIALIZED",
         message: "Store default language is not configured. Please complete store setup in Settings.",
+      };
+    }
+
+    if (defaultLangCode === "ar" && arabicName) {
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        message: "The store's default language is already Arabic; do not submit redundant Arabic fields.",
+        errors: { arabicName: "Store default language is already Arabic." },
       };
     }
 
@@ -504,16 +575,22 @@ export async function createProductAction(
       },
     ];
 
-    if (arabicName) {
+    if (arabicName && defaultLangCode !== "ar") {
       const arabicLang = languages.find((l) => l.code === "ar");
-      if (arabicLang) {
-        translationsToInsert.push({
-          languageId: arabicLang.id,
-          name: arabicName,
-          description: arabicDesc,
-          details: arabicDetails,
-        });
+      if (!arabicLang) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          message: "Arabic is not a registered language in this store.",
+          errors: { arabicName: "Arabic is not registered in this store." },
+        };
       }
+      translationsToInsert.push({
+        languageId: arabicLang.id,
+        name: arabicName,
+        description: arabicDesc,
+        details: arabicDetails,
+      });
     }
 
     const result = await createCatalogProduct(db, {
@@ -527,6 +604,7 @@ export async function createProductAction(
     return {
       success: true,
       productId: result.productId,
+      product: result.product,
       message: "Product created successfully.",
     };
   } catch (error) {
@@ -555,6 +633,7 @@ export async function createProductAction(
 
 /**
  * Updates product base attributes (slug, price, isActive) and saves translation for the specified language.
+ * Uses atomic batch update to ensure base attributes and translation commit or roll back together.
  */
 export async function updateProductAction(
   input: UpdateProductActionInput,
@@ -596,34 +675,56 @@ export async function updateProductAction(
     price = priceRes.data;
   }
 
-  const isActive = validateBoolean(rawIsActive);
+  const isActiveRes = validateBoolean(rawIsActive, "Active status");
+  let isActive = false;
+  if (!isActiveRes.success) {
+    errors.isActive = isActiveRes.error;
+  } else {
+    isActive = isActiveRes.data;
+  }
 
-  const languageCode = typeof rawLanguageCode === "string" ? rawLanguageCode.trim() : "en";
+  // Translation update contract:
+  // If name, description, or details is explicitly provided, validate as translation update.
+  // If none is provided, treat as base-only update.
+  const isTranslationSubmitted =
+    rawName !== undefined || rawDescription !== undefined || rawDetails !== undefined;
+
+  let languageCode: string | null = null;
   let name: string | null = null;
   let description: string | null = null;
   let details: string | null = null;
 
-  if (rawName !== undefined && rawName !== null && String(rawName).trim().length > 0) {
-    const nameRes = validateName(rawName, languageCode.toUpperCase());
+  if (isTranslationSubmitted) {
+    if (typeof rawLanguageCode !== "string" || rawLanguageCode.trim().length === 0) {
+      errors.languageCode = "Language code is required when updating translations.";
+    } else {
+      languageCode = rawLanguageCode.trim().toLowerCase();
+      if (languageCode !== "en" && languageCode !== "ar") {
+        errors.languageCode = `Language '${languageCode}' is not supported by the catalog editor.`;
+      }
+    }
+
+    const langLabel = (languageCode ?? "the selected language").toUpperCase();
+    const nameRes = validateName(rawName, langLabel);
     if (!nameRes.success) {
       errors.name = nameRes.error;
     } else {
       name = nameRes.data;
     }
-  }
 
-  const descRes = validateDescription(rawDescription, languageCode.toUpperCase());
-  if (!descRes.success) {
-    errors.description = descRes.error;
-  } else {
-    description = descRes.data;
-  }
+    const descRes = validateDescription(rawDescription, langLabel);
+    if (!descRes.success) {
+      errors.description = descRes.error;
+    } else {
+      description = descRes.data;
+    }
 
-  const detailsRes = validateDetails(rawDetails, languageCode.toUpperCase());
-  if (!detailsRes.success) {
-    errors.details = detailsRes.error;
-  } else {
-    details = detailsRes.data;
+    const detailsRes = validateDetails(rawDetails, langLabel);
+    if (!detailsRes.success) {
+      errors.details = detailsRes.error;
+    } else {
+      details = detailsRes.data;
+    }
   }
 
   if (Object.keys(errors).length > 0) {
@@ -638,28 +739,45 @@ export async function updateProductAction(
   try {
     const db = getDb();
     const languages = await listLanguages(db);
-    const targetLanguage = languages.find((l) => l.code === languageCode);
 
-    await updateCatalogProduct(db, productId, {
-      slug,
-      price,
-      isActive,
-    });
+    let translationInput: {
+      languageId: string;
+      name: string;
+      description?: string | null;
+      details?: string | null;
+    } | null = null;
 
-    if (name && targetLanguage) {
-      await saveCatalogProductTranslation(db, {
-        productId,
+    if (isTranslationSubmitted && languageCode && name) {
+      const targetLanguage = languages.find((l) => l.code === languageCode);
+      if (!targetLanguage) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          message: `Language '${languageCode}' is not registered in this store.`,
+          errors: { languageCode: `Language '${languageCode}' is not registered.` },
+        };
+      }
+      translationInput = {
         languageId: targetLanguage.id,
         name,
         description,
         details,
-      });
+      };
     }
+
+    const result = await editCatalogProduct(db, {
+      productId,
+      slug,
+      price,
+      isActive,
+      translation: translationInput,
+    });
 
     revalidatePath("/catalog");
     return {
       success: true,
       productId,
+      product: result.product,
       message: "Product updated successfully.",
     };
   } catch (error) {

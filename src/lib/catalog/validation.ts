@@ -186,14 +186,14 @@ export function validateDetails(
  * - NO floating-point arithmetic is used.
  */
 export function validatePrice(raw: unknown): ValidationResult<string> {
-  if (typeof raw !== "string" && typeof raw !== "number") {
+  if (typeof raw !== "string") {
     return {
       success: false,
-      error: "Price must be a valid numeric string or number.",
+      error: "Price must be a string representing an exact decimal value.",
     };
   }
 
-  const str = String(raw).trim();
+  const str = raw.trim();
   if (str.length === 0) {
     return { success: false, error: "Price is required." };
   }
@@ -248,16 +248,27 @@ export function validatePrice(raw: unknown): ValidationResult<string> {
 }
 
 /**
- * Validates a boolean value from a form submission or checkbox.
+ * Validates a boolean value strictly from an action payload or checkbox.
+ * Rejects undefined, null, numbers, or malformed strings.
  */
-export function validateBoolean(raw: unknown): boolean {
-  if (typeof raw === "boolean") return raw;
+export function validateBoolean(
+  raw: unknown,
+  fieldName = "Field",
+): ValidationResult<boolean> {
+  if (typeof raw === "boolean") {
+    return { success: true, data: raw };
+  }
   if (typeof raw === "string") {
     const lower = raw.trim().toLowerCase();
-    return lower === "true" || lower === "1" || lower === "on";
+    if (lower === "true" || lower === "1" || lower === "on") {
+      return { success: true, data: true };
+    }
+    if (lower === "false" || lower === "0" || lower === "off") {
+      return { success: true, data: false };
+    }
   }
-  if (typeof raw === "number") {
-    return raw === 1;
-  }
-  return false;
+  return {
+    success: false,
+    error: `${fieldName} must be a valid boolean.`,
+  };
 }

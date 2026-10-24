@@ -18,8 +18,16 @@ describe("validatePrice", () => {
     expect(validatePrice("12")).toEqual({ success: true, data: "12.00" });
     expect(validatePrice("12.5")).toEqual({ success: true, data: "12.50" });
     expect(validatePrice("12.99")).toEqual({ success: true, data: "12.99" });
-    expect(validatePrice(49)).toEqual({ success: true, data: "49.00" });
     expect(validatePrice("1000000.50")).toEqual({ success: true, data: "1000000.50" });
+  });
+
+  it("rejects numeric JavaScript numbers to prevent precision loss", () => {
+    const res = validatePrice(49);
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error).toMatch(/must be a string/i);
+    }
+    expect(validatePrice(12.99).success).toBe(false);
   });
 
   it("handles leading zeros correctly", () => {
@@ -168,15 +176,23 @@ describe("validateUuid", () => {
 });
 
 describe("validateBoolean", () => {
-  it("converts boolean and string values accurately", () => {
-    expect(validateBoolean(true)).toBe(true);
-    expect(validateBoolean(false)).toBe(false);
-    expect(validateBoolean("true")).toBe(true);
-    expect(validateBoolean("on")).toBe(true);
-    expect(validateBoolean("1")).toBe(true);
-    expect(validateBoolean("false")).toBe(false);
-    expect(validateBoolean("off")).toBe(false);
-    expect(validateBoolean("0")).toBe(false);
-    expect(validateBoolean(undefined)).toBe(false);
+  it("strictly validates boolean and string values accurately", () => {
+    expect(validateBoolean(true)).toEqual({ success: true, data: true });
+    expect(validateBoolean(false)).toEqual({ success: true, data: false });
+    expect(validateBoolean("true")).toEqual({ success: true, data: true });
+    expect(validateBoolean("on")).toEqual({ success: true, data: true });
+    expect(validateBoolean("1")).toEqual({ success: true, data: true });
+    expect(validateBoolean("false")).toEqual({ success: true, data: false });
+    expect(validateBoolean("off")).toEqual({ success: true, data: false });
+    expect(validateBoolean("0")).toEqual({ success: true, data: false });
+  });
+
+  it("rejects undefined, numbers, and malformed strings", () => {
+    expect(validateBoolean(undefined).success).toBe(false);
+    expect(validateBoolean(null).success).toBe(false);
+    expect(validateBoolean(1).success).toBe(false);
+    expect(validateBoolean(0).success).toBe(false);
+    expect(validateBoolean("yes").success).toBe(false);
+    expect(validateBoolean("invalid").success).toBe(false);
   });
 });

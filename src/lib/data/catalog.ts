@@ -426,7 +426,7 @@ export interface CreateCategoryInput {
 export async function createCatalogCategory(
   db: Database,
   input: CreateCategoryInput,
-): Promise<{ categoryId: string }> {
+): Promise<{ categoryId: string; category: CatalogCategoryRecord }> {
   try {
     // 1. If parentId is specified, verify it exists and is not soft-deleted
     if (input.parentId !== null) {
@@ -487,7 +487,106 @@ export async function createCatalogCategory(
 
     await executeAtomicBatch(db, [categoryInsert, ...translationInserts]);
 
-    return { categoryId };
+    const createdRecord = await readCatalogCategory(db, categoryId);
+    if (!createdRecord) {
+      throw new RabetDataError(
+        "UNCATEGORIZED",
+        "Failed to read category after creation.",
+      );
+    }
+
+    return { categoryId, category: createdRecord };
+  } catch (error) {
+    if (error instanceof RabetDataError) throw error;
+    throw mapDatabaseError(error);
+  }
+}
+
+export interface EditCategoryInput {
+  categoryId: string;
+  slug: string;
+  isActive: boolean;
+  translation?: {
+    languageId: string;
+    name: string;
+    description?: string | null;
+  } | null;
+}
+
+/**
+ * Atomically updates category base fields (slug, isActive) and optionally
+ * upserts a translation for a specific language in a single atomic batch.
+ *
+ * Rules:
+ * - Category must exist and must not be soft-deleted.
+ * - Base fields and translation are committed together.
+ * - If translation persistence fails, base fields remain unchanged.
+ * - Translations in other languages are preserved.
+ * - Returns the authoritative updated record from the database.
+ */
+export async function editCatalogCategory(
+  db: Database,
+  input: EditCategoryInput,
+): Promise<{ category: CatalogCategoryRecord }> {
+  try {
+    const existing = await db
+      .select({ id: category.id, deletedAt: category.deletedAt })
+      .from(category)
+      .where(eq(category.id, input.categoryId));
+
+    if (existing.length === 0 || existing[0].deletedAt !== null) {
+      throw new RabetDataError(
+        "NOT_FOUND",
+        "The category does not exist or has been deleted.",
+      );
+    }
+
+    const categoryUpdate = db
+      .update(category)
+      .set({
+        slug: input.slug,
+        isActive: input.isActive,
+        updatedAt: sql`now()`,
+      })
+      .where(and(eq(category.id, input.categoryId), isNull(category.deletedAt)));
+
+    const queries: unknown[] = [categoryUpdate];
+
+    if (input.translation) {
+      const translationUpsert = db
+        .insert(categoryTranslation)
+        .values({
+          id: globalThis.crypto.randomUUID(),
+          categoryId: input.categoryId,
+          languageId: input.translation.languageId,
+          name: input.translation.name,
+          description: input.translation.description ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [
+            categoryTranslation.categoryId,
+            categoryTranslation.languageId,
+          ],
+          set: {
+            name: input.translation.name,
+            description: input.translation.description ?? null,
+            updatedAt: sql`now()`,
+          },
+        });
+      queries.push(translationUpsert);
+    }
+
+    await executeAtomicBatch(db, queries);
+
+    const updated = await readCatalogCategory(db, input.categoryId);
+    if (!updated) {
+      throw new RabetDataError(
+        "UNCATEGORIZED",
+        "Failed to read category after update.",
+      );
+    }
+
+    return { category: updated };
   } catch (error) {
     if (error instanceof RabetDataError) throw error;
     throw mapDatabaseError(error);
@@ -612,7 +711,7 @@ export interface CreateProductInput {
 export async function createCatalogProduct(
   db: Database,
   input: CreateProductInput,
-): Promise<{ productId: string }> {
+): Promise<{ productId: string; product: CatalogProductRecord }> {
   try {
     const catRows = await db
       .select({ id: category.id, deletedAt: category.deletedAt })
@@ -657,7 +756,111 @@ export async function createCatalogProduct(
 
     await executeAtomicBatch(db, [productInsert, ...translationInserts]);
 
-    return { productId };
+    const createdRecord = await readCatalogProduct(db, productId);
+    if (!createdRecord) {
+      throw new RabetDataError(
+        "UNCATEGORIZED",
+        "Failed to read product after creation.",
+      );
+    }
+
+    return { productId, product: createdRecord };
+  } catch (error) {
+    if (error instanceof RabetDataError) throw error;
+    throw mapDatabaseError(error);
+  }
+}
+
+export interface EditProductInput {
+  productId: string;
+  slug: string;
+  price: string;
+  isActive: boolean;
+  translation?: {
+    languageId: string;
+    name: string;
+    description?: string | null;
+    details?: string | null;
+  } | null;
+}
+
+/**
+ * Atomically updates product base fields (slug, price, isActive) and optionally
+ * upserts a translation for a specific language in a single atomic batch.
+ *
+ * Rules:
+ * - Product must exist and must not be soft-deleted.
+ * - Base fields and translation are committed together.
+ * - If translation persistence fails, base fields remain unchanged.
+ * - Translations in other languages are preserved.
+ * - Returns the authoritative updated record from the database.
+ */
+export async function editCatalogProduct(
+  db: Database,
+  input: EditProductInput,
+): Promise<{ product: CatalogProductRecord }> {
+  try {
+    const existing = await db
+      .select({ id: product.id, deletedAt: product.deletedAt })
+      .from(product)
+      .where(eq(product.id, input.productId));
+
+    if (existing.length === 0 || existing[0].deletedAt !== null) {
+      throw new RabetDataError(
+        "NOT_FOUND",
+        "The product does not exist or has been deleted.",
+      );
+    }
+
+    const productUpdate = db
+      .update(product)
+      .set({
+        slug: input.slug,
+        price: input.price,
+        isActive: input.isActive,
+        updatedAt: sql`now()`,
+      })
+      .where(and(eq(product.id, input.productId), isNull(product.deletedAt)));
+
+    const queries: unknown[] = [productUpdate];
+
+    if (input.translation) {
+      const translationUpsert = db
+        .insert(productTranslation)
+        .values({
+          id: globalThis.crypto.randomUUID(),
+          productId: input.productId,
+          languageId: input.translation.languageId,
+          name: input.translation.name,
+          description: input.translation.description ?? null,
+          details: input.translation.details ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [
+            productTranslation.productId,
+            productTranslation.languageId,
+          ],
+          set: {
+            name: input.translation.name,
+            description: input.translation.description ?? null,
+            details: input.translation.details ?? null,
+            updatedAt: sql`now()`,
+          },
+        });
+      queries.push(translationUpsert);
+    }
+
+    await executeAtomicBatch(db, queries);
+
+    const updated = await readCatalogProduct(db, input.productId);
+    if (!updated) {
+      throw new RabetDataError(
+        "UNCATEGORIZED",
+        "Failed to read product after update.",
+      );
+    }
+
+    return { product: updated };
   } catch (error) {
     if (error instanceof RabetDataError) throw error;
     throw mapDatabaseError(error);

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { category, product } from "@/db/schema";
+import { category, language, product } from "@/db/schema";
 import {
   asAppDb,
   createTestDatabase,
@@ -11,6 +11,8 @@ import {
 import {
   createCatalogCategory,
   createCatalogProduct,
+  editCatalogCategory,
+  editCatalogProduct,
   ensureLanguage,
   initializeSettings,
   listCatalogCategories,
@@ -102,16 +104,33 @@ describe.skipIf(!shouldRun)("catalog persistence & integrity", () => {
       ],
     });
 
+    expect(childRes.categoryId).toBeDefined();
+
     const childCat = await readCatalogCategory(appDb, childRes.categoryId);
     expect(childCat).not.toBeNull();
-    expect(childCat?.parentId).toBe(rootRes.categoryId);
     expect(childCat?.slug).toBe("smartphones");
+    expect(childCat?.parentId).toBe(rootRes.categoryId);
     expect(childCat?.isActive).toBe(false);
     expect(childCat?.translations.en?.name).toBe("Smartphones");
+
+    // Verify list categories reflects parent-child relationships
+    const allCats = await listCatalogCategories(appDb);
+    const foundRoot = allCats.find((c) => c.id === rootRes.categoryId);
+    const foundChild = allCats.find((c) => c.id === childRes.categoryId);
+    expect(foundRoot).toBeDefined();
+    expect(foundChild).toBeDefined();
+    expect(foundChild?.parentId).toBe(foundRoot?.id);
   });
 
-  it("updates category attributes and saves Arabic translation without enabling Arabic store-wide", async () => {
+  it("updates category base fields and allows saving Arabic while Arabic remains disabled in database", async () => {
     const appDb = asAppDb(testDb!.db);
+
+    // Verify Arabic language record is initially disabled
+    const [arBefore] = await testDb!.db
+      .select({ isEnabled: language.isEnabled })
+      .from(language)
+      .where(eq(language.id, arabicLangId));
+    expect(arBefore?.isEnabled).toBe(false);
 
     const cat = await createCatalogCategory(appDb, {
       parentId: null,
@@ -147,9 +166,12 @@ describe.skipIf(!shouldRun)("catalog persistence & integrity", () => {
     // Arabic translation saved
     expect(updated?.translations.ar?.name).toBe("أزياء");
 
-    // Verify Arabic language record in database was NOT enabled
-    const arRows = await testDb!.db.select().from(category).limit(1);
-    expect(arRows).toBeDefined();
+    // Verify Arabic language record in database was NOT enabled by saving Arabic content
+    const [arAfter] = await testDb!.db
+      .select({ isEnabled: language.isEnabled })
+      .from(language)
+      .where(eq(language.id, arabicLangId));
+    expect(arAfter?.isEnabled).toBe(false);
   });
 
   it("atomically rolls back category creation if a translation insert fails", async () => {
@@ -175,6 +197,46 @@ describe.skipIf(!shouldRun)("catalog persistence & integrity", () => {
       .from(category)
       .where(eq(category.slug, "doomed-category"));
     expect(doomedRows).toHaveLength(0);
+  });
+
+  it("atomically rolls back category edit if translation fails, preserving base fields and existing translations", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const created = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "original-cat-slug",
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "Original Cat",
+          description: "Original Desc",
+        },
+      ],
+    });
+
+    const before = await readCatalogCategory(appDb, created.categoryId);
+    expect(before?.slug).toBe("original-cat-slug");
+    expect(before?.isActive).toBe(false);
+
+    // Attempt edit with new slug, isActive = true, and invalid translation languageId
+    await expect(
+      editCatalogCategory(appDb, {
+        categoryId: created.categoryId,
+        slug: "attempted-new-cat-slug",
+        isActive: true,
+        translation: {
+          languageId: globalThis.crypto.randomUUID(), // non-existent language
+          name: "Failed Translation",
+        },
+      }),
+    ).rejects.toThrow();
+
+    // Verify base fields and translations are untouched
+    const after = await readCatalogCategory(appDb, created.categoryId);
+    expect(after?.slug).toBe("original-cat-slug");
+    expect(after?.isActive).toBe(false);
+    expect(after?.translations.en?.name).toBe("Original Cat");
+    expect(after?.translations.en?.description).toBe("Original Desc");
   });
 
   it("rejects creating a child category under a non-existent or soft-deleted parent", async () => {
@@ -227,6 +289,42 @@ describe.skipIf(!shouldRun)("catalog persistence & integrity", () => {
         translations: [{ languageId: defaultLangId, name: "Cat 2" }],
       }),
     ).rejects.toThrow();
+  });
+
+  it("assigns next sort order correctly past soft-deleted tombstone categories to avoid index collisions", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "tombstone-test-a",
+      translations: [{ languageId: defaultLangId, name: "Cat A" }],
+    });
+
+    const catB = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "tombstone-test-b",
+      translations: [{ languageId: defaultLangId, name: "Cat B" }],
+    });
+
+    const recordB = await readCatalogCategory(appDb, catB.categoryId);
+    expect(recordB).not.toBeNull();
+
+    // Soft-delete category B
+    await testDb!.db
+      .update(category)
+      .set({ deletedAt: new Date() })
+      .where(eq(category.id, catB.categoryId));
+
+    // Create category C; nextOrder must inspect all rows (including B) so sortOrder > B.sortOrder
+    const catC = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "tombstone-test-c",
+      translations: [{ languageId: defaultLangId, name: "Cat C" }],
+    });
+
+    const recordC = await readCatalogCategory(appDb, catC.categoryId);
+    expect(recordC).not.toBeNull();
+    expect(recordC!.sortOrder).toBeGreaterThan(recordB!.sortOrder);
   });
 
   it("creates a product with exact decimal price and persists edits", async () => {
@@ -318,13 +416,90 @@ describe.skipIf(!shouldRun)("catalog persistence & integrity", () => {
     expect(doomedProd).toHaveLength(0);
   });
 
+  it("atomically rolls back product edit if translation fails, preserving base fields and existing translations", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "edit-rollback-cat",
+      translations: [{ languageId: defaultLangId, name: "Edit Rollback Cat" }],
+    });
+
+    const prod = await createCatalogProduct(appDb, {
+      categoryId: cat.categoryId,
+      slug: "original-prod-slug",
+      price: "19.99",
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "Original Prod Name",
+          description: "Original Prod Desc",
+        },
+      ],
+    });
+
+    const before = await readCatalogProduct(appDb, prod.productId);
+    expect(before?.slug).toBe("original-prod-slug");
+    expect(before?.price).toBe("19.99");
+    expect(before?.isActive).toBe(false);
+
+    // Attempt edit with changed slug, price, isActive, and invalid translation languageId
+    await expect(
+      editCatalogProduct(appDb, {
+        productId: prod.productId,
+        slug: "attempted-new-prod-slug",
+        price: "89.99",
+        isActive: true,
+        translation: {
+          languageId: globalThis.crypto.randomUUID(), // invalid language
+          name: "Failed Prod Translation",
+        },
+      }),
+    ).rejects.toThrow();
+
+    // Verify base fields and translations are completely unchanged
+    const after = await readCatalogProduct(appDb, prod.productId);
+    expect(after?.slug).toBe("original-prod-slug");
+    expect(after?.price).toBe("19.99");
+    expect(after?.isActive).toBe(false);
+    expect(after?.translations.en?.name).toBe("Original Prod Name");
+    expect(after?.translations.en?.description).toBe("Original Prod Desc");
+  });
+
   it("lists categories and products in deterministic sort order", async () => {
     const appDb = asAppDb(testDb!.db);
 
-    const catList = await listCatalogCategories(appDb);
-    expect(catList.length).toBeGreaterThan(0);
+    const orderedCat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "ordered-parent-cat",
+      translations: [{ languageId: defaultLangId, name: "Ordered Parent" }],
+    });
 
-    const prodList = await listCatalogProducts(appDb);
-    expect(prodList.length).toBeGreaterThan(0);
+    // Create 3 products with distinct sort order under this category
+    const p1 = await createCatalogProduct(appDb, {
+      categoryId: orderedCat.categoryId,
+      slug: "alpha-product",
+      price: "10.00",
+      translations: [{ languageId: defaultLangId, name: "Alpha Product" }],
+    });
+
+    const p2 = await createCatalogProduct(appDb, {
+      categoryId: orderedCat.categoryId,
+      slug: "beta-product",
+      price: "20.00",
+      translations: [{ languageId: defaultLangId, name: "Beta Product" }],
+    });
+
+    const p3 = await createCatalogProduct(appDb, {
+      categoryId: orderedCat.categoryId,
+      slug: "gamma-product",
+      price: "30.00",
+      translations: [{ languageId: defaultLangId, name: "Gamma Product" }],
+    });
+
+    const prods = await listCatalogProducts(appDb, orderedCat.categoryId);
+    expect(prods.map((p) => p.id)).toEqual([p1.productId, p2.productId, p3.productId]);
+    expect(prods[0].sortOrder).toBeLessThan(prods[1].sortOrder);
+    expect(prods[1].sortOrder).toBeLessThan(prods[2].sortOrder);
   });
 });

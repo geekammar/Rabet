@@ -174,6 +174,10 @@ class CDPClient {
       this.ws.onerror = (err) => reject(err);
       this.ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
+        if (data.method === "Runtime.consoleAPICalled") {
+          const text = (data.params?.args || []).map((a) => a.value ?? a.description ?? "").join(" ");
+          log(`[browser-console] ${text}`);
+        }
         if (data.id && this.callbacks.has(data.id)) {
           const { resolve, reject } = this.callbacks.get(data.id);
           this.callbacks.delete(data.id);
@@ -216,7 +220,7 @@ class CDPClient {
 }
 
 async function setInputValue(cdp, selector, value) {
-  await cdp.evaluate(`{
+  await cdp.evaluate(`(() => {
     const el = document.querySelector(${JSON.stringify(selector)});
     if (!el) throw new Error("Element not found: " + ${JSON.stringify(selector)});
     const proto = el instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
@@ -224,7 +228,18 @@ async function setInputValue(cdp, selector, value) {
     setter.call(el, ${JSON.stringify(value)});
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
-  }`);
+  })()`);
+}
+
+async function setCheckboxValue(cdp, selector, checked) {
+  return await cdp.evaluate(`(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) throw new Error("Checkbox element not found: " + ${JSON.stringify(selector)});
+    if (el.checked !== ${Boolean(checked)}) {
+      el.click();
+    }
+    return el.checked;
+  })()`);
 }
 
 async function main() {
@@ -339,10 +354,15 @@ async function main() {
       `        const results = [];\n` +
       `        await pg.begin(async (sql) => {\n` +
       `          for (const q of parsedBody.queries) {\n` +
-      `            const rows = await sql.unsafe(q.query, q.params || []);\n` +
+      `            const qParams = (q.params || []).map((p) => {\n` +
+      `              if (p === "true") return true;\n` +
+      `              if (p === "false") return false;\n` +
+      `              return p;\n` +
+      `            });\n` +
+      `            const rows = await sql.unsafe(q.query, qParams);\n` +
       `            const cols = rows.columns || [];\n` +
       `            const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
-      `            const rowArrays = rows.map((r) => cols.map((c) => r[c.name]));\n` +
+      `            const rowArrays = rows.map((r) => cols.map((c) => (typeof r[c.name] === "boolean" ? (r[c.name] ? "t" : "f") : r[c.name])));\n` +
       `            results.push({ rows: rowArrays, fields });\n` +
       `          }\n` +
       `        });\n` +
@@ -352,10 +372,15 @@ async function main() {
       `        });\n` +
       `      } else {\n` +
       `        const { query, params } = parsedBody;\n` +
-      `        const rows = await pg.unsafe(query, params || []);\n` +
+      `        const qParams = (params || []).map((p) => {\n` +
+      `          if (p === "true") return true;\n` +
+      `          if (p === "false") return false;\n` +
+      `          return p;\n` +
+      `        });\n` +
+      `        const rows = await pg.unsafe(query, qParams);\n` +
       `        const cols = rows.columns || [];\n` +
       `        const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
-      `        const rowArrays = rows.map((r) => cols.map((c) => r[c.name]));\n` +
+      `        const rowArrays = rows.map((r) => cols.map((c) => (typeof r[c.name] === "boolean" ? (r[c.name] ? "t" : "f") : r[c.name])));\n` +
       `        return new Response(JSON.stringify({ rows: rowArrays, fields }), {\n` +
       `          status: 200,\n` +
       `          headers: { "content-type": "application/json" },\n` +
@@ -627,7 +652,19 @@ async function main() {
       `Scenario 3: Persisted categories missing on reload: root=${persistedRoot}, child=${persistedChild}`
     );
   }
-  log("Scenario 3 passed: Root and nested category created and persisted.");
+
+  // Verify initial selected-category draft values are populated immediately on reload without manual clicks
+  log("Scenario 3: Verifying initial selected-category draft values populated immediately on page load...");
+  const initialSelectedDraft = await cdp.evaluate(`({
+    slug: document.querySelector('#cat-slug-input')?.value ?? '',
+    name: document.querySelector('#cat-name-input')?.value ?? '',
+  })`);
+  if (initialSelectedDraft.slug !== "digital-goods" || initialSelectedDraft.name !== "Digital Goods") {
+    await fail(
+      `Scenario 3: Expected initial auto-selected category draft to be 'digital-goods' / 'Digital Goods', got: ${JSON.stringify(initialSelectedDraft)}`
+    );
+  }
+  log("Scenario 3 passed: Root and nested category created and persisted, and initial draft populated on load.");
 
   // =========================================================================
   // Scenario 4: Create a product; edit price/content; reload and verify persistence
@@ -721,10 +758,17 @@ async function main() {
   }`);
   await sleep(500);
 
-  // Assert RTL container
-  const isRtl = await cdp.evaluate(`Boolean(document.querySelector('[dir="rtl"]'))`);
-  if (!isRtl) {
-    await fail("Scenario 5: Expected RTL container [dir='rtl'] when Arabic tab is active");
+  // Assert RTL scoped to the active product editor:
+  // computed direction of #prod-name-input must be 'rtl' and its closest form container must have dir="rtl"
+  const isInputRtl = await cdp.evaluate(`(() => {
+    const input = document.querySelector('#prod-name-input');
+    if (!input) return false;
+    const computedDir = window.getComputedStyle(input).direction;
+    const containerDir = input.closest('[dir="rtl"]');
+    return computedDir === 'rtl' && containerDir !== null;
+  })()`);
+  if (!isInputRtl) {
+    await fail("Scenario 5: Expected product name input computed style direction to be 'rtl' within [dir='rtl'] container");
   }
 
   // Fill Arabic name and save
@@ -734,24 +778,59 @@ async function main() {
   await cdp.evaluate(`document.querySelector('[data-testid="save-product-btn"]').click()`);
   await sleep(1500);
 
-  // Switch back to English tab
+  // Reload page and re-open product editor to verify exact persisted translations
+  log("Scenario 5: Reloading page to verify exact persisted English and Arabic translations...");
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(2000);
+
+  // Select software category
+  await cdp.evaluate(`
+    const childNode = document.querySelector('[data-category-slug="software"] button');
+    if (childNode) childNode.click();
+  `);
+  await sleep(600);
+
+  // Open product editor
+  await cdp.evaluate(`
+    const editBtn = document.querySelector('[data-product-slug="code-studio"] button');
+    if (editBtn) editBtn.click();
+  `);
+  await sleep(500);
+
+  // Assert exact English name
+  const exactEnName = await cdp.evaluate(`document.querySelector('#prod-name-input')?.value ?? ''`);
+  if (exactEnName !== "Code Studio Pro") {
+    await fail(`Scenario 5: Expected exact persisted English name 'Code Studio Pro', got '${exactEnName}'`);
+  }
+
+  // Switch to Arabic tab and assert exact Arabic name
+  await cdp.evaluate(`{
+    const tabs = Array.from(document.querySelectorAll('button'));
+    const arTab = tabs.find(b => b.innerText.includes('العربية'));
+    if (arTab) arTab.click();
+  }`);
+  await sleep(500);
+
+  const exactArName = await cdp.evaluate(`document.querySelector('#prod-name-input')?.value ?? ''`);
+  if (exactArName !== "محرر الأكواد الاحترافي") {
+    await fail(`Scenario 5: Expected exact persisted Arabic name 'محرر الأكواد الاحترافي', got '${exactArName}'`);
+  }
+
+  // Query language table to prove Arabic remains disabled
+  const [arLangRow] = await pgClient`
+    SELECT is_enabled FROM language WHERE code = 'ar'
+  `;
+  if (arLangRow?.is_enabled !== false) {
+    await fail(`Scenario 5: Expected Arabic language record is_enabled to remain false, got '${arLangRow?.is_enabled}'`);
+  }
+
+  // Switch back to English tab for subsequent tests
   await cdp.evaluate(`{
     const tabs = Array.from(document.querySelectorAll('button'));
     const enTab = tabs.find(b => b.innerText.trim() === 'English');
     if (enTab) enTab.click();
   }`);
-  await sleep(500);
-
-  // Assert English name is preserved
-  const enNamePreserved = await cdp.evaluate(`
-    const input = document.querySelector('#prod-name-input');
-    input ? input.value : '';
-  `);
-  if (enNamePreserved !== "Code Studio Pro") {
-    await fail(
-      `Scenario 5: Expected English name 'Code Studio Pro' preserved, got '${enNamePreserved}'`
-    );
-  }
+  await sleep(400);
 
   // Check database has both translations
   const prodTransCount = (
@@ -766,10 +845,11 @@ async function main() {
       `Scenario 5: Expected 2 product translations in DB (EN and AR), found ${prodTransCount}`
     );
   }
-  log("Scenario 5 passed: Arabic editing uses RTL and preserves English translation.");
+  log("Scenario 5 passed: Arabic editing uses RTL, exact content persisted on reload, and Arabic remains disabled.");
 
   // =========================================================================
-  // Scenario 6: Reject invalid price/name; preserve input and database state
+  // Scenario 6: Reject invalid price/name; preserve input and database state;
+  // test synthetic transport failure, draft preservation, and retry
   // =========================================================================
   log("Scenario 6: Testing validation failure, input preservation, and zero state mutation...");
   await setInputValue(cdp, '#prod-price-input', "-99.99");
@@ -778,17 +858,16 @@ async function main() {
   await cdp.evaluate(`document.querySelector('[data-testid="save-product-btn"]').click()`);
   await sleep(1000);
 
-  // Verify alert shown
+  // Verify alert shown for negative price
   const alertText = await cdp.evaluate(`
-    const alert = document.querySelector('[role="alert"]');
-    alert ? alert.innerText : '';
+    document.querySelector('[role="alert"]')?.innerText ?? ''
   `);
   if (!alertText.toLowerCase().includes("cannot be negative") && !alertText.toLowerCase().includes("correct the errors")) {
-    await fail(`Scenario 6: Expected validation error alert, got: '${alertText}'`);
+    await fail(`Scenario 6: Expected validation error alert for negative price, got: '${alertText}'`);
   }
 
   // Verify entered invalid value was preserved in input
-  const retainedPrice = await cdp.evaluate(`document.querySelector('#prod-price-input').value`);
+  const retainedPrice = await cdp.evaluate(`document.querySelector('#prod-price-input')?.value ?? ''`);
   if (retainedPrice !== "-99.99") {
     await fail(`Scenario 6: Expected input value '-99.99' preserved, got '${retainedPrice}'`);
   }
@@ -802,7 +881,89 @@ async function main() {
       `Scenario 6: Expected database price to remain '59.50', found '${dbPrice}'`
     );
   }
-  log("Scenario 6 passed: Invalid price rejected, input preserved, DB state unaffected.");
+
+  // Test blank name rejection
+  log("Scenario 6: Testing blank-name rejection and input preservation...");
+  await setInputValue(cdp, '#prod-price-input', "59.50");
+  await setInputValue(cdp, '#prod-name-input', "   ");
+  await sleep(300);
+
+  await cdp.evaluate(`document.querySelector('[data-testid="save-product-btn"]').click()`);
+  await sleep(1000);
+
+  const blankNameAlert = await cdp.evaluate(`
+    document.querySelector('[role="alert"]')?.innerText ?? ''
+  `);
+  if (!blankNameAlert.toLowerCase().includes("required") && !blankNameAlert.toLowerCase().includes("correct the errors")) {
+    await fail(`Scenario 6: Expected validation error for blank name, got: '${blankNameAlert}'`);
+  }
+
+  // Verify database translation name was NOT overwritten with blank
+  const [dbTrans] = await pgClient`
+    SELECT pt.name FROM product_translation pt
+    JOIN product p ON pt.product_id = p.id
+    JOIN language l ON pt.language_id = l.id
+    WHERE p.slug = 'code-studio' AND l.code = 'en'
+  `;
+  if (dbTrans?.name !== "Code Studio Pro") {
+    await fail(`Scenario 6: Database translation was mutated on blank name submission: '${dbTrans?.name}'`);
+  }
+
+  // Restore valid name
+  await setInputValue(cdp, '#prod-name-input', "Code Studio Pro");
+  await sleep(300);
+
+  // Test synthetic transport rejection, safe error feedback, draft preservation, and retry
+  log("Scenario 6: Testing synthetic transport rejection, safe error feedback, draft preservation, and retry...");
+  await setInputValue(cdp, '#prod-price-input', "65.00");
+  await sleep(300);
+
+  // Inject a synthetic failure into window.fetch so Server Action call rejects with network error
+  await cdp.evaluate(`(() => {
+    window.__originalFetch = window.fetch;
+    window.fetch = async () => {
+      throw new Error("Synthetic network connection abort");
+    };
+  })()`);
+
+  await cdp.evaluate(`document.querySelector('[data-testid="save-product-btn"]').click()`);
+  await sleep(1000);
+
+  // Verify safe generic feedback is displayed and no internal error details leak
+  const transportAlertText = await cdp.evaluate(`
+    document.querySelector('[role="alert"]')?.innerText ?? ''
+  `);
+  if (!transportAlertText.toLowerCase().includes("communication or server error") && !transportAlertText.toLowerCase().includes("preserved")) {
+    await fail(`Scenario 6: Expected safe retry message on transport rejection, got: '${transportAlertText}'`);
+  }
+  if (transportAlertText.includes("Synthetic") || transportAlertText.includes("abort")) {
+    await fail("Scenario 6: Internal exception details leaked into UI feedback!");
+  }
+
+  // Verify draft is preserved
+  const preservedDraftPrice = await cdp.evaluate(`document.querySelector('#prod-price-input')?.value ?? ''`);
+  if (preservedDraftPrice !== "65.00") {
+    await fail(`Scenario 6: Expected price draft '65.00' preserved after transport failure, got '${preservedDraftPrice}'`);
+  }
+
+  // Restore fetch and retry save
+  await cdp.evaluate(`(() => {
+    window.fetch = window.__originalFetch;
+    delete window.__originalFetch;
+  })()`);
+  await sleep(200);
+
+  await cdp.evaluate(`document.querySelector('[data-testid="save-product-btn"]').click()`);
+  await sleep(1500);
+
+  // Verify retry succeeded in database
+  const retriedDbPrice = (
+    await pgClient`SELECT price FROM product WHERE slug = 'code-studio'`
+  )[0].price;
+  if (String(retriedDbPrice) !== "65.00") {
+    await fail(`Scenario 6: Expected retried save to persist price '65.00', found '${retriedDbPrice}'`);
+  }
+  log("Scenario 6 passed: Validation failures, blank names, and transport errors handled safely with draft preservation and retry.");
 
   // Close product editor
   await cdp.evaluate(`
@@ -815,24 +976,41 @@ async function main() {
   // Scenario 7: Verify inactive-ancestor visibility explanation
   // =========================================================================
   log("Scenario 7: Verifying inactive-ancestor customer visibility explanation...");
+  // Explicitly select child 'software' category
+  await cdp.evaluate(`(() => {
+    const childNode = document.querySelector('[data-category-slug="software"] button');
+    if (childNode) childNode.click();
+  })()`);
+  await sleep(600);
+
   // digital-goods is inactive. Set child 'software' to active.
-  await cdp.evaluate(`{
-    const statusCheckbox = document.querySelector('#cat-status-input');
-    if (!statusCheckbox.checked) {
-      statusCheckbox.click();
-    }
-  }`);
+  const isCheckedBefore = await cdp.evaluate("document.querySelector('#cat-status-input')?.checked");
+  log(`Scenario 7: before toggle, #cat-status-input checked = ${isCheckedBefore}`);
+  const isCheckedAfter = await setCheckboxValue(cdp, "#cat-status-input", true);
+  log(`Scenario 7: after setCheckboxValue, #cat-status-input checked = ${isCheckedAfter}`);
   await sleep(300);
 
   await cdp.evaluate(`document.querySelector('[data-testid="save-category-btn"]').click()`);
   await sleep(1500);
 
+  const dbSoftware = (await pgClient`SELECT id, slug, is_active FROM category WHERE slug = 'software'`)[0];
+  log(`Scenario 7: PostgreSQL category row for 'software': ${JSON.stringify(dbSoftware)}`);
+
   // Assert inactive-ancestor warning notice is displayed
   const inactiveNotice = await cdp.evaluate(`
-    const notice = document.querySelector('[data-testid="inactive-ancestor-notice"]');
-    notice ? notice.innerText : '';
+    document.querySelector('[data-testid="inactive-ancestor-notice"]')?.innerText ?? ''
   `);
   if (!inactiveNotice.includes("Inactive Ancestor Warning") || !inactiveNotice.includes("Digital Goods")) {
+    const currentAlert = await cdp.evaluate(`
+      document.querySelector('[role="alert"]')?.innerText ?? 'NO ALERT'
+    `);
+    const debugInfo = await cdp.evaluate(`({
+      catSlug: document.querySelector('#cat-slug-input')?.value,
+      catName: document.querySelector('#cat-name-input')?.value,
+      catStatusChecked: document.querySelector('#cat-status-input')?.checked,
+      hasNotice: Boolean(document.querySelector('[data-testid="inactive-ancestor-notice"]')),
+    })`);
+    log(`Debug info: ${JSON.stringify(debugInfo)}, Alert: ${currentAlert}`);
     await fail(
       `Scenario 7: Expected inactive ancestor notice mentioning 'Digital Goods', got: '${inactiveNotice}'`
     );
@@ -868,10 +1046,36 @@ async function main() {
     );
   }
 
-  // Verify interactive targets have at least 44x44 px bounding rect
-  const targetSizes = await cdp.evaluate(`
+  // 8a: Negative control: prove that the touch-target detection catches an intentionally undersized control
+  log("Scenario 8: Running touch-target negative control...");
+  const negativeControlDetected = await cdp.evaluate(`(() => {
+    const dummyBtn = document.createElement("button");
+    dummyBtn.id = "negative-control-undersized-btn";
+    dummyBtn.style.width = "20px";
+    dummyBtn.style.height = "20px";
+    dummyBtn.innerText = "tiny";
+    document.body.appendChild(dummyBtn);
+
     const buttons = Array.from(document.querySelectorAll('button:not([hidden])'));
-    const nonCompliant = buttons.filter(b => {
+    const undersized = buttons.filter(b => {
+      const rect = b.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+      return rect.width < 43.5 || rect.height < 43.5;
+    });
+
+    const detected = undersized.some(b => b.id === "negative-control-undersized-btn");
+    dummyBtn.remove();
+    return detected;
+  })()`);
+
+  if (!negativeControlDetected) {
+    await fail("Scenario 8: Negative control failed — touch-target validator did not detect deliberately undersized button");
+  }
+  log("Scenario 8: Negative control passed — undersized button correctly detected.");
+
+  // 8b: Real check: verify interactive targets on page have at least 44x44 px bounding rect
+  const nonCompliant = await cdp.evaluate(`
+    Array.from(document.querySelectorAll('button:not([hidden])')).filter(b => {
       const rect = b.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return false;
       return rect.width < 43.5 || rect.height < 43.5;
@@ -881,13 +1085,13 @@ async function main() {
       w: b.getBoundingClientRect().width,
       h: b.getBoundingClientRect().height,
     }));
-    nonCompliant;
   `);
 
-  if (targetSizes.length > 0) {
-    log(`Non-compliant buttons: ${JSON.stringify(targetSizes, null, 2)}`);
+  if (nonCompliant.length > 0) {
+    log(`Non-compliant buttons detected: ${JSON.stringify(nonCompliant, null, 2)}`);
+    await fail(`Scenario 8: Found ${nonCompliant.length} non-compliant touch target(s) (< 44x44 px)`);
   }
-  log("Scenario 8 passed: 360px layout and touch targets verified.");
+  log("Scenario 8 passed: 360px layout has zero overflow and all interactive touch targets meet or exceed 44x44 CSS px.");
 
   log("ALL 8 ACCEPTANCE SCENARIOS PASSED SUCCESSFULLY!");
   await cleanup();

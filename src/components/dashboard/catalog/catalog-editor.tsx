@@ -42,7 +42,7 @@ import {
   type HierarchyCategoryNode,
 } from "@/lib/catalog/tree";
 import { resolveCatalogTranslationStatus } from "@/lib/catalog/status";
-import type { CatalogViewData } from "./types";
+import type { CatalogCategoryRecord, CatalogViewData } from "./types";
 
 export function CatalogEditor({
   settings,
@@ -125,31 +125,50 @@ export function CatalogEditor({
   // ==========================================
   // Category Edit Draft State
   // ==========================================
-  const [catDraftSlug, setCatDraftSlug] = useState("");
-  const [catDraftIsActive, setCatDraftIsActive] = useState(false);
+  const getCategoryDraft = (cat: CatalogCategoryRecord | null) => {
+    if (!cat) return { slug: "", isActive: false, translations: {} };
+    const trans: Record<string, { name: string; description: string }> = {};
+    for (const [code, t] of Object.entries(cat.translations)) {
+      const transItem = t as { name?: string | null; description?: string | null };
+      trans[code] = {
+        name: transItem?.name ?? "",
+        description: transItem?.description ?? "",
+      };
+    }
+    return {
+      slug: cat.slug,
+      isActive: cat.isActive,
+      translations: trans,
+    };
+  };
+
+  const initialCatDraft = getCategoryDraft(initialCategories[0] ?? null);
+  const [catDraftSlug, setCatDraftSlug] = useState(initialCatDraft.slug);
+  const [catDraftIsActive, setCatDraftIsActive] = useState(initialCatDraft.isActive);
   const [catDraftTranslations, setCatDraftTranslations] = useState<
     Record<string, { name: string; description: string }>
-  >({});
+  >(initialCatDraft.translations);
 
   // When selected category changes, initialize draft values
-  const syncCategoryDraft = (node: HierarchyCategoryNode | null) => {
+  const syncCategoryDraft = (node: HierarchyCategoryNode | CatalogCategoryRecord | null) => {
     if (!node) return;
     setCatDraftSlug(node.slug);
     setCatDraftIsActive(node.isActive);
     const trans: Record<string, { name: string; description: string }> = {};
     for (const [code, t] of Object.entries(node.translations)) {
+      const transItem = t as { name?: string | null; description?: string | null };
       trans[code] = {
-        name: t.name ?? "",
-        description: t.description ?? "",
+        name: transItem?.name ?? "",
+        description: transItem?.description ?? "",
       };
     }
     setCatDraftTranslations(trans);
-    setActionFeedback(null);
   };
 
   const handleSelectCategory = (node: HierarchyCategoryNode) => {
     setSelectedCategoryId(node.id);
     setEditingProductId(null);
+    setActionFeedback(null);
     syncCategoryDraft(node);
   };
 
@@ -205,56 +224,36 @@ export function CatalogEditor({
   const handleCreateCategorySubmit = () => {
     setNewCatErrors({});
     startTransition(async () => {
-      const res = await createCategoryAction({
-        parentId: newCatParentId,
-        slug: newCatSlug,
-        name: newCatNameEn,
-        description: newCatDescEn,
-        arabicName: newCatNameAr,
-        arabicDescription: newCatDescAr,
-      });
+      try {
+        const res = await createCategoryAction({
+          parentId: newCatParentId,
+          slug: newCatSlug,
+          name: newCatNameEn,
+          description: newCatDescEn,
+          arabicName: newCatNameAr,
+          arabicDescription: newCatDescAr,
+        });
 
-      if (!res.success) {
-        if (res.errors) setNewCatErrors(res.errors);
-        setActionFeedback(res);
-        return;
+        if (!res.success) {
+          if (res.errors) setNewCatErrors(res.errors);
+          setActionFeedback(res);
+          return;
+        }
+
+        const authoritativeCategory = res.category!;
+        setCategories((prev) => [...prev, authoritativeCategory]);
+        setSelectedCategoryId(authoritativeCategory.id);
+        setExpandedNodeIds((prev) => new Set([...prev, authoritativeCategory.id]));
+        syncCategoryDraft(authoritativeCategory);
+        setIsCreateCategoryOpen(false);
+        setActionFeedback({ success: true, message: "Category created successfully." });
+      } catch {
+        setActionFeedback({
+          success: false,
+          message:
+            "A communication or server error occurred. Your inputs have been preserved. Please try again.",
+        });
       }
-
-      // Add to local categories state
-      const newCatId = res.categoryId!;
-      const newCatRecord = {
-        id: newCatId,
-        parentId: newCatParentId,
-        slug: newCatSlug.toLowerCase().trim(),
-        sortOrder: categories.length,
-        isActive: false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        translations: {
-          en: {
-            id: `trans-${newCatId}-en`,
-            languageId: "lang-en",
-            name: newCatNameEn.trim(),
-            description: newCatDescEn.trim() || null,
-          },
-          ...(newCatNameAr.trim()
-            ? {
-                ar: {
-                  id: `trans-${newCatId}-ar`,
-                  languageId: "lang-ar",
-                  name: newCatNameAr.trim(),
-                  description: newCatDescAr.trim() || null,
-                },
-              }
-            : {}),
-        },
-      };
-
-      setCategories((prev) => [...prev, newCatRecord]);
-      setSelectedCategoryId(newCatId);
-      setExpandedNodeIds((prev) => new Set([...prev, newCatId]));
-      setIsCreateCategoryOpen(false);
-      setActionFeedback({ success: true, message: "Category created successfully." });
     });
   };
 
@@ -264,40 +263,32 @@ export function CatalogEditor({
   const handleSaveCategory = () => {
     if (!selectedNode) return;
     startTransition(async () => {
-      const activeTrans = catDraftTranslations[activeLangTab] ?? { name: "", description: "" };
-      const res = await updateCategoryAction({
-        categoryId: selectedNode.id,
-        slug: catDraftSlug,
-        isActive: catDraftIsActive,
-        languageCode: activeLangTab,
-        name: activeTrans.name,
-        description: activeTrans.description,
-      });
+      try {
+        const activeTrans = catDraftTranslations[activeLangTab] ?? { name: "", description: "" };
+        const res = await updateCategoryAction({
+          categoryId: selectedNode.id,
+          slug: catDraftSlug,
+          isActive: catDraftIsActive,
+          languageCode: activeLangTab,
+          name: activeTrans.name,
+          description: activeTrans.description,
+        });
 
-      setActionFeedback(res);
+        setActionFeedback(res);
 
-      if (res.success) {
-        setCategories((prev) =>
-          prev.map((c) => {
-            if (c.id !== selectedNode.id) return c;
-            const existingTrans = { ...c.translations };
-            if (activeTrans.name.trim()) {
-              existingTrans[activeLangTab] = {
-                id: existingTrans[activeLangTab]?.id ?? `trans-${c.id}-${activeLangTab}`,
-                languageId: `lang-${activeLangTab}`,
-                name: activeTrans.name.trim(),
-                description: activeTrans.description.trim() || null,
-              };
-            }
-            return {
-              ...c,
-              slug: catDraftSlug.toLowerCase().trim(),
-              isActive: catDraftIsActive,
-              translations: existingTrans,
-              updatedAt: new Date(),
-            };
-          }),
-        );
+        if (res.success && res.category) {
+          const authoritativeCategory = res.category;
+          setCategories((prev) =>
+            prev.map((c) => (c.id === authoritativeCategory.id ? authoritativeCategory : c)),
+          );
+          syncCategoryDraft(authoritativeCategory);
+        }
+      } catch {
+        setActionFeedback({
+          success: false,
+          message:
+            "A communication or server error occurred. Your changes have been preserved. Please try again.",
+        });
       }
     });
   };
@@ -333,59 +324,36 @@ export function CatalogEditor({
   const handleCreateProductSubmit = () => {
     setNewProdErrors({});
     startTransition(async () => {
-      const res = await createProductAction({
-        categoryId: newProdCatId,
-        slug: newProdSlug,
-        price: newProdPrice,
-        name: newProdNameEn,
-        description: newProdDescEn,
-        details: newProdDetailsEn,
-        arabicName: newProdNameAr,
-        arabicDescription: newProdDescAr,
-        arabicDetails: newProdDetailsAr,
-      });
+      try {
+        const res = await createProductAction({
+          categoryId: newProdCatId,
+          slug: newProdSlug,
+          price: newProdPrice,
+          name: newProdNameEn,
+          description: newProdDescEn,
+          details: newProdDetailsEn,
+          arabicName: newProdNameAr,
+          arabicDescription: newProdDescAr,
+          arabicDetails: newProdDetailsAr,
+        });
 
-      if (!res.success) {
-        if (res.errors) setNewProdErrors(res.errors);
-        setActionFeedback(res);
-        return;
+        if (!res.success) {
+          if (res.errors) setNewProdErrors(res.errors);
+          setActionFeedback(res);
+          return;
+        }
+
+        const authoritativeProduct = res.product!;
+        setProducts((prev) => [...prev, authoritativeProduct]);
+        setIsCreateProductOpen(false);
+        setActionFeedback({ success: true, message: "Product created successfully." });
+      } catch {
+        setActionFeedback({
+          success: false,
+          message:
+            "A communication or server error occurred. Your inputs have been preserved. Please try again.",
+        });
       }
-
-      const newProdId = res.productId!;
-      const newProdRecord = {
-        id: newProdId,
-        categoryId: newProdCatId,
-        slug: newProdSlug.toLowerCase().trim(),
-        price: newProdPrice.includes(".") ? newProdPrice : `${newProdPrice}.00`,
-        isActive: false,
-        sortOrder: products.length,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        translations: {
-          en: {
-            id: `trans-${newProdId}-en`,
-            languageId: "lang-en",
-            name: newProdNameEn.trim(),
-            description: newProdDescEn.trim() || null,
-            details: newProdDetailsEn.trim() || null,
-          },
-          ...(newProdNameAr.trim()
-            ? {
-                ar: {
-                  id: `trans-${newProdId}-ar`,
-                  languageId: "lang-ar",
-                  name: newProdNameAr.trim(),
-                  description: newProdDescAr.trim() || null,
-                  details: newProdDetailsAr.trim() || null,
-                },
-              }
-            : {}),
-        },
-      };
-
-      setProducts((prev) => [...prev, newProdRecord]);
-      setIsCreateProductOpen(false);
-      setActionFeedback({ success: true, message: "Product created successfully." });
     });
   };
 
@@ -395,49 +363,50 @@ export function CatalogEditor({
   const handleSaveProduct = () => {
     if (!selectedProduct) return;
     startTransition(async () => {
-      const activeTrans = prodDraftTranslations[activeLangTab] ?? {
-        name: "",
-        description: "",
-        details: "",
-      };
+      try {
+        const activeTrans = prodDraftTranslations[activeLangTab] ?? {
+          name: "",
+          description: "",
+          details: "",
+        };
 
-      const res = await updateProductAction({
-        productId: selectedProduct.id,
-        slug: prodDraftSlug,
-        price: prodDraftPrice,
-        isActive: prodDraftIsActive,
-        languageCode: activeLangTab,
-        name: activeTrans.name,
-        description: activeTrans.description,
-        details: activeTrans.details,
-      });
+        const res = await updateProductAction({
+          productId: selectedProduct.id,
+          slug: prodDraftSlug,
+          price: prodDraftPrice,
+          isActive: prodDraftIsActive,
+          languageCode: activeLangTab,
+          name: activeTrans.name,
+          description: activeTrans.description,
+          details: activeTrans.details,
+        });
 
-      setActionFeedback(res);
+        setActionFeedback(res);
 
-      if (res.success) {
-        setProducts((prev) =>
-          prev.map((p) => {
-            if (p.id !== selectedProduct.id) return p;
-            const existingTrans = { ...p.translations };
-            if (activeTrans.name.trim()) {
-              existingTrans[activeLangTab] = {
-                id: existingTrans[activeLangTab]?.id ?? `trans-${p.id}-${activeLangTab}`,
-                languageId: `lang-${activeLangTab}`,
-                name: activeTrans.name.trim(),
-                description: activeTrans.description.trim() || null,
-                details: activeTrans.details.trim() || null,
-              };
-            }
-            return {
-              ...p,
-              slug: prodDraftSlug.toLowerCase().trim(),
-              price: prodDraftPrice,
-              isActive: prodDraftIsActive,
-              translations: existingTrans,
-              updatedAt: new Date(),
+        if (res.success && res.product) {
+          const authoritativeProduct = res.product;
+          setProducts((prev) =>
+            prev.map((p) => (p.id === authoritativeProduct.id ? authoritativeProduct : p)),
+          );
+          setProdDraftSlug(authoritativeProduct.slug);
+          setProdDraftPrice(authoritativeProduct.price);
+          setProdDraftIsActive(authoritativeProduct.isActive);
+          const trans: Record<string, { name: string; description: string; details: string }> = {};
+          for (const [code, t] of Object.entries(authoritativeProduct.translations)) {
+            trans[code] = {
+              name: t.name ?? "",
+              description: t.description ?? "",
+              details: t.details ?? "",
             };
-          }),
-        );
+          }
+          setProdDraftTranslations(trans);
+        }
+      } catch {
+        setActionFeedback({
+          success: false,
+          message:
+            "A communication or server error occurred. Your changes have been preserved. Please try again.",
+        });
       }
     });
   };
@@ -817,19 +786,21 @@ export function CatalogEditor({
                     </div>
 
                     <div className="space-y-1.5">
-                      <label htmlFor="cat-status-input" className="text-xs font-medium">
-                        Customer Visibility State
-                      </label>
+                      <span className="text-xs font-medium">Customer Visibility State</span>
                       <div className="flex items-center gap-3 pt-2">
-                        <label className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
-                          <input
-                            id="cat-status-input"
-                            type="checkbox"
-                            checked={catDraftIsActive}
-                            onChange={(e) => setCatDraftIsActive(e.target.checked)}
-                            className="size-4 rounded border-gray-300 text-primary"
-                          />
-                          <span>Category is Active</span>
+                        <input
+                          id="cat-status-input"
+                          type="checkbox"
+                          checked={catDraftIsActive}
+                          onChange={(e) => setCatDraftIsActive(e.target.checked)}
+                          onClick={(e) => setCatDraftIsActive(e.currentTarget.checked)}
+                          className="size-4 rounded border-gray-300 text-primary cursor-pointer"
+                        />
+                        <label
+                          htmlFor="cat-status-input"
+                          className="flex items-center text-sm cursor-pointer select-none min-h-11"
+                        >
+                          Category is Active
                         </label>
                       </div>
                     </div>
@@ -1061,19 +1032,21 @@ export function CatalogEditor({
                       </div>
 
                       <div className="space-y-1.5">
-                        <label htmlFor="prod-status-input" className="text-xs font-medium">
-                          Active State
-                        </label>
-                        <div className="pt-2">
-                          <label className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
-                            <input
-                              id="prod-status-input"
-                              type="checkbox"
-                              checked={prodDraftIsActive}
-                              onChange={(e) => setProdDraftIsActive(e.target.checked)}
-                              className="size-4 rounded border-gray-300 text-primary"
-                            />
-                            <span>Product is Active</span>
+                        <span className="text-xs font-medium">Active State</span>
+                        <div className="flex items-center gap-2 pt-2">
+                          <input
+                            id="prod-status-input"
+                            type="checkbox"
+                            checked={prodDraftIsActive}
+                            onChange={(e) => setProdDraftIsActive(e.target.checked)}
+                            onClick={(e) => setProdDraftIsActive(e.currentTarget.checked)}
+                            className="size-4 rounded border-gray-300 text-primary cursor-pointer"
+                          />
+                          <label
+                            htmlFor="prod-status-input"
+                            className="flex items-center text-sm cursor-pointer select-none min-h-11"
+                          >
+                            Product is Active
                           </label>
                         </div>
                       </div>

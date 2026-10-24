@@ -11,11 +11,9 @@ vi.mock("@/db/client", () => ({
 }));
 
 const mockCreateCatalogCategory = vi.fn();
-const mockUpdateCatalogCategory = vi.fn();
-const mockSaveCatalogCategoryTranslation = vi.fn();
+const mockEditCatalogCategory = vi.fn();
 const mockCreateCatalogProduct = vi.fn();
-const mockUpdateCatalogProduct = vi.fn();
-const mockSaveCatalogProductTranslation = vi.fn();
+const mockEditCatalogProduct = vi.fn();
 const mockListLanguages = vi.fn();
 const mockResolveDefaultLanguage = vi.fn();
 
@@ -24,13 +22,9 @@ vi.mock("@/lib/data", async (importOriginal) => {
   return {
     ...actual,
     createCatalogCategory: (...args: unknown[]) => mockCreateCatalogCategory(...args),
-    updateCatalogCategory: (...args: unknown[]) => mockUpdateCatalogCategory(...args),
-    saveCatalogCategoryTranslation: (...args: unknown[]) =>
-      mockSaveCatalogCategoryTranslation(...args),
+    editCatalogCategory: (...args: unknown[]) => mockEditCatalogCategory(...args),
     createCatalogProduct: (...args: unknown[]) => mockCreateCatalogProduct(...args),
-    updateCatalogProduct: (...args: unknown[]) => mockUpdateCatalogProduct(...args),
-    saveCatalogProductTranslation: (...args: unknown[]) =>
-      mockSaveCatalogProductTranslation(...args),
+    editCatalogProduct: (...args: unknown[]) => mockEditCatalogProduct(...args),
     listLanguages: (...args: unknown[]) => mockListLanguages(...args),
     resolveDefaultLanguage: (...args: unknown[]) => mockResolveDefaultLanguage(...args),
   };
@@ -104,8 +98,45 @@ describe("Catalog Server Actions", () => {
       expect(mockCreateCatalogCategory).not.toHaveBeenCalled();
     });
 
-    it("creates a category with valid input", async () => {
-      mockCreateCatalogCategory.mockResolvedValueOnce({ categoryId: "cat-123" });
+    it("rejects supplying Arabic when Arabic is not a registered language", async () => {
+      mockListLanguages.mockResolvedValueOnce([
+        { id: "lang-en-id", code: "en", label: "English", isEnabled: true },
+      ]);
+
+      const res = await createCategoryAction({
+        slug: "electronics",
+        name: "Electronics",
+        arabicName: "إلكترونيات",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("NOT_FOUND");
+      expect(res.errors?.arabicName).toMatch(/not registered/i);
+      expect(mockCreateCatalogCategory).not.toHaveBeenCalled();
+    });
+
+    it("creates a category with valid input and returns authoritative record", async () => {
+      const mockSavedCategory = {
+        id: "cat-123",
+        parentId: null,
+        slug: "electronics",
+        sortOrder: 0,
+        isActive: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {
+          en: {
+            id: "t-1",
+            languageId: "lang-en-id",
+            name: "Electronics",
+            description: "Gadgets and devices",
+          },
+        },
+      };
+      mockCreateCatalogCategory.mockResolvedValueOnce({
+        categoryId: "cat-123",
+        category: mockSavedCategory,
+      });
 
       const res = await createCategoryAction({
         slug: "electronics",
@@ -115,6 +146,7 @@ describe("Catalog Server Actions", () => {
 
       expect(res.success).toBe(true);
       expect(res.categoryId).toBe("cat-123");
+      expect(res.category).toEqual(mockSavedCategory);
       expect(mockCreateCatalogCategory).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
@@ -147,6 +179,21 @@ describe("Catalog Server Actions", () => {
         }),
       ).rejects.toThrow("Unauthorized admin access");
 
+      expect(mockGetDb).not.toHaveBeenCalled();
+      expect(mockCreateCatalogProduct).not.toHaveBeenCalled();
+    });
+
+    it("rejects numeric JavaScript numbers to preserve exact decimal intent", async () => {
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "phone",
+        price: 19.99,
+        name: "Phone",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.price).toMatch(/must be a string/i);
       expect(mockGetDb).not.toHaveBeenCalled();
       expect(mockCreateCatalogProduct).not.toHaveBeenCalled();
     });
@@ -194,8 +241,30 @@ describe("Catalog Server Actions", () => {
       expect(mockGetDb).not.toHaveBeenCalled();
     });
 
-    it("creates product with normalized price string", async () => {
-      mockCreateCatalogProduct.mockResolvedValueOnce({ productId: "prod-123" });
+    it("creates product with normalized price string and returns authoritative record", async () => {
+      const mockSavedProduct = {
+        id: "prod-123",
+        categoryId: validCatId,
+        slug: "smart-phone",
+        price: "99.90",
+        isActive: false,
+        sortOrder: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {
+          en: {
+            id: "pt-1",
+            languageId: "lang-en-id",
+            name: "Smart Phone",
+            description: "A great phone",
+            details: "Specs: 128GB",
+          },
+        },
+      };
+      mockCreateCatalogProduct.mockResolvedValueOnce({
+        productId: "prod-123",
+        product: mockSavedProduct,
+      });
 
       const res = await createProductAction({
         categoryId: validCatId,
@@ -208,6 +277,7 @@ describe("Catalog Server Actions", () => {
 
       expect(res.success).toBe(true);
       expect(res.productId).toBe("prod-123");
+      expect(res.product).toEqual(mockSavedProduct);
       expect(mockCreateCatalogProduct).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
@@ -230,7 +300,69 @@ describe("Catalog Server Actions", () => {
   describe("updateCategoryAction", () => {
     const validCatId = "22222222-2222-2222-2222-222222222222";
 
-    it("updates category and saves translation for the specified language", async () => {
+    it("rejects blank/whitespace name when translation is submitted", async () => {
+      const res = await updateCategoryAction({
+        categoryId: validCatId,
+        slug: "electronics",
+        isActive: true,
+        languageCode: "en",
+        name: "   ",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.name).toMatch(/required/i);
+      expect(mockEditCatalogCategory).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed boolean isActive values strictly", async () => {
+      const res = await updateCategoryAction({
+        categoryId: validCatId,
+        slug: "electronics",
+        isActive: "maybe",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.isActive).toMatch(/valid boolean/i);
+      expect(mockEditCatalogCategory).not.toHaveBeenCalled();
+    });
+
+    it("rejects unsupported language code before writing", async () => {
+      const res = await updateCategoryAction({
+        categoryId: validCatId,
+        slug: "electronics",
+        isActive: true,
+        languageCode: "fr",
+        name: "Electronique",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.languageCode).toMatch(/not supported/i);
+      expect(mockEditCatalogCategory).not.toHaveBeenCalled();
+    });
+
+    it("updates category and translation atomically in a single batch call", async () => {
+      const mockSavedCategory = {
+        id: validCatId,
+        parentId: null,
+        slug: "electronics-updated",
+        sortOrder: 0,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {
+          ar: {
+            id: "t-ar",
+            languageId: "lang-ar-id",
+            name: "إلكترونيات",
+            description: "أجهزة",
+          },
+        },
+      };
+      mockEditCatalogCategory.mockResolvedValueOnce({ category: mockSavedCategory });
+
       const res = await updateCategoryAction({
         categoryId: validCatId,
         slug: "electronics-updated",
@@ -241,21 +373,49 @@ describe("Catalog Server Actions", () => {
       });
 
       expect(res.success).toBe(true);
-      expect(mockUpdateCatalogCategory).toHaveBeenCalledWith(
-        expect.anything(),
-        validCatId,
-        {
-          slug: "electronics-updated",
-          isActive: true,
-        },
-      );
-      expect(mockSaveCatalogCategoryTranslation).toHaveBeenCalledWith(
+      expect(res.category).toEqual(mockSavedCategory);
+      expect(mockEditCatalogCategory).toHaveBeenCalledWith(
         expect.anything(),
         {
           categoryId: validCatId,
-          languageId: "lang-ar-id",
-          name: "إلكترونيات",
-          description: "أجهزة",
+          slug: "electronics-updated",
+          isActive: true,
+          translation: {
+            languageId: "lang-ar-id",
+            name: "إلكترونيات",
+            description: "أجهزة",
+          },
+        },
+      );
+    });
+
+    it("supports base-only updates when translation fields are omitted", async () => {
+      const mockSavedCategory = {
+        id: validCatId,
+        parentId: null,
+        slug: "electronics-newslug",
+        sortOrder: 0,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {},
+      };
+      mockEditCatalogCategory.mockResolvedValueOnce({ category: mockSavedCategory });
+
+      const res = await updateCategoryAction({
+        categoryId: validCatId,
+        slug: "electronics-newslug",
+        isActive: true,
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditCatalogCategory).toHaveBeenCalledWith(
+        expect.anything(),
+        {
+          categoryId: validCatId,
+          slug: "electronics-newslug",
+          isActive: true,
+          translation: null,
         },
       );
     });
@@ -264,7 +424,44 @@ describe("Catalog Server Actions", () => {
   describe("updateProductAction", () => {
     const validProdId = "33333333-3333-3333-3333-333333333333";
 
-    it("updates product base and translation", async () => {
+    it("rejects blank/whitespace name when translation is submitted", async () => {
+      const res = await updateProductAction({
+        productId: validProdId,
+        slug: "phone",
+        price: "100.00",
+        isActive: true,
+        languageCode: "en",
+        name: "   ",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.name).toMatch(/required/i);
+      expect(mockEditCatalogProduct).not.toHaveBeenCalled();
+    });
+
+    it("updates product base and translation atomically", async () => {
+      const mockSavedProduct = {
+        id: validProdId,
+        categoryId: "cat-1",
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: false,
+        sortOrder: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {
+          en: {
+            id: "pt-en",
+            languageId: "lang-en-id",
+            name: "Phone Pro",
+            description: "Short desc",
+            details: "Long details",
+          },
+        },
+      };
+      mockEditCatalogProduct.mockResolvedValueOnce({ product: mockSavedProduct });
+
       const res = await updateProductAction({
         productId: validProdId,
         slug: "phone-pro",
@@ -277,23 +474,20 @@ describe("Catalog Server Actions", () => {
       });
 
       expect(res.success).toBe(true);
-      expect(mockUpdateCatalogProduct).toHaveBeenCalledWith(
-        expect.anything(),
-        validProdId,
-        {
-          slug: "phone-pro",
-          price: "199.50",
-          isActive: false,
-        },
-      );
-      expect(mockSaveCatalogProductTranslation).toHaveBeenCalledWith(
+      expect(res.product).toEqual(mockSavedProduct);
+      expect(mockEditCatalogProduct).toHaveBeenCalledWith(
         expect.anything(),
         {
           productId: validProdId,
-          languageId: "lang-en-id",
-          name: "Phone Pro",
-          description: "Short desc",
-          details: "Long details",
+          slug: "phone-pro",
+          price: "199.50",
+          isActive: false,
+          translation: {
+            languageId: "lang-en-id",
+            name: "Phone Pro",
+            description: "Short desc",
+            details: "Long details",
+          },
         },
       );
     });
