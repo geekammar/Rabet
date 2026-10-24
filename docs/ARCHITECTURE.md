@@ -615,6 +615,32 @@ connection lifecycle, one round trip per unit of work. The constraint this impos
 and small: no path may read a row it just wrote in order to decide what to write next. See
 DATA_MODEL.md §15.3.
 
+### ADR-016 — Store Settings, Currency Safeguards and Availability States (Phase 04-A)
+
+**Decision.** The Settings dashboard interface (`/settings`) implements four explicit database
+availability states (A: `DATABASE_URL` unset, B: DB unavailable/transient error, C: DB available but uninitialized,
+D: DB available and configured). USD is the approved initial form currency selection with strict safeguards
+against unintended price reinterpretation. When catalog products are present, changing store currency
+requires explicit confirmation. No currency conversion or price modification is performed. English is the
+initially selected bot language with optional RTL Arabic enablement; missing translations resolve through the
+configured default language (requested -> default -> explicitly missing), disabling a language preserves its
+translations, and the active default cannot be disabled. Support categories are stored in `bot_setting.support_category` (`text[]`).
+Bot Content message templates are reserved for Phase 04-B.
+
+**Rationale.**
+1. Vercel Production initially runs without a provisioned database; the dashboard must remain buildable and
+   render a clean administrator notice rather than crash.
+2. In Rabet's single-merchant digital catalog, currency is a global display label. Converting product prices
+   automatically would risk exchange-rate errors or unintended charges, while silently reinterpreting numbers
+   creates pricing ambiguities. Explicit confirmation ensures the owner is fully aware that prices remain
+   exact numerical constants under the new currency.
+3. Every Server Action asserts `await requireAdmin()` at the boundary and uses `toSafeErrorMessage()` so no
+   SQL details, credentials or connection strings reach client bundles or responses.
+
+**Consequences.**
+The Settings UI remains robust across local development, unconfigured previews, database outages, and live
+production. Bot message templates remain clean for Phase 04-B.
+
 ## 5. Data flow (future)
 
 1. A customer starts the bot; the customer row is created and, if more than one language is

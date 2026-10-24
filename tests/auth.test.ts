@@ -15,7 +15,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess, execSync } from "node:child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { hash } from "@node-rs/argon2";
@@ -175,18 +175,29 @@ let testAuthSecret = "";
 async function buildOnce(): Promise<void> {
   // Reuse the already-built .next output when present (the CI matrix builds
   // before testing), otherwise build it here.
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn("npm", ["run", "build"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: process.platform === "win32",
+  if (existsSync(path.join(process.cwd(), ".next", "BUILD_ID"))) {
+    return;
+  }
+
+  const runBuild = () =>
+    new Promise<void>((resolve, reject) => {
+      const proc = spawn("npm", ["run", "build"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: process.platform === "win32",
+      });
+      let output = "";
+      proc.stdout?.on("data", (chunk) => (output += chunk));
+      proc.stderr?.on("data", (chunk) => (output += chunk));
+      proc.on("exit", (code) =>
+        code === 0 ? resolve() : reject(new Error(`build failed: ${output}`)),
+      );
     });
-    let output = "";
-    proc.stdout?.on("data", (chunk) => (output += chunk));
-    proc.stderr?.on("data", (chunk) => (output += chunk));
-    proc.on("exit", (code) =>
-      code === 0 ? resolve() : reject(new Error(`build failed: ${output}`)),
-    );
-  });
+
+  try {
+    await runBuild();
+  } catch {
+    await runBuild();
+  }
 }
 
 beforeAll(async () => {

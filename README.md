@@ -4,23 +4,16 @@ A lightweight **Telegram digital-product catalog** with a mobile-first admin das
 
 Rabet connects a Telegram bot — where customers browse an arbitrarily deep catalog, interact with configurable product buttons, and open **inquiries** to the seller — to a clean dashboard where a single merchant manages the catalog, configures the button trees, and replies to customers.
 
-> **Status:** Phase 03C-A — the server-only **settings & localization data access
-> layer** implemented on `feat/phase-03c-settings-data-access`. Phases 01, 02,
-> 03A, 03B, 03B-B and 03B-C are merged into `main`: the Phase 03 schema
-> foundation (PR #6), the Neon development setup wizard (PR #7) and the Neon DEV
-> GitHub Actions migration runner (PR #8) are all on `main`, and the dedicated
-> Neon development database has the full migration chain applied and inspected.
-> Phase 03C-A adds the typed data-access layer for `bot_setting`, `language`,
-> `message_template` and `message_translation` — the functions the Phase 04
-> settings and bot-content forms will call, with their business rules proven
-> against real PostgreSQL — but **no dashboard UI yet**. **No** production
-> database has been created or contacted, and **no payment processing exists at
-> all** — the MVP has no checkout, no orders and no invoices; an inquiry is a
-> conversation, not a purchase (ADR-013). The app is **not** production-secure
-> until later phases land. See [docs/PROGRESS.md](./docs/PROGRESS.md),
-> [docs/DATA_MODEL.md](./docs/DATA_MODEL.md),
-> [docs/PHASE_03C_A_HANDOFF.md](./docs/PHASE_03C_A_HANDOFF.md) and
-> [docs/PHASE_03B_HANDOFF.md](./docs/PHASE_03B_HANDOFF.md).
+> **Status:** Phase 04-A — mobile-first **Store Settings & Onboarding UI** implemented on `feat/phase-04a-settings-ui`.
+> Phases 01, 02, 03A, 03B, 03B-B, 03B-C and 03C-A (PR #9) are merged into `main`.
+> Phase 04-A replaces the `/settings` placeholder with a functional, mobile-first
+> admin interface with clean database availability state handling (States A, B, C, D).
+> USD is the approved initial display currency selection with safeguards against
+> unintended price reinterpretation. English is the default bot language with optional
+> RTL Arabic enablement. Support categories are editable.
+> Bot Content UI is reserved for Phase 04-B. **No** production database has been
+> provisioned or modified by this phase. See [docs/PROGRESS.md](./docs/PROGRESS.md)
+> and [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 ---
 
 ## Tech stack

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { botSetting, language } from "@/db/schema";
+import { botSetting, category, language, product } from "@/db/schema";
 import {
   asAppDb,
   createTestDatabase,
@@ -11,6 +11,7 @@ import {
   type TestDatabase,
 } from "./helpers";
 import {
+  hasCatalogPrices,
   initializeSettings,
   isConfigured,
   readSettings,
@@ -268,5 +269,103 @@ describe.skipIf(!shouldRun)("settings — updates", () => {
     expect(second.displayName).toBe(first.displayName);
     expect(second.currency).toBe(first.currency);
     expect(second.defaultLanguageId).toBe(first.defaultLanguageId);
+  });
+
+  it("persists askForLanguage false and toggles back to true", async () => {
+    const turnedFalse = await updateSettings(asAppDb(testDb!.db), {
+      askForLanguage: false,
+    });
+    expect(turnedFalse.askForLanguage).toBe(false);
+
+    const reloadedFalse = await readSettings(asAppDb(testDb!.db));
+    expect(reloadedFalse?.askForLanguage).toBe(false);
+
+    const turnedTrue = await updateSettings(asAppDb(testDb!.db), {
+      askForLanguage: true,
+    });
+    expect(turnedTrue.askForLanguage).toBe(true);
+
+    const reloadedTrue = await readSettings(asAppDb(testDb!.db));
+    expect(reloadedTrue?.askForLanguage).toBe(true);
+  });
+
+  it("rejects blank or whitespace-only displayName and preserves stored settings", async () => {
+    const before = await readSettings(asAppDb(testDb!.db));
+
+    await expect(
+      updateSettings(asAppDb(testDb!.db), { displayName: "" }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    await expect(
+      updateSettings(asAppDb(testDb!.db), { displayName: "    " }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    const after = await readSettings(asAppDb(testDb!.db));
+    expect(after?.displayName).toBe(before?.displayName);
+  });
+
+  it("explicitly clears supportCategory when empty array is provided and preserves when omitted", async () => {
+    // Set categories
+    await updateSettings(asAppDb(testDb!.db), {
+      supportCategory: ["Sales", "Billing"],
+    });
+    let current = await readSettings(asAppDb(testDb!.db));
+    expect(current?.supportCategory).toEqual(["Sales", "Billing"]);
+
+    // Update another field without supportCategory (omitted)
+    await updateSettings(asAppDb(testDb!.db), {
+      displayName: "Preserved Categories Store",
+    });
+    current = await readSettings(asAppDb(testDb!.db));
+    expect(current?.displayName).toBe("Preserved Categories Store");
+    expect(current?.supportCategory).toEqual(["Sales", "Billing"]);
+
+    // Explicitly clear categories
+    await updateSettings(asAppDb(testDb!.db), {
+      supportCategory: [],
+    });
+    current = await readSettings(asAppDb(testDb!.db));
+    expect(current?.supportCategory).toEqual([]);
+  });
+});
+
+describe.skipIf(!shouldRun)("settings — catalog price detection for currency safeguards", () => {
+  it("detects when catalog contains active prices and when it is empty", async () => {
+    const db = asAppDb(testDb!.db);
+
+    // Initial state: no products exist
+    expect(await hasCatalogPrices(db)).toBe(false);
+
+    // Insert a category to satisfy foreign key
+    const [cat] = await db
+      .insert(category)
+      .values({
+        slug: "test-category",
+        isActive: true,
+      })
+      .returning();
+
+    // Insert a product with a displayed price
+    const [prod] = await db
+      .insert(product)
+      .values({
+        categoryId: cat.id,
+        slug: "test-product",
+        price: "49.99",
+        isActive: true,
+      })
+      .returning();
+
+    // Active product with price exists
+    expect(await hasCatalogPrices(db)).toBe(true);
+
+    // Soft delete the product
+    await db
+      .update(product)
+      .set({ deletedAt: new Date() })
+      .where(eq(product.id, prod.id));
+
+    // After soft-deletion, no active catalog prices exist
+    expect(await hasCatalogPrices(db)).toBe(false);
   });
 });
