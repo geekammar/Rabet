@@ -1,0 +1,45 @@
+/**
+ * Constants and operational safeguards for product interaction actions (ADR-014, DATA_MODEL.md §11.3).
+ *
+ * Operational safeguards:
+ * - ACTION_DEPTH_WARNING_THRESHOLD = 8 levels (advisory in tree editor)
+ * - MAX_ACTION_DEPTH = 16 levels (hard refusal in application/editor)
+ * - MAX_ACTIVE_CHILDREN = 20 buttons per submenu / root (bounds Telegram menu size)
+ * - MAX_ACTION_DEPTH_SAFEGUARD = 64 hops (cycle detection and traversal safety ceiling)
+ *
+ * Text length contracts:
+ * - MAX_ACTION_LABEL_LENGTH = 64 chars (database check & Telegram button limit)
+ * - MAX_ACTION_MENU_TEXT_LENGTH = 4096 chars (Telegram message text limit)
+ */
+
+export const SUPPORTED_ACTION_TYPES = [
+  "OPEN_SUBMENU",
+  "SHOW_DETAILS",
+  "START_INQUIRY",
+] as const;
+
+export type SupportedActionType = (typeof SUPPORTED_ACTION_TYPES)[number];
+
+export const DEFERRED_ACTION_TYPES = [
+  "SEND_TEMPLATE_MESSAGE",
+  "OPEN_URL",
+  "OPEN_SUPPORT",
+  "NAVIGATE_CATALOG",
+] as const;
+
+export type DeferredActionType = (typeof DEFERRED_ACTION_TYPES)[number];
+
+export const MAX_ACTION_LABEL_LENGTH = 64;
+export const MAX_ACTION_MENU_TEXT_LENGTH = 4096;
+
+/** Advisory warning in editor when hierarchy depth exceeds this value. */
+export const ACTION_DEPTH_WARNING_THRESHOLD = 8;
+
+/** Hard stop limit on maximum hierarchy depth (root = level 1). */
+export const MAX_ACTION_DEPTH = 16;
+
+/** Maximum number of active buttons per submenu or root list. */
+export const MAX_ACTIVE_CHILDREN = 20;
+
+/** Safety bound for ancestry traversal and cycle detection. */
+export const MAX_ACTION_DEPTH_SAFEGUARD = 64;
