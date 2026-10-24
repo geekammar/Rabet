@@ -26,7 +26,7 @@ No migrations or schema changes were created or authorized. Phase 05-B1 complete
 | **Product Ownership** | Immutable Product Scope | Actions strictly belong to one product. Parent-child relationships enforce same-product ancestry at both the application layer and via PostgreSQL trigger `product_action_check_ancestry`. Cross-product parenting is rejected. |
 | **Operational Safeguards** | Named Application Constants | `ACTION_DEPTH_WARNING_THRESHOLD = 8`: UI visual warning banner.<br>`MAX_ACTION_DEPTH = 16`: Form disables adding children and server rejects creation.<br>`MAX_ACTIVE_CHILDREN = 20`: Warning when active children count exceeds limit.<br>`MAX_ACTION_DEPTH_SAFEGUARD = 64`: Traversal cycle and stack exhaustion safeguard during tree construction. |
 | **Truthful Availability** | Effective Visibility Resolution | `effectiveVisibility`: An action is customer-visible only if it is active AND all its ancestors, its parent product, and the parent category are active. An active action under an inactive ancestor is clearly labeled `Active (Hidden)` in the UI. |
-| **Creation & Ordering** | Atomic Creation & Sibling Appends | Deterministic sibling sort order calculation across active and soft-deleted rows (`MAX(sort_order) + 1`). Atomic commit of base action and required default-language translation. Concurrent sort conflicts return safe, retryable feedback. |
+| **Creation & Ordering** | Atomic Creation & Sibling Appends | Deterministic sibling sort order calculation (`MAX(sort_order) + 1`). Atomic commit of base action and required default-language translation. Concurrent sort conflicts return safe, retryable feedback. |
 | **Editing & Rollback** | Atomic Edit Operations | Base action properties (`actionType`, `isActive`) and the active language translation (`label`, `menuText`) commit atomically via `executeAtomicBatch`. If a translation write fails, base action updates are not committed. |
 | **Localization** | Multi-Language & Draft Preservation | Required label in configured store default language (`en` or `ar`). Registered optional Arabic supported with native RTL (`dir="rtl"`). Editing disabled Arabic preserves disabled status. In UI, unsaved edits in one language tab are preserved when saving or switching to another language tab. |
 | **Character Constraints** | Unicode Character Counting | Action labels: 1 to 64 Unicode code points. Submenu menu texts: 0 to 4096 Unicode code points. Accurate code-point counting matching PostgreSQL character semantics. |
@@ -37,8 +37,8 @@ No migrations or schema changes were created or authorized. Phase 05-B1 complete
 
 - **Deferred action types**: `SEND_TEMPLATE_MESSAGE`, `OPEN_URL`, `OPEN_SUPPORT`, `NAVIGATE_CATALOG`. (Pre-existing records with these types are preserved without conversion or deletion, but new submissions are rejected).
 - **Reparenting or moving actions** across different parents.
-- **Manual reordering / drag-and-drop** of sibling actions.
-- **Deleting or archiving actions** (soft-delete / hard-delete).
+- **Manual reordering** of sibling actions (future reordering will use simple controls; drag-and-drop is not required).
+- **Deleting or archiving actions** (soft-delete / hard-delete; note `product_action` has no `deleted_at` column and cascades on product delete).
 - **Bulk action management or tree templating**.
 - **Telegram bot runtime execution & callback query handling** (deferred to Phase 06).
 - **Inquiry creation & conversation handling** (deferred to Phase 07 / Phase 09).
@@ -49,14 +49,14 @@ No migrations or schema changes were created or authorized. Phase 05-B1 complete
 
 ### 3.1. Zero-Migration Schema Reuse
 Phase 05-B1 creates no migrations and alters no tables. It directly targets the schema established in Phase 03B:
-- `product_action` (`id`, `product_id`, `parent_id`, `action_type`, `action_config`, `sort_order`, `is_active`, `deleted_at`, `created_at`, `updated_at`)
+- `product_action` (`id`, `product_id`, `parent_action_id`, `action_type`, `action_config`, `sort_order`, `is_active`, `created_at`, `updated_at` — note `product_action` has no `deleted_at` column)
 - `product_action_translation` (`id`, `action_id`, `language_id`, `label`, `menu_text`, `created_at`, `updated_at`)
 
 Database constraints and triggers serve as the definitive integrity boundary:
 - Trigger `product_action_check_ancestry`: Enforces same-product ancestry and prevents self-parenting and cross-product parent references.
 - Trigger `product_action_guard_menu_capability`: Enforces that non-`OPEN_SUBMENU` actions cannot have child actions.
-- Partial unique index `product_action_root_sort_order_idx`: `(product_id, sort_order) WHERE parent_id IS NULL AND deleted_at IS NULL`.
-- Partial unique index `product_action_sibling_sort_order_idx`: `(product_id, parent_id, sort_order) WHERE parent_id IS NOT NULL AND deleted_at IS NULL`.
+- Partial unique index `product_action_root_sort_order_idx`: `(product_id, sort_order) WHERE parent_action_id IS NULL`.
+- Partial unique index `product_action_sibling_sort_order_idx`: `(product_id, parent_action_id, sort_order) WHERE parent_action_id IS NOT NULL`.
 
 ### 3.2. Neon HTTP Driver Batch Contract (`executeAtomicBatch`)
 The production application uses `@neondatabase/serverless` with Drizzle's `neon-http` driver. Because interactive transactions (`BEGIN` ... `COMMIT` across roundtrips) are unsupported on HTTP connections, `executeAtomicBatch` executes all related queries in a single atomic roundtrip via `db.batch([...])`, with clean fallback to driver transactions for non-HTTP drivers (such as local `postgres-js` in testing).
@@ -132,16 +132,38 @@ export const MAX_ACTION_DEPTH_SAFEGUARD = 64;
 Executed against `next start` with a real disposable PostgreSQL fixture and automated Chromium CDP runner:
 1. **Scenario 1 (Unauthorized Access)**: Unauthenticated request to `/catalog` redirects immediately to `/login` without writes.
 2. **Scenario 2 (Empty Tree Zero-Writes)**: Navigating to an existing product's Buttons editor renders the empty state banner (`No buttons configured`) with exactly 0 rows inserted into `product_action`.
-3. **Scenario 3 (Hierarchy Creation)**: Created root submenu (`Options`), nested submenu (`Tiers`), terminal `SHOW_DETAILS` (`View Specs`), and terminal `START_INQUIRY` (`Order Now`).
-4. **Scenario 4 (Hierarchy Persistence)**: Refreshed browser; verified exact tree hierarchy, indentation, action types, labels, and product ownership persisted.
+3. **Scenario 3 (Hierarchy Creation)**: Created root submenu (`Options`), nested submenu (`Tiers`), terminal `SHOW_DETAILS` (`View Specs`), and terminal `START_INQUIRY` (`Ask about this product`).
+4. **Scenario 4 (Exact Hierarchy Persistence)**: Refreshed browser; verified exact tree hierarchy, `parent_action_id` relationships, sibling ordering, action types, labels, and product ownership persisted in PostgreSQL and rendered in the DOM.
 5. **Scenario 5 (Language Draft Preservation)**: Typed an unsaved Arabic draft, saved English translation; verified English was committed to PostgreSQL while Arabic draft remained intact in browser without premature persistence.
 6. **Scenario 6 (Validation Failure)**: Submitted empty label; form rejected submission with field error alert, and PostgreSQL database state remained completely unchanged.
 7. **Scenario 7 (Transport Failure & Retry)**: Injected synthetic network failure during save; UI displayed retryable communication error alert and preserved user draft. Restored network, retried save, and verified successful commit to PostgreSQL.
 8. **Scenario 8 (Mobile 360px & Touch Targets)**: Tested viewport at 360 × 800 px; verified `scrollWidth <= clientWidth` (zero horizontal overflow) and all interactive buttons/checkboxes measure at least 44 × 44 CSS pixels.
+9. **Scenario 9 (Delayed-Response Reconciliation & Scoping)**: Simulated delayed server response on action mutation and product switching; proved in-flight saves do not corrupt adjacent nodes or overwrite newer inputs, and product transitions safely discard outdated responses.
 
 ---
 
-## 6. Known Limitations and Remaining Work
+## 6. PR #14 Safety & Save Contract Repairs
+
+The following repairs were applied on PR #14 based on review findings:
+1. **Truthful Save Contract**:
+   - `updateProductActionAction` requires a supported language code (`en` or `ar`) and non-empty label whenever a translation is submitted. Missing language codes, missing labels, or unsupported language codes are rejected before database access.
+   - Distinguishes intentional base-only updates from translation submissions. Omission vs explicit clearing of `menuText` is clearly handled (`undefined` retains existing value; `""` or `null` explicitly clears).
+   - Parameter validation applies across all submitted languages (including optional Arabic). Submenu messages on terminal actions (`SHOW_DETAILS`, `START_INQUIRY`) are rejected rather than silently discarded.
+   - `actionConfig` validation explicitly parses FormData and accepts only omitted or empty plain objects `{}`. Non-empty objects, arrays, and primitives are strictly rejected.
+2. **Product Lifecycle & Deferred Records**:
+   - `listProductActions`, `createProductAction`, and `editProductAction` verify the target product exists and is not soft-deleted (`deleted_at IS NULL`), returning safe `NOT_FOUND` feedback.
+   - Existing deferred/unsupported action records (`OPEN_URL`, `SEND_TEMPLATE_MESSAGE`, etc.) are preserved untouched, labeled truthfully with their action type in the UI, and marked read-only. Edit submissions against them are rejected.
+3. **Draft Safety & Delayed Requests**:
+   - In `ProductActionEditor`, action selection is disabled while mutations are pending (`isPending`). Responses are strictly scoped by `productId`, `actionId`, and a version counter.
+   - Newer draft edits made during flight are preserved rather than overwritten by server reconciliation.
+   - Product transitions immediately reset actions, selection, and drafts, and ignore responses from previous products.
+4. **Concurrency-Safe Active Child Limits**:
+   - Active child checks for creation and activation use atomic SQL verification combined with row-level locks (`SELECT ... FOR UPDATE`) in `executeAtomicBatch`.
+   - Simultaneous activations at the limit boundary are safely serialized; surplus operations roll back atomically with safe feedback.
+
+---
+
+## 7. Known Limitations and Remaining Work
 
 1. **Phase 05 Scope Remains Incomplete**:
    - Phase 05-B1 covers configuration of `OPEN_SUBMENU`, `SHOW_DETAILS`, and `START_INQUIRY`.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -35,6 +35,7 @@ import {
   MAX_ACTION_LABEL_LENGTH,
   MAX_ACTION_MENU_TEXT_LENGTH,
   MAX_ACTIVE_CHILDREN,
+  SUPPORTED_ACTION_TYPES,
   type SupportedActionType,
 } from "@/lib/product-actions/constants";
 import { resolveActionTranslationStatus } from "@/lib/product-actions/status";
@@ -90,12 +91,34 @@ export function ProductActionEditor({
   // Active language tab in edit drawer
   const [activeLangTab, setActiveLangTab] = useState<string>(defaultLangCode);
 
+  const saveVersionRef = useRef(0);
+  const [prevProductId, setPrevProductId] = useState(product.id);
+
+  // Edit Form Draft State
+  const [editActionType, setEditActionType] = useState<SupportedActionType>("OPEN_SUBMENU");
+  const [editIsActive, setEditIsActive] = useState(true);
+  const [editDraftTranslations, setEditDraftTranslations] = useState<
+    Record<string, { label: string; menuText: string }>
+  >({});
+
+  // Reset local state if product changes
+  if (product.id !== prevProductId) {
+    setPrevProductId(product.id);
+    setActions([]);
+    setIsLoading(true);
+    setEditingActionId(null);
+    setActionFeedback(null);
+    setEditDraftTranslations({});
+  }
+
   // Fetch actions on mount / product change
   const reloadActions = () => {
+    const targetProductId = product.id;
     setIsLoading(true);
     setActionFeedback(null);
-    loadProductActionsAction(product.id)
+    loadProductActionsAction(targetProductId)
       .then((res) => {
+        if (product.id !== targetProductId) return;
         setIsLoading(false);
         if (res.success && res.actions) {
           setActions(res.actions);
@@ -108,6 +131,7 @@ export function ProductActionEditor({
         }
       })
       .catch(() => {
+        if (product.id !== targetProductId) return;
         setIsLoading(false);
         setActionFeedback({
           success: false,
@@ -119,6 +143,7 @@ export function ProductActionEditor({
 
   useEffect(() => {
     let isMounted = true;
+
     loadProductActionsAction(product.id)
       .then((res) => {
         if (!isMounted) return;
@@ -164,6 +189,10 @@ export function ProductActionEditor({
     return flattened.find((a) => a.id === editingActionId) ?? null;
   }, [flattened, editingActionId]);
 
+  const isSelectedUnsupported =
+    selectedNode !== null &&
+    !SUPPORTED_ACTION_TYPES.includes(selectedNode.actionType as SupportedActionType);
+
   const toggleExpand = (id: string) => {
     setExpandedNodeIds((prev) => {
       const next = new Set(prev);
@@ -172,15 +201,6 @@ export function ProductActionEditor({
       return next;
     });
   };
-
-  // ==========================================
-  // Edit Form Draft State
-  // ==========================================
-  const [editActionType, setEditActionType] = useState<SupportedActionType>("OPEN_SUBMENU");
-  const [editIsActive, setEditIsActive] = useState(true);
-  const [editDraftTranslations, setEditDraftTranslations] = useState<
-    Record<string, { label: string; menuText: string }>
-  >({});
 
   const syncEditDraft = (node: HierarchyActionNode) => {
     setEditActionType(node.actionType as SupportedActionType);
@@ -203,20 +223,34 @@ export function ProductActionEditor({
 
   const handleSaveEdit = () => {
     if (!selectedNode) return;
+    const targetActionId = selectedNode.id;
+    const targetProductId = product.id;
+    const targetVersion = ++saveVersionRef.current;
     const submittedLang = activeLangTab;
     const draft = editDraftTranslations[submittedLang] || { label: "", menuText: "" };
+    const submittedLabel = draft.label;
+    const submittedMenuText = draft.menuText;
 
     startTransition(async () => {
       try {
         const res = await updateProductActionAction({
-          actionId: selectedNode.id,
-          productId: product.id,
+          actionId: targetActionId,
+          productId: targetProductId,
           actionType: editActionType,
           isActive: editIsActive,
           languageCode: submittedLang,
-          label: draft.label,
-          menuText: editActionType === "OPEN_SUBMENU" ? draft.menuText : null,
+          label: submittedLabel,
+          menuText: editActionType === "OPEN_SUBMENU" ? submittedMenuText : null,
         });
+
+        if (
+          targetProductId !== product.id ||
+          targetActionId !== editingActionId ||
+          targetVersion !== saveVersionRef.current
+        ) {
+          // Stale request response; do not mutate active editor state
+          return;
+        }
 
         setActionFeedback(res);
 
@@ -229,8 +263,16 @@ export function ProductActionEditor({
           setEditActionType(authoritative.actionType as SupportedActionType);
           setEditIsActive(authoritative.isActive);
 
-          // Reconcile ONLY submitted language draft
+          // Reconcile ONLY submitted language draft, preserving text entered after submission
           setEditDraftTranslations((prev) => {
+            const currentDraft = prev[submittedLang];
+            if (
+              currentDraft &&
+              (currentDraft.label !== submittedLabel ||
+                currentDraft.menuText !== submittedMenuText)
+            ) {
+              return prev; // User entered new text during save; do not overwrite!
+            }
             const savedTrans = authoritative.translations[submittedLang];
             return {
               ...prev,
@@ -242,11 +284,17 @@ export function ProductActionEditor({
           });
         }
       } catch {
-        setActionFeedback({
-          success: false,
-          message:
-            "A communication or server error occurred. Your changes have been preserved. Please try again.",
-        });
+        if (
+          targetProductId === product.id &&
+          targetActionId === editingActionId &&
+          targetVersion === saveVersionRef.current
+        ) {
+          setActionFeedback({
+            success: false,
+            message:
+              "A communication or server error occurred. Your changes have been preserved. Please try again.",
+          });
+        }
       }
     });
   };
@@ -358,7 +406,8 @@ export function ProductActionEditor({
             <button
               type="button"
               onClick={() => handleStartEdit(node)}
-              className="flex min-w-0 min-h-11 flex-1 items-center gap-2 text-left py-2"
+              disabled={isPending}
+              className="flex min-w-0 min-h-11 flex-1 items-center gap-2 text-left py-2 disabled:opacity-60"
               aria-label={`Edit button ${node.translations[activeLangTab]?.label || node.actionType}`}
             >
               <FolderTree className="size-4 shrink-0 text-primary/70" />
@@ -374,7 +423,9 @@ export function ProductActionEditor({
                       ? "Submenu"
                       : node.actionType === "SHOW_DETAILS"
                       ? "Details"
-                      : "Inquiry"}
+                      : node.actionType === "START_INQUIRY"
+                      ? "Inquiry"
+                      : `Unsupported (${node.actionType})`}
                   </Badge>
                 </div>
               </div>
@@ -649,6 +700,19 @@ export function ProductActionEditor({
               </CardHeader>
 
               <CardContent className="p-4 space-y-4">
+                {/* Unsupported action notice */}
+                {isSelectedUnsupported && (
+                  <div
+                    role="alert"
+                    className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800"
+                  >
+                    <AlertTriangle className="size-4 shrink-0 text-amber-600 mt-0.5" />
+                    <span>
+                      This button has unsupported action type &quot;{selectedNode.actionType}&quot; and cannot be edited in this slice. Its configuration and translations are preserved read-only.
+                    </span>
+                  </div>
+                )}
+
                 {/* Availability guidance if hidden */}
                 {!selectedNode.effectiveVisibility && selectedNode.isActive && (
                   <div
@@ -675,13 +739,15 @@ export function ProductActionEditor({
                     id="edit-action-type"
                     value={editActionType}
                     disabled={
-                      selectedNode.actionType === "OPEN_SUBMENU" &&
-                      selectedNode.children.length > 0
+                      isPending ||
+                      isSelectedUnsupported ||
+                      (selectedNode.actionType === "OPEN_SUBMENU" &&
+                        selectedNode.children.length > 0)
                     }
                     onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
                       setEditActionType(e.target.value as SupportedActionType)
                     }
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                   >
                     <option value="OPEN_SUBMENU">OPEN_SUBMENU (Submenu with child buttons)</option>
                     <option value="SHOW_DETAILS">SHOW_DETAILS (Display product description & details)</option>
@@ -701,8 +767,9 @@ export function ProductActionEditor({
                     type="checkbox"
                     id="edit-is-active"
                     checked={editIsActive}
+                    disabled={isPending || isSelectedUnsupported}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditIsActive(e.target.checked)}
-                    className="size-5 rounded border-gray-300 text-primary focus:ring-primary min-h-11 min-w-11"
+                    className="size-5 rounded border-gray-300 text-primary focus:ring-primary min-h-11 min-w-11 disabled:opacity-60"
                   />
                   <label
                     htmlFor="edit-is-active"
@@ -791,6 +858,7 @@ export function ProductActionEditor({
                       data-testid="edit-action-label-input"
                       dir={activeLangTab === "ar" ? "rtl" : "ltr"}
                       value={editDraftTranslations[activeLangTab]?.label ?? ""}
+                      disabled={isPending || isSelectedUnsupported}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         const val = e.target.value;
                         setEditDraftTranslations((prev) => ({
@@ -801,7 +869,7 @@ export function ProductActionEditor({
                           },
                         }));
                       }}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       placeholder={
                         activeLangTab === "ar"
                           ? "مثال: عرض الخيارات"
@@ -831,6 +899,7 @@ export function ProductActionEditor({
                         data-testid="edit-action-menu-text-input"
                         dir={activeLangTab === "ar" ? "rtl" : "ltr"}
                         value={editDraftTranslations[activeLangTab]?.menuText ?? ""}
+                        disabled={isPending || isSelectedUnsupported}
                         onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
                           const val = e.target.value;
                           setEditDraftTranslations((prev) => ({
@@ -842,7 +911,7 @@ export function ProductActionEditor({
                           }));
                         }}
                         rows={3}
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                         placeholder={
                           activeLangTab === "ar"
                             ? "رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
@@ -878,7 +947,7 @@ export function ProductActionEditor({
                   <Button
                     type="button"
                     onClick={handleSaveEdit}
-                    disabled={isPending}
+                    disabled={isPending || isSelectedUnsupported}
                     className="min-h-11 gap-2"
                     data-testid="save-action-btn"
                   >

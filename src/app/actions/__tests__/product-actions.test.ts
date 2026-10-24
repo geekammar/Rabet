@@ -227,6 +227,87 @@ describe("Product Action Server Actions", () => {
       expect(res.errors?.arabicLabel).toMatch(/already Arabic/i);
       expect(mockCreateProductAction).not.toHaveBeenCalled();
     });
+
+    it("rejects terminal action with nonblank arabicMenuText with 0 DB writes", async () => {
+      const res = await createProductActionAction({
+        productId: validProductId,
+        actionType: "SHOW_DETAILS",
+        label: "Specs",
+        arabicLabel: "المواصفات",
+        arabicMenuText: "نص غير مسموح",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.errors?.parameters).toMatch(/only permitted on OPEN_SUBMENU/i);
+      expect(mockCreateProductAction).not.toHaveBeenCalled();
+    });
+
+    it("rejects invalid actionConfig with 0 DB writes", async () => {
+      const res1 = await createProductActionAction({
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        label: "Menu",
+        actionConfig: "arbitrary-string",
+      });
+      expect(res1.success).toBe(false);
+      expect(res1.errors?.parameters).toMatch(/actionConfig must be an empty plain object/i);
+
+      const res2 = await createProductActionAction({
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        label: "Menu",
+        actionConfig: [1, 2, 3],
+      });
+      expect(res2.success).toBe(false);
+      expect(res2.errors?.parameters).toMatch(/actionConfig cannot be an array/i);
+
+      const res3 = await createProductActionAction({
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        label: "Menu",
+        actionConfig: { extraField: true },
+      });
+      expect(res3.success).toBe(false);
+      expect(res3.errors?.parameters).toMatch(/Custom actionConfig properties are not supported/i);
+
+      expect(mockCreateProductAction).not.toHaveBeenCalled();
+    });
+
+    it("successfully creates an action when Arabic is store default", async () => {
+      mockResolveDefaultLanguage.mockResolvedValue({
+        id: "lang-ar-id",
+        code: "ar",
+        label: "العربية",
+        isEnabled: true,
+      });
+      mockCreateProductAction.mockResolvedValue({
+        actionId: validActionId,
+        action: {
+          id: validActionId,
+          productId: validProductId,
+          actionType: "OPEN_SUBMENU",
+        },
+      });
+
+      const res = await createProductActionAction({
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        label: "القائمة الرئيسية",
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateProductAction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          translations: [
+            expect.objectContaining({
+              languageCode: "ar",
+              label: "القائمة الرئيسية",
+            }),
+          ],
+        }),
+      );
+    });
   });
 
   describe("updateProductActionAction", () => {
@@ -242,19 +323,179 @@ describe("Product Action Server Actions", () => {
       expect(mockEditProductAction).not.toHaveBeenCalled();
     });
 
-    it("rejects unregistered language update", async () => {
+    it("rejects translation update when languageCode is missing", async () => {
       const res = await updateProductActionAction({
         actionId: validActionId,
         productId: validProductId,
         actionType: "OPEN_SUBMENU",
         isActive: true,
-        languageCode: "fr",
-        label: "Options",
+        label: "Updated Label",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.errors?.languageCode).toMatch(/Language code is required/i);
+      expect(mockEditProductAction).not.toHaveBeenCalled();
+    });
+
+    it("rejects translation update when label is missing", async () => {
+      const res = await updateProductActionAction({
+        actionId: validActionId,
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        isActive: true,
+        languageCode: "en",
+        menuText: "Updated Menu Text",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.errors?.label).toMatch(/Button label in EN is required/i);
+      expect(mockEditProductAction).not.toHaveBeenCalled();
+    });
+
+    it("rejects unsupported language code before database lookup", async () => {
+      const res = await updateProductActionAction({
+        actionId: validActionId,
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        isActive: true,
+        languageCode: "es",
+        label: "Opciones",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.errors?.languageCode).toMatch(/not supported by the action editor/i);
+      expect(mockEditProductAction).not.toHaveBeenCalled();
+    });
+
+    it("rejects unregistered language update", async () => {
+      mockListLanguages.mockResolvedValue([
+        { id: "lang-en-id", code: "en", label: "English", isEnabled: true },
+      ]); // Arabic not registered
+
+      const res = await updateProductActionAction({
+        actionId: validActionId,
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        isActive: true,
+        languageCode: "ar",
+        label: "خيارات",
       });
 
       expect(res.success).toBe(false);
       expect(res.errors?.languageCode).toMatch(/not registered/i);
       expect(mockEditProductAction).not.toHaveBeenCalled();
+    });
+
+    it("rejects terminal action with nonblank menuText", async () => {
+      const res = await updateProductActionAction({
+        actionId: validActionId,
+        productId: validProductId,
+        actionType: "SHOW_DETAILS",
+        isActive: true,
+        languageCode: "en",
+        label: "View Specs",
+        menuText: "Message on terminal action",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.errors?.menuText).toMatch(/only permitted on OPEN_SUBMENU/i);
+      expect(mockEditProductAction).not.toHaveBeenCalled();
+    });
+
+    it("allows intentional base-only update without translation fields", async () => {
+      mockEditProductAction.mockResolvedValue({
+        action: {
+          id: validActionId,
+          productId: validProductId,
+          actionType: "START_INQUIRY",
+          isActive: false,
+          translations: {},
+        },
+      });
+
+      const res = await updateProductActionAction({
+        actionId: validActionId,
+        productId: validProductId,
+        actionType: "START_INQUIRY",
+        isActive: false,
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditProductAction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          actionId: validActionId,
+          productId: validProductId,
+          actionType: "START_INQUIRY",
+          isActive: false,
+          translation: undefined,
+        }),
+      );
+    });
+
+    it("preserves omitted menuText when updating label only", async () => {
+      mockEditProductAction.mockResolvedValue({
+        action: {
+          id: validActionId,
+          productId: validProductId,
+          actionType: "OPEN_SUBMENU",
+          isActive: true,
+          translations: {},
+        },
+      });
+
+      const res = await updateProductActionAction({
+        actionId: validActionId,
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        isActive: true,
+        languageCode: "en",
+        label: "New Submenu Label",
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditProductAction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          translation: expect.objectContaining({
+            label: "New Submenu Label",
+            menuText: undefined,
+          }),
+        }),
+      );
+    });
+
+    it("explicitly clears menuText when passed empty string or null", async () => {
+      mockEditProductAction.mockResolvedValue({
+        action: {
+          id: validActionId,
+          productId: validProductId,
+          actionType: "OPEN_SUBMENU",
+          isActive: true,
+          translations: {},
+        },
+      });
+
+      const res = await updateProductActionAction({
+        actionId: validActionId,
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        isActive: true,
+        languageCode: "en",
+        label: "Submenu",
+        menuText: "",
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditProductAction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          translation: expect.objectContaining({
+            label: "Submenu",
+            menuText: null,
+          }),
+        }),
+      );
     });
 
     it("successfully edits an action with its translation", async () => {
@@ -311,6 +552,21 @@ describe("Product Action Server Actions", () => {
       const res = await loadProductActionsAction(validProductId);
       expect(res.success).toBe(true);
       expect(res.actions).toHaveLength(1);
+    });
+
+    it("returns safe not-found state when product does not exist or is deleted", async () => {
+      const { RabetDataError } = await import("@/lib/data");
+      mockListProductActions.mockRejectedValue(
+        new RabetDataError(
+          "NOT_FOUND",
+          "Referenced product does not exist or has been deleted.",
+        ),
+      );
+
+      const res = await loadProductActionsAction(validProductId);
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("NOT_FOUND");
+      expect(res.message).toMatch(/does not exist or has been deleted/i);
     });
   });
 });

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -12,6 +12,7 @@ import {
 import {
   MAX_ACTION_DEPTH,
   MAX_ACTIVE_CHILDREN,
+  SUPPORTED_ACTION_TYPES,
   type SupportedActionType,
 } from "@/lib/product-actions/constants";
 import { executeAtomicBatch } from "./catalog";
@@ -84,6 +85,20 @@ export async function listProductActions(
   productId: string,
 ): Promise<ProductActionRecord[]> {
   try {
+    // 1. Verify referenced product exists and is not soft-deleted
+    const [targetProduct] = await db
+      .select({ id: product.id, deletedAt: product.deletedAt })
+      .from(product)
+      .where(eq(product.id, productId))
+      .limit(1);
+
+    if (!targetProduct || targetProduct.deletedAt !== null) {
+      throw new RabetDataError(
+        "NOT_FOUND",
+        "Referenced product does not exist or has been deleted.",
+      );
+    }
+
     const actionRows = await db
       .select()
       .from(productAction)
@@ -141,6 +156,9 @@ export async function listProductActions(
       translations: translationsByAction.get(row.id) ?? {},
     }));
   } catch (error) {
+    if (error instanceof RabetDataError) {
+      throw error;
+    }
     throw mapDatabaseError(error);
   }
 }
@@ -195,6 +213,9 @@ export async function readProductAction(
       translations,
     };
   } catch (error) {
+    if (error instanceof RabetDataError) {
+      throw error;
+    }
     throw mapDatabaseError(error);
   }
 }
@@ -294,50 +315,9 @@ export async function createProductAction(
 
         currentParentId = ancestor.parentActionId;
       }
-
-      // 4. Active child limit check
-      if (isActive) {
-        const [activeCountRow] = await db
-          .select({ count: sql<number>`count(*)::int` })
-          .from(productAction)
-          .where(
-            and(
-              eq(productAction.parentActionId, parentId),
-              eq(productAction.isActive, true),
-            ),
-          );
-
-        if ((activeCountRow?.count ?? 0) >= MAX_ACTIVE_CHILDREN) {
-          throw new RabetDataError(
-            "INVALID_INPUT",
-            `Active child limit reached (${MAX_ACTIVE_CHILDREN} buttons). Cannot activate another button under this submenu.`,
-          );
-        }
-      }
-    } else {
-      // Root button: check active root limit
-      if (isActive) {
-        const [activeRootRow] = await db
-          .select({ count: sql<number>`count(*)::int` })
-          .from(productAction)
-          .where(
-            and(
-              eq(productAction.productId, input.productId),
-              isNull(productAction.parentActionId),
-              eq(productAction.isActive, true),
-            ),
-          );
-
-        if ((activeRootRow?.count ?? 0) >= MAX_ACTIVE_CHILDREN) {
-          throw new RabetDataError(
-            "INVALID_INPUT",
-            `Active root button limit reached (${MAX_ACTIVE_CHILDREN} buttons). Cannot activate another root button.`,
-          );
-        }
-      }
     }
 
-    // 5. Deterministic next sibling sort order
+    // 4. Deterministic next sibling sort order
     const [maxOrderRow] = await db
       .select({ maxOrder: sql<number | null>`max(${productAction.sortOrder})` })
       .from(productAction)
@@ -353,7 +333,64 @@ export async function createProductAction(
     const nextSortOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
     const actionId = globalThis.crypto.randomUUID();
 
-    // 6. Build atomic batch
+    // 5. Build atomic batch with concurrency-safe active limit check
+    const batchQueries: unknown[] = [];
+
+    if (isActive) {
+      if (parentId) {
+        batchQueries.push(
+          db
+            .select({ id: productAction.id })
+            .from(productAction)
+            .where(eq(productAction.id, parentId))
+            .for("update"),
+        );
+        batchQueries.push(
+          db
+            .select({
+              check: sql`CASE
+                WHEN count(*)::int >= ${MAX_ACTIVE_CHILDREN}
+                THEN (count(*)::int || '_ACTIVE_LIMIT_EXCEEDED_child')::integer
+                ELSE 0
+              END`,
+            })
+            .from(productAction)
+            .where(
+              and(
+                eq(productAction.parentActionId, parentId),
+                eq(productAction.isActive, true),
+              ),
+            ),
+        );
+      } else {
+        batchQueries.push(
+          db
+            .select({ id: product.id })
+            .from(product)
+            .where(eq(product.id, input.productId))
+            .for("update"),
+        );
+        batchQueries.push(
+          db
+            .select({
+              check: sql`CASE
+                WHEN count(*)::int >= ${MAX_ACTIVE_CHILDREN}
+                THEN (count(*)::int || '_ACTIVE_LIMIT_EXCEEDED_root')::integer
+                ELSE 0
+              END`,
+            })
+            .from(productAction)
+            .where(
+              and(
+                eq(productAction.productId, input.productId),
+                isNull(productAction.parentActionId),
+                eq(productAction.isActive, true),
+              ),
+            ),
+        );
+      }
+    }
+
     const actionInsert = db.insert(productAction).values({
       id: actionId,
       productId: input.productId,
@@ -378,7 +415,9 @@ export async function createProductAction(
       }),
     );
 
-    await executeAtomicBatch(db, [actionInsert, ...translationInserts]);
+    batchQueries.push(actionInsert, ...translationInserts);
+
+    await executeAtomicBatch(db, batchQueries);
 
     const createdRecord = await readProductAction(db, actionId);
     if (!createdRecord) {
@@ -392,6 +431,18 @@ export async function createProductAction(
   } catch (error) {
     if (error instanceof RabetDataError) {
       throw error;
+    }
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "message" in error &&
+      typeof (error as { message: unknown }).message === "string" &&
+      (error as { message: string }).message.includes("ACTIVE_LIMIT_EXCEEDED")
+    ) {
+      const msg = (error as { message: string }).message.includes("root")
+        ? `Active root button limit reached (${MAX_ACTIVE_CHILDREN} buttons). Cannot activate another root button.`
+        : `Active child limit reached (${MAX_ACTIVE_CHILDREN} buttons). Cannot activate another button under this submenu.`;
+      throw new RabetDataError("INVALID_INPUT", msg);
     }
     if (
       typeof error === "object" &&
@@ -416,7 +467,21 @@ export async function editProductAction(
   input: EditProductActionData,
 ): Promise<{ action: ProductActionRecord }> {
   try {
-    // 1. Verify action exists and belongs to the specified product
+    // 1. Verify referenced product exists and is not soft-deleted
+    const [targetProduct] = await db
+      .select({ id: product.id, deletedAt: product.deletedAt })
+      .from(product)
+      .where(eq(product.id, input.productId))
+      .limit(1);
+
+    if (!targetProduct || targetProduct.deletedAt !== null) {
+      throw new RabetDataError(
+        "NOT_FOUND",
+        "Referenced product does not exist or has been deleted.",
+      );
+    }
+
+    // 2. Verify action exists and belongs to the specified product
     const existing = await readProductAction(db, input.actionId);
     if (!existing) {
       throw new RabetDataError("NOT_FOUND", "Button action not found.");
@@ -429,7 +494,15 @@ export async function editProductAction(
       );
     }
 
-    // 2. Prevent changing actionType away from OPEN_SUBMENU if children exist
+    // 3. Reject edit attempts against existing deferred/unsupported action types
+    if (!SUPPORTED_ACTION_TYPES.includes(existing.actionType as SupportedActionType)) {
+      throw new RabetDataError(
+        "INVALID_INPUT",
+        `Action has unsupported type "${existing.actionType}" and cannot be edited in this slice.`,
+      );
+    }
+
+    // 4. Prevent changing actionType away from OPEN_SUBMENU if children exist
     if (
       existing.actionType === "OPEN_SUBMENU" &&
       input.actionType !== "OPEN_SUBMENU"
@@ -448,36 +521,65 @@ export async function editProductAction(
       }
     }
 
-    // 3. Active limit check if activating
-    if (!existing.isActive && input.isActive) {
-      const siblingCondition = existing.parentActionId
-        ? eq(productAction.parentActionId, existing.parentActionId)
-        : and(
-            eq(productAction.productId, input.productId),
-            isNull(productAction.parentActionId),
-          );
+    // 5. Build atomic queries with concurrency-safe active limit check
+    const queries: unknown[] = [];
 
-      const [activeSiblingRow] = await db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(productAction)
-        .where(
-          and(
-            siblingCondition,
-            eq(productAction.isActive, true),
-            sql`${productAction.id} <> ${input.actionId}`,
-          ),
+    if (input.isActive) {
+      if (existing.parentActionId) {
+        queries.push(
+          db
+            .select({ id: productAction.id })
+            .from(productAction)
+            .where(eq(productAction.id, existing.parentActionId))
+            .for("update"),
         );
-
-      if ((activeSiblingRow?.count ?? 0) >= MAX_ACTIVE_CHILDREN) {
-        throw new RabetDataError(
-          "INVALID_INPUT",
-          `Active button limit reached (${MAX_ACTIVE_CHILDREN} buttons). Deactivate an existing button before activating this one.`,
+        queries.push(
+          db
+            .select({
+              check: sql`CASE
+                WHEN count(*)::int >= ${MAX_ACTIVE_CHILDREN}
+                THEN (count(*)::int || '_ACTIVE_LIMIT_EXCEEDED_child')::integer
+                ELSE 0
+              END`,
+            })
+            .from(productAction)
+            .where(
+              and(
+                eq(productAction.parentActionId, existing.parentActionId),
+                eq(productAction.isActive, true),
+                ne(productAction.id, input.actionId),
+              ),
+            ),
+        );
+      } else {
+        queries.push(
+          db
+            .select({ id: product.id })
+            .from(product)
+            .where(eq(product.id, input.productId))
+            .for("update"),
+        );
+        queries.push(
+          db
+            .select({
+              check: sql`CASE
+                WHEN count(*)::int >= ${MAX_ACTIVE_CHILDREN}
+                THEN (count(*)::int || '_ACTIVE_LIMIT_EXCEEDED_root')::integer
+                ELSE 0
+              END`,
+            })
+            .from(productAction)
+            .where(
+              and(
+                eq(productAction.productId, input.productId),
+                isNull(productAction.parentActionId),
+                eq(productAction.isActive, true),
+                ne(productAction.id, input.actionId),
+              ),
+            ),
         );
       }
     }
-
-    // 4. Build atomic queries
-    const queries: unknown[] = [];
 
     const actionUpdate = db
       .update(productAction)
@@ -491,6 +593,18 @@ export async function editProductAction(
     queries.push(actionUpdate);
 
     if (input.translation) {
+      const updateSet: Record<string, unknown> = {
+        label: input.translation.label,
+        updatedAt: sql`now()`,
+      };
+
+      if (input.translation.menuText !== undefined) {
+        updateSet.menuText =
+          input.actionType === "OPEN_SUBMENU"
+            ? (input.translation.menuText ?? null)
+            : null;
+      }
+
       const translationUpsert = db
         .insert(productActionTranslation)
         .values({
@@ -509,14 +623,7 @@ export async function editProductAction(
             productActionTranslation.actionId,
             productActionTranslation.languageId,
           ],
-          set: {
-            label: input.translation.label,
-            menuText:
-              input.actionType === "OPEN_SUBMENU"
-                ? (input.translation.menuText ?? null)
-                : null,
-            updatedAt: sql`now()`,
-          },
+          set: updateSet,
         });
 
       queries.push(translationUpsert);
@@ -536,6 +643,18 @@ export async function editProductAction(
   } catch (error) {
     if (error instanceof RabetDataError) {
       throw error;
+    }
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "message" in error &&
+      typeof (error as { message: unknown }).message === "string" &&
+      (error as { message: string }).message.includes("ACTIVE_LIMIT_EXCEEDED")
+    ) {
+      const msg = (error as { message: string }).message.includes("root")
+        ? `Active root button limit reached (${MAX_ACTIVE_CHILDREN} buttons). Cannot activate another root button.`
+        : `Active button limit reached (${MAX_ACTIVE_CHILDREN} buttons). Deactivate an existing button before activating this one.`;
+      throw new RabetDataError("INVALID_INPUT", msg);
     }
     throw mapDatabaseError(error);
   }

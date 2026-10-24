@@ -121,23 +121,109 @@ export function validateActionMenuText(
 }
 
 /**
+ * Validates the actionConfig payload.
+ * In Phase 05-B1, actionConfig may be omitted or the approved empty plain object {}.
+ * Rejects nonempty objects, arrays, primitives, and arbitrary strings.
+ * Explicitly parses and validates FormData representations (e.g. "" or "{}").
+ */
+export function validateActionConfig(
+  raw: unknown,
+  isFormData = false,
+): ValidationResult<Record<string, never>> {
+  if (raw === undefined || raw === null) {
+    return { success: true, data: {} };
+  }
+
+  if (isFormData && typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0 || trimmed === "{}") {
+      return { success: true, data: {} };
+    }
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed) &&
+          Object.keys(parsed).length === 0
+        ) {
+          return { success: true, data: {} };
+        }
+      } catch {
+        // parse failed
+      }
+    }
+    return {
+      success: false,
+      error: "actionConfig must be an empty plain object or omitted.",
+    };
+  }
+
+  if (typeof raw !== "object" || raw === null) {
+    return {
+      success: false,
+      error: "actionConfig must be an empty plain object or omitted.",
+    };
+  }
+
+  if (Array.isArray(raw)) {
+    return {
+      success: false,
+      error: "actionConfig cannot be an array.",
+    };
+  }
+
+  if (Object.prototype.toString.call(raw) !== "[object Object]") {
+    return {
+      success: false,
+      error: "actionConfig must be a plain object.",
+    };
+  }
+
+  if (Object.keys(raw as object).length > 0) {
+    return {
+      success: false,
+      error: "Custom actionConfig properties are not supported in this slice.",
+    };
+  }
+
+  return { success: true, data: {} };
+}
+
+/**
  * Validates incompatible parameters for the Phase 05-B1 action types.
- * Rejects menuText on terminal actions, non-null URL or navigation targets,
- * or non-empty actionConfig.
+ * Rejects menuText on terminal actions (in all submitted languages),
+ * non-null URL or navigation targets, and invalid actionConfig.
  */
 export function validateActionParameters(input: {
   actionType: SupportedActionType;
   menuText?: string | null;
+  arabicMenuText?: string | null;
   url?: unknown;
   navigateCategoryId?: unknown;
   navigateProductId?: unknown;
   actionConfig?: unknown;
+  isFormData?: boolean;
 }): ValidationResult<void> {
-  if (input.actionType !== "OPEN_SUBMENU" && input.menuText) {
-    return {
-      success: false,
-      error: `Submenu message is only permitted on OPEN_SUBMENU actions, not on ${input.actionType}.`,
-    };
+  const isTerminal = input.actionType !== "OPEN_SUBMENU";
+
+  if (isTerminal) {
+    const hasDefaultMenuText =
+      input.menuText !== undefined &&
+      input.menuText !== null &&
+      input.menuText.trim().length > 0;
+    const hasArabicMenuText =
+      input.arabicMenuText !== undefined &&
+      input.arabicMenuText !== null &&
+      input.arabicMenuText.trim().length > 0;
+
+    if (hasDefaultMenuText || hasArabicMenuText) {
+      return {
+        success: false,
+        error: `Submenu message is only permitted on OPEN_SUBMENU actions, not on ${input.actionType}.`,
+      };
+    }
   }
 
   if (input.url !== undefined && input.url !== null) {
@@ -157,15 +243,11 @@ export function validateActionParameters(input: {
     };
   }
 
-  if (
-    input.actionConfig !== undefined &&
-    input.actionConfig !== null &&
-    typeof input.actionConfig === "object" &&
-    Object.keys(input.actionConfig as object).length > 0
-  ) {
+  const configRes = validateActionConfig(input.actionConfig, input.isFormData);
+  if (!configRes.success) {
     return {
       success: false,
-      error: "Custom actionConfig properties are not supported in this slice.",
+      error: configRes.error,
     };
   }
 

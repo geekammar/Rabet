@@ -68,6 +68,7 @@ export type UpdateProductActionInput =
 
 function extractField(source: unknown, field: string): unknown {
   if (typeof FormData !== "undefined" && source instanceof FormData) {
+    if (!source.has(field)) return undefined;
     return source.get(field);
   }
   if (typeof source === "object" && source !== null) {
@@ -104,7 +105,10 @@ export async function loadProductActionsAction(
     return {
       success: false,
       code: error instanceof RabetDataError ? error.code : "DATABASE_ERROR",
-      message: toSafeErrorMessage(error),
+      message:
+        error instanceof RabetDataError && error.code === "NOT_FOUND"
+          ? error.message
+          : toSafeErrorMessage(error),
     };
   }
 }
@@ -119,6 +123,7 @@ export async function createProductActionAction(
   await requireAdmin();
 
   // 2. Extract fields
+  const isFormData = typeof FormData !== "undefined" && input instanceof FormData;
   const rawProductId = extractField(input, "productId");
   const rawParentActionId = extractField(input, "parentActionId");
   const rawActionType = extractField(input, "actionType");
@@ -208,14 +213,20 @@ export async function createProductActionAction(
     arabicMenuText = arMenuTextRes.data;
   }
 
+  if (arabicMenuText && !arabicLabel) {
+    errors.arabicLabel = "Arabic button label is required when Arabic submenu message is provided.";
+  }
+
   if (typeRes.success) {
     const paramRes = validateActionParameters({
       actionType: typeRes.data,
       menuText,
+      arabicMenuText,
       url: rawUrl,
       navigateCategoryId: rawNavCat,
       navigateProductId: rawNavProd,
       actionConfig: rawConfig,
+      isFormData,
     });
     if (!paramRes.success) {
       errors.parameters = paramRes.error;
@@ -319,6 +330,7 @@ export async function updateProductActionAction(
   await requireAdmin();
 
   // 2. Extract fields
+  const isFormData = typeof FormData !== "undefined" && input instanceof FormData;
   const rawActionId = extractField(input, "actionId");
   const rawProductId = extractField(input, "productId");
   const rawActionType = extractField(input, "actionType");
@@ -353,37 +365,68 @@ export async function updateProductActionAction(
     errors.isActive = activeRes.error;
   }
 
-  const langCode =
-    typeof rawLangCode === "string" ? rawLangCode.trim().toLowerCase() : undefined;
+  const isTranslationSubmitted =
+    rawLabel !== undefined || rawMenuText !== undefined;
 
+  let langCode: string | undefined;
   let label: string | undefined;
-  if (rawLabel !== undefined) {
-    const labelRes = validateActionLabel(rawLabel, langCode ?? "the selected language");
-    if (!labelRes.success) {
-      errors.label = labelRes.error;
-    } else {
-      label = labelRes.data;
-    }
-  }
+  let menuText: string | null | undefined = undefined;
 
-  let menuText: string | null = null;
-  if (rawMenuText !== undefined && rawMenuText !== null) {
-    const menuRes = validateActionMenuText(rawMenuText, langCode ?? "the selected language");
-    if (!menuRes.success) {
-      errors.menuText = menuRes.error;
+  if (isTranslationSubmitted) {
+    if (typeof rawLangCode !== "string" || rawLangCode.trim().length === 0) {
+      errors.languageCode = "Language code is required when updating translations.";
     } else {
-      menuText = menuRes.data;
+      langCode = rawLangCode.trim().toLowerCase();
+      if (langCode !== "en" && langCode !== "ar") {
+        errors.languageCode = `Language '${langCode}' is not supported by the action editor.`;
+      }
+    }
+
+    const langLabel = langCode ? langCode.toUpperCase() : "the selected language";
+
+    if (rawLabel === undefined) {
+      errors.label = `Button label in ${langLabel} is required when updating translations.`;
+    } else {
+      const labelRes = validateActionLabel(rawLabel, langLabel);
+      if (!labelRes.success) {
+        errors.label = labelRes.error;
+      } else {
+        label = labelRes.data;
+      }
+    }
+
+    if (rawMenuText === undefined) {
+      menuText = undefined;
+    } else if (
+      rawMenuText === null ||
+      (typeof rawMenuText === "string" && rawMenuText.trim().length === 0)
+    ) {
+      menuText = null;
+    } else {
+      const menuRes = validateActionMenuText(rawMenuText, langLabel);
+      if (!menuRes.success) {
+        errors.menuText = menuRes.error;
+      } else {
+        menuText = menuRes.data;
+      }
+    }
+
+    if (typeRes.success && typeRes.data !== "OPEN_SUBMENU") {
+      if (menuText !== undefined && menuText !== null && menuText.trim().length > 0) {
+        errors.menuText = `Submenu message is only permitted on OPEN_SUBMENU actions, not on ${typeRes.data}.`;
+      }
     }
   }
 
   if (typeRes.success) {
     const paramRes = validateActionParameters({
       actionType: typeRes.data,
-      menuText,
+      menuText: isTranslationSubmitted && typeof menuText === "string" ? menuText : null,
       url: rawUrl,
       navigateCategoryId: rawNavCat,
       navigateProductId: rawNavProd,
       actionConfig: rawConfig,
+      isFormData,
     });
     if (!paramRes.success) {
       errors.parameters = paramRes.error;
@@ -418,7 +461,16 @@ export async function updateProductActionAction(
         }
       | undefined;
 
-    if (langCode && label !== undefined) {
+    if (isTranslationSubmitted) {
+      if (!langCode || !label) {
+        return {
+          success: false,
+          code: "INVALID_INPUT",
+          message: "Please correct the errors in the form.",
+          errors,
+        };
+      }
+
       const targetLang = languages.find((l) => l.code === langCode);
       if (!targetLang) {
         return {
@@ -433,7 +485,7 @@ export async function updateProductActionAction(
         languageId: targetLang.id,
         languageCode: targetLang.code,
         label,
-        menuText,
+        menuText: menuText === undefined ? undefined : menuText,
       };
     }
 

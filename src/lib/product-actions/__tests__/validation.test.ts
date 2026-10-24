@@ -6,6 +6,7 @@ import {
 } from "../constants";
 import {
   countCharacters,
+  validateActionConfig,
   validateActionLabel,
   validateActionMenuText,
   validateActionParameters,
@@ -140,6 +141,48 @@ describe("validateActionMenuText", () => {
   });
 });
 
+describe("validateActionConfig", () => {
+  it("accepts omitted config (undefined or null)", () => {
+    expect(validateActionConfig(undefined)).toEqual({
+      success: true,
+      data: {},
+    });
+    expect(validateActionConfig(null)).toEqual({
+      success: true,
+      data: {},
+    });
+  });
+
+  it("accepts approved empty plain object {}", () => {
+    expect(validateActionConfig({})).toEqual({
+      success: true,
+      data: {},
+    });
+  });
+
+  it("rejects nonempty objects, arrays, primitives, and arbitrary strings", () => {
+    expect(validateActionConfig({ foo: "bar" }).success).toBe(false);
+    expect(validateActionConfig([]).success).toBe(false);
+    expect(validateActionConfig([1, 2]).success).toBe(false);
+    expect(validateActionConfig("foo").success).toBe(false);
+    expect(validateActionConfig(123).success).toBe(false);
+    expect(validateActionConfig(true).success).toBe(false);
+  });
+
+  it("parses and validates FormData representations", () => {
+    expect(validateActionConfig("", true)).toEqual({
+      success: true,
+      data: {},
+    });
+    expect(validateActionConfig("{}", true)).toEqual({
+      success: true,
+      data: {},
+    });
+    expect(validateActionConfig('{"foo": "bar"}', true).success).toBe(false);
+    expect(validateActionConfig("not json", true).success).toBe(false);
+  });
+});
+
 describe("validateActionParameters", () => {
   it("permits menuText on OPEN_SUBMENU", () => {
     const res = validateActionParameters({
@@ -166,6 +209,17 @@ describe("validateActionParameters", () => {
     expect(inquiryRes.success).toBe(false);
   });
 
+  it("rejects nonblank arabicMenuText on terminal actions", () => {
+    const res = validateActionParameters({
+      actionType: "SHOW_DETAILS",
+      arabicMenuText: "رسالة تفاصيل",
+    });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error).toMatch(/only permitted on OPEN_SUBMENU/i);
+    }
+  });
+
   it("rejects non-null URL or navigation targets in this slice", () => {
     expect(
       validateActionParameters({
@@ -189,11 +243,25 @@ describe("validateActionParameters", () => {
     ).toBe(false);
   });
 
-  it("rejects non-empty actionConfig objects", () => {
+  it("rejects non-empty or primitive actionConfig values", () => {
     expect(
       validateActionParameters({
         actionType: "OPEN_SUBMENU",
         actionConfig: { customField: "value" },
+      }).success,
+    ).toBe(false);
+
+    expect(
+      validateActionParameters({
+        actionType: "OPEN_SUBMENU",
+        actionConfig: "arbitrary-string",
+      }).success,
+    ).toBe(false);
+
+    expect(
+      validateActionParameters({
+        actionType: "OPEN_SUBMENU",
+        actionConfig: [1, 2],
       }).success,
     ).toBe(false);
 

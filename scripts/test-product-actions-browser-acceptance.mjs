@@ -707,7 +707,7 @@ async function main() {
   await cdp.evaluate(`(() => { document.querySelector('[data-testid="submit-create-action-btn"]').click(); })()`);
   await sleep(1500);
 
-  log("Scenario 3: Creating START_INQUIRY child ('Order Now') under 'Tiers'...");
+  log("Scenario 3: Creating START_INQUIRY child ('Ask about this product') under 'Tiers'...");
   await cdp.evaluate(`(() => {
     const tiersNode = document.querySelector('[data-action-id="${nestedNodeId}"]');
     const addChildBtn = tiersNode ? tiersNode.querySelector('[data-testid="add-child-action-btn"]') : null;
@@ -721,7 +721,7 @@ async function main() {
     sel.value = 'START_INQUIRY';
     sel.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
-  await setInputValue(cdp, '[data-testid="create-action-label-input"]', "Order Now");
+  await setInputValue(cdp, '[data-testid="create-action-label-input"]', "Ask about this product");
   await sleep(300);
 
   await cdp.evaluate(`(() => { document.querySelector('[data-testid="submit-create-action-btn"]').click(); })()`);
@@ -755,20 +755,56 @@ async function main() {
     await fail(`Scenario 4: Expected 4 nodes in tree on reload, found ${reloadedNodes.length}`);
   }
 
-  // Database verification
+  // Exact Database verification: ownership, types, relationships, sort orders, and labels
   const dbActions = await pgClient`
-    SELECT id, product_id, parent_action_id, action_type, sort_order, is_active
-    FROM product_action
-    ORDER BY sort_order ASC
+    SELECT a.id, a.product_id, a.parent_action_id, a.action_type, a.sort_order, a.is_active, t.label
+    FROM product_action a
+    JOIN product_action_translation t ON a.id = t.action_id
+    WHERE a.product_id = ${prod.id}
+    ORDER BY a.sort_order ASC, a.created_at ASC
   `;
 
   if (dbActions.length !== 4) {
-    await fail(`Scenario 4: Expected 4 rows in product_action, found ${dbActions.length}`);
+    await fail(`Scenario 4: Expected 4 rows for product ${prod.id}, found ${dbActions.length}`);
   }
 
-  // Verify all belong to test product
-  if (!dbActions.every(a => a.product_id === prod.id)) {
-    await fail("Scenario 4: One or more action rows have wrong product_id");
+  const dbRoot = dbActions.find(a => a.parent_action_id === null);
+  if (!dbRoot || dbRoot.action_type !== "OPEN_SUBMENU" || dbRoot.label !== "Options" || dbRoot.sort_order !== 0) {
+    await fail(`Scenario 4: Root action failed contract: ${JSON.stringify(dbRoot)}`);
+  }
+
+  const dbTiers = dbActions.find(a => a.parent_action_id === dbRoot.id);
+  if (!dbTiers || dbTiers.action_type !== "OPEN_SUBMENU" || dbTiers.label !== "Tiers" || dbTiers.sort_order !== 0) {
+    await fail(`Scenario 4: Nested submenu 'Tiers' failed contract: ${JSON.stringify(dbTiers)}`);
+  }
+
+  const dbSpecs = dbActions.find(a => a.parent_action_id === dbTiers.id && a.action_type === "SHOW_DETAILS");
+  if (!dbSpecs || dbSpecs.label !== "View Specs" || dbSpecs.sort_order !== 0) {
+    await fail(`Scenario 4: Terminal 'SHOW_DETAILS' failed contract: ${JSON.stringify(dbSpecs)}`);
+  }
+
+  const dbInquiry = dbActions.find(a => a.parent_action_id === dbTiers.id && a.action_type === "START_INQUIRY");
+  if (!dbInquiry || dbInquiry.label !== "Ask about this product" || dbInquiry.sort_order !== 1) {
+    await fail(`Scenario 4: Terminal 'START_INQUIRY' failed contract: ${JSON.stringify(dbInquiry)}`);
+  }
+
+  // Verify DOM rendered text corresponds to saved content
+  const domRoot = reloadedNodes.find(n => n.id === dbRoot.id);
+  const domTiers = reloadedNodes.find(n => n.id === dbTiers.id);
+  const domSpecs = reloadedNodes.find(n => n.id === dbSpecs.id);
+  const domInquiry = reloadedNodes.find(n => n.id === dbInquiry.id);
+
+  if (!domRoot || !domRoot.text.includes("Options")) {
+    await fail("Scenario 4: DOM missing root 'Options' node");
+  }
+  if (!domTiers || !domTiers.text.includes("Tiers")) {
+    await fail("Scenario 4: DOM missing nested 'Tiers' node");
+  }
+  if (!domSpecs || !domSpecs.text.includes("View Specs")) {
+    await fail("Scenario 4: DOM missing 'View Specs' node");
+  }
+  if (!domInquiry || !domInquiry.text.includes("Ask about this product")) {
+    await fail("Scenario 4: DOM missing 'Ask about this product' node");
   }
 
   log("Scenario 4 passed: Exact tree ownership, hierarchy, and content verified.");
@@ -1006,8 +1042,143 @@ async function main() {
 
   log("Scenario 8 passed: 360px viewport has no horizontal overflow and all targets are >= 44x44px.");
 
+  // =========================================================================
+  // Scenario 9: Delayed-response regression & product switch safety
+  // =========================================================================
+  log("Scenario 9: Testing delayed-response reconciliation and product switch safety...");
+  // Reset viewport to desktop
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await sleep(500);
+
+  // 1. Delayed save regression
+  // Select Action A (root)
+  await cdp.evaluate(`(() => {
+    const rootBtn = document.querySelector('[data-action-id="${rootActionId}"] button:nth-of-type(2)');
+    if (rootBtn) rootBtn.click();
+  })()`);
+  await sleep(400);
+
+  await setInputValue(cdp, '[data-testid="edit-action-label-input"]', "Main Options Delayed");
+  await sleep(200);
+
+  // Inject artificial delay into fetch
+  await cdp.evaluate(`(() => {
+    window.__origFetch = window.fetch;
+    window.fetch = async (...args) => {
+      await new Promise(r => setTimeout(r, 1200));
+      return window.__origFetch(...args);
+    };
+  })()`);
+
+  // Trigger Save on Action A
+  await cdp.evaluate(`(() => {
+    const saveBtn = document.querySelector('[data-testid="save-action-btn"]');
+    if (saveBtn) saveBtn.click();
+  })()`);
+  await sleep(200);
+
+  // Attempt to select Action B while Action A is pending (disabled in UI)
+  await cdp.evaluate(`(() => {
+    const bBtn = document.querySelector('[data-action-id="${nestedNodeId}"] button:nth-of-type(2)');
+    if (bBtn) bBtn.click();
+  })()`);
+
+  // Wait for Action A save to complete
+  await sleep(1800);
+
+  // Now select Action B
+  await cdp.evaluate(`(() => {
+    const bBtn = document.querySelector('[data-action-id="${nestedNodeId}"] button:nth-of-type(2)');
+    if (bBtn) bBtn.click();
+  })()`);
+  await sleep(500);
+
+  const actionBValue = await cdp.evaluate(`(() => {
+    return document.querySelector('[data-testid="edit-action-label-input"]')?.value;
+  })()`);
+
+  if (actionBValue !== "Tiers") {
+    await fail(`Scenario 9: Action B draft was corrupted by delayed response of Action A: '${actionBValue}'`);
+  }
+
+  // Restore fetch
+  await cdp.evaluate(`(() => {
+    window.fetch = window.__origFetch;
+  })()`);
+
+  // 2. Delayed product load safety
+  // Create second product in database
+  const [prod2] = await pgClient`
+    INSERT INTO product (id, category_id, slug, price, sort_order, is_active)
+    VALUES (${crypto.randomUUID()}, ${cat.id}, 'cloud-suite-two', '29.99', 1, true)
+    RETURNING id
+  `;
+  await pgClient`
+    INSERT INTO product_translation (product_id, language_id, name)
+    VALUES (${prod2.id}, ${langEn.id}, 'Cloud Suite Two')
+  `;
+
+  // Navigate back to catalog
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(1500);
+
+  // Inject artificial delay into fetch for loading actions
+  await cdp.evaluate(`(() => {
+    window.__origFetch = window.fetch;
+    window.fetch = async (...args) => {
+      await new Promise(r => setTimeout(r, 1200));
+      return window.__origFetch(...args);
+    };
+  })()`);
+
+  // Click Buttons on Product 1
+  await cdp.evaluate(`(() => {
+    const btn1 = document.querySelector('[data-testid="product-buttons-btn-cloud-suite"]');
+    if (btn1) btn1.click();
+  })()`);
+  await sleep(200);
+
+  // Immediately go back and click Buttons on Product 2 before Product 1 load completes
+  await cdp.evaluate(`(() => {
+    const backBtn = document.querySelector('button[aria-label="Back to Product Details"]');
+    if (backBtn) backBtn.click();
+  })()`);
+  await sleep(200);
+
+  await cdp.evaluate(`(() => {
+    const btn2 = document.querySelector('[data-testid="product-buttons-btn-cloud-suite-two"]');
+    if (btn2) btn2.click();
+  })()`);
+
+  // Wait for both loads to settle
+  await sleep(2500);
+
+  // Verify Product 2 displays empty state with 0 nodes (Product 1's actions did not populate Product 2)
+  const prod2NodeCount = await cdp.evaluate(`(() => {
+    return document.querySelectorAll('[data-testid="action-node"]').length;
+  })()`);
+  const prod2EmptyText = await cdp.evaluate(`(() => {
+    return document.querySelector('[data-testid="product-action-editor"]')?.innerText || '';
+  })()`);
+
+  // Restore fetch
+  await cdp.evaluate(`(() => {
+    window.fetch = window.__origFetch;
+  })()`);
+
+  if (prod2NodeCount !== 0 || !prod2EmptyText.includes("No buttons configured")) {
+    await fail(`Scenario 9: Old product's actions leaked into new product during delayed load! Node count: ${prod2NodeCount}`);
+  }
+
+  log("Scenario 9 passed: Delayed response reconciliation and product switch scoping verified.");
+
   log("\n=======================================================");
-  log("ALL 8 ACCEPTANCE SCENARIOS PASSED SUCCESSFULLY!");
+  log("ALL 9 ACCEPTANCE SCENARIOS PASSED SUCCESSFULLY!");
   log("=======================================================\n");
 
   await cdp.close();
