@@ -98,3 +98,62 @@ export interface TelegramTransport {
     showAlert?: boolean;
   }): Promise<TelegramAnswerResult>;
 }
+
+export class TelegramTransportError extends Error {
+  readonly errorKind: TelegramErrorKind;
+  readonly httpStatus?: number;
+  readonly retryAfterSeconds?: number;
+
+  constructor(
+    message: string,
+    options?: {
+      errorKind?: TelegramErrorKind;
+      httpStatus?: number;
+      retryAfterSeconds?: number;
+    },
+  ) {
+    super(message);
+    this.name = "TelegramTransportError";
+    this.errorKind = options?.errorKind ?? "api_error";
+    this.httpStatus = options?.httpStatus;
+    this.retryAfterSeconds = options?.retryAfterSeconds;
+  }
+}
+
+export class BudgetExceededError extends Error {
+  constructor(message = "Execution budget exceeded") {
+    super(message);
+    this.name = "BudgetExceededError";
+  }
+}
+
+export class FencingRejectedError extends Error {
+  constructor(message = "Completion fencing rejected update") {
+    super(message);
+    this.name = "FencingRejectedError";
+  }
+}
+
+export interface ExecutionDeadline {
+  getRemainingMs(): number;
+  isExpired(): boolean;
+  checkOrThrow(): void;
+}
+
+export type SafeDiagnosticCategory =
+  | "timeout"
+  | "network_error"
+  | "rate_limited"
+  | "not_editable"
+  | "not_modified"
+  | "api_error"
+  | "db_error"
+  | "budget_exceeded"
+  | "fencing_rejected"
+  | "internal_error";
+
+export interface SafeDiagnostic {
+  category: SafeDiagnosticCategory;
+  httpStatus?: number;
+  retryAfterSeconds?: number;
+}

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 import {
   botSetting,
@@ -22,7 +22,10 @@ import {
   hasTestCluster,
   type TestDatabase,
 } from "./helpers";
-import { createFakeTelegramTransport } from "@/lib/telegram/transport";
+import {
+  createFakeTelegramTransport,
+  StandardExecutionDeadline,
+} from "@/lib/telegram/transport";
 import { handleTelegramWebhookRequest } from "@/lib/telegram/webhook";
 import { tokens } from "@/lib/telegram/tokens";
 import {
@@ -1148,6 +1151,7 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
 
       // Simulate network failure
       fakeTransport.failSendWith = "Connection timeout to api.telegram.org";
+      fakeTransport.failSendKind = "timeout";
 
       const resFail = await handleTelegramWebhookRequest(
         createWebhookRequest(payload, TEST_WEBHOOK_SECRET),
@@ -1166,7 +1170,7 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
         .from(telegramUpdate)
         .where(eq(telegramUpdate.updateId, 4003));
       expect(failedRow.processedAt).toBeNull();
-      expect(failedRow.processingError).toContain("Connection timeout");
+      expect(failedRow.processingError).toBe("category=timeout");
 
       // Now recovery: Telegram retries the update
       fakeTransport.failSendWith = undefined;
@@ -1605,8 +1609,12 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
         .where(eq(telegramUpdate.updateId, 7001));
 
       expect(storedRow.processingError).not.toBeNull();
+      expect(storedRow.processingError).toBe("category=api_error");
       expect(storedRow.processingError).not.toContain(TEST_BOT_TOKEN);
       expect(storedRow.processingError).not.toContain(TEST_WEBHOOK_SECRET);
+      expect(storedRow.processingError).not.toContain(syntheticSecret);
+      expect(storedRow.processingError).not.toContain(syntheticSql);
+      expect(storedRow.processingError).not.toContain(customerSecretText);
     });
 
     it("does not crash if failure bookkeeping database write itself fails", async () => {
@@ -1629,6 +1637,7 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
           update_id: 7002,
           message: {
             message_id: 1,
+            from: { id: 12345, is_bot: false, first_name: "Test" },
             chat: { id: 12345, type: "private" },
             text: "/start",
           },
@@ -1657,7 +1666,11 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
         const req = createWebhookRequest(
           {
             update_id: badId,
-            message: { message_id: 1, chat: { id: 123, type: "private" } },
+            message: {
+              message_id: 1,
+              from: { id: 123, is_bot: false, first_name: "Test" },
+              chat: { id: 123, type: "private" },
+            },
           },
           TEST_WEBHOOK_SECRET,
         );
@@ -1737,7 +1750,196 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
         .from(telegramUpdate)
         .where(eq(telegramUpdate.updateId, 8002));
       expect(row.processedAt).toBeNull();
-      expect(row.processingError).toContain("Telegram guidance send failed");
+      expect(row.processingError).toBe("category=api_error");
+    });
+
+    it("rejects malformed from.id, non-string text, or contradictory shapes upfront with 400 and zero writes", async () => {
+      const fakeTransport = createFakeTelegramTransport();
+      const db = asAppDb(testDb!.db);
+      const testCustomerId = 818181;
+
+      const invalidPayloads = [
+        // Missing from
+        {
+          update_id: 8101,
+          message: {
+            message_id: 1,
+            chat: { id: testCustomerId, type: "private" },
+            text: "/start",
+          },
+        },
+        // Fractional from.id
+        {
+          update_id: 8102,
+          message: {
+            message_id: 1,
+            from: { id: 818181.67, is_bot: false, first_name: "Test" },
+            chat: { id: testCustomerId, type: "private" },
+            text: "/start",
+          },
+        },
+        // Negative from.id
+        {
+          update_id: 8103,
+          message: {
+            message_id: 1,
+            from: { id: -1, is_bot: false, first_name: "Test" },
+            chat: { id: testCustomerId, type: "private" },
+            text: "/start",
+          },
+        },
+        // Unsafe integer from.id
+        {
+          update_id: 8104,
+          message: {
+            message_id: 1,
+            from: { id: Number.MAX_SAFE_INTEGER + 10, is_bot: false, first_name: "Test" },
+            chat: { id: testCustomerId, type: "private" },
+            text: "/start",
+          },
+        },
+        // Non-string text
+        {
+          update_id: 8105,
+          message: {
+            message_id: 1,
+            from: { id: testCustomerId, is_bot: false, first_name: "Test" },
+            chat: { id: testCustomerId, type: "private" },
+            text: 99999,
+          },
+        },
+        // Contradictory shapes: both message and callback_query present
+        {
+          update_id: 8106,
+          message: {
+            message_id: 1,
+            from: { id: testCustomerId, is_bot: false, first_name: "Test" },
+            chat: { id: testCustomerId, type: "private" },
+            text: "/start",
+          },
+          callback_query: {
+            id: "cb_contradict",
+            from: { id: testCustomerId, is_bot: false, first_name: "Test" },
+            message: { message_id: 1, chat: { id: testCustomerId, type: "private" } },
+            data: "home",
+          },
+        },
+      ];
+
+      for (const payload of invalidPayloads) {
+        const req = createWebhookRequest(payload, TEST_WEBHOOK_SECRET);
+        const res = await handleTelegramWebhookRequest(req, {
+          db,
+          transport: fakeTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        });
+
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "Bad request" });
+      }
+
+      // Assert zero database rows created in telegram_update
+      const updateRows = await testDb!.db
+        .select()
+        .from(telegramUpdate)
+        .where(inArray(telegramUpdate.updateId, [8101, 8102, 8103, 8104, 8105, 8106]));
+      expect(updateRows).toHaveLength(0);
+
+      // Assert zero customer records created for customer 818181
+      const customerRows = await testDb!.db
+        .select()
+        .from(customer)
+        .where(eq(customer.telegramId, testCustomerId));
+      expect(customerRows).toHaveLength(0);
+
+      // Assert zero outbound transport calls
+      expect(fakeTransport.sentMessages).toHaveLength(0);
+      expect(fakeTransport.editedMessages).toHaveLength(0);
+      expect(fakeTransport.answeredCallbacks).toHaveLength(0);
+    });
+
+    it("rejects malformed callback token grammar upfront with 400 and zero writes", async () => {
+      const fakeTransport = createFakeTelegramTransport();
+      const db = asAppDb(testDb!.db);
+
+      const invalidCallbackPayloads = [
+        {
+          update_id: 8201,
+          callback_query: {
+            id: "cb_inv_1",
+            from: { id: 777666, is_bot: false, first_name: "Test" },
+            message: { message_id: 1, chat: { id: 777666, type: "private" } },
+            data: "unknown_prefix:foo",
+          },
+        },
+        {
+          update_id: 8202,
+          callback_query: {
+            id: "cb_inv_2",
+            from: { id: 777666, is_bot: false, first_name: "Test" },
+            message: { message_id: 1, chat: { id: 777666, type: "private" } },
+            data: "c:not-a-valid-uuid",
+          },
+        },
+        {
+          update_id: 8203,
+          callback_query: {
+            id: "cb_inv_3",
+            from: { id: 777666, is_bot: false, first_name: "Test" },
+            message: { message_id: 1, chat: { id: 777666, type: "private" } },
+            data: "p:not-a-valid-uuid",
+          },
+        },
+        {
+          update_id: 8204,
+          callback_query: {
+            id: "cb_inv_4",
+            from: { id: 777666, is_bot: false, first_name: "Test" },
+            message: { message_id: 1, chat: { id: 777666, type: "private" } },
+            data: "a:invalid_kind:123",
+          },
+        },
+        {
+          update_id: 8205,
+          callback_query: {
+            id: "cb_inv_5",
+            from: { id: 777666, is_bot: false, first_name: "Test" },
+            message: { message_id: 1, chat: { id: 777666, type: "private" } },
+            data: "c:root:notanumber",
+          },
+        },
+      ];
+
+      for (const payload of invalidCallbackPayloads) {
+        const req = createWebhookRequest(payload, TEST_WEBHOOK_SECRET);
+        const res = await handleTelegramWebhookRequest(req, {
+          db,
+          transport: fakeTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        });
+
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "Bad request" });
+      }
+
+      // Assert zero database rows created
+      const updateRows = await testDb!.db
+        .select()
+        .from(telegramUpdate)
+        .where(inArray(telegramUpdate.updateId, [8201, 8202, 8203, 8204, 8205]));
+      expect(updateRows).toHaveLength(0);
+
+      const customerRows = await testDb!.db
+        .select()
+        .from(customer)
+        .where(eq(customer.telegramId, 777666));
+      expect(customerRows).toHaveLength(0);
+
+      expect(fakeTransport.sentMessages).toHaveLength(0);
+      expect(fakeTransport.editedMessages).toHaveLength(0);
+      expect(fakeTransport.answeredCallbacks).toHaveLength(0);
     });
   });
 
@@ -1852,6 +2054,552 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       // Must be trimmed to 4095 to avoid leaving an unpaired high surrogate!
       expect(safeBounded).toHaveLength(4095);
       expect(safeBounded).toBe(prefix);
+    });
+  });
+
+  describe("Attempt Lifecycle, In-Flight Responses, and Rate Limiting", () => {
+    it("returns HTTP 429 Retry-After when update is in-flight, and recovers if owner fails", async () => {
+      const updateId = 8301;
+      const customerTelegramId = 444555666;
+      const fakeTransport = createFakeTelegramTransport();
+      const db = asAppDb(testDb!.db);
+
+      const payload = {
+        update_id: updateId,
+        message: {
+          message_id: 10,
+          from: { id: customerTelegramId, is_bot: false, first_name: "InFlightTest" },
+          chat: { id: customerTelegramId, type: "private" },
+          text: "/start",
+        },
+      };
+
+      // Set up a promise to block the first worker inside its transport call
+      let unblockFirstWorker!: (result: {
+        ok: false;
+        error: string;
+        errorKind: "network_error";
+      }) => void;
+      const firstWorkerGate = new Promise<{
+        ok: false;
+        error: string;
+        errorKind: "network_error";
+      }>((resolve) => {
+        unblockFirstWorker = resolve;
+      });
+
+      // Custom transport for worker 1 that hangs on sendMessage until unblocked
+      let worker1Started = false;
+      let notifyWorker1Started!: () => void;
+      const worker1StartedPromise = new Promise<void>((resolve) => {
+        notifyWorker1Started = resolve;
+      });
+
+      const blockingTransport = {
+        ...fakeTransport,
+        async sendMessage() {
+          worker1Started = true;
+          notifyWorker1Started();
+          return await firstWorkerGate;
+        },
+      };
+
+      // Start Worker 1 (held in-flight)
+      const worker1Promise = handleTelegramWebhookRequest(
+        createWebhookRequest(payload, TEST_WEBHOOK_SECRET),
+        {
+          db,
+          transport: blockingTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        },
+      );
+
+      // Wait until worker 1 has claimed the update and entered transport.sendMessage
+      await worker1StartedPromise;
+      expect(worker1Started).toBe(true);
+
+      // Worker 2 delivers duplicate update while Worker 1 is still in-flight
+      const resWorker2 = await handleTelegramWebhookRequest(
+        createWebhookRequest(payload, TEST_WEBHOOK_SECRET),
+        {
+          db,
+          transport: fakeTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        },
+      );
+
+      // Worker 2 receives deliberate retryable status HTTP 429 with Retry-After header
+      expect(resWorker2.status).toBe(429);
+      expect(resWorker2.headers.get("retry-after")).toBe("5");
+      expect(await resWorker2.json()).toEqual({ error: "Update is currently in flight" });
+
+      // Now unblock Worker 1 with a failure (e.g. simulated network crash during send)
+      unblockFirstWorker({
+        ok: false,
+        error: "Network crash during send",
+        errorKind: "network_error",
+      });
+      const resWorker1 = await worker1Promise;
+      expect(resWorker1.status).toBe(500);
+
+      // Stored record should show attempt failure, not completion
+      const [failedRow] = await testDb!.db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(failedRow.processedAt).toBeNull();
+      expect(failedRow.processingError).toBe("category=network_error");
+
+      // Worker 3 arrives as retry: now succeeds because previous attempt failed
+      const resWorker3 = await handleTelegramWebhookRequest(
+        createWebhookRequest(payload, TEST_WEBHOOK_SECRET),
+        {
+          db,
+          transport: fakeTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        },
+      );
+
+      expect(resWorker3.status).toBe(200);
+      expect(fakeTransport.sentMessages).toHaveLength(1);
+
+      const [completedRow] = await testDb!.db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(completedRow.processedAt).not.toBeNull();
+      expect(completedRow.processingError).toBeNull();
+    });
+
+    it("enforces execution budget and rejects outbound calls after budget expiry", async () => {
+      const db = asAppDb(testDb!.db);
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 555666777;
+
+      let currentTime = 1000;
+      // Budget of 100ms starting at 1000
+      const deadline = new StandardExecutionDeadline(100, () => currentTime);
+
+      // Advance clock during execution so budget expires while attempting outbound send
+      fakeTransport.sendMessage = async () => {
+        currentTime = 1200; // Elapsed 200ms > 100ms budget
+        deadline.checkOrThrow();
+        return { ok: true, messageId: 1 };
+      };
+
+      const req = createWebhookRequest(
+        {
+          update_id: 8401,
+          message: {
+            message_id: 20,
+            from: { id: customerTelegramId, is_bot: false, first_name: "BudgetTest" },
+            chat: { id: customerTelegramId, type: "private" },
+            text: "/start",
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db,
+        transport: fakeTransport,
+        deadline,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("5");
+      expect(await res.json()).toEqual({ error: "Service Unavailable" });
+
+      const [row] = await testDb!.db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, 8401));
+      expect(row.processedAt).toBeNull();
+      expect(row.processingError).toBe("category=budget_exceeded");
+    });
+
+    it("treats completion fencing rejection as failure rather than acknowledging success", async () => {
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 666777111;
+
+      // Mock DB where update returns no updated row (simulating another worker took ownership)
+      const baseAppDb = asAppDb(testDb!.db);
+      const mockDb = {
+        ...baseAppDb,
+        insert: baseAppDb.insert.bind(baseAppDb),
+        select: baseAppDb.select.bind(baseAppDb),
+        update: (...args: Parameters<typeof baseAppDb.update>) => {
+          const updateBuilder = baseAppDb.update(...args);
+          return {
+            ...updateBuilder,
+            set: (...setArgs: Parameters<typeof updateBuilder.set>) => {
+              const setBuilder = updateBuilder.set(...setArgs);
+              return {
+                ...setBuilder,
+                where: () => {
+                  // Return empty array to simulate fencing failure
+                  return Object.assign(Promise.resolve([]), {
+                    returning: async () => [],
+                  });
+                },
+              };
+            },
+          };
+        },
+      } as unknown as ReturnType<typeof asAppDb>;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 8501,
+          message: {
+            message_id: 30,
+            from: { id: customerTelegramId, is_bot: false, first_name: "FencingTest" },
+            chat: { id: customerTelegramId, type: "private" },
+            text: "/start",
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: mockDb,
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      // Must NOT return 200 { ok: true }
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "Internal server error" });
+    });
+
+    it("handles answerCallbackQuery failure by failing the attempt cleanly", async () => {
+      const db = asAppDb(testDb!.db);
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 777111222;
+
+      // Pre-seed customer
+      await testDb!.db.insert(customer).values({
+        telegramId: customerTelegramId,
+        firstName: "AnswerFailUser",
+      });
+
+      fakeTransport.failAnswerWith = "Callback query expired";
+      fakeTransport.failAnswerKind = "api_error";
+
+      const req = createWebhookRequest(
+        {
+          update_id: 8601,
+          callback_query: {
+            id: "cb_fail_answer_1",
+            from: { id: customerTelegramId, is_bot: false, first_name: "AnswerFailUser" },
+            message: { message_id: 40, chat: { id: customerTelegramId, type: "private" } },
+            data: "home",
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db,
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "Internal server error" });
+
+      const [row] = await testDb!.db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, 8601));
+      expect(row.processedAt).toBeNull();
+      expect(row.processingError).toBe("category=api_error");
+    });
+
+    it("propagates rate-limit retry_after to client response and stores in safe diagnostic", async () => {
+      const db = asAppDb(testDb!.db);
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 888222333;
+
+      fakeTransport.failSendWith = "Too Many Requests";
+      fakeTransport.failSendKind = "rate_limited";
+      fakeTransport.failSendRetryAfter = 9;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 8701,
+          message: {
+            message_id: 50,
+            from: { id: customerTelegramId, is_bot: false, first_name: "RateLimitUser" },
+            chat: { id: customerTelegramId, type: "private" },
+            text: "/start",
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db,
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).toBe("9");
+      expect(await res.json()).toEqual({ error: "Too Many Requests" });
+
+      const [row] = await testDb!.db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, 8701));
+      expect(row.processedAt).toBeNull();
+      expect(row.processingError).toBe("category=rate_limited;status=429;retry_after=9");
+    });
+  });
+
+  describe("Long Message Content Preservation and Chunking", () => {
+    it("delivers long catalog text in sequential chunks <= 4096 with navigation on final chunk", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 999333444;
+
+      let [enLang] = await db
+        .select()
+        .from(language)
+        .where(eq(language.code, "en"));
+
+      if (!enLang) {
+        [enLang] = await db
+          .insert(language)
+          .values({
+            code: "en",
+            label: "English",
+            textDirection: "ltr",
+            isEnabled: true,
+          })
+          .returning();
+      }
+
+      const [setting] = await db.select().from(botSetting).where(eq(botSetting.id, 1));
+      if (!setting) {
+        await db.insert(botSetting).values({
+          id: 1,
+          defaultLanguageId: enLang.id,
+          currency: "USD",
+          displayName: "Test Store",
+          askForLanguage: false,
+        });
+      }
+
+      // Seed a category
+      const [cat] = await db
+        .insert(category)
+        .values({
+          slug: "long-desc-category",
+          isActive: true,
+          sortOrder: 999,
+        })
+        .returning();
+
+      // Seed a product with details > 6000 characters
+      const [prod] = await db
+        .insert(product)
+        .values({
+          categoryId: cat.id,
+          slug: "long-sku-001",
+          price: "199.99",
+          isActive: true,
+          sortOrder: 1,
+        })
+        .returning();
+
+      // Seed product actions for SHOW_DETAILS:
+      const [menuAction] = await db
+        .insert(productAction)
+        .values({
+          productId: prod.id,
+          parentActionId: null,
+          actionType: "OPEN_SUBMENU",
+          sortOrder: 1,
+          isActive: true,
+        })
+        .returning();
+
+      await db.insert(productActionTranslation).values({
+        actionId: menuAction.id,
+        languageId: enLang.id,
+        label: "Options",
+      });
+
+      const [detailsAction] = await db
+        .insert(productAction)
+        .values({
+          productId: prod.id,
+          parentActionId: menuAction.id,
+          actionType: "SHOW_DETAILS",
+          sortOrder: 1,
+          isActive: true,
+        })
+        .returning();
+
+      await db.insert(productActionTranslation).values({
+        actionId: detailsAction.id,
+        languageId: enLang.id,
+        label: "Specifications",
+      });
+
+      const tailSignature = "UNIQUE_TAIL_DISCLOSURE_CODE_778899";
+      const longDescription =
+        "Paragraph 1: " +
+        "Important detailed specifications. ".repeat(80) +
+        "\n\nParagraph 2: " +
+        "Regulatory disclosures and warranty details. ".repeat(80) +
+        `\n\nFinal Section: Product summary and verification signature: ${tailSignature}.`;
+
+      expect(longDescription.length).toBeGreaterThan(5000);
+
+      await db.insert(productTranslation).values({
+        productId: prod.id,
+        languageId: enLang.id,
+        name: "Extended Details Product",
+        description: longDescription,
+      });
+
+      // Pre-select language for customer
+      await db.insert(customer).values({
+        telegramId: customerTelegramId,
+        firstName: "ChunkUser",
+        selectedLanguageId: enLang.id,
+      });
+
+      // Request SHOW_DETAILS via action token
+      const req = createWebhookRequest(
+        {
+          update_id: 8801,
+          callback_query: {
+            id: "cb_show_dt_long",
+            from: { id: customerTelegramId, is_bot: false, first_name: "ChunkUser" },
+            message: { message_id: 100, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(detailsAction.id),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+
+      // Verify delivery: chunk 1 edits existing message, subsequent chunks sent via sendMessage
+      expect(fakeTransport.editedMessages).toHaveLength(1);
+      expect(fakeTransport.sentMessages.length).toBeGreaterThanOrEqual(1);
+
+      const allDelivered = [
+        fakeTransport.editedMessages[0],
+        ...fakeTransport.sentMessages,
+      ];
+
+      // Every chunk must be <= 4096 code units
+      for (const msg of allDelivered) {
+        expect(msg.text.length).toBeLessThanOrEqual(4096);
+      }
+
+      // Reconstructed text matches full generated text
+      const reconstructedText = allDelivered.map((m) => m.text).join("");
+      expect(reconstructedText).toContain(tailSignature);
+      expect(reconstructedText).toContain("Extended Details Product");
+      expect(reconstructedText).toContain("Paragraph 1:");
+      expect(reconstructedText).toContain("Paragraph 2:");
+
+      // Only the final delivered message contains the navigation keyboard
+      for (let i = 0; i < allDelivered.length - 1; i++) {
+        expect(allDelivered[i].replyMarkup).toBeUndefined();
+      }
+      const finalMsg = allDelivered[allDelivered.length - 1];
+      expect(finalMsg.replyMarkup?.inline_keyboard).toBeDefined();
+      const backBtn = finalMsg.replyMarkup!.inline_keyboard
+        .flat()
+        .find((btn) => btn.callback_data === tokens.product(prod.id));
+      expect(backBtn).toBeDefined();
+    });
+
+    it("halts delivery if an intermediate chunk fails and follows attempt failure policy", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 999333555;
+
+      const [enLang] = await db
+        .select()
+        .from(language)
+        .where(eq(language.code, "en"));
+
+      const [prod] = await db
+        .select()
+        .from(product)
+        .where(eq(product.slug, "long-sku-001"));
+
+      const [detailsAction] = await db
+        .select()
+        .from(productAction)
+        .where(
+          and(
+            eq(productAction.productId, prod.id),
+            eq(productAction.actionType, "SHOW_DETAILS"),
+          ),
+        );
+
+      // Customer
+      await db.insert(customer).values({
+        telegramId: customerTelegramId,
+        firstName: "ChunkFailUser",
+        selectedLanguageId: enLang.id,
+      });
+
+      // Fail on the second chunk (which uses sendMessage)
+      fakeTransport.failSendWith = "Delivery failure on secondary chunk";
+      fakeTransport.failSendKind = "network_error";
+
+      const req = createWebhookRequest(
+        {
+          update_id: 8802,
+          callback_query: {
+            id: "cb_show_dt_fail",
+            from: { id: customerTelegramId, is_bot: false, first_name: "ChunkFailUser" },
+            message: { message_id: 101, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(detailsAction.id),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(500);
+
+      const [row] = await testDb!.db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, 8802));
+      expect(row.processedAt).toBeNull();
+      expect(row.processingError).toBe("category=network_error");
     });
   });
 });

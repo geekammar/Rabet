@@ -20,7 +20,10 @@ import {
   setCustomerSelectedLanguage,
   upsertCustomer,
 } from "@/lib/data";
-import { parseToken, tokens } from "./tokens";
+import { parseToken, tokens, type ParsedToken } from "./tokens";
+import {
+  TELEGRAM_MAX_MESSAGE_CHARS,
+} from "./transport";
 import type {
   TelegramCallbackQuery,
   TelegramInlineKeyboardButton,
@@ -29,6 +32,7 @@ import type {
   TelegramTransport,
   TelegramUser,
 } from "./types";
+import { TelegramTransportError } from "./types";
 
 export const TELEGRAM_MENU_PAGE_SIZE = 10;
 export const MAX_SAFEGUARD_DEPTH = 64;
@@ -125,17 +129,74 @@ async function resolveCustomerLanguageContext(
 }
 
 /**
- * Safe Unicode-aware message text bounding to Telegram's 4096-character limit.
- * Never splits UTF-16 surrogate pairs.
+ * Splits rendered message text into chunks of at most `maxChunkLength` characters.
+ * Preserves exact text content and ordering such that `chunks.join("") === text`.
+ * Ensures UTF-16 surrogate pairs (e.g. multibyte emojis) are never split across chunks.
+ * Attempts to break cleanly at paragraph (\n\n), newline (\n), or word boundary when possible.
+ */
+export function splitMessageText(text: string, maxChunkLength = TELEGRAM_MAX_MESSAGE_CHARS): string[] {
+  if (text.length <= maxChunkLength) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > maxChunkLength) {
+    let splitIdx = maxChunkLength;
+
+    // Search for natural break points within the final 500 chars of the window
+    const windowStart = Math.max(0, maxChunkLength - 500);
+    const windowText = remaining.slice(windowStart, maxChunkLength);
+
+    const paragraphBreak = windowText.lastIndexOf("\n\n");
+    if (paragraphBreak !== -1) {
+      // Split right after the paragraph break
+      splitIdx = windowStart + paragraphBreak + 2;
+    } else {
+      const lineBreak = windowText.lastIndexOf("\n");
+      if (lineBreak !== -1) {
+        splitIdx = windowStart + lineBreak + 1;
+      } else {
+        const spaceBreak = windowText.lastIndexOf(" ");
+        if (spaceBreak !== -1) {
+          splitIdx = windowStart + spaceBreak + 1;
+        }
+      }
+    }
+
+    // Surrogate pair safeguard: never split between high surrogate and low surrogate
+    const prevCode = remaining.charCodeAt(splitIdx - 1);
+    if (prevCode >= 0xd800 && prevCode <= 0xdbff) {
+      splitIdx -= 1;
+    }
+
+    // Safety fallback: ensure forward progress
+    if (splitIdx <= 0) {
+      splitIdx = maxChunkLength;
+      const code = remaining.charCodeAt(splitIdx - 1);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        splitIdx -= 1;
+      }
+    }
+
+    chunks.push(remaining.slice(0, splitIdx));
+    remaining = remaining.slice(splitIdx);
+  }
+
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+/**
+ * Safe Unicode-aware message text bounding helper.
  */
 export function boundMessageText(text: string, maxLen = 4096): string {
-  if (text.length <= maxLen) return text;
-  let end = maxLen;
-  const code = text.charCodeAt(end - 1);
-  if (code >= 0xd800 && code <= 0xdbff) {
-    end -= 1;
-  }
-  return text.slice(0, end);
+  const [firstChunk] = splitMessageText(text, maxLen);
+  return firstChunk ?? "";
 }
 
 /**
@@ -273,13 +334,20 @@ async function sendOrThrow(
     replyMarkup?: TelegramInlineKeyboardMarkup;
   },
 ): Promise<void> {
-  const boundedParams = {
-    ...params,
-    text: boundMessageText(params.text),
-  };
-  const res = await transport.sendMessage(boundedParams);
-  if (!res.ok) {
-    throw new Error(res.error ?? "Failed to send Telegram message");
+  const chunks = splitMessageText(params.text, TELEGRAM_MAX_MESSAGE_CHARS);
+  for (let i = 0; i < chunks.length; i++) {
+    const isLast = i === chunks.length - 1;
+    const res = await transport.sendMessage({
+      chatId: params.chatId,
+      text: chunks[i],
+      replyMarkup: isLast ? params.replyMarkup : undefined,
+    });
+    if (!res.ok) {
+      throw new TelegramTransportError(res.error ?? "Failed to send Telegram message", {
+        errorKind: res.errorKind ?? "api_error",
+        retryAfterSeconds: res.retryAfterSeconds,
+      });
+    }
   }
 }
 
@@ -292,25 +360,59 @@ async function editOrThrow(
     replyMarkup?: TelegramInlineKeyboardMarkup;
   },
 ): Promise<void> {
-  const boundedParams = {
-    ...params,
-    text: boundMessageText(params.text),
-  };
-  const res = await transport.editMessageText(boundedParams);
+  const chunks = splitMessageText(params.text, TELEGRAM_MAX_MESSAGE_CHARS);
+  const firstChunk = chunks[0];
+  const isOnlyChunk = chunks.length === 1;
+
+  const res = await transport.editMessageText({
+    chatId: params.chatId,
+    messageId: params.messageId,
+    text: firstChunk,
+    replyMarkup: isOnlyChunk ? params.replyMarkup : undefined,
+  });
+
   if (!res.ok) {
     // Only fall back to sendMessage if the message was not editable
     if (res.errorKind === "not_editable") {
       const sendRes = await transport.sendMessage({
-        chatId: boundedParams.chatId,
-        text: boundedParams.text,
-        replyMarkup: boundedParams.replyMarkup,
+        chatId: params.chatId,
+        text: firstChunk,
+        replyMarkup: isOnlyChunk ? params.replyMarkup : undefined,
       });
       if (!sendRes.ok) {
-        throw new Error(sendRes.error ?? "Failed to send replacement Telegram message");
+        throw new TelegramTransportError(
+          sendRes.error ?? "Failed to send replacement Telegram message",
+          {
+            errorKind: sendRes.errorKind ?? "api_error",
+            retryAfterSeconds: sendRes.retryAfterSeconds,
+          },
+        );
       }
-      return;
+    } else {
+      throw new TelegramTransportError(res.error ?? "Failed to edit Telegram message", {
+        errorKind: res.errorKind ?? "api_error",
+        retryAfterSeconds: res.retryAfterSeconds,
+      });
     }
-    throw new Error(res.error ?? "Failed to edit Telegram message");
+  }
+
+  // Deliver remaining chunks sequentially, placing replyMarkup on the final chunk
+  for (let i = 1; i < chunks.length; i++) {
+    const isLast = i === chunks.length - 1;
+    const nextRes = await transport.sendMessage({
+      chatId: params.chatId,
+      text: chunks[i],
+      replyMarkup: isLast ? params.replyMarkup : undefined,
+    });
+    if (!nextRes.ok) {
+      throw new TelegramTransportError(
+        nextRes.error ?? "Failed to send follow-up message chunk",
+        {
+          errorKind: nextRes.errorKind ?? "api_error",
+          retryAfterSeconds: nextRes.retryAfterSeconds,
+        },
+      );
+    }
   }
 }
 
@@ -515,9 +617,16 @@ export async function handleCallbackQuery(
   db: Database,
   transport: TelegramTransport,
   callbackQuery: TelegramCallbackQuery,
+  preValidatedToken?: ParsedToken,
 ): Promise<void> {
   // Acknowledge callback immediately to clear loading indicator
-  await transport.answerCallbackQuery({ callbackQueryId: callbackQuery.id });
+  const ack = await transport.answerCallbackQuery({ callbackQueryId: callbackQuery.id });
+  if (!ack.ok) {
+    throw new TelegramTransportError(ack.error ?? "Failed to answer callback query", {
+      errorKind: ack.errorKind ?? "api_error",
+      retryAfterSeconds: ack.retryAfterSeconds,
+    });
+  }
 
   const message = callbackQuery.message;
   if (!message) return;
@@ -546,7 +655,10 @@ export async function handleCallbackQuery(
     return;
   }
 
-  const parsed = parseToken(callbackQuery.data);
+  const parsed = preValidatedToken ?? parseToken(callbackQuery.data);
+  if (parsed.type === "unknown") {
+    throw new Error("Unrecognized callback token");
+  }
 
   // 1. Language selection callback: lang:<code>
   if (parsed.type === "lang") {

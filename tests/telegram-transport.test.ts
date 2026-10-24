@@ -1,10 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  classifyErrorToSafeDiagnostic,
   createFakeTelegramTransport,
   createFetchTelegramTransport,
+  formatSafeDiagnostic,
   sanitizeTelegramError,
+  StandardExecutionDeadline,
 } from "@/lib/telegram/transport";
+import { splitMessageText } from "@/lib/telegram/catalog-journey";
+import {
+  BudgetExceededError,
+  FencingRejectedError,
+  TelegramTransportError,
+} from "@/lib/telegram/types";
 
 describe("telegram transport and error sanitization", () => {
   const originalFetch = globalThis.fetch;
@@ -210,6 +219,152 @@ describe("telegram transport and error sanitization", () => {
 
       expect(res.ok).toBe(false);
       expect(res.errorKind).toBe("timeout");
+    });
+  });
+
+  describe("splitMessageText - Content Preservation and Surrogate Safety", () => {
+    it("returns a single chunk when text is <= 4096 code units", () => {
+      const short = "Hello, world!";
+      expect(splitMessageText(short)).toEqual([short]);
+
+      const exact = "X".repeat(4096);
+      expect(splitMessageText(exact)).toEqual([exact]);
+    });
+
+    it("splits long text preserving complete content without dropping characters", () => {
+      // 10,000 characters composed of paragraphs
+      const p1 = "A".repeat(3000);
+      const p2 = "B".repeat(3000);
+      const p3 = "C".repeat(4000);
+      const fullText = `${p1}\n\n${p2}\n\n${p3}`;
+
+      const chunks = splitMessageText(fullText);
+      expect(chunks.length).toBeGreaterThan(1);
+
+      // Every chunk must be <= 4096
+      for (const chunk of chunks) {
+        expect(chunk.length).toBeLessThanOrEqual(4096);
+      }
+
+      // Reconstructed content matches original exactly
+      expect(chunks.join("")).toBe(fullText);
+    });
+
+    it("prefers splitting on paragraph then line then space boundaries", () => {
+      const part1 = "Section 1 content with several words.";
+      const part2 = "Section 2 content with several other words.";
+      const longPart = "D".repeat(4050);
+      const text = `${longPart}\n\n${part1}\n${part2}`;
+
+      const chunks = splitMessageText(text);
+      expect(chunks).toHaveLength(2);
+      expect(chunks[0]).toBe(`${longPart}\n\n`);
+      expect(chunks[1]).toBe(`${part1}\n${part2}`);
+      expect(chunks.join("")).toBe(text);
+    });
+
+    it("handles Arabic text and UTF-16 surrogate pairs (emojis) at chunk boundaries safely", () => {
+      const prefix = "مرحبا بالعالم ".repeat(250); // Arabic text
+      const emoji = "🌟🎉🚀"; // surrogate pairs
+      const suffix = " نهاية النص التفصيلي";
+      const fullText = prefix + emoji + suffix;
+
+      const chunks = splitMessageText(fullText, 4000);
+      for (const chunk of chunks) {
+        expect(chunk.length).toBeLessThanOrEqual(4000);
+        // Ensure no chunk ends with a lone high surrogate
+        const lastCode = chunk.charCodeAt(chunk.length - 1);
+        expect(lastCode < 0xd800 || lastCode > 0xdbff).toBe(true);
+      }
+      expect(chunks.join("")).toBe(fullText);
+    });
+  });
+
+  describe("StandardExecutionDeadline and Budget Enforcement", () => {
+    it("reports remainingMs and tracks expiration", async () => {
+      let currentTime = 1000;
+      const fakeClock = () => currentTime;
+
+      const deadline = new StandardExecutionDeadline(500, fakeClock);
+      expect(deadline.getRemainingMs()).toBe(500);
+      expect(deadline.isExpired()).toBe(false);
+
+      currentTime += 200;
+      expect(deadline.getRemainingMs()).toBe(300);
+      expect(deadline.isExpired()).toBe(false);
+
+      currentTime += 350; // Total 550 elapsed > 500 budget
+      expect(deadline.getRemainingMs()).toBe(0);
+      expect(deadline.isExpired()).toBe(true);
+      expect(() => deadline.checkOrThrow()).toThrow(BudgetExceededError);
+    });
+
+    it("fake transport refuses outbound calls when deadline is expired", async () => {
+      let fakeTime = 1000;
+      const deadline = new StandardExecutionDeadline(100, () => fakeTime);
+      fakeTime = 1200; // now expired!
+      const fake = createFakeTelegramTransport();
+      fake.deadline = deadline;
+
+      await expect(fake.sendMessage({ chatId: 123, text: "Hi" })).rejects.toThrow(
+        BudgetExceededError,
+      );
+      await expect(
+        fake.editMessageText({ chatId: 123, messageId: 1, text: "Edit" }),
+      ).rejects.toThrow(BudgetExceededError);
+      await expect(
+        fake.answerCallbackQuery({ callbackQueryId: "cb1" }),
+      ).rejects.toThrow(BudgetExceededError);
+    });
+  });
+
+  describe("Safe Diagnostic Formatting & Classification", () => {
+    it("formats safe diagnostics without arbitrary strings or sensitive data", () => {
+      expect(formatSafeDiagnostic({ category: "timeout" })).toBe("category=timeout");
+      expect(formatSafeDiagnostic({ category: "network_error" })).toBe("category=network_error");
+      expect(
+        formatSafeDiagnostic({
+          category: "rate_limited",
+          httpStatus: 429,
+          retryAfterSeconds: 15,
+        }),
+      ).toBe("category=rate_limited;status=429;retry_after=15");
+      expect(formatSafeDiagnostic({ category: "budget_exceeded" })).toBe("category=budget_exceeded");
+      expect(formatSafeDiagnostic({ category: "fencing_rejected" })).toBe("category=fencing_rejected");
+    });
+
+    it("classifies error types into correct safe categories", () => {
+      const transportRateLimit = new TelegramTransportError("Too many requests", {
+        errorKind: "rate_limited",
+        httpStatus: 429,
+        retryAfterSeconds: 7,
+      });
+      expect(classifyErrorToSafeDiagnostic(transportRateLimit)).toEqual({
+        category: "rate_limited",
+        httpStatus: 429,
+        retryAfterSeconds: 7,
+      });
+
+      const budgetErr = new BudgetExceededError("Time is up");
+      expect(classifyErrorToSafeDiagnostic(budgetErr)).toEqual({
+        category: "budget_exceeded",
+      });
+
+      const fencingErr = new FencingRejectedError("Stale worker");
+      expect(classifyErrorToSafeDiagnostic(fencingErr)).toEqual({
+        category: "fencing_rejected",
+      });
+
+      const abortErr = new Error("Aborted");
+      abortErr.name = "AbortError";
+      expect(classifyErrorToSafeDiagnostic(abortErr)).toEqual({
+        category: "timeout",
+      });
+
+      const genericErr = new Error("Some unexpected exception with SQL");
+      expect(classifyErrorToSafeDiagnostic(genericErr)).toEqual({
+        category: "internal_error",
+      });
     });
   });
 });

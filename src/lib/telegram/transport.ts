@@ -1,14 +1,96 @@
 import type {
+  ExecutionDeadline,
+  SafeDiagnostic,
   TelegramAnswerResult,
   TelegramErrorKind,
   TelegramInlineKeyboardMarkup,
   TelegramSendResult,
   TelegramTransport,
 } from "./types";
+import {
+  BudgetExceededError,
+  FencingRejectedError,
+  TelegramTransportError,
+} from "./types";
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 export const TELEGRAM_MAX_MESSAGE_CHARS = 4096;
 export const TELEGRAM_MAX_CALLBACK_BYTES = 64;
+
+/**
+ * Standard execution deadline tracker.
+ */
+export class StandardExecutionDeadline implements ExecutionDeadline {
+  private readonly endTimestamp: number;
+  private readonly nowFn: () => number;
+
+  constructor(budgetMs: number, nowFn: () => number = Date.now) {
+    this.nowFn = nowFn;
+    this.endTimestamp = nowFn() + budgetMs;
+  }
+
+  getRemainingMs(): number {
+    return Math.max(0, this.endTimestamp - this.nowFn());
+  }
+
+  isExpired(): boolean {
+    return this.getRemainingMs() <= 0;
+  }
+
+  checkOrThrow(): void {
+    if (this.isExpired()) {
+      throw new BudgetExceededError("Execution budget exceeded before completing work");
+    }
+  }
+}
+
+/**
+ * Formats a safe diagnostic descriptor using an allowlisted schema.
+ * Never includes raw exception messages, query strings, SQL statements, or customer text.
+ */
+export function formatSafeDiagnostic(diagnostic: SafeDiagnostic): string {
+  const parts: string[] = [`category=${diagnostic.category}`];
+  if (typeof diagnostic.httpStatus === "number" && Number.isInteger(diagnostic.httpStatus)) {
+    parts.push(`status=${diagnostic.httpStatus}`);
+  }
+  if (
+    typeof diagnostic.retryAfterSeconds === "number" &&
+    Number.isInteger(diagnostic.retryAfterSeconds)
+  ) {
+    parts.push(`retry_after=${diagnostic.retryAfterSeconds}`);
+  }
+  return parts.join(";");
+}
+
+/**
+ * Classifies any caught exception into an allowlisted safe diagnostic descriptor.
+ */
+export function classifyErrorToSafeDiagnostic(err: unknown): SafeDiagnostic {
+  if (err instanceof TelegramTransportError) {
+    return {
+      category: err.errorKind,
+      httpStatus: err.httpStatus ?? (err.errorKind === "rate_limited" ? 429 : undefined),
+      retryAfterSeconds: err.retryAfterSeconds,
+    };
+  }
+  if (err instanceof BudgetExceededError) {
+    return { category: "budget_exceeded" };
+  }
+  if (err instanceof FencingRejectedError) {
+    return { category: "fencing_rejected" };
+  }
+  if (err instanceof Error) {
+    if (err.name === "BudgetExceededError") return { category: "budget_exceeded" };
+    if (err.name === "FencingRejectedError") return { category: "fencing_rejected" };
+    if (err.name === "AbortError" || err.name === "TimeoutError") {
+      return { category: "timeout" };
+    }
+    if (err.name === "RabetDataError") {
+      return { category: "db_error" };
+    }
+  }
+  return { category: "internal_error" };
+}
 
 /**
  * Strips Telegram bot tokens, database URLs, and sensitive secrets from error messages
@@ -94,33 +176,49 @@ function classifyNetworkException(err: unknown): { errorKind: TelegramErrorKind 
   return { errorKind: "network_error" };
 }
 
+export interface FetchTelegramTransportOptions {
+  timeoutMs?: number;
+  deadline?: ExecutionDeadline;
+}
+
 /**
  * Creates a real HTTP transport for communicating with the official Telegram Bot API via fetch.
  */
 export function createFetchTelegramTransport(
   botToken: string,
-  options?: { timeoutMs?: number },
+  options?: FetchTelegramTransportOptions,
 ): TelegramTransport {
   if (!botToken || typeof botToken !== "string" || botToken.trim().length === 0) {
     throw new Error("Cannot create Telegram transport: TELEGRAM_BOT_TOKEN is missing or empty.");
   }
 
   const baseUrl = `https://api.telegram.org/bot${botToken}`;
-  const timeoutMs = options?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const defaultTimeoutMs = options?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const deadline = options?.deadline;
 
   async function postTelegram<T>(
     method: string,
     body: Record<string, unknown>,
   ): Promise<
     | { ok: true; result?: T }
-    | { ok: false; error: string; errorKind: TelegramErrorKind; retryAfterSeconds?: number }
+    | { ok: false; error: string; errorKind: TelegramErrorKind; httpStatus?: number; retryAfterSeconds?: number }
   > {
+    if (deadline) {
+      deadline.checkOrThrow();
+    }
+
+    const remainingMs = deadline ? deadline.getRemainingMs() : defaultTimeoutMs;
+    const effectiveTimeout = Math.min(defaultTimeoutMs, remainingMs);
+    if (effectiveTimeout <= 0) {
+      throw new BudgetExceededError("Execution budget exceeded before initiating Telegram request");
+    }
+
     try {
       const res = await fetch(`${baseUrl}/${method}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(effectiveTimeout),
       });
 
       let data: TelegramApiResponse<T> | undefined;
@@ -146,12 +244,16 @@ export function createFetchTelegramTransport(
           ok: false,
           error: sanitizeTelegramError(desc, botToken),
           errorKind: classification.errorKind,
+          httpStatus: res.status,
           retryAfterSeconds: classification.retryAfterSeconds,
         };
       }
 
       return { ok: true, result: data.result };
     } catch (err) {
+      if (deadline?.isExpired()) {
+        throw new BudgetExceededError("Execution budget expired during request");
+      }
       const classification = classifyNetworkException(err);
       return {
         ok: false,
@@ -258,12 +360,16 @@ export interface FakeTelegramTransport extends TelegramTransport {
   sentMessages: FakeSentMessage[];
   editedMessages: FakeEditedMessage[];
   answeredCallbacks: FakeAnsweredCallback[];
+  deadline?: ExecutionDeadline;
   failSendWith?: string;
   failSendKind?: TelegramErrorKind;
+  failSendRetryAfter?: number;
   failEditWith?: string;
   failEditKind?: TelegramErrorKind;
+  failEditRetryAfter?: number;
   failAnswerWith?: string;
   failAnswerKind?: TelegramErrorKind;
+  failAnswerRetryAfter?: number;
   clear(): void;
 }
 
@@ -315,11 +421,15 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
     answeredCallbacks,
 
     async sendMessage({ chatId, text, replyMarkup }) {
+      if (transport.deadline?.isExpired()) {
+        throw new BudgetExceededError("Execution budget exceeded in fake transport");
+      }
       if (transport.failSendWith) {
         return {
           ok: false,
           error: transport.failSendWith,
           errorKind: transport.failSendKind ?? "api_error",
+          retryAfterSeconds: transport.failSendRetryAfter,
         };
       }
       const check = validatePayloadLimits(text, replyMarkup);
@@ -332,11 +442,15 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
     },
 
     async editMessageText({ chatId, messageId, text, replyMarkup }) {
+      if (transport.deadline?.isExpired()) {
+        throw new BudgetExceededError("Execution budget exceeded in fake transport");
+      }
       if (transport.failEditWith) {
         return {
           ok: false,
           error: transport.failEditWith,
           errorKind: transport.failEditKind ?? "api_error",
+          retryAfterSeconds: transport.failEditRetryAfter,
         };
       }
       const check = validatePayloadLimits(text, replyMarkup);
@@ -348,11 +462,15 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
     },
 
     async answerCallbackQuery({ callbackQueryId, text, showAlert }) {
+      if (transport.deadline?.isExpired()) {
+        throw new BudgetExceededError("Execution budget exceeded in fake transport");
+      }
       if (transport.failAnswerWith) {
         return {
           ok: false,
           error: transport.failAnswerWith,
           errorKind: transport.failAnswerKind ?? "api_error",
+          retryAfterSeconds: transport.failAnswerRetryAfter,
         };
       }
       answeredCallbacks.push({ callbackQueryId, text, showAlert });
@@ -363,12 +481,16 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
       sentMessages.length = 0;
       editedMessages.length = 0;
       answeredCallbacks.length = 0;
+      transport.deadline = undefined;
       transport.failSendWith = undefined;
       transport.failSendKind = undefined;
+      transport.failSendRetryAfter = undefined;
       transport.failEditWith = undefined;
       transport.failEditKind = undefined;
+      transport.failEditRetryAfter = undefined;
       transport.failAnswerWith = undefined;
       transport.failAnswerKind = undefined;
+      transport.failAnswerRetryAfter = undefined;
     },
   };
 
