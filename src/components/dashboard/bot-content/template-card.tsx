@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/card";
 import {
   interpolateTemplate,
+  resolveTranslationStatus,
   validateTemplateBody,
   type PlaceholderKey,
   type TemplateDefinition,
@@ -98,8 +99,25 @@ export function TemplateCard({
 
   const currentDraft = drafts[currentLang] ?? "";
   const currentSaved = savedTranslations[currentLang] ?? "";
-  const isSavedInDb = Boolean(savedTranslations[currentLang]);
   const hasUnsavedChanges = currentDraft !== currentSaved;
+
+  // Truthful status based strictly on SAVED translations
+  const statusResult = useMemo(
+    () =>
+      resolveTranslationStatus({
+        currentLang,
+        savedTranslations,
+        defaultLanguageCode: defaultLanguage?.code ?? "en",
+        defaultLanguageLabel: defaultLanguage?.label ?? "English",
+      }),
+    [
+      currentLang,
+      savedTranslations,
+      defaultLanguage?.code,
+      defaultLanguage?.label,
+    ]
+  );
+  const isSavedInDb = statusResult.isSaved;
 
   // Sample context for live preview
   const previewContext = useMemo(
@@ -117,7 +135,6 @@ export function TemplateCard({
   );
 
   const isRtl = currentLang === "ar";
-  const defaultLangLabel = defaultLanguage?.label || "English";
 
   // Use suggested text handler
   const handleUseSuggestion = () => {
@@ -173,25 +190,39 @@ export function TemplateCard({
     }
 
     startTransition(async () => {
-      const result = await saveBotContentTranslation({
-        templateKey: definition.key,
-        languageCode: currentLang,
-        body: currentDraft,
-      });
+      try {
+        const result = await saveBotContentTranslation({
+          templateKey: definition.key,
+          languageCode: currentLang,
+          body: currentDraft,
+        });
 
-      setActionResult(result);
+        setActionResult(result);
 
-      if (result.success) {
-        setSavedTranslations((prev) => ({
-          ...prev,
-          [currentLang]: currentDraft.trim(),
-        }));
+        if (result.success) {
+          setSavedTranslations((prev) => ({
+            ...prev,
+            [currentLang]: currentDraft.trim(),
+          }));
+        }
+      } catch (err) {
+        setActionResult({
+          success: false,
+          code: "CONNECTION_FAILED",
+          message:
+            err instanceof Error && err.message
+              ? `Save failed: ${err.message}`
+              : "Unable to reach the server. Please check your connection and try again.",
+        });
       }
     });
   };
 
   return (
-    <Card className="overflow-hidden border border-border shadow-xs">
+    <Card
+      className="overflow-hidden border border-border shadow-xs"
+      data-template-card={definition.key}
+    >
       <CardHeader className="space-y-2 border-b bg-muted/15 pb-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -214,21 +245,33 @@ export function TemplateCard({
               </Badge>
             )}
 
-            {isSavedInDb ? (
+            {statusResult.kind === "saved" && (
               <Badge
                 variant="outline"
                 className="border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
               >
                 <CheckCircle2 className="size-3" />
-                Saved ({currentLang.toUpperCase()})
+                {statusResult.label}
               </Badge>
-            ) : (
+            )}
+
+            {statusResult.kind === "missing_with_fallback" && (
               <Badge
                 variant="outline"
                 className="border-muted-foreground/30 text-muted-foreground"
-                title={`Not saved yet. Bot falls back to ${defaultLangLabel}.`}
+                title={statusResult.label}
               >
-                Missing — falls back to {defaultLangLabel}
+                {statusResult.label}
+              </Badge>
+            )}
+
+            {statusResult.kind === "missing_no_fallback" && (
+              <Badge
+                variant="outline"
+                className="border-amber-500/30 text-amber-700 dark:text-amber-400"
+                title={statusResult.label}
+              >
+                {statusResult.label}
               </Badge>
             )}
           </div>
@@ -422,7 +465,18 @@ export function TemplateCard({
           <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
             <AlertCircle className="size-4 shrink-0 mt-0.5" />
             <div className="space-y-0.5">
-              <p className="font-semibold">Validation error</p>
+              <p className="font-semibold">
+                {actionResult.code === "INVALID_INPUT"
+                  ? "Validation error"
+                  : actionResult.code === "CONNECTION_FAILED"
+                  ? "Connection error"
+                  : actionResult.code === "DATABASE_UNAVAILABLE"
+                  ? "Database unavailable"
+                  : actionResult.code === "LANGUAGE_NOT_FOUND" ||
+                    actionResult.code === "UNSUPPORTED_LANGUAGE"
+                  ? "Language error"
+                  : "Save failed"}
+              </p>
               <p>{actionResult.message}</p>
             </div>
           </div>

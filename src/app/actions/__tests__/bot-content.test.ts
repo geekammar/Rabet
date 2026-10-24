@@ -142,9 +142,7 @@ describe("saveBotContentTranslation Server Action", () => {
     expect(mockSaveTranslation).not.toHaveBeenCalled();
   });
 
-  it("returns LANGUAGE_NOT_FOUND when language is not registered in DB, with zero writes", async () => {
-    mockReadLanguage.mockResolvedValueOnce(null);
-
+  it("rejects unsupported languages before database access", async () => {
     const result = await saveBotContentTranslation({
       templateKey: "bot_welcome",
       languageCode: "fr",
@@ -152,9 +150,92 @@ describe("saveBotContentTranslation Server Action", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe("LANGUAGE_NOT_FOUND");
-    expect(result.message).toContain("Language \"fr\" is not registered");
+    expect(result.code).toBe("UNSUPPORTED_LANGUAGE");
+    expect(result.message).toContain("not supported by the Bot Content editor");
+    expect(result.message).toContain("en, ar");
+    expect(mockGetDb).not.toHaveBeenCalled();
+    expect(mockReadLanguage).not.toHaveBeenCalled();
     expect(mockCreateTemplate).not.toHaveBeenCalled();
+    expect(mockSaveTranslation).not.toHaveBeenCalled();
+  });
+
+  it("returns LANGUAGE_NOT_FOUND when supported language is not registered in DB, with zero writes", async () => {
+    mockReadLanguage.mockResolvedValueOnce(null);
+
+    const result = await saveBotContentTranslation({
+      templateKey: "bot_welcome",
+      languageCode: "ar",
+      body: "مرحبًا بك في {{store_name}}!",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe("LANGUAGE_NOT_FOUND");
+    expect(result.message).toContain('Language "ar" is not registered');
+    expect(mockGetDb).toHaveBeenCalled();
+    expect(mockReadLanguage).toHaveBeenCalled();
+    expect(mockCreateTemplate).not.toHaveBeenCalled();
+    expect(mockSaveTranslation).not.toHaveBeenCalled();
+  });
+
+  it("handles getDb() initialization failure safely with zero writes", async () => {
+    mockGetDb.mockImplementationOnce(() => {
+      throw new Error("DATABASE_URL is not configured.");
+    });
+
+    const result = await saveBotContentTranslation({
+      templateKey: "bot_welcome",
+      languageCode: "en",
+      body: "Welcome to {{store_name}}!",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe("DATABASE_UNAVAILABLE");
+    expect(result.message).toContain("Database is not configured or unavailable");
+    expect(mockReadLanguage).not.toHaveBeenCalled();
+    expect(mockCreateTemplate).not.toHaveBeenCalled();
+    expect(mockSaveTranslation).not.toHaveBeenCalled();
+  });
+
+  it("handles readLanguage() query rejection safely with zero writes", async () => {
+    mockReadLanguage.mockRejectedValueOnce(
+      new Error("connection reset by peer to postgresql://secret:pass@host:5432/db")
+    );
+
+    const result = await saveBotContentTranslation({
+      templateKey: "bot_welcome",
+      languageCode: "en",
+      body: "Welcome to {{store_name}}!",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe("SAVE_FAILED");
+    expect(result.message).not.toContain("secret");
+    expect(result.message).not.toContain("pass");
+    expect(result.message).not.toContain("postgresql://");
+    expect(mockCreateTemplate).not.toHaveBeenCalled();
+    expect(mockSaveTranslation).not.toHaveBeenCalled();
+  });
+
+  it("handles createTemplate() failure safely with zero subsequent translation writes", async () => {
+    mockReadLanguage.mockResolvedValueOnce({
+      id: "lang-en-id",
+      code: "en",
+      label: "English",
+      isEnabled: true,
+    });
+    mockCreateTemplate.mockRejectedValueOnce(
+      new Error("connection closed during metadata write")
+    );
+
+    const result = await saveBotContentTranslation({
+      templateKey: "bot_welcome",
+      languageCode: "en",
+      body: "Welcome to {{store_name}}!",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe("SAVE_FAILED");
+    expect(mockCreateTemplate).toHaveBeenCalled();
     expect(mockSaveTranslation).not.toHaveBeenCalled();
   });
 

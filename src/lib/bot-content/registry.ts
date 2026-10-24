@@ -150,3 +150,14 @@ export function isApprovedTemplateKey(key: string): key is TemplateKey {
 export function getTemplateDefinition(key: string): TemplateDefinition | undefined {
   return TEMPLATE_REGISTRY.find((t) => t.key === key);
 }
+
+/** Supported languages for the Bot Content Editor (MVP: English and Arabic). */
+export const SUPPORTED_BOT_CONTENT_LANGUAGES = ["en", "ar"] as const;
+export type SupportedBotContentLanguage =
+  (typeof SUPPORTED_BOT_CONTENT_LANGUAGES)[number];
+
+export function isSupportedBotContentLanguage(
+  code: string,
+): code is SupportedBotContentLanguage {
+  return (SUPPORTED_BOT_CONTENT_LANGUAGES as readonly string[]).includes(code);
+}

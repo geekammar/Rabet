@@ -8,7 +8,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { hash } from "@node-rs/argon2";
@@ -20,28 +20,19 @@ const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "test-password-123";
 
-const CHROME_PATH = "/root/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
-
-let proxyServer = null;
 let appServer = null;
 let chromeProcess = null;
 let pgClient = null;
+let ownedTempDir = null;
+let isCleaningUp = false;
 
 function log(msg) {
   process.stdout.write(`[browser-acceptance] ${msg}\n`);
 }
 
-function fail(msg) {
-  process.stderr.write(`[browser-acceptance:FAIL] ${msg}\n`);
-  cleanup();
-  process.exit(1);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function cleanup() {
+  if (isCleaningUp) return;
+  isCleaningUp = true;
   log("Cleaning up processes and temporary resources...");
 
   if (chromeProcess) {
@@ -58,13 +49,6 @@ async function cleanup() {
     appServer = null;
   }
 
-  if (proxyServer) {
-    try {
-      proxyServer.close();
-    } catch {}
-    proxyServer = null;
-  }
-
   if (pgClient) {
     try {
       await pgClient.end();
@@ -72,9 +56,12 @@ async function cleanup() {
     pgClient = null;
   }
 
-  try {
-    rmSync(path.resolve("scripts/neon-proxy-bootstrap.mjs"), { force: true });
-  } catch {}
+  if (ownedTempDir) {
+    try {
+      rmSync(ownedTempDir, { recursive: true, force: true });
+    } catch {}
+    ownedTempDir = null;
+  }
 
   try {
     spawnSync("node", ["scripts/db-test-postgres.mjs", "stop"], {
@@ -83,8 +70,66 @@ async function cleanup() {
   } catch {}
 }
 
-process.on("SIGINT", cleanup);
-process.on("SIGTERM", cleanup);
+async function fail(msg) {
+  process.stderr.write(`[browser-acceptance:FAIL] ${msg}\n`);
+  await cleanup();
+  process.exit(1);
+}
+
+process.on("SIGINT", async () => {
+  await cleanup();
+  process.exit(130);
+});
+
+process.on("SIGTERM", async () => {
+  await cleanup();
+  process.exit(143);
+});
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Configurable or auto-discovered Chromium executable */
+function resolveChromePath() {
+  if (process.env.CHROME_BIN && existsSync(process.env.CHROME_BIN)) {
+    return process.env.CHROME_BIN;
+  }
+  if (process.env.CHROME_PATH && existsSync(process.env.CHROME_PATH)) {
+    return process.env.CHROME_PATH;
+  }
+
+  const pwDirs = [
+    "/root/.cache/ms-playwright",
+    path.join(process.env.HOME || "", ".cache/ms-playwright"),
+  ];
+
+  for (const pwDir of pwDirs) {
+    if (existsSync(pwDir)) {
+      try {
+        const entries = readdirSync(pwDir);
+        for (const entry of entries) {
+          if (entry.startsWith("chromium-")) {
+            const candidate = path.join(pwDir, entry, "chrome-linux64/chrome");
+            if (existsSync(candidate)) return candidate;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  const systemPaths = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ];
+  for (const p of systemPaths) {
+    if (existsSync(p)) return p;
+  }
+
+  return null;
+}
 
 /** Simple CDP client using native Node WebSocket */
 class CDPClient {
@@ -144,21 +189,40 @@ class CDPClient {
 }
 
 async function main() {
+  const chromePath = resolveChromePath();
+  if (!chromePath) {
+    await fail(
+      "Chromium executable not found. Set CHROME_BIN or CHROME_PATH environment variable."
+    );
+  }
+  log(`Using Chromium executable: ${chromePath}`);
+
   log("Starting disposable PostgreSQL...");
   const pgStart = spawnSync("node", ["scripts/db-test-postgres.mjs", "start"], {
     encoding: "utf8",
   });
   if (pgStart.status !== 0) {
-    fail(`Could not start disposable PostgreSQL: ${pgStart.stderr}`);
+    await fail(`Could not start disposable PostgreSQL: ${pgStart.stderr}`);
   }
 
   // Parse connection string
   const pgUrlMatch = pgStart.stdout.match(/postgresql:\/\/[^\s]+/);
   if (!pgUrlMatch) {
-    fail("Could not find PostgreSQL URL in output");
+    await fail("Could not find PostgreSQL URL in output");
   }
   const pgUrl = pgUrlMatch[0];
-  log(`Disposable PostgreSQL ready at ${pgUrl}`);
+
+  // Verify test database is the designated disposable loopback target before any migration or write
+  const parsedPgUrl = new URL(pgUrl);
+  if (
+    parsedPgUrl.hostname !== "127.0.0.1" &&
+    parsedPgUrl.hostname !== "localhost"
+  ) {
+    await fail(
+      `Refusing to run against non-loopback database host: ${parsedPgUrl.hostname}`
+    );
+  }
+  log(`Disposable loopback PostgreSQL ready on port ${parsedPgUrl.port}`);
 
   // Run migrations
   log("Applying database migrations...");
@@ -167,7 +231,7 @@ async function main() {
     encoding: "utf8",
   });
   if (migrate.status !== 0) {
-    fail(`Migration failed: ${migrate.stderr || migrate.stdout}`);
+    await fail(`Migration failed: ${migrate.stderr || migrate.stdout}`);
   }
   log("Migrations applied successfully.");
 
@@ -191,18 +255,26 @@ async function main() {
   `;
   log("Initial store settings seeded.");
 
-  // Write bootstrap file that intercepts Neon HTTP queries via globalThis.fetch
-  log("Setting up Neon HTTP fetch interceptor for Next.js server...");
-  const bootstrapFile = path.resolve("scripts/neon-proxy-bootstrap.mjs");
+  // Create isolated owned temporary directory with restrictive permissions (0700)
+  ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-acceptance-"));
+  chmodSync(ownedTempDir, 0o700);
 
+  // Write bootstrap file that substitutes Neon HTTP queries with local disposable PostgreSQL
+  // NOTE: This test interceptor is strictly scoped to the synthetic endpoint ep-example.neon.tech.
+  // It substitutes transport to local PostgreSQL for browser testing and does not prove live Neon cloud connectivity.
+  const postgresModuleUrl = import.meta.resolve("postgres");
+  const bootstrapFile = path.join(ownedTempDir, "neon-proxy-bootstrap.mjs");
   writeFileSync(
     bootstrapFile,
-    `import postgres from "postgres";\n` +
+    `import postgres from "${postgresModuleUrl}";\n` +
       `const originalFetch = globalThis.fetch;\n` +
       `let pg = null;\n` +
       `globalThis.fetch = async (input, init) => {\n` +
       `  const url = typeof input === "string" ? input : (input ? input.url : "");\n` +
-      `  if (url && (url.includes("/sql") || url.includes("neon.tech"))) {\n` +
+      `  const headers = init?.headers || {};\n` +
+      `  const connStr = typeof headers.get === "function" ? headers.get("Neon-Connection-String") : (headers["Neon-Connection-String"] || headers["neon-connection-string"] || "");\n` +
+      `  const isSyntheticEndpoint = (url && url.includes("ep-example.neon.tech")) || (typeof connStr === "string" && connStr.includes("ep-example.neon.tech"));\n` +
+      `  if (isSyntheticEndpoint && (url.includes("/sql") || url.includes("neon.tech"))) {\n` +
       `    if (!pg && process.env.TEST_REAL_PG_URL) {\n` +
       `      pg = postgres(process.env.TEST_REAL_PG_URL);\n` +
       `    }\n` +
@@ -224,7 +296,8 @@ async function main() {
       `    }\n` +
       `  }\n` +
       `  return originalFetch(input, init);\n` +
-      `};\n`
+      `};\n`,
+    { mode: 0o600 }
   );
 
   const passwordHash = await hash(TEST_PASSWORD, {
@@ -238,10 +311,9 @@ async function main() {
     globalThis.crypto.getRandomValues(new Uint8Array(32))
   ).toString("base64");
 
-  const envDir = mkdtempSync(path.join(tmpdir(), "rabet-browser-"));
-  const envFile = path.join(envDir, "test.env");
-
-  const testSyntheticNeonUrl = "postgresql://rabet_user:synthetic_pass@ep-example.neon.tech/rabet_db";
+  const envFile = path.join(ownedTempDir, "test.env");
+  const testSyntheticNeonUrl =
+    "postgresql://rabet_user:synthetic_pass@ep-example.neon.tech/rabet_db";
 
   writeFileSync(
     envFile,
@@ -254,118 +326,132 @@ async function main() {
       `export AUTH_URL='${BASE_URL}'`,
       `export AUTH_TRUST_HOST='true'`,
       `export NODE_OPTIONS='--import ${bootstrapFile}'`,
-    ].join("\n") + "\n"
+    ].join("\n") + "\n",
+    { mode: 0o600 }
   );
 
   appServer = spawn(
     "bash",
-    ["-c", `set -a; . ${envFile}; set +a; exec npx next start -p ${APP_PORT}`],
+    [
+      "-c",
+      `source "${envFile}" && PORT=${APP_PORT} node node_modules/next/dist/bin/next start`,
+    ],
     {
       stdio: ["ignore", "pipe", "pipe"],
-      cwd: process.cwd(),
       detached: true,
+      env: { ...process.env },
     }
   );
 
-  await new Promise((resolve, reject) => {
-    let ready = false;
-    const check = (data) => {
-      const text = data.toString();
-      if (text.includes("Ready") && !ready) {
-        ready = true;
-        resolve();
-      }
-    };
-    appServer.stdout.on("data", check);
-    appServer.stderr.on("data", (data) => {
-      process.stderr.write(`[next:stderr] ${data.toString()}`);
-      check(data);
-    });
-    appServer.on("error", reject);
-    setTimeout(() => {
-      if (!ready) reject(new Error("Next.js server startup timeout"));
-    }, 30000);
+  appServer.stderr.on("data", (d) => {
+    const s = d.toString();
+    if (!s.includes("blocking-prerender-crypto") && !s.includes("ExperimentalWarning")) {
+      process.stderr.write(`[next:stderr] ${s}`);
+    }
   });
+
+  // Wait for Next.js server to be ready
+  let serverReady = false;
+  for (let i = 0; i < 40; i++) {
+    await sleep(500);
+    try {
+      const res = await fetch(`${BASE_URL}/login`);
+      if (res.status === 200 || res.status === 307) {
+        serverReady = true;
+        break;
+      }
+    } catch {}
+  }
+  if (!serverReady) {
+    await fail("Next.js server failed to start within 20s");
+  }
   log("Next.js server is ready.");
 
-  // Obtain admin session cookie via signIn
+  // Authenticate admin session over HTTP
   log("Authenticating admin session over HTTP...");
   const csrfRes = await fetch(`${BASE_URL}/api/auth/csrf`);
   const csrfData = await csrfRes.json();
-  const csrfCookie = csrfRes.headers.getSetCookie?.() || [];
+  const csrfToken = csrfData.csrfToken;
+  const initialCookies = csrfRes.headers.get("set-cookie") || "";
 
-  const loginRes = await fetch(`${BASE_URL}/api/auth/callback/credentials`, {
+  const signinBody = new URLSearchParams({
+    csrfToken,
+    email: TEST_EMAIL,
+    password: TEST_PASSWORD,
+    callbackUrl: `${BASE_URL}/bot-content`,
+    json: "true",
+  });
+
+  const signinRes = await fetch(`${BASE_URL}/api/auth/callback/credentials`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
-      Cookie: csrfCookie.map((c) => c.split(";")[0]).join("; "),
+      Cookie: initialCookies,
     },
-    body: new URLSearchParams({
-      csrfToken: csrfData.csrfToken,
-      email: TEST_EMAIL,
-      password: TEST_PASSWORD,
-      callbackUrl: `${BASE_URL}/bot-content`,
-    }).toString(),
+    body: signinBody.toString(),
     redirect: "manual",
   });
 
-  const setCookies = loginRes.headers.getSetCookie?.() || [];
-  const sessionTokenCookie = setCookies.find((c) =>
-    c.includes("authjs.session-token")
-  );
-  if (!sessionTokenCookie) {
-    fail("Failed to obtain authjs.session-token cookie from login response.");
+  const authCookies = signinRes.headers.get("set-cookie") || "";
+  const sessionTokenMatch = authCookies.match(/authjs\.session-token=([^;]+)/);
+  if (!sessionTokenMatch) {
+    await fail("Failed to obtain session token from signin response");
   }
-
-  const [cookiePair] = sessionTokenCookie.split(";");
-  const [cookieName, cookieVal] = cookiePair.split("=");
+  const sessionCookieVal = sessionTokenMatch[1];
   log("Admin session authenticated successfully.");
 
   // Launch headless Chromium
   log("Launching headless Chromium...");
+  const chromeDataDir = path.join(ownedTempDir, "chrome-data");
+  chmodSync(ownedTempDir, 0o700);
+
   chromeProcess = spawn(
-    CHROME_PATH,
+    chromePath,
     [
-      `--remote-debugging-port=${CDP_PORT}`,
       "--headless=new",
+      `--remote-debugging-port=${CDP_PORT}`,
+      `--user-data-dir=${chromeDataDir}`,
       "--no-sandbox",
       "--disable-gpu",
       "--disable-dev-shm-usage",
+      "--window-size=1280,800",
       "about:blank",
     ],
     { stdio: "ignore" }
   );
 
-  // Wait for CDP port
-  await sleep(1500);
-
-  // Get active target WS URL
-  const versionRes = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`);
-  const versionData = await versionRes.json();
-  log(`Connected to Chromium: ${versionData.Browser}`);
-
-  const targetsRes = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`);
-  const targets = await targetsRes.json();
-  const pageTarget = targets.find((t) => t.type === "page") || targets[0];
+  let pageTarget = null;
+  for (let i = 0; i < 30; i++) {
+    await sleep(400);
+    try {
+      const targetsRes = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`);
+      const targets = await targetsRes.json();
+      pageTarget = targets.find((t) => t.type === "page") || targets[0];
+      if (pageTarget && pageTarget.webSocketDebuggerUrl) {
+        break;
+      }
+    } catch {}
+  }
   if (!pageTarget) {
-    fail("No page target found in Chromium.");
+    await fail("Could not connect to Chromium DevTools Protocol (no page target)");
   }
 
   const cdp = new CDPClient(pageTarget.webSocketDebuggerUrl);
   await cdp.connect();
+  log("Connected to Chromium page via CDP.");
+
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
   await cdp.send("Network.enable");
 
   // Inject session cookie into Chromium
   await cdp.send("Network.setCookie", {
-    name: cookieName,
-    value: cookieVal,
+    name: "authjs.session-token",
+    value: sessionCookieVal,
     domain: "127.0.0.1",
     path: "/",
     httpOnly: true,
   });
-  log("Session cookie injected into Chromium.");
 
   // ==========================================
   // Flow 1: Open /bot-content with missing content
@@ -376,135 +462,170 @@ async function main() {
 
   const pageTitle = await cdp.evaluate("document.title");
   if (!pageTitle.includes("Bot Content")) {
-    fail(`Flow 1: Expected page title to contain 'Bot Content', got '${pageTitle}'`);
+    await fail(`Flow 1: Expected page title to contain 'Bot Content', got '${pageTitle}'`);
   }
 
+  // Confirm all 7 cards are rendered
   const currentUrl = await cdp.evaluate("window.location.href");
-  log(`Current URL: ${currentUrl}`);
-
-  // Confirm cards are rendered
   const cardCount = await cdp.evaluate(
-    "document.querySelectorAll('textarea').length"
+    "document.querySelectorAll('[data-template-card]').length"
   );
   if (cardCount !== 7) {
-    const pageHtml = await cdp.evaluate("document.body.innerText");
-    log(`Page text: ${pageHtml.slice(0, 500)}`);
-    fail(`Flow 1: Expected 7 template textareas rendered, found ${cardCount}`);
+    const bodyText = await cdp.evaluate("document.body.innerText");
+    log(`Flow 1 current URL: ${currentUrl}`);
+    log(`Flow 1 body text:\n${bodyText}`);
+    await fail(`Flow 1: Expected 7 template cards rendered, found ${cardCount}`);
   }
 
-  // Confirm missing content indicators exist
-  const missingBadges = await cdp.evaluate(
-    "document.body.innerText.includes('Missing — falls back to English')"
-  );
-  if (!missingBadges) {
-    fail("Flow 1: Missing fallback badge not displayed on uninitialized templates");
+  // Assert honest fallback badge for completely missing template (selected EN, no saved fallback)
+  const botWelcomeCardBadge = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card ? card.innerText : "";
+  }`);
+  if (!botWelcomeCardBadge.includes("Missing (EN) — no saved fallback")) {
+    await fail(
+      `Flow 1: Expected 'Missing (EN) — no saved fallback' on fresh bot_welcome card, got: '${botWelcomeCardBadge.slice(0, 300)}'`
+    );
   }
 
   // Confirm zero templates and zero translations exist in database
   const tmplCountDb = (await pgClient`SELECT count(*) FROM message_template`)[0].count;
   const transCountDb = (await pgClient`SELECT count(*) FROM message_translation`)[0].count;
   if (Number(tmplCountDb) !== 0 || Number(transCountDb) !== 0) {
-    fail(`Flow 1: Database has ${tmplCountDb} templates, ${transCountDb} translations; expected 0 writes on page load.`);
+    await fail(
+      `Flow 1: Database has ${tmplCountDb} templates, ${transCountDb} translations; expected 0 writes on page load.`
+    );
   }
-  log("Flow 1 PASSED: Page loaded cleanly; 0 database templates/translations created.");
+  log("Flow 1 PASSED: Page loaded cleanly; truthful missing badges verified; 0 DB writes on page load.");
 
   // ==========================================
   // Flow 2: Apply a suggestion and confirm it is NOT saved yet
   // ==========================================
-  log("Flow 2: Applying suggested text without clicking Save...");
-  // Click first 'Use suggested text' button
-  await cdp.evaluate(`
-    const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Use suggested text'));
+  log("Flow 2: Applying suggested text within bot_welcome card without clicking Save...");
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const btn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Use suggested text'));
     if (btn) btn.click();
-  `);
+  }`);
   await sleep(500);
 
-  // Check textarea value (contains raw placeholder {{store_name}})
-  const textareaVal = await cdp.evaluate(`document.querySelectorAll('textarea')[0].value`);
+  // Check card-scoped textarea value
+  const textareaVal = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.querySelector('textarea').value;
+  }`);
   if (!textareaVal.includes("Welcome to {{store_name}}!")) {
-    fail(`Flow 2: Suggested text was not loaded into draft; got '${textareaVal}'`);
+    await fail(`Flow 2: Suggested text was not loaded into draft; got '${textareaVal}'`);
   }
 
-  // Check live preview text (interpolates sample value Acme Digital)
-  const previewVal = await cdp.evaluate(`document.body.innerText.includes("Welcome to Acme Digital!")`);
+  // Check card-scoped live preview text (interpolates sample value Acme Digital)
+  const previewVal = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.innerText.includes("Welcome to Acme Digital!");
+  }`);
   if (!previewVal) {
-    fail("Flow 2: Expected preview to interpolate {{store_name}} with Acme Digital");
+    await fail("Flow 2: Expected preview inside card to interpolate {{store_name}} with Acme Digital");
   }
 
-  // Verify unsaved changes badge appeared
-  const hasUnsavedBadge = await cdp.evaluate(
-    "document.body.innerText.includes('Unsaved changes')"
-  );
+  // Verify unsaved changes badge appeared on card
+  const hasUnsavedBadge = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.innerText.includes('Unsaved changes');
+  }`);
   if (!hasUnsavedBadge) {
-    fail("Flow 2: Expected 'Unsaved changes' indicator after applying suggestion.");
+    await fail("Flow 2: Expected 'Unsaved changes' indicator on card after applying suggestion.");
   }
 
   // Query database: must still be 0!
   const tmplCountDb2 = (await pgClient`SELECT count(*) FROM message_template`)[0].count;
   const transCountDb2 = (await pgClient`SELECT count(*) FROM message_translation`)[0].count;
   if (Number(tmplCountDb2) !== 0 || Number(transCountDb2) !== 0) {
-    fail("Flow 2: Applying suggestion wrote to database before explicit Save!");
+    await fail("Flow 2: Applying suggestion wrote to database before explicit Save!");
   }
   log("Flow 2 PASSED: Suggestion applied to local draft; 0 database writes occurred.");
 
   // ==========================================
   // Flow 3: Save English text, reload, and verify persistence
   // ==========================================
-  log("Flow 3: Saving English text on bot_welcome...");
-  await cdp.evaluate(`
-    const saveBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
+  log("Flow 3: Explicitly saving English text on bot_welcome...");
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const saveBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
     if (saveBtn) saveBtn.click();
-  `);
+  }`);
   await sleep(1500);
 
   // Reload page
   await cdp.send("Page.reload");
   await sleep(2000);
 
-  // Verify textarea still has persisted text
-  const persistedVal = await cdp.evaluate(`document.querySelectorAll('textarea')[0].value`);
+  // Verify card-scoped textarea still has persisted text
+  const persistedVal = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.querySelector('textarea').value;
+  }`);
   if (!persistedVal.includes("Welcome to {{store_name}}!")) {
-    fail(`Flow 3: Persisted text not found in textarea after reload; got '${persistedVal}'`);
+    await fail(`Flow 3: Persisted text not found in textarea after reload; got '${persistedVal}'`);
   }
 
   // Verify database now contains 1 template and 1 translation
   const tmplCountDb3 = (await pgClient`SELECT count(*) FROM message_template`)[0].count;
   const transCountDb3 = (await pgClient`SELECT count(*) FROM message_translation`)[0].count;
   if (Number(tmplCountDb3) !== 1 || Number(transCountDb3) !== 1) {
-    fail(`Flow 3: Expected exactly 1 template and 1 translation in DB, found ${tmplCountDb3} / ${transCountDb3}`);
+    await fail(
+      `Flow 3: Expected exactly 1 template and 1 translation in DB, found ${tmplCountDb3} / ${transCountDb3}`
+    );
   }
   log("Flow 3 PASSED: English message saved, persisted, and confirmed in database.");
 
   // ==========================================
-  // Flow 4: Save Arabic using registered test language; verify RTL and English preservation
+  // Flow 4: Arabic editing, fallback badge with saved default, and RTL verification
   // ==========================================
-  log("Flow 4: Editing Arabic on bot_welcome...");
-  // Click Arabic tab on the first card
-  await cdp.evaluate(`
-    const arTab = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('العربية'));
+  log("Flow 4: Testing Arabic tab, fallback badge, RTL direction, and persistence...");
+  // Click Arabic tab within bot_welcome card
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const arTab = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('العربية'));
     if (arTab) arTab.click();
-  `);
+  }`);
   await sleep(500);
 
-  // Check textarea dir="rtl"
-  const isRtl = await cdp.evaluate(`document.querySelectorAll('textarea')[0].getAttribute('dir')`);
-  if (isRtl !== "rtl") {
-    fail(`Flow 4: Expected Arabic textarea to have dir="rtl", got '${isRtl}'`);
+  // Assert truthful fallback badge: Arabic missing, but default English is saved -> "Missing (AR) — falls back to English"
+  const arCardBadge = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.innerText;
+  }`);
+  if (!arCardBadge.includes("Missing (AR) — falls back to English")) {
+    await fail(
+      `Flow 4: Expected 'Missing (AR) — falls back to English' badge when English is saved, got: '${arCardBadge.slice(0, 300)}'`
+    );
   }
 
-  // Check live preview box dir="rtl"
-  const previewIsRtl = await cdp.evaluate(`
-    const preview = document.querySelector('[dir="rtl"]');
-    Boolean(preview);
-  `);
+  // Check textarea dir="rtl" separately
+  const textareaIsRtl = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const ta = card.querySelector('textarea');
+    ta ? ta.getAttribute('dir') : null;
+  }`);
+  if (textareaIsRtl !== "rtl") {
+    await fail(`Flow 4: Expected Arabic textarea to have dir="rtl", got '${textareaIsRtl}'`);
+  }
+
+  // Check live preview box dir="rtl" separately
+  const previewIsRtl = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const previewEl = card.querySelector('[dir="rtl"]');
+    Boolean(previewEl);
+  }`);
   if (!previewIsRtl) {
-    fail("Flow 4: Expected live preview container to have dir='rtl'");
+    await fail("Flow 4: Expected live preview container inside card to have dir='rtl'");
   }
 
   // Type Arabic message into draft
   const arabicText = "مرحبًا بك في Acme Digital! يسعدنا خدمتك.";
   await cdp.evaluate(`{
-    const textarea = document.querySelectorAll('textarea')[0];
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const textarea = card.querySelector('textarea');
     const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
     nativeSetter.call(textarea, ${JSON.stringify(arabicText)});
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
@@ -512,12 +633,22 @@ async function main() {
   }`);
   await sleep(500);
 
-  // Click Save Arabic Message
+  // Click Save Arabic Message within card
   await cdp.evaluate(`{
-    const saveArBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Save Arabic Message'));
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const saveArBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save Arabic Message'));
     if (saveArBtn) saveArBtn.click();
   }`);
   await sleep(1500);
+
+  // Assert badge on card updated to "Saved (AR)"
+  const arCardBadgeAfterSave = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.innerText.includes("Saved (AR)");
+  }`);
+  if (!arCardBadgeAfterSave) {
+    await fail("Flow 4: Expected 'Saved (AR)' badge on card after saving Arabic translation.");
+  }
 
   // Verify DB: 1 template, 2 translations
   const transRows = await pgClient`
@@ -527,32 +658,40 @@ async function main() {
     ORDER BY l.code;
   `;
   if (transRows.length !== 2) {
-    fail(`Flow 4: Expected 2 translations in DB, found ${transRows.length}`);
+    await fail(`Flow 4: Expected 2 translations in DB, found ${transRows.length}`);
   }
   const enRow = transRows.find((r) => r.code === "en");
   const arRow = transRows.find((r) => r.code === "ar");
 
   if (!enRow || !enRow.body.includes("Welcome to {{store_name}}!")) {
-    fail("Flow 4: English translation was corrupted or overwritten!");
+    await fail("Flow 4: English translation was corrupted or overwritten!");
   }
   if (!arRow || arRow.body !== arabicText) {
-    fail(`Flow 4: Arabic translation did not match expected body; got '${arRow?.body}'`);
+    await fail(`Flow 4: Arabic translation did not match expected body; got '${arRow?.body}'`);
   }
 
   // Verify Arabic language remains disabled in store settings
   const [arLangRow] = await pgClient`SELECT is_enabled FROM language WHERE code = 'ar'`;
   if (arLangRow.is_enabled !== false) {
-    fail("Flow 4: Saving Arabic translation improperly enabled the language in language table!");
+    await fail("Flow 4: Saving Arabic translation improperly enabled the language in language table!");
   }
-  log("Flow 4 PASSED: Arabic saved with RTL direction; English preserved; Arabic remains disabled.");
+  log("Flow 4 PASSED: Arabic saved with RTL direction; truthful fallback badge verified; English preserved.");
 
   // ==========================================
-  // Flow 5: Submit invalid/unknown placeholders
+  // Flow 5: Submit invalid/unknown placeholders & draft preservation
   // ==========================================
-  log("Flow 5: Submitting invalid placeholder and testing preservation...");
-  // Switch back to English tab
+  log("Flow 5: Submitting invalid placeholder and testing client-side validation...");
+  // Capture stored text BEFORE the invalid save attempt
+  const [storedEnBefore] = await pgClient`
+    SELECT mt.body FROM message_translation mt
+    JOIN language l ON l.id = mt.language_id
+    WHERE l.code = 'en';
+  `;
+
+  // Switch back to English tab on bot_welcome card
   await cdp.evaluate(`{
-    const enTab = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('English'));
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const enTab = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('English'));
     if (enTab) enTab.click();
   }`);
   await sleep(500);
@@ -560,7 +699,8 @@ async function main() {
   // Type invalid placeholder into English draft
   const invalidText = "Hello {{unknown_placeholder}}!";
   await cdp.evaluate(`{
-    const textarea = document.querySelectorAll('textarea')[0];
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const textarea = card.querySelector('textarea');
     const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
     nativeSetter.call(textarea, ${JSON.stringify(invalidText)});
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
@@ -568,49 +708,56 @@ async function main() {
   }`);
   await sleep(500);
 
-  const valBeforeSave = await cdp.evaluate("document.querySelectorAll('textarea')[0].value");
-  log(`Flow 5 textarea value before save: '${valBeforeSave}'`);
-
-  // Click Save
+  // Click Save within card
   await cdp.evaluate(`{
-    const saveEnBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
-    if (saveEnBtn) {
-      saveEnBtn.click();
-    }
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const saveEnBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
+    if (saveEnBtn) saveEnBtn.click();
   }`);
-  await sleep(1500);
+  await sleep(1000);
 
-  // Check what the page shows
-  const bodyText = await cdp.evaluate("document.body.innerText");
+  // Check card text for client-side validation feedback
+  const cardText = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.innerText;
+  }`);
 
-  // Verify validation error appeared
-  const hasErrorMsg = bodyText.includes('Unknown placeholder') || bodyText.includes('Validation error');
-  if (!hasErrorMsg) {
-    log(`Flow 5 debug text: ${bodyText.slice(0, 800)}`);
-    fail("Flow 5: Expected validation error alert when unknown placeholder was submitted.");
+  const hasValidationError =
+    cardText.includes("Validation error") &&
+    cardText.includes("Unknown placeholder");
+  if (!hasValidationError) {
+    await fail(
+      `Flow 5: Expected client-side validation error inside card, got: '${cardText.slice(0, 500)}'`
+    );
   }
+  log("Flow 5: Client-side validation intercepted invalid placeholder before submission, displaying validation error.");
 
   // Verify draft is preserved in textarea
-  const preservedDraft = await cdp.evaluate(`document.querySelectorAll('textarea')[0].value`);
+  const preservedDraft = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.querySelector('textarea').value;
+  }`);
   if (preservedDraft !== invalidText) {
-    fail(`Flow 5: User input was cleared or lost on validation failure; got '${preservedDraft}'`);
+    await fail(`Flow 5: User draft was cleared or lost on validation failure; got '${preservedDraft}'`);
   }
 
-  // Verify database still has the original valid text
-  const [currentEnInDb] = await pgClient`
+  // Compare stored text AFTER the invalid save attempt: must be strictly unchanged!
+  const [storedEnAfter] = await pgClient`
     SELECT mt.body FROM message_translation mt
     JOIN language l ON l.id = mt.language_id
     WHERE l.code = 'en';
   `;
-  if (currentEnInDb.body === invalidText) {
-    fail("Flow 5: Database was updated with invalid placeholder!");
+  if (storedEnAfter.body !== storedEnBefore.body) {
+    await fail(
+      `Flow 5: Stored database text was modified after invalid submission! Before: '${storedEnBefore.body}', After: '${storedEnAfter.body}'`
+    );
   }
-  log("Flow 5 PASSED: Validation error shown, draft preserved in textarea, database unchanged.");
+  log("Flow 5 PASSED: Client-side validation displayed, draft preserved in textarea, DB text unchanged.");
 
   // ==========================================
-  // Flow 6: Check a 360px viewport for overflow and usable controls
+  // Flow 6: Check a 360px viewport for overflow and 44x44 touch targets
   // ==========================================
-  log("Flow 6: Testing 360px viewport responsiveness and touch targets...");
+  log("Flow 6: Testing 360px viewport responsiveness and 44x44px touch targets...");
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 360,
     height: 740,
@@ -623,25 +770,39 @@ async function main() {
   const innerWidth = await cdp.evaluate("window.innerWidth");
 
   if (scrollWidth > 360) {
-    fail(`Flow 6: Horizontal overflow detected at 360px: scrollWidth=${scrollWidth}, innerWidth=${innerWidth}`);
+    await fail(
+      `Flow 6: Horizontal overflow detected at 360px: scrollWidth=${scrollWidth}, innerWidth=${innerWidth}`
+    );
   }
 
-  // Check interactive buttons minimum height
-  const buttonHeights = await cdp.evaluate(`
+  // Check interactive buttons minimum width AND height >= 43.5px
+  const buttonMetrics = await cdp.evaluate(`{
     Array.from(document.querySelectorAll('button'))
       .filter(b => b.offsetWidth > 0 && b.offsetHeight > 0)
-      .map(b => ({
-        text: b.innerText.slice(0, 20),
-        height: b.getBoundingClientRect().height
-      }))
-  `);
+      .map(b => {
+        const rect = b.getBoundingClientRect();
+        return {
+          text: b.innerText.slice(0, 20),
+          width: Math.round(rect.width * 10) / 10,
+          height: Math.round(rect.height * 10) / 10,
+        };
+      });
+  }`);
 
-  const smallButtons = buttonHeights.filter((b) => b.height < 43.5);
+  const smallButtons = buttonMetrics.filter(
+    (b) => b.width < 43.5 || b.height < 43.5
+  );
   if (smallButtons.length > 0) {
-    fail(`Flow 6: Found buttons with touch target < 44px: ${JSON.stringify(smallButtons.slice(0, 3))}`);
+    await fail(
+      `Flow 6: Found buttons with touch target < 44x44px: ${JSON.stringify(
+        smallButtons.slice(0, 3)
+      )}`
+    );
   }
 
-  log(`Flow 6 PASSED: 0 horizontal overflow at 360px (scrollWidth=${scrollWidth}), touch targets >= 44px.`);
+  log(
+    `Flow 6 PASSED: 0 horizontal overflow at 360px (scrollWidth=${scrollWidth}), all touch targets >= 44x44px.`
+  );
 
   await cdp.close();
   await cleanup();
@@ -649,8 +810,8 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err);
-  cleanup();
+  await cleanup();
   process.exit(1);
 });

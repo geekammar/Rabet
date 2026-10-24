@@ -6,6 +6,7 @@ import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import {
   createTemplate,
+  RabetDataError,
   readLanguage,
   saveTranslation,
   toSafeErrorMessage,
@@ -13,6 +14,8 @@ import {
 import {
   getTemplateDefinition,
   isApprovedTemplateKey,
+  isSupportedBotContentLanguage,
+  SUPPORTED_BOT_CONTENT_LANGUAGES,
   validateTemplateBody,
 } from "@/lib/bot-content";
 
@@ -115,6 +118,15 @@ export async function saveBotContentTranslation(
     };
   }
 
+  // Enforce supported editor languages (MVP: English and Arabic only) before DB access
+  if (!isSupportedBotContentLanguage(languageCode)) {
+    return {
+      success: false,
+      code: "UNSUPPORTED_LANGUAGE",
+      message: `Language "${languageCode}" is not supported by the Bot Content editor. Supported languages are: ${SUPPORTED_BOT_CONTENT_LANGUAGES.join(", ")}.`,
+    };
+  }
+
   // 5. Validate body and placeholders
   const validation = validateTemplateBody(body, templateKey);
   if (!validation.valid) {
@@ -125,20 +137,20 @@ export async function saveBotContentTranslation(
     };
   }
 
-  // 6. Database operations
-  const db = getDb();
-
-  // Verify language is registered in the database
-  const targetLanguage = await readLanguage(db, languageCode);
-  if (!targetLanguage) {
-    return {
-      success: false,
-      code: "LANGUAGE_NOT_FOUND",
-      message: `Language "${languageCode}" is not registered. Please register it in Store Settings first.`,
-    };
-  }
-
+  // 6. Complete database failure boundary (getDb, readLanguage, createTemplate, saveTranslation)
   try {
+    const db = getDb();
+
+    // Verify language is registered in the database
+    const targetLanguage = await readLanguage(db, languageCode);
+    if (!targetLanguage) {
+      return {
+        success: false,
+        code: "LANGUAGE_NOT_FOUND",
+        message: `Language "${languageCode}" is not registered. Please register it in Store Settings first.`,
+      };
+    }
+
     // Ensure template metadata row exists; idempotent, writes only this row
     await createTemplate(db, {
       key: templateDef.key,
@@ -159,6 +171,23 @@ export async function saveBotContentTranslation(
       message: "Template translation saved successfully.",
     };
   } catch (error) {
+    if (error instanceof RabetDataError) {
+      return {
+        success: false,
+        code: error.code,
+        message: error.message,
+      };
+    }
+
+    if (error instanceof Error && error.message.includes("DATABASE_URL")) {
+      return {
+        success: false,
+        code: "DATABASE_UNAVAILABLE",
+        message:
+          "Database is not configured or unavailable. Please check your setup.",
+      };
+    }
+
     return {
       success: false,
       code: "SAVE_FAILED",
