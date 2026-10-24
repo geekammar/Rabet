@@ -1,32 +1,29 @@
 import { afterAll, afterEach, expect, it, vi } from "vitest";
-import { drizzle } from "drizzle-orm/postgres-js";
+import { drizzle as drizzlePostgres } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import * as schema from "@/db/schema";
+import { executeAtomicBatch } from "../catalog";
 
 /**
- * The data layer's driver contract — the part the disposable-PostgreSQL
- * integration suites **cannot** exercise, asserted here instead.
+ * The data layer's driver contract verification.
  *
  * `db.batch([...])` is the neon-http driver's non-interactive batched
  * transaction and the only atomicity mechanism available on that driver
- * (ADR-015): `db.transaction()` throws. The integration suites run against real
- * PostgreSQL through `drizzle-orm/postgres-js`, which in the installed Drizzle
- * version does not implement `batch` at all — so a neon batch cannot be replayed
- * against a throwaway cluster.
+ * (ADR-015): `db.transaction()` throws on neon-http.
  *
- * This file documents both halves of that boundary at the driver level: the
- * application client exposes `batch`, the integration client does not, and no
- * Phase 03C-A write path needs one (every write here is a single statement,
- * idempotent at its own site). The end-to-end batch path therefore remains
- * unexercised, honestly — it will be exercised by the first write path that
- * genuinely needs several statements to commit together.
+ * This suite proves unit contracts:
+ * 1. The application client exposes `db.batch`.
+ * 2. The integration client (postgres-js) does not expose `batch`, justifying executeAtomicBatch.
+ * 3. executeAtomicBatch dispatches to `db.batch` when present on neon-http.
+ *
+ * The PostgreSQL integration test with real neon-http serialization and rollback
+ * through the local protocol bridge runs in `tests/db/neon-driver-batch.test.ts`.
  */
 
 const originalDatabaseUrl = process.env.DATABASE_URL;
 
 afterEach(() => {
-  // The application client memoizes one instance per process.
   vi.resetModules();
 });
 
@@ -42,22 +39,25 @@ it("exposes db.batch on the application (neon-http) client", async () => {
   process.env.DATABASE_URL = "postgresql://user:pass@ep-example.neon.tech/rabet";
 
   const { getDb } = await import("@/db/client");
-
-  // This is the API a future multi-statement atomic write will use. Its presence
-  // here is the driver-level guarantee; `tests/db/client.test.ts` asserts the
-  // other half, that `transaction()` throws on this driver.
   expect(typeof getDb().batch).toBe("function");
 });
 
 it("does not expose db.batch on the integration client the DB suites use", () => {
-  // `postgres()` performs no I/O at construction; the first query would be the
-  // first connection, and this test never runs one.
   const pool = postgres("postgresql://user:pass@127.0.0.1:1/rabet", { max: 1 });
-  const integrationClient = drizzle({ client: pool, schema });
+  const integrationClient = drizzlePostgres({ client: pool, schema });
 
-  // The disposable-PostgreSQL suites therefore cannot replay a neon batch — the
-  // honest reason the batch path is verified at the driver level only.
   expect((integrationClient as unknown as { batch?: unknown }).batch).toBeUndefined();
 
   return pool.end();
+});
+
+it("proves executeAtomicBatch uses db.batch when present", async () => {
+  const mockBatch = vi.fn().mockResolvedValue(["res1", "res2"]);
+  const mockDb = { batch: mockBatch } as unknown as import("@/db/client").Database;
+
+  const queries = ["stmt1", "stmt2"] as unknown as Parameters<typeof executeAtomicBatch>[1];
+  const results = await executeAtomicBatch(mockDb, queries);
+
+  expect(mockBatch).toHaveBeenCalledWith(queries);
+  expect(results).toEqual(["res1", "res2"]);
 });
