@@ -8,6 +8,8 @@ import {
 } from "@/lib/telegram/tokens";
 
 describe("telegram tokens", () => {
+  const uuid = "123e4567-e89b-12d3-a456-426614174000";
+
   it("enforces 1-64 UTF-8 bytes ceiling", () => {
     expect(() => assertValidCallbackData("")).toThrow();
     expect(assertValidCallbackData("home")).toBe("home");
@@ -30,9 +32,9 @@ describe("telegram tokens", () => {
   });
 
   it("builds valid and compact callback tokens", () => {
-    const uuid = "123e4567-e89b-12d3-a456-426614174000";
-
     expect(tokens.home()).toBe("home");
+    expect(tokens.rootCategory()).toBe("c:root");
+    expect(tokens.rootCategory(2)).toBe("c:root:2");
     expect(tokens.lang("en")).toBe("lang:en");
     expect(tokens.lang("ar")).toBe("lang:ar");
     expect(tokens.category(uuid)).toBe(`c:${uuid}`);
@@ -46,6 +48,7 @@ describe("telegram tokens", () => {
     // All must be well below 64 bytes
     for (const token of [
       tokens.home(),
+      tokens.rootCategory(2),
       tokens.lang("en"),
       tokens.category(uuid, 99),
       tokens.product(uuid),
@@ -59,10 +62,27 @@ describe("telegram tokens", () => {
     }
   });
 
-  it("parses tokens deterministically", () => {
-    const uuid = "123e4567-e89b-12d3-a456-426614174000";
+  it("builder validates identifiers and page numbers strictly", () => {
+    expect(() => tokens.category("not-a-uuid")).toThrow(/Invalid category UUID/);
+    expect(() => tokens.category(uuid, -1)).toThrow(/Invalid page number/);
+    expect(() => tokens.category(uuid, 0)).toThrow(/Invalid page number/);
+    expect(() => tokens.category(uuid, 1.5)).toThrow(/Invalid page number/);
 
+    expect(() => tokens.product("bad-id")).toThrow(/Invalid product UUID/);
+    expect(() => tokens.action("bad-id")).toThrow(/Invalid action UUID/);
+    expect(() => tokens.submenu("bad-id")).toThrow(/Invalid action UUID/);
+    expect(() => tokens.submenu(uuid, 0)).toThrow(/Invalid page number/);
+    expect(() => tokens.back("bad-id")).toThrow(/Invalid action UUID/);
+
+    expect(() => tokens.lang("invalid!code")).toThrow(/Invalid language code/);
+    expect(() => tokens.rootCategory(0)).toThrow(/Invalid page number/);
+    expect(() => tokens.rootCategory(-2)).toThrow(/Invalid page number/);
+  });
+
+  it("parses tokens deterministically", () => {
     expect(parseToken("home")).toEqual({ type: "home" });
+    expect(parseToken("c:root")).toEqual({ type: "root", page: 1 });
+    expect(parseToken("c:root:3")).toEqual({ type: "root", page: 3 });
     expect(parseToken("lang:en")).toEqual({ type: "lang", code: "en" });
     expect(parseToken(`c:${uuid}`)).toEqual({
       type: "category",
@@ -104,5 +124,43 @@ describe("telegram tokens", () => {
       type: "unknown",
       raw: "",
     });
+  });
+
+  it("strictly rejects malformed tokens and invalid page syntax", () => {
+    // Malformed category tokens
+    expect(parseToken("c:not-a-uuid")).toEqual({ type: "unknown", raw: "c:not-a-uuid" });
+    expect(parseToken(`c:${uuid}:2junk`)).toEqual({
+      type: "unknown",
+      raw: `c:${uuid}:2junk`,
+    });
+    expect(parseToken(`c:${uuid}:-1`)).toEqual({ type: "unknown", raw: `c:${uuid}:-1` });
+    expect(parseToken(`c:${uuid}:0`)).toEqual({ type: "unknown", raw: `c:${uuid}:0` });
+    expect(parseToken(`c:${uuid}:1.5`)).toEqual({ type: "unknown", raw: `c:${uuid}:1.5` });
+    expect(parseToken(`c:${uuid}:`)).toEqual({ type: "unknown", raw: `c:${uuid}:` });
+
+    // Malformed root category tokens
+    expect(parseToken("c:root:abc")).toEqual({ type: "unknown", raw: "c:root:abc" });
+    expect(parseToken("c:root:-1")).toEqual({ type: "unknown", raw: "c:root:-1" });
+
+    // Malformed submenu tokens
+    expect(parseToken("m:not-a-uuid")).toEqual({ type: "unknown", raw: "m:not-a-uuid" });
+    expect(parseToken(`m:${uuid}:0`)).toEqual({ type: "unknown", raw: `m:${uuid}:0` });
+    expect(parseToken(`m:${uuid}:10junk`)).toEqual({
+      type: "unknown",
+      raw: `m:${uuid}:10junk`,
+    });
+
+    // Malformed product, action, back, and language tokens
+    expect(parseToken("p:invalid-uuid")).toEqual({ type: "unknown", raw: "p:invalid-uuid" });
+    expect(parseToken("a:invalid-uuid")).toEqual({ type: "unknown", raw: "a:invalid-uuid" });
+    expect(parseToken("b:invalid-uuid")).toEqual({ type: "unknown", raw: "b:invalid-uuid" });
+    expect(parseToken("lang:invalid!code")).toEqual({
+      type: "unknown",
+      raw: "lang:invalid!code",
+    });
+
+    // Overlength payload (>64 bytes)
+    const overlength = "c:" + "a".repeat(70);
+    expect(parseToken(overlength)).toEqual({ type: "unknown", raw: overlength });
   });
 });

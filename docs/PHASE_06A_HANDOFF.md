@@ -22,14 +22,14 @@ The implementation enforces a clean separation of concerns without introducing g
 src/
 ├── app/api/telegram/webhook/route.ts   # Next.js App Router POST webhook endpoint
 ├── lib/telegram/
-│   ├── types.ts                       # Telegram Bot API updates, keyboards, and transport contracts
-│   ├── tokens.ts                      # Strict <= 64-byte UTF-8 callback token encoder/parser
-│   ├── transport.ts                   # Injected transport interface, fetch client, fake test transport
-│   ├── catalog-journey.ts             # Navigation state-machine, visibility validation, localization
-│   └── webhook.ts                     # Request authentication (timingSafeEqual), dedup, dispatch
+│   ├── types.ts                       # Telegram Bot API updates, error classification, and transport contracts
+│   ├── tokens.ts                      # Strict <= 64-byte UTF-8 callback token encoder/parser with grammar validation
+│   ├── transport.ts                   # Injected transport interface, fetch client with timeouts & sanitization, fake test transport
+│   ├── catalog-journey.ts             # Navigation state-machine, visibility validation, localization, text bounding
+│   └── webhook.ts                     # Request authentication (timingSafeEqual), input validation, atomic dedup/claim, dispatch
 ├── lib/data/
 │   ├── customer.ts                    # Minimal customer upsert and language preference persistence
-│   └── telegram.ts                    # telegram_update deduplication log & retry status tracking
+│   └── telegram.ts                    # telegram_update atomic claim ownership, lease recovery, and attempt tracking
 ```
 
 ### 2.1 Webhook Authentication and Safety Boundary
@@ -38,43 +38,99 @@ src/
 - **Session Exemption:** Configured in `src/proxy.ts` so the webhook is reachable without an admin session. Admin routes remain strictly guarded.
 - **Request Authentication:** Incoming requests must present the secret token header `X-Telegram-Bot-Api-Secret-Token`. Validated using constant-time comparison (`crypto.timingSafeEqual`).
 - **Fail-Closed Guarantee:** Missing configuration (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`) or invalid/missing secret tokens immediately fail closed (HTTP 503 / 401) with sanitized JSON responses and perform zero database writes and zero outbound HTTP calls.
-- **Build Isolation:** The build succeed without a database or Telegram credentials (`env -u DATABASE_URL npm run build`). No database connections or Telegram endpoints are queried at module evaluation time.
-- **Secret & Privacy Protection:** Bot tokens, request URLs with tokens, secret headers, database credentials, and raw customer message bodies are never logged or exposed in errors.
+- **Build Isolation:** The build succeeds without a database or Telegram credentials (`env -u DATABASE_URL npm run build`). No database connections or Telegram endpoints are queried at module evaluation time.
+- **Secret & Privacy Protection:** Bot tokens, database connection URLs, secret headers, customer message bodies, and raw exception objects are never returned in public HTTP responses or logged. Public responses use fixed strings (`"Internal server error"`, `"Bad request"`, `"Unauthorized"`, `"Telegram webhook is not configured."`).
 
 ---
 
-## 3. Callback Token Contract (`src/lib/telegram/tokens.ts`)
+## 3. Atomic Retry Ownership & Database Recovery Policy
 
-Telegram enforces a strict limit of **1–64 UTF-8 bytes** on `callback_data`. Rabet validates every callback data string against this byte length limit (`Buffer.byteLength(token, "utf8") <= 64`) before rendering keyboards.
+The webhook deduplication and retry mechanism is database-backed and compatible with the production Neon HTTP driver (where cross-instance advisory locks or interactive multi-query transactions are not available):
 
-All tokens are self-scoping and stateless:
-| Token Pattern | Size (bytes) | Meaning |
-| --- | --- | --- |
-| `home` | 4 | Main catalog root (categories with `parent_id IS NULL`). |
-| `lang:<code>` | 7 | Customer language selection (e.g., `lang:en`, `lang:ar`). |
-| `c:<uuid>` | 38 | Open category menu (page 1). |
-| `c:<uuid>:<n>` | 40–42 | Open category menu page `n`. |
-| `p:<uuid>` | 38 | Open product card with displayed price and root buttons. |
-| `a:<uuid>` | 38 | Execute product action (`OPEN_SUBMENU`, `SHOW_DETAILS`, etc.). |
-| `m:<uuid>` | 38 | Open action submenu page 1. |
-| `m:<uuid>:<n>` | 40–42 | Open action submenu page `n`. |
-| `b:<uuid>` | 38 | Context-aware Back navigation from action to parent submenu or product card. |
+### 3.1 Attempt Claiming Protocol (`claimTelegramUpdate`)
+1. **Initial Attempt:** Uses `INSERT INTO telegram_update (update_id, update_type, payload) VALUES (...) ON CONFLICT DO NOTHING RETURNING ...`.
+   - If a row is inserted, the attempt acquires ownership (`status: "claimed"`).
+2. **Concurrent Initial Race:** If another worker concurrently receives the same `update_id`, only one row is inserted. The losing worker inspects the record: if `processed_at IS NULL` and `processing_error IS NULL` and the lease is active, it returns `status: "in_flight"`.
+3. **Atomic Retry / Recovery:** When an update failed previously (`processing_error IS NOT NULL`) or an in-flight attempt was abandoned past the lease window, a worker claims ownership via a single conditional atomic update:
+   ```sql
+   UPDATE telegram_update
+   SET payload = :envelope, processing_error = NULL
+   WHERE update_id = :updateId
+     AND processed_at IS NULL
+     AND (
+       processing_error IS NOT NULL
+       OR (payload->>'claimedAt') IS NULL
+       OR (payload->>'claimedAt')::timestamptz <= :leaseCutoff
+     )
+   RETURNING *;
+   ```
+   PostgreSQL row-level write serialization guarantees that across concurrent retry deliveries, **exactly one** worker succeeds and acquires ownership (`status: "claimed"`). The runner receives `status: "in_flight"` and avoids duplicate work.
+4. **Attempt Identity Guard:** Each claim stamps a unique `attemptId` (UUID) into `payload->>'attemptId'`.
+   - `markTelegramUpdateProcessed(db, { updateId, attemptId })` updates `processed_at` only `WHERE payload->>'attemptId' = :attemptId`.
+   - `markTelegramUpdateFailed(db, { updateId, attemptId, errorMessage })` updates `processing_error` only `WHERE payload->>'attemptId' = :attemptId`.
+   - **Stale Attempt Protection:** A stale attempt that was superseded by a newer retry attempt cannot mark the record processed or overwrite newer attempt diagnostics.
+5. **Abandoned In-Flight Recovery:** `IN_FLIGHT_LEASE_MS = 30_000` (30 seconds). If a serverless instance crashes mid-execution without setting `processing_error`, subsequent redeliveries after 30 seconds atomically reclaim the update. Permanently abandoned in-flight records are not treated as successful processing.
+6. **Delivery Ambiguity Boundary:** External HTTP delivery to Telegram cannot be transactional with a database write. If a process dies immediately after `sendMessage` succeeds but before `markTelegramUpdateProcessed` commits, Telegram will not retry (since it received 200, or will retry if connection closed). A database cannot guarantee exactly-once physical delivery across arbitrary external crash windows; our architecture guarantees single-owner attempt execution and idempotency without heavyweight queue infrastructure.
 
 ---
 
-## 4. Supported vs. Deferred Runtime Actions
+## 4. Callback Token Contract (`src/lib/telegram/tokens.ts`)
 
-### 4.1 Supported Runtime Features (Phase 06-A)
-- **/start command:** Upserts minimal customer record (`telegramId`, names, username, language hint). Evaluates `bot_setting.askForLanguage` and enabled languages. Offers language choice keyboard only when choice is required; otherwise renders welcome message and root catalog.
+Telegram enforces a strict limit of **1–64 UTF-8 bytes** on `callback_data`. Rabet strictly validates input and output against token grammar:
+
+| Token Pattern | Size (bytes) | Grammar & Range | Meaning |
+| --- | --- | --- | --- |
+| `home` | 4 | Exact match | Main catalog root (page 1). |
+| `c:root` | 6 | Exact match | Root categories list (page 1). |
+| `c:root:<n>` | 8–12 | `<n>` is positive integer `[1..99999]` | Root categories list page `n`. |
+| `lang:<code>` | 7 | `<code>` matches `^[a-z]{2,5}(-[a-zA-Z0-9]+)?$` | Customer language selection (e.g., `lang:en`, `lang:ar`). |
+| `c:<uuid>` | 38 | `<uuid>` matches 8-4-4-4-12 hex UUID | Open category menu (page 1). |
+| `c:<uuid>:<n>` | 40–44 | `<uuid>` + positive integer `[1..99999]` | Open category menu page `n`. |
+| `p:<uuid>` | 38 | `<uuid>` matches 8-4-4-4-12 hex UUID | Open product card with displayed price. |
+| `a:<uuid>` | 38 | `<uuid>` matches 8-4-4-4-12 hex UUID | Execute product action (`OPEN_SUBMENU`, `SHOW_DETAILS`, etc.). |
+| `m:<uuid>` | 38 | `<uuid>` matches 8-4-4-4-12 hex UUID | Open action submenu page 1. |
+| `m:<uuid>:<n>` | 40–44 | `<uuid>` + positive integer `[1..99999]` | Open action submenu page `n`. |
+| `b:<uuid>` | 38 | `<uuid>` matches 8-4-4-4-12 hex UUID | Back navigation from action to parent submenu or product card. |
+
+**Grammar Validation:**
+- Values such as `c:not-a-uuid`, `c:<uuid>:2junk`, negative/fractional pages (`c:<uuid>:-1`), or overlength UTF-8 strings (>64 bytes) are strictly parsed as `{ type: "unknown", raw: ... }` rather than silently accepted via `parseInt` defaults.
+
+---
+
+## 5. Delivery Results, Timeouts, and Error Classification
+
+### 5.1 Transport Timeout & Sanitization (`src/lib/telegram/transport.ts`)
+- All outbound Telegram requests use `AbortSignal.timeout(10_000)` (`DEFAULT_REQUEST_TIMEOUT_MS = 10_000`).
+- Errors are classified into structured kinds:
+  - `"not_modified"`: Telegram 400 when edited message content matches identically; treated as successful no-op.
+  - `"not_editable"`: Telegram 400 when message cannot be edited or was deleted; safely triggers fallback to `sendMessage`.
+  - `"rate_limited"`: Telegram 429; captures `parameters.retry_after`.
+  - `"timeout"`: AbortError or TimeoutError.
+  - `"network_error"`: Connection drops or DNS failures.
+  - `"api_error"`: Other 4xx/5xx responses or non-JSON payloads (e.g. 502 Bad Gateway HTML).
+- **Selective Edit Fallback:** `editOrThrow` falls back to `sendMessage` **only** when `errorKind === "not_editable"`. Timeouts, rate-limits, and API errors throw immediately to avoid duplicate messages or traffic spikes.
+
+### 5.2 Payload Limits & Safe Text Bounding
+- Telegram restricts message text to **4096 characters** and callback data to **64 bytes**.
+- `boundMessageText(text, maxLen = 4096)`: Safely bounds text without splitting UTF-16 surrogate pairs (e.g. multibyte emojis).
+- Fake transport (`createFakeTelegramTransport`) enforces these limits in tests to mirror official Telegram Bot API validation.
+
+---
+
+## 6. Supported vs. Deferred Runtime Actions
+
+### 6.1 Supported Runtime Features (Phase 06-A)
+- **/start command:** Strictly matched with `/^\/start(?:@\w+)?(?:\s+.*)?$/i`. Non-start messages trigger plain-text guidance (`"To browse our catalog, please send /start"`). If sending guidance fails, HTTP 500 is returned.
 - **Language Selection:** Persists customer preference to `customer.selectedLanguageId` and immediately renders catalog in chosen language.
+- **Root Catalog Pagination:** Paginated when root categories exceed `TELEGRAM_MENU_PAGE_SIZE = 10` with stable tie-breaking (`ORDER BY sort_order ASC, id ASC`).
 - **Catalog Browsing:** Category hierarchy traversal, nested subcategories, product lists.
 - **Product Card:** Displays localized name, description, and exact decimal price (`price` + `bot_setting.currency`) without floating-point conversion.
-- **`OPEN_SUBMENU`:** Renders configured localized `menu_text` (or fallback) and active child buttons in saved sibling order.
+- **`OPEN_SUBMENU`:** Renders configured localized `menu_text` (or fallback) and active child buttons in deterministic sibling order (`ORDER BY sort_order ASC, id ASC`).
 - **`SHOW_DETAILS`:** Displays localized `details`, falling back to `description`, then generic safe message.
 - **Navigation Controls:** Context-aware `◀ Back`, `🏠 Home`, and `📦 Return to Product`.
-- **Deterministic Pagination:** Bounded page sizes (`TELEGRAM_MENU_PAGE_SIZE = 10`) with Next/Prev page controls.
+- **Ancestry Safeguards:** Validates category and action hierarchies. If loop reaches safeguard depth (64) while ancestors remain unresolved, it **fails closed** (`valid: false`).
 
-### 4.2 Deferred Actions & Truthful Fallback
+### 6.2 Deferred Actions & Truthful Fallback
 The following action types have full administrative configuration and database persistence in Rabet, but their customer-side runtime is deferred to upcoming phases:
 - `START_INQUIRY` (Phase 07)
 - `OPEN_SUPPORT` (Phase 07)
@@ -93,50 +149,17 @@ When a deferred action button is tapped in Telegram:
 
 ---
 
-## 5. Authoritative Visibility & Stale Keyboard Protection
-
-Telegram inline buttons remain in chat history indefinitely. To prevent stale buttons from bypassing current administrative state, every button tap authoritatively re-validates server-side:
-1. **Target Existence:** Record must exist in PostgreSQL.
-2. **Soft Deletion Check:** Record must have `deleted_at IS NULL`.
-3. **Activation State:** Record must have `is_active = true`.
-4. **Ancestor Chain Validation:** Every ancestor category and ancestor action up to the root must have `is_active = true` and `deleted_at IS NULL`.
-5. **Submenu-Only Hierarchy:** Ancestor actions must be of type `OPEN_SUBMENU`.
-
-If any validation fails (e.g., an admin deactivated a parent category or product after the customer received the keyboard), the bot answers with a localized unavailable notice (`"This category is no longer available."`, `"This product is no longer available."`, or `"This option is no longer available."`) and an offer to return Home or to the product card.
-
----
-
-## 6. Deduplication, Idempotency, and Delivery Failure Guarantees
-
-### 6.1 Database Idempotency
-- Uses the existing `telegram_update` table.
-- Each incoming update initiates an insert on `update_id` (`ON CONFLICT DO NOTHING`).
-- **Sequential Redelivery:** If `processed_at` is non-null, the update is recognized as already handled and returns HTTP 200 `{ ok: true, status: "already_processed" }` without re-executing writes or outbound Telegram calls.
-- **Concurrent Redelivery:** Parallel requests for the same `update_id` encounter unique constraint conflict; exactly one worker acquires the insert lock and processes the update.
-- **Customer Upsert:** Customer records are upserted on `telegram_id` using `ON CONFLICT DO UPDATE`, preserving existing language choices and preventing duplicates.
-
-### 6.2 Transport Failure and Retry Path
-- External Telegram HTTP API calls cannot be made atomic inside a database transaction.
-- When an outbound send or edit fails (e.g., Telegram timeout or HTTP 5xx):
-  - `telegram_update.processing_error` records the sanitized error message.
-  - `telegram_update.processed_at` **remains null**.
-  - The webhook handler returns HTTP 500 so Telegram will retry delivery.
-- On subsequent redelivery from Telegram, the handler detects that `processed_at` is null and retries the outbound call. Upon success, `processed_at` is stamped and `processing_error` is cleared.
-- **Honest Delivery Boundary:** Exactly-once external delivery cannot be mathematically guaranteed across arbitrary process crashes occurring between Telegram send completion and database commit. In this slice, bounded idempotency and retry tracking prevent message duplication and dropped updates without heavyweight external queue infrastructure.
-
----
-
 ## 7. Verification Results
 
-All suites executed and passed on real PostgreSQL and clean environment:
+All test suites executed and passed against real disposable PostgreSQL and clean environment:
 
 | Suite / Command | Scope | Result |
 | --- | --- | --- |
-| `npm run lint` | ESLint across all source files | ✅ Pass (0 errors) |
-| `npm run typecheck` | Strict TypeScript check | ✅ Pass (0 errors) |
-| `npm test` | Unit tests (`tokens`, `transport`, `bot-content`, etc.) | ✅ Pass (478 passed) |
-| `npm run test:telegram` | Webhook, journey, tokens, and transport suites | ✅ Pass (20 passed) |
-| `npm run test:db` | All real PostgreSQL database integration tests | ✅ Pass (191 passed) |
+| `npm run lint` | ESLint across all source and test files | ✅ Pass (0 errors, 0 warnings) |
+| `npm run typecheck` | Strict TypeScript compilation check | ✅ Pass (0 errors) |
+| `npm test` | All unit tests across all application modules | ✅ Pass (489 passed) |
+| `npm run test:telegram` | Webhook, retry ownership, privacy, tokens, and transport suites | ✅ Pass (39 passed) |
+| `npm run test:db` | All real PostgreSQL database integration tests | ✅ Pass (201 passed) |
 | `npm run db:check` | Drizzle schema check against migration chain | ✅ Pass (Everything's fine) |
 | `env -u DATABASE_URL npm run build` | Next.js production build without database or credentials | ✅ Pass (Route `/api/telegram/webhook` registered) |
 

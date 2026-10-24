@@ -125,6 +125,20 @@ async function resolveCustomerLanguageContext(
 }
 
 /**
+ * Safe Unicode-aware message text bounding to Telegram's 4096-character limit.
+ * Never splits UTF-16 surrogate pairs.
+ */
+export function boundMessageText(text: string, maxLen = 4096): string {
+  if (text.length <= maxLen) return text;
+  let end = maxLen;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
+/**
  * Checks category existence, active flag, and whether all ancestors are active and not soft-deleted.
  */
 async function isCategoryHierarchyActive(
@@ -161,7 +175,12 @@ async function isCategoryHierarchyActive(
     depth += 1;
   }
 
-  return { valid: Boolean(targetRow), categoryRow: targetRow };
+  // If loop exited with depth safeguard while ancestors remain unresolved, fail closed.
+  if (currentId !== null || !targetRow) {
+    return { valid: false };
+  }
+
+  return { valid: true, categoryRow: targetRow };
 }
 
 /**
@@ -232,7 +251,8 @@ async function isActionHierarchyActive(
     depth += 1;
   }
 
-  if (!targetRow) {
+  // If loop exited with depth safeguard while ancestors remain unresolved, fail closed.
+  if (currentId !== null || !targetRow) {
     return { valid: false };
   }
 
@@ -253,7 +273,11 @@ async function sendOrThrow(
     replyMarkup?: TelegramInlineKeyboardMarkup;
   },
 ): Promise<void> {
-  const res = await transport.sendMessage(params);
+  const boundedParams = {
+    ...params,
+    text: boundMessageText(params.text),
+  };
+  const res = await transport.sendMessage(boundedParams);
   if (!res.ok) {
     throw new Error(res.error ?? "Failed to send Telegram message");
   }
@@ -268,16 +292,25 @@ async function editOrThrow(
     replyMarkup?: TelegramInlineKeyboardMarkup;
   },
 ): Promise<void> {
-  const res = await transport.editMessageText(params);
+  const boundedParams = {
+    ...params,
+    text: boundMessageText(params.text),
+  };
+  const res = await transport.editMessageText(boundedParams);
   if (!res.ok) {
-    const sendRes = await transport.sendMessage({
-      chatId: params.chatId,
-      text: params.text,
-      replyMarkup: params.replyMarkup,
-    });
-    if (!sendRes.ok) {
-      throw new Error(res.error ?? sendRes.error ?? "Failed to deliver Telegram message");
+    // Only fall back to sendMessage if the message was not editable
+    if (res.errorKind === "not_editable") {
+      const sendRes = await transport.sendMessage({
+        chatId: boundedParams.chatId,
+        text: boundedParams.text,
+        replyMarkup: boundedParams.replyMarkup,
+      });
+      if (!sendRes.ok) {
+        throw new Error(sendRes.error ?? "Failed to send replacement Telegram message");
+      }
+      return;
     }
+    throw new Error(res.error ?? "Failed to edit Telegram message");
   }
 }
 
@@ -290,6 +323,7 @@ async function renderRootCatalog(
   chatId: number | string,
   user: TelegramUser,
   messageIdToEdit?: number,
+  page = 1,
 ): Promise<void> {
   const settings = await readSettings(db);
   if (!settings) {
@@ -305,6 +339,7 @@ async function renderRootCatalog(
     user.id,
     settings.defaultLanguageId,
   );
+  const ui = getLocalizedUiStrings(langContext.isRtl);
 
   // Resolve welcome text
   let welcomeBody = `Welcome to ${settings.displayName}!`;
@@ -322,7 +357,7 @@ async function renderRootCatalog(
     // Fall back to simple greeting
   }
 
-  // Read root categories
+  // Read root categories with deterministic tie-breaking
   const rootCategories = await db
     .select({
       id: category.id,
@@ -337,12 +372,17 @@ async function renderRootCatalog(
         isNull(category.deletedAt),
       ),
     )
-    .orderBy(asc(category.sortOrder));
+    .orderBy(asc(category.sortOrder), asc(category.id));
+
+  const totalPages = Math.max(1, Math.ceil(rootCategories.length / TELEGRAM_MENU_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(1, page), totalPages);
+  const startIndex = (currentPage - 1) * TELEGRAM_MENU_PAGE_SIZE;
+  const pageCategories = rootCategories.slice(startIndex, startIndex + TELEGRAM_MENU_PAGE_SIZE);
 
   // Get translations for root categories
   const keyboard: TelegramInlineKeyboardButton[][] = [];
 
-  for (const cat of rootCategories) {
+  for (const cat of pageCategories) {
     const translations = await db
       .select({
         languageId: categoryTranslation.languageId,
@@ -361,6 +401,24 @@ async function renderRootCatalog(
         callback_data: tokens.category(cat.id),
       },
     ]);
+  }
+
+  // Pagination row if multiple pages
+  if (totalPages > 1) {
+    const navButtons: TelegramInlineKeyboardButton[] = [];
+    if (currentPage > 1) {
+      navButtons.push({
+        text: ui.prevPage,
+        callback_data: tokens.rootCategory(currentPage - 1),
+      });
+    }
+    if (currentPage < totalPages) {
+      navButtons.push({
+        text: ui.nextPage,
+        callback_data: tokens.rootCategory(currentPage + 1),
+      });
+    }
+    keyboard.push(navButtons);
   }
 
   const replyMarkup: TelegramInlineKeyboardMarkup = { inline_keyboard: keyboard };
@@ -514,9 +572,14 @@ export async function handleCallbackQuery(
   );
   const ui = getLocalizedUiStrings(langContext.isRtl);
 
-  // 2. Home callback
+  // 2. Home or Root callback
   if (parsed.type === "home") {
-    await renderRootCatalog(db, transport, chatId, user, messageId);
+    await renderRootCatalog(db, transport, chatId, user, messageId, 1);
+    return;
+  }
+
+  if (parsed.type === "root") {
+    await renderRootCatalog(db, transport, chatId, user, messageId, parsed.page);
     return;
   }
 
@@ -557,7 +620,7 @@ export async function handleCallbackQuery(
       bodyText += `\n\n${catDesc.trim()}`;
     }
 
-    // Active subcategories
+    // Active subcategories with deterministic tie-breaking
     const subcategories = await db
       .select({
         id: category.id,
@@ -572,9 +635,9 @@ export async function handleCallbackQuery(
           isNull(category.deletedAt),
         ),
       )
-      .orderBy(asc(category.sortOrder));
+      .orderBy(asc(category.sortOrder), asc(category.id));
 
-    // Active products
+    // Active products with deterministic tie-breaking
     const productsList = await db
       .select({
         id: product.id,
@@ -590,7 +653,7 @@ export async function handleCallbackQuery(
           isNull(product.deletedAt),
         ),
       )
-      .orderBy(asc(product.sortOrder));
+      .orderBy(asc(product.sortOrder), asc(product.id));
 
     // Combine items for deterministic pagination
     const allItems: Array<
@@ -728,7 +791,7 @@ export async function handleCallbackQuery(
     // Exact decimal price display without floating-point conversion
     bodyText += `\n\n${ui.priceLabel} ${prodRow.price} ${settings.currency}`;
 
-    // Root product actions
+    // Root product actions with deterministic tie-breaking
     const rootActions = await db
       .select({
         id: productAction.id,
@@ -743,7 +806,7 @@ export async function handleCallbackQuery(
           eq(productAction.isActive, true),
         ),
       )
-      .orderBy(asc(productAction.sortOrder));
+      .orderBy(asc(productAction.sortOrder), asc(productAction.id));
 
     const keyboard: TelegramInlineKeyboardButton[][] = [];
 
@@ -906,7 +969,7 @@ async function handleActionExecution(
 
     const bodyText = menuText && menuText.trim().length > 0 ? menuText.trim() : label;
 
-    // Active children
+    // Active children with deterministic tie-breaking
     const children = await db
       .select({
         id: productAction.id,
@@ -920,7 +983,7 @@ async function handleActionExecution(
           eq(productAction.isActive, true),
         ),
       )
-      .orderBy(asc(productAction.sortOrder));
+      .orderBy(asc(productAction.sortOrder), asc(productAction.id));
 
     const totalPages = Math.max(1, Math.ceil(children.length / TELEGRAM_MENU_PAGE_SIZE));
     const currentPage = Math.min(Math.max(1, page), totalPages);

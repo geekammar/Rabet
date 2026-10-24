@@ -55,15 +55,27 @@ export interface TelegramInlineKeyboardMarkup {
   inline_keyboard: TelegramInlineKeyboardButton[][];
 }
 
+export type TelegramErrorKind =
+  | "not_modified"
+  | "not_editable"
+  | "rate_limited"
+  | "timeout"
+  | "network_error"
+  | "api_error";
+
 export interface TelegramSendResult {
   ok: boolean;
   messageId?: number;
   error?: string;
+  errorKind?: TelegramErrorKind;
+  retryAfterSeconds?: number;
 }
 
 export interface TelegramAnswerResult {
   ok: boolean;
   error?: string;
+  errorKind?: TelegramErrorKind;
+  retryAfterSeconds?: number;
 }
 
 export interface TelegramTransport {
