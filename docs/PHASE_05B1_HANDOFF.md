@@ -118,8 +118,8 @@ export const MAX_ACTION_DEPTH_SAFEGUARD = 64;
 - `npm run db:check`: **0 schema drift** ("Everything's fine").
 
 ### 5.2. Unit & Integration Tests
-- `npm test`: **30 test files passed** (424 tests passed, 160 skipped for unconfigured external services, 0 failures).
-- `npm run test:db`: **15 test files passed** (166 tests passed against disposable PostgreSQL, 0 failures).
+- `npm test`: **30 test files passed** (440 tests passed, 164 skipped for unconfigured external services, 0 failures).
+- `npm run test:db`: **15 test files passed** (170 tests passed against disposable PostgreSQL, 0 failures).
   - Includes `tests/db/product-actions-persistence.test.ts` verifying:
     1. Multi-level submenu creation and atomic persistence.
     2. Atomic rollback on translation failure (zero partial records).
@@ -139,10 +139,14 @@ Executed against `next start` with a real disposable PostgreSQL fixture and auto
 7. **Scenario 7 (Transport Failure & Retry)**: Injected synthetic network failure during save; UI displayed retryable communication error alert and preserved user draft. Restored network, retried save, and verified successful commit to PostgreSQL.
 8. **Scenario 8 (Mobile 360px & Touch Targets)**: Tested viewport at 360 × 800 px; verified `scrollWidth <= clientWidth` (zero horizontal overflow) and all interactive buttons/checkboxes measure at least 44 × 44 CSS pixels.
 9. **Scenario 9 (Delayed-Response Reconciliation & Scoping)**: Simulated delayed server response on action mutation and product switching; proved in-flight saves do not corrupt adjacent nodes or overwrite newer inputs, and product transitions safely discard outdated responses.
+10. **Scenario 10 (Tree Read & Mutation Lifecycle Overlap Closure)**: Verified mutual exclusion and request coordination under simulated network delays:
+    - **10A (Initial Load vs Create)**: Held initial tree load; verified `Add Button` and `Refresh` were disabled and programmatic creation was blocked. Released hold, created action, and confirmed unique action IDs and persistence.
+    - **10B (Refresh vs Mutation)**: Held manual refresh response; verified edit drawer inputs and `Save` button were disabled and programmatic save was blocked. Released hold, executed save, and confirmed authoritative update in DOM and PostgreSQL.
+    - **10C (Mutation vs Refresh)**: Held save mutation; verified `Refresh` button was disabled and programmatic refresh was rejected without initiating a network request. Released mutation, verified persisted label, and confirmed persistence across full browser reload.
 
 ---
 
-## 6. PR #14 Safety & Save Contract Repairs
+## 6. PR #14 Safety, Save Contract & Coordination Repairs
 
 The following repairs were applied on PR #14 based on review findings:
 1. **Truthful Save Contract**:
@@ -160,6 +164,10 @@ The following repairs were applied on PR #14 based on review findings:
 4. **Concurrency-Safe Active Child Limits**:
    - Active child checks for creation and activation use atomic SQL verification combined with row-level locks (`SELECT ... FOR UPDATE`) in `executeAtomicBatch`.
    - Simultaneous activations at the limit boundary are safely serialized; surplus operations roll back atomically with safe feedback.
+5. **Tree Read / Mutation Coordination**:
+   - Closed race conditions between reads (initial load, manual refresh) and mutations (create, edit/save) via synchronous refs (`isReadActiveRef`, `isMutationActiveRef`), monotonic `loadGenerationRef`, and unified UI gating (`isBusy = isLoading || isPending`).
+   - Gated all relevant UI controls (Refresh, Add Button, Action Node selection, Add Child, Edit Inputs, Save, Create inputs, Submit) and enforced immediate synchronous entry handler checks (`if (isReadActiveRef.current || isMutationActiveRef.current || isBusy) return;`).
+   - Ensured all operation locks are reliably released in `finally` blocks on success, structured failure, and thrown rejections.
 
 ---
 

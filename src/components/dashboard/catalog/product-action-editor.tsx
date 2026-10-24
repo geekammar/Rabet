@@ -92,6 +92,16 @@ export function ProductActionEditor({
   const [activeLangTab, setActiveLangTab] = useState<string>(defaultLangCode);
 
   const saveVersionRef = useRef(0);
+  const loadGenerationRef = useRef(0);
+  const isReadActiveRef = useRef(false);
+  const isMutationActiveRef = useRef(false);
+  const currentProductIdRef = useRef(product.id);
+  const editingActionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    editingActionIdRef.current = editingActionId;
+  }, [editingActionId]);
+
   const [prevProductId, setPrevProductId] = useState(product.id);
 
   // Edit Form Draft State
@@ -109,16 +119,31 @@ export function ProductActionEditor({
     setEditingActionId(null);
     setActionFeedback(null);
     setEditDraftTranslations({});
+    setIsCreateOpen(false);
   }
 
-  // Fetch actions on mount / product change
+  // Combined busy flag for UI controls
+  const isBusy = isLoading || isPending;
+
   const reloadActions = () => {
-    const targetProductId = product.id;
+    if (isReadActiveRef.current || isMutationActiveRef.current || isBusy) {
+      return;
+    }
+    const targetProductId = currentProductIdRef.current;
+    const gen = ++loadGenerationRef.current;
+    isReadActiveRef.current = true;
     setIsLoading(true);
     setActionFeedback(null);
+
     loadProductActionsAction(targetProductId)
       .then((res) => {
-        if (product.id !== targetProductId) return;
+        if (
+          gen !== loadGenerationRef.current ||
+          targetProductId !== currentProductIdRef.current
+        ) {
+          return;
+        }
+        isReadActiveRef.current = false;
         setIsLoading(false);
         if (res.success && res.actions) {
           setActions(res.actions);
@@ -131,7 +156,13 @@ export function ProductActionEditor({
         }
       })
       .catch(() => {
-        if (product.id !== targetProductId) return;
+        if (
+          gen !== loadGenerationRef.current ||
+          targetProductId !== currentProductIdRef.current
+        ) {
+          return;
+        }
+        isReadActiveRef.current = false;
         setIsLoading(false);
         setActionFeedback({
           success: false,
@@ -142,34 +173,59 @@ export function ProductActionEditor({
   };
 
   useEffect(() => {
-    let isMounted = true;
+    currentProductIdRef.current = product.id;
+    const gen = ++loadGenerationRef.current;
+    isReadActiveRef.current = false;
+    isMutationActiveRef.current = false;
+    let isCurrent = true;
 
-    loadProductActionsAction(product.id)
-      .then((res) => {
-        if (!isMounted) return;
-        setIsLoading(false);
-        if (res.success && res.actions) {
-          setActions(res.actions);
-          setExpandedNodeIds(new Set(res.actions.map((a) => a.id)));
-        } else {
+    if (!isMutationActiveRef.current) {
+      isReadActiveRef.current = true;
+      setIsLoading(true);
+      setActionFeedback(null);
+
+      loadProductActionsAction(product.id)
+        .then((res) => {
+          if (
+            !isCurrent ||
+            gen !== loadGenerationRef.current ||
+            product.id !== currentProductIdRef.current
+          ) {
+            return;
+          }
+          isReadActiveRef.current = false;
+          setIsLoading(false);
+          if (res.success && res.actions) {
+            setActions(res.actions);
+            setExpandedNodeIds(new Set(res.actions.map((a) => a.id)));
+          } else {
+            setActionFeedback({
+              success: false,
+              message: res.message || "Failed to load product buttons.",
+            });
+          }
+        })
+        .catch(() => {
+          if (
+            !isCurrent ||
+            gen !== loadGenerationRef.current ||
+            product.id !== currentProductIdRef.current
+          ) {
+            return;
+          }
+          isReadActiveRef.current = false;
+          setIsLoading(false);
           setActionFeedback({
             success: false,
-            message: res.message || "Failed to load product buttons.",
+            message:
+              "A communication error occurred while loading buttons. Please try again.",
           });
-        }
-      })
-      .catch(() => {
-        if (!isMounted) return;
-        setIsLoading(false);
-        setActionFeedback({
-          success: false,
-          message:
-            "A communication error occurred while loading buttons. Please try again.",
         });
-      });
+    }
 
     return () => {
-      isMounted = false;
+      isCurrent = false;
+      isReadActiveRef.current = false;
     };
   }, [product.id]);
 
@@ -216,6 +272,9 @@ export function ProductActionEditor({
   };
 
   const handleStartEdit = (node: HierarchyActionNode) => {
+    if (isReadActiveRef.current || isMutationActiveRef.current || isBusy) {
+      return;
+    }
     setEditingActionId(node.id);
     setActionFeedback(null);
     syncEditDraft(node);
@@ -223,13 +282,18 @@ export function ProductActionEditor({
 
   const handleSaveEdit = () => {
     if (!selectedNode) return;
+    if (isReadActiveRef.current || isMutationActiveRef.current || isBusy) {
+      return;
+    }
     const targetActionId = selectedNode.id;
-    const targetProductId = product.id;
+    const targetProductId = currentProductIdRef.current;
     const targetVersion = ++saveVersionRef.current;
     const submittedLang = activeLangTab;
     const draft = editDraftTranslations[submittedLang] || { label: "", menuText: "" };
     const submittedLabel = draft.label;
     const submittedMenuText = draft.menuText;
+
+    isMutationActiveRef.current = true;
 
     startTransition(async () => {
       try {
@@ -244,8 +308,8 @@ export function ProductActionEditor({
         });
 
         if (
-          targetProductId !== product.id ||
-          targetActionId !== editingActionId ||
+          targetProductId !== currentProductIdRef.current ||
+          targetActionId !== editingActionIdRef.current ||
           targetVersion !== saveVersionRef.current
         ) {
           // Stale request response; do not mutate active editor state
@@ -285,8 +349,8 @@ export function ProductActionEditor({
         }
       } catch {
         if (
-          targetProductId === product.id &&
-          targetActionId === editingActionId &&
+          targetProductId === currentProductIdRef.current &&
+          targetActionId === editingActionIdRef.current &&
           targetVersion === saveVersionRef.current
         ) {
           setActionFeedback({
@@ -295,6 +359,8 @@ export function ProductActionEditor({
               "A communication or server error occurred. Your changes have been preserved. Please try again.",
           });
         }
+      } finally {
+        isMutationActiveRef.current = false;
       }
     });
   };
@@ -310,6 +376,9 @@ export function ProductActionEditor({
   const [createArabicMenuText, setCreateArabicMenuText] = useState("");
 
   const handleOpenCreate = (parentId: string | null = null) => {
+    if (isReadActiveRef.current || isMutationActiveRef.current || isBusy) {
+      return;
+    }
     setCreateParentActionId(parentId);
     setCreateType("OPEN_SUBMENU");
     setCreateIsActive(true);
@@ -322,10 +391,16 @@ export function ProductActionEditor({
   };
 
   const handleCreateAction = () => {
+    if (isReadActiveRef.current || isMutationActiveRef.current || isBusy) {
+      return;
+    }
+    const targetProductId = currentProductIdRef.current;
+    isMutationActiveRef.current = true;
+
     startTransition(async () => {
       try {
         const res = await createProductActionAction({
-          productId: product.id,
+          productId: targetProductId,
           parentActionId: createParentActionId,
           actionType: createType,
           isActive: createIsActive,
@@ -344,6 +419,10 @@ export function ProductActionEditor({
               : undefined,
         });
 
+        if (targetProductId !== currentProductIdRef.current) {
+          return;
+        }
+
         setActionFeedback(res);
 
         if (res.success && res.action) {
@@ -355,11 +434,15 @@ export function ProductActionEditor({
           }
         }
       } catch {
-        setActionFeedback({
-          success: false,
-          message:
-            "A communication or server error occurred. Your inputs have been preserved. Please try again.",
-        });
+        if (targetProductId === currentProductIdRef.current) {
+          setActionFeedback({
+            success: false,
+            message:
+              "A communication or server error occurred. Your inputs have been preserved. Please try again.",
+          });
+        }
+      } finally {
+        isMutationActiveRef.current = false;
       }
     });
   };
@@ -406,9 +489,10 @@ export function ProductActionEditor({
             <button
               type="button"
               onClick={() => handleStartEdit(node)}
-              disabled={isPending}
+              disabled={isBusy}
               className="flex min-w-0 min-h-11 flex-1 items-center gap-2 text-left py-2 disabled:opacity-60"
               aria-label={`Edit button ${node.translations[activeLangTab]?.label || node.actionType}`}
+              data-testid="select-action-btn"
             >
               <FolderTree className="size-4 shrink-0 text-primary/70" />
               <div className="min-w-0 flex-1">
@@ -473,7 +557,7 @@ export function ProductActionEditor({
                 type="button"
                 variant="ghost"
                 size="icon"
-                disabled={node.isAtMaxDepth}
+                disabled={node.isAtMaxDepth || isBusy}
                 onClick={() => handleOpenCreate(node.id)}
                 className="size-11 text-muted-foreground hover:text-foreground"
                 title={
@@ -532,7 +616,7 @@ export function ProductActionEditor({
             variant="outline"
             size="icon"
             onClick={reloadActions}
-            disabled={isLoading}
+            disabled={isBusy}
             className="size-11"
             aria-label="Refresh buttons"
             title="Refresh buttons"
@@ -543,6 +627,7 @@ export function ProductActionEditor({
           <Button
             type="button"
             onClick={() => handleOpenCreate(null)}
+            disabled={isBusy}
             className="min-h-11 gap-2"
             data-testid="add-root-action-btn"
           >
@@ -659,6 +744,7 @@ export function ProductActionEditor({
                   <Button
                     type="button"
                     onClick={() => handleOpenCreate(null)}
+                    disabled={isBusy}
                     className="min-h-11 gap-2"
                   >
                     <Plus className="size-4" />
@@ -739,7 +825,7 @@ export function ProductActionEditor({
                     id="edit-action-type"
                     value={editActionType}
                     disabled={
-                      isPending ||
+                      isBusy ||
                       isSelectedUnsupported ||
                       (selectedNode.actionType === "OPEN_SUBMENU" &&
                         selectedNode.children.length > 0)
@@ -767,7 +853,7 @@ export function ProductActionEditor({
                     type="checkbox"
                     id="edit-is-active"
                     checked={editIsActive}
-                    disabled={isPending || isSelectedUnsupported}
+                    disabled={isBusy || isSelectedUnsupported}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditIsActive(e.target.checked)}
                     className="size-5 rounded border-gray-300 text-primary focus:ring-primary min-h-11 min-w-11 disabled:opacity-60"
                   />
@@ -795,6 +881,7 @@ export function ProductActionEditor({
                         type="button"
                         variant={activeLangTab === defaultLangCode ? "default" : "outline"}
                         size="sm"
+                        disabled={isBusy}
                         onClick={() => setActiveLangTab(defaultLangCode)}
                         className="text-xs min-h-11 px-3"
                       >
@@ -805,6 +892,7 @@ export function ProductActionEditor({
                           type="button"
                           variant={activeLangTab === "ar" ? "default" : "outline"}
                           size="sm"
+                          disabled={isBusy}
                           onClick={() => setActiveLangTab("ar")}
                           className="text-xs min-h-11 px-3"
                         >
@@ -858,7 +946,7 @@ export function ProductActionEditor({
                       data-testid="edit-action-label-input"
                       dir={activeLangTab === "ar" ? "rtl" : "ltr"}
                       value={editDraftTranslations[activeLangTab]?.label ?? ""}
-                      disabled={isPending || isSelectedUnsupported}
+                      disabled={isBusy || isSelectedUnsupported}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         const val = e.target.value;
                         setEditDraftTranslations((prev) => ({
@@ -899,7 +987,7 @@ export function ProductActionEditor({
                         data-testid="edit-action-menu-text-input"
                         dir={activeLangTab === "ar" ? "rtl" : "ltr"}
                         value={editDraftTranslations[activeLangTab]?.menuText ?? ""}
-                        disabled={isPending || isSelectedUnsupported}
+                        disabled={isBusy || isSelectedUnsupported}
                         onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
                           const val = e.target.value;
                           setEditDraftTranslations((prev) => ({
@@ -940,6 +1028,7 @@ export function ProductActionEditor({
                     type="button"
                     variant="outline"
                     onClick={() => setEditingActionId(null)}
+                    disabled={isBusy}
                     className="min-h-11"
                   >
                     Cancel
@@ -947,7 +1036,7 @@ export function ProductActionEditor({
                   <Button
                     type="button"
                     onClick={handleSaveEdit}
-                    disabled={isPending || isSelectedUnsupported}
+                    disabled={isBusy || isSelectedUnsupported}
                     className="min-h-11 gap-2"
                     data-testid="save-action-btn"
                   >
@@ -1010,10 +1099,11 @@ export function ProductActionEditor({
                   id="create-action-type"
                   data-testid="create-action-type-select"
                   value={createType}
+                  disabled={isBusy}
                   onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
                     setCreateType(e.target.value as SupportedActionType)
                   }
-                  className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                 >
                   <option value="OPEN_SUBMENU">OPEN_SUBMENU (Submenu with child buttons)</option>
                   <option value="SHOW_DETAILS">SHOW_DETAILS (Display product description & details)</option>
@@ -1028,8 +1118,9 @@ export function ProductActionEditor({
                   id="create-is-active"
                   data-testid="create-action-is-active"
                   checked={createIsActive}
+                  disabled={isBusy}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateIsActive(e.target.checked)}
-                  className="size-5 rounded border-gray-300 text-primary focus:ring-primary min-h-11 min-w-11"
+                  className="size-5 rounded border-gray-300 text-primary focus:ring-primary min-h-11 min-w-11 disabled:opacity-60"
                 />
                 <label
                   htmlFor="create-is-active"
@@ -1058,8 +1149,9 @@ export function ProductActionEditor({
                   data-testid="create-action-label-input"
                   dir={defaultLangDir}
                   value={createLabel}
+                  disabled={isBusy}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateLabel(e.target.value)}
-                  className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                   placeholder={
                     defaultLangCode === "ar"
                       ? "مثال: عرض الخيارات"
@@ -1088,9 +1180,10 @@ export function ProductActionEditor({
                     data-testid="create-action-menu-text-input"
                     dir={defaultLangDir}
                     value={createMenuText}
+                    disabled={isBusy}
                     onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCreateMenuText(e.target.value)}
                     rows={2}
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                     placeholder={
                       defaultLangCode === "ar"
                         ? "رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
@@ -1118,8 +1211,9 @@ export function ProductActionEditor({
                       data-testid="create-action-ar-label-input"
                       dir="rtl"
                       value={createArabicLabel}
+                      disabled={isBusy}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateArabicLabel(e.target.value)}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       placeholder="مثال: عرض الخيارات"
                       maxLength={MAX_ACTION_LABEL_LENGTH}
                     />
@@ -1138,9 +1232,10 @@ export function ProductActionEditor({
                         data-testid="create-action-ar-menu-text-input"
                         dir="rtl"
                         value={createArabicMenuText}
+                        disabled={isBusy}
                         onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCreateArabicMenuText(e.target.value)}
                         rows={2}
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11"
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                         placeholder="رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
                       />
                     </div>
@@ -1154,6 +1249,7 @@ export function ProductActionEditor({
                 type="button"
                 variant="outline"
                 onClick={() => setIsCreateOpen(false)}
+                disabled={isPending}
                 className="min-h-11"
               >
                 Cancel
@@ -1161,7 +1257,7 @@ export function ProductActionEditor({
               <Button
                 type="button"
                 onClick={handleCreateAction}
-                disabled={isPending || createLabel.trim().length === 0}
+                disabled={isBusy || createLabel.trim().length === 0}
                 className="min-h-11 gap-2"
                 data-testid="submit-create-action-btn"
               >

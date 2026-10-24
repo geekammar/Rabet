@@ -1177,8 +1177,382 @@ async function main() {
 
   log("Scenario 9 passed: Delayed response reconciliation and product switch scoping verified.");
 
+  // =========================================================================
+  // Scenario 10: Request Lifecycle Coordination Regressions (A, B, C)
+  // =========================================================================
+  log("Scenario 10: Testing request lifecycle coordination regressions (A, B, C)...");
+
+  // Create third product in database for regression testing
+  const [prod3] = await pgClient`
+    INSERT INTO product (id, category_id, slug, price, sort_order, is_active)
+    VALUES (${crypto.randomUUID()}, ${cat.id}, 'cloud-suite-three', '49.99', 2, true)
+    RETURNING id
+  `;
+  await pgClient`
+    INSERT INTO product_translation (product_id, language_id, name)
+    VALUES (${prod3.id}, ${langEn.id}, 'Cloud Suite Three')
+  `;
+
+  // Navigate to catalog
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(1500);
+
+  // --- Case 10A: Initial load versus create ---
+  log("Scenario 10A: Testing initial load versus create coordination...");
+  await cdp.evaluate(`(() => {
+    window.__holdReadPromise = new Promise(resolve => { window.__releaseHeldRead = resolve; });
+    window.__readInterceptCount = 0;
+    window.__createInterceptCount = 0;
+    window.__origFetch = window.fetch;
+    window.fetch = async (...args) => {
+      if (window.__holdRead) {
+        window.__readInterceptCount++;
+        await window.__holdReadPromise;
+      }
+      if (window.__trackCreates) {
+        window.__createInterceptCount++;
+      }
+      return window.__origFetch(...args);
+    };
+    window.__holdRead = true;
+    window.__trackCreates = true;
+  })()`);
+
+  // Click Buttons on Product 3 to trigger initial load
+  await cdp.evaluate(`(() => {
+    const btn3 = document.querySelector('[data-testid="product-buttons-btn-cloud-suite-three"]');
+    if (btn3) btn3.click();
+  })()`);
+  await sleep(400);
+
+  const readHeld = await cdp.evaluate(`window.__readInterceptCount > 0`);
+  if (!readHeld) {
+    await fail("Scenario 10A: Initial load request was not intercepted");
+  }
+
+  // Assert intended controls are disabled during initial load
+  const controlsStateDuringLoad = await cdp.evaluate(`(() => {
+    const addBtn = document.querySelector('[data-testid="add-root-action-btn"]');
+    const refreshBtn = document.querySelector('button[aria-label="Refresh buttons"]');
+    const isSpinnerVisible = Boolean(document.querySelector('.animate-spin'));
+    return {
+      addBtnDisabled: addBtn ? addBtn.disabled : true,
+      refreshBtnDisabled: refreshBtn ? refreshBtn.disabled : true,
+      isSpinnerVisible,
+    };
+  })()`);
+
+  if (!controlsStateDuringLoad.addBtnDisabled) {
+    await fail("Scenario 10A: Add Button was not disabled during initial load");
+  }
+  if (!controlsStateDuringLoad.refreshBtnDisabled) {
+    await fail("Scenario 10A: Refresh Button was not disabled during initial load");
+  }
+
+  // Attempt programmatic click on Add Button during load
+  await cdp.evaluate(`(() => {
+    const addBtn = document.querySelector('[data-testid="add-root-action-btn"]');
+    if (addBtn) addBtn.click();
+  })()`);
+
+  const modalOpenDuringLoad = await cdp.evaluate(`Boolean(document.querySelector('[data-testid="submit-create-action-btn"]'))`);
+  if (modalOpenDuringLoad) {
+    await fail("Scenario 10A: Creation modal opened while initial load was active");
+  }
+  if (await cdp.evaluate(`window.__createInterceptCount !== 0`)) {
+    await fail("Scenario 10A: Create action was triggered while initial load was active");
+  }
+
+  // Release loading
+  await cdp.evaluate(`(() => {
+    window.__holdRead = false;
+    window.__releaseHeldRead();
+  })()`);
+  await sleep(800);
+
+  // Verify load completed
+  const addBtnAfterLoad = await cdp.evaluate(`Boolean(document.querySelector('[data-testid="add-root-action-btn"]')?.disabled)`);
+  if (addBtnAfterLoad) {
+    await fail("Scenario 10A: Add Button remained disabled after load completed");
+  }
+
+  // Create an action ("Feature Root A")
+  await cdp.evaluate(`(() => {
+    const addBtn = document.querySelector('[data-testid="add-root-action-btn"]');
+    if (addBtn) addBtn.click();
+  })()`);
+  await sleep(300);
+
+  await setInputValue(cdp, '[data-testid="create-action-label-input"]', "Feature Root A");
+  await sleep(200);
+
+  await cdp.evaluate(`(() => {
+    document.querySelector('[data-testid="submit-create-action-btn"]').click();
+  })()`);
+  await sleep(1500);
+
+  // Confirm exactly one correct action appears
+  const actionNodesA = await cdp.evaluate(`(() => {
+    const nodes = Array.from(document.querySelectorAll('[data-testid="action-node"]'));
+    return nodes.map(n => ({ id: n.getAttribute('data-action-id'), text: n.innerText }));
+  })()`);
+
+  if (actionNodesA.length !== 1 || !actionNodesA[0].text.includes("Feature Root A")) {
+    await fail(`Scenario 10A: Expected exactly 1 action 'Feature Root A', got: ${JSON.stringify(actionNodesA)}`);
+  }
+
+  // Check unique action IDs
+  const uniqueIdsA = new Set(actionNodesA.map(n => n.id));
+  if (uniqueIdsA.size !== actionNodesA.length) {
+    await fail("Scenario 10A: Duplicate action IDs rendered in tree");
+  }
+
+  // Verify in PostgreSQL
+  const dbActionsA = await pgClient`
+    SELECT a.id, t.label
+    FROM product_action a
+    JOIN product_action_translation t ON a.id = t.action_id
+    WHERE a.product_id = ${prod3.id}
+  `;
+  if (dbActionsA.length !== 1 || dbActionsA[0].label !== "Feature Root A") {
+    await fail(`Scenario 10A: DB does not have exactly 1 action 'Feature Root A': ${JSON.stringify(dbActionsA)}`);
+  }
+  log("Scenario 10A passed: Initial load vs create coordination verified.");
+
+  // --- Case 10B: Refresh versus mutation ---
+  log("Scenario 10B: Testing refresh versus mutation coordination...");
+  const rootAId = actionNodesA[0].id;
+  await cdp.evaluate(`(() => {
+    const nodeBtn = document.querySelector('[data-action-id="${rootAId}"] [data-testid="select-action-btn"]');
+    if (nodeBtn) nodeBtn.click();
+  })()`);
+  await sleep(400);
+
+  // Type an update into draft
+  await setInputValue(cdp, '[data-testid="edit-action-label-input"]', "Feature Root A Updated");
+  await sleep(200);
+
+  // Hold Refresh response
+  await cdp.evaluate(`(() => {
+    window.__holdRefreshPromise = new Promise(resolve => { window.__releaseHeldRefresh = resolve; });
+    window.__refreshInterceptCount = 0;
+    window.__saveInterceptCount = 0;
+    window.fetch = async (...args) => {
+      if (window.__holdRefresh) {
+        window.__refreshInterceptCount++;
+        await window.__holdRefreshPromise;
+      }
+      if (window.__trackSaves) {
+        window.__saveInterceptCount++;
+      }
+      return window.__origFetch(...args);
+    };
+    window.__holdRefresh = true;
+    window.__trackSaves = false;
+  })()`);
+
+  // Click Refresh button
+  await cdp.evaluate(`(() => {
+    const refreshBtn = document.querySelector('button[aria-label="Refresh buttons"]');
+    if (refreshBtn) refreshBtn.click();
+  })()`);
+  await sleep(300);
+
+  // Assert Refresh is active and controls are disabled
+  const refreshActive = await cdp.evaluate(`window.__refreshInterceptCount > 0`);
+  if (!refreshActive) {
+    await fail("Scenario 10B: Refresh request was not intercepted");
+  }
+
+  const controlsStateDuringRefresh = await cdp.evaluate(`(() => {
+    const refreshBtn = document.querySelector('button[aria-label="Refresh buttons"]');
+    const saveBtn = document.querySelector('[data-testid="save-action-btn"]');
+    const addBtn = document.querySelector('[data-testid="add-root-action-btn"]');
+    return {
+      refreshDisabled: refreshBtn ? refreshBtn.disabled : false,
+      saveDisabled: saveBtn ? saveBtn.disabled : false,
+      addDisabled: addBtn ? addBtn.disabled : false,
+    };
+  })()`);
+
+  if (!controlsStateDuringRefresh.refreshDisabled) {
+    await fail("Scenario 10B: Refresh button was not disabled while refresh was active");
+  }
+  if (!controlsStateDuringRefresh.saveDisabled) {
+    await fail("Scenario 10B: Save button was not disabled while refresh was active");
+  }
+  if (!controlsStateDuringRefresh.addDisabled) {
+    await fail("Scenario 10B: Add button was not disabled while refresh was active");
+  }
+
+  // Attempt to submit save or create during refresh
+  await cdp.evaluate(`(() => {
+    window.__trackSaves = true;
+    const saveBtn = document.querySelector('[data-testid="save-action-btn"]');
+    if (saveBtn) saveBtn.click();
+  })()`);
+
+  const saveSentDuringRefresh = await cdp.evaluate(`window.__saveInterceptCount !== 0`);
+  if (saveSentDuringRefresh) {
+    await fail("Scenario 10B: Save mutation was submitted while refresh was active");
+  }
+
+  // Release refresh
+  await cdp.evaluate(`(() => {
+    window.__holdRefresh = false;
+    window.__releaseHeldRefresh();
+  })()`);
+  await sleep(800);
+
+  // Now save button is enabled again
+  const saveBtnAfterRefresh = await cdp.evaluate(`Boolean(document.querySelector('[data-testid="save-action-btn"]')?.disabled)`);
+  if (saveBtnAfterRefresh) {
+    await fail("Scenario 10B: Save button remained disabled after refresh finished");
+  }
+
+  // Re-enter edit label and save
+  await setInputValue(cdp, '[data-testid="edit-action-label-input"]', "Feature Root A Authoritative");
+  await sleep(200);
+
+  await cdp.evaluate(`(() => {
+    const saveBtn = document.querySelector('[data-testid="save-action-btn"]');
+    if (saveBtn) saveBtn.click();
+  })()`);
+  await sleep(1500);
+
+  // Verify authoritative result
+  const savedDbB = await pgClient`
+    SELECT label FROM product_action_translation
+    WHERE action_id = ${rootAId}
+  `;
+  if (savedDbB[0]?.label !== "Feature Root A Authoritative") {
+    await fail(`Scenario 10B: Database does not have authoritative saved label: '${savedDbB[0]?.label}'`);
+  }
+  log("Scenario 10B passed: Refresh vs mutation coordination verified.");
+
+  // --- Case 10C: Mutation versus refresh ---
+  log("Scenario 10C: Testing mutation versus refresh coordination...");
+  await setInputValue(cdp, '[data-testid="edit-action-label-input"]', "Feature Root A Mutating");
+  await sleep(200);
+
+  await cdp.evaluate(`(() => {
+    window.__holdMutationPromise = new Promise(resolve => { window.__releaseHeldMutation = resolve; });
+    window.__mutationInterceptCount = 0;
+    window.__refreshInterceptCountDuringMutation = 0;
+    window.fetch = async (...args) => {
+      if (window.__holdMutation) {
+        window.__mutationInterceptCount++;
+        await window.__holdMutationPromise;
+      }
+      if (window.__trackRefreshesDuringMutation) {
+        window.__refreshInterceptCountDuringMutation++;
+      }
+      return window.__origFetch(...args);
+    };
+    window.__holdMutation = true;
+    window.__trackRefreshesDuringMutation = true;
+  })()`);
+
+  // Click Save Button
+  await cdp.evaluate(`(() => {
+    const saveBtn = document.querySelector('[data-testid="save-action-btn"]');
+    if (saveBtn) saveBtn.click();
+  })()`);
+  await sleep(300);
+
+  // Assert Save mutation is in flight
+  const mutationActive = await cdp.evaluate(`window.__mutationInterceptCount > 0`);
+  if (!mutationActive) {
+    await fail("Scenario 10C: Save mutation request was not intercepted");
+  }
+
+  // Assert controls disabled during mutation
+  const controlsStateDuringMutation = await cdp.evaluate(`(() => {
+    const saveBtn = document.querySelector('[data-testid="save-action-btn"]');
+    const refreshBtn = document.querySelector('button[aria-label="Refresh buttons"]');
+    const addBtn = document.querySelector('[data-testid="add-root-action-btn"]');
+    return {
+      saveDisabled: saveBtn ? saveBtn.disabled : false,
+      refreshDisabled: refreshBtn ? refreshBtn.disabled : false,
+      addDisabled: addBtn ? addBtn.disabled : false,
+    };
+  })()`);
+
+  if (!controlsStateDuringMutation.saveDisabled) {
+    await fail("Scenario 10C: Save button was not disabled while mutation was active");
+  }
+  if (!controlsStateDuringMutation.refreshDisabled) {
+    await fail("Scenario 10C: Refresh button was not disabled while mutation was active");
+  }
+  if (!controlsStateDuringMutation.addDisabled) {
+    await fail("Scenario 10C: Add button was not disabled while mutation was active");
+  }
+
+  // Attempt Refresh during mutation
+  await cdp.evaluate(`(() => {
+    const refreshBtn = document.querySelector('button[aria-label="Refresh buttons"]');
+    if (refreshBtn) refreshBtn.click();
+  })()`);
+
+  const refreshSentDuringMutation = await cdp.evaluate(`window.__refreshInterceptCountDuringMutation !== 0`);
+  if (refreshSentDuringMutation) {
+    await fail("Scenario 10C: Refresh request was sent while mutation was in flight");
+  }
+
+  // Release mutation
+  await cdp.evaluate(`(() => {
+    window.__holdMutation = false;
+    window.__releaseHeldMutation();
+  })()`);
+  await sleep(1500);
+
+  // Restore fetch
+  await cdp.evaluate(`(() => {
+    window.fetch = window.__origFetch;
+  })()`);
+
+  // Verify label in tree and in DB
+  const finalLabelNode = await cdp.evaluate(`(() => {
+    const node = document.querySelector('[data-action-id="${rootAId}"]');
+    return node ? node.innerText : '';
+  })()`);
+  if (!finalLabelNode.includes("Feature Root A Mutating")) {
+    await fail(`Scenario 10C: Action node does not have mutated label: '${finalLabelNode}'`);
+  }
+
+  const savedDbC = await pgClient`
+    SELECT label FROM product_action_translation
+    WHERE action_id = ${rootAId}
+  `;
+  if (savedDbC[0]?.label !== "Feature Root A Mutating") {
+    await fail(`Scenario 10C: DB does not have mutated label: '${savedDbC[0]?.label}'`);
+  }
+
+  // Reload page to confirm persistence
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(1500);
+
+  // Click Buttons on Cloud Suite Three
+  await cdp.evaluate(`(() => {
+    const btn3 = document.querySelector('[data-testid="product-buttons-btn-cloud-suite-three"]');
+    if (btn3) btn3.click();
+  })()`);
+  await sleep(1000);
+
+  const reloadedNodes10C = await cdp.evaluate(`(() => {
+    const nodes = Array.from(document.querySelectorAll('[data-testid="action-node"]'));
+    return nodes.map(n => ({ id: n.getAttribute('data-action-id'), text: n.innerText }));
+  })()`);
+
+  if (reloadedNodes10C.length !== 1 || !reloadedNodes10C[0].text.includes("Feature Root A Mutating")) {
+    await fail(`Scenario 10C: Persisted action not found after reload: ${JSON.stringify(reloadedNodes10C)}`);
+  }
+
+  log("Scenario 10C passed: Mutation vs refresh coordination and persistence verified.");
+  log("Scenario 10 passed: All request coordination regressions (A, B, C) verified.");
+
   log("\n=======================================================");
-  log("ALL 9 ACCEPTANCE SCENARIOS PASSED SUCCESSFULLY!");
+  log("ALL 10 ACCEPTANCE SCENARIOS PASSED SUCCESSFULLY!");
   log("=======================================================\n");
 
   await cdp.close();
