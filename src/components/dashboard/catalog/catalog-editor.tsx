@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Folder,
   FolderPlus,
+  FolderTree,
   Globe,
   Info,
   Loader2,
@@ -42,6 +43,7 @@ import {
   type HierarchyCategoryNode,
 } from "@/lib/catalog/tree";
 import { resolveCatalogTranslationStatus } from "@/lib/catalog/status";
+import { ProductActionEditor } from "./product-action-editor";
 import type { CatalogCategoryRecord, CatalogViewData } from "./types";
 
 export function CatalogEditor({
@@ -80,7 +82,37 @@ export function CatalogEditor({
   const [isCreateCategoryOpen, setIsCreateCategoryOpen] = useState(false);
 
   const [isCreateProductOpen, setIsCreateProductOpen] = useState(false);
-  const [editingProductId, setEditingProductId] = useState<string | null>(null);
+  const [editingProductId, setEditingProductId] = useState<string | null>(() => {
+    if (typeof window !== "undefined") {
+      return new URLSearchParams(window.location.search).get("actionProduct");
+    }
+    return null;
+  });
+  const [isActionEditorOpen, setIsActionEditorOpen] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      return Boolean(new URLSearchParams(window.location.search).get("actionProduct"));
+    }
+    return false;
+  });
+
+  const handleOpenActionEditor = (prodId: string) => {
+    setEditingProductId(prodId);
+    setIsActionEditorOpen(true);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("actionProduct", prodId);
+      window.history.replaceState({}, "", url.toString());
+    }
+  };
+
+  const handleCloseActionEditor = () => {
+    setIsActionEditorOpen(false);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("actionProduct");
+      window.history.replaceState({}, "", url.toString());
+    }
+  };
 
   // Pending transition for action executions
   const [isPending, startTransition] = useTransition();
@@ -169,6 +201,7 @@ export function CatalogEditor({
   const handleSelectCategory = (node: HierarchyCategoryNode) => {
     setSelectedCategoryId(node.id);
     setEditingProductId(null);
+    setIsActionEditorOpen(false);
     setActionFeedback(null);
     syncCategoryDraft(node);
   };
@@ -520,6 +553,26 @@ export function CatalogEditor({
       </div>
     );
   };
+
+  if (isActionEditorOpen && selectedProduct) {
+    return (
+      <div className="space-y-8" data-testid="catalog-editor">
+        <PageHeader
+          title="Catalog"
+          description="Digital products, categories, displayed prices and customer navigation."
+        />
+        <ProductActionEditor
+          product={selectedProduct}
+          categoryBreadcrumb={selectedNode?.breadcrumb ?? ""}
+          isProductActive={selectedProduct.isActive}
+          isCategoryActive={selectedNode?.effectiveVisibility ?? true}
+          defaultLanguage={defaultLanguage}
+          languages={languages}
+          onClose={handleCloseActionEditor}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8" data-testid="catalog-editor">
@@ -966,15 +1019,29 @@ export function CatalogEditor({
                             </div>
                           </div>
 
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleStartEditProduct(prod)}
-                            className="min-h-11 text-xs"
-                          >
-                            Edit
-                          </Button>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleOpenActionEditor(prod.id)}
+                              className="min-h-11 text-xs gap-1.5"
+                              data-testid={`product-buttons-btn-${prod.slug}`}
+                              title="Configure Buttons"
+                            >
+                              <FolderTree className="size-3.5 text-muted-foreground" />
+                              <span>Buttons</span>
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleStartEditProduct(prod)}
+                              className="min-h-11 text-xs"
+                            >
+                              Edit
+                            </Button>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -995,16 +1062,29 @@ export function CatalogEditor({
                       </CardDescription>
                     </div>
 
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => setEditingProductId(null)}
-                      className="size-11"
-                      aria-label="Close product editor"
-                    >
-                      <X className="size-4" />
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleOpenActionEditor(selectedProduct.id)}
+                        className="min-h-11 text-xs gap-1.5"
+                        data-testid="open-product-actions-btn"
+                      >
+                        <FolderTree className="size-3.5" />
+                        <span>Buttons</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setEditingProductId(null)}
+                        className="size-11"
+                        aria-label="Close product editor"
+                      >
+                        <X className="size-4" />
+                      </Button>
+                    </div>
                   </CardHeader>
 
                   <CardContent className="p-4 space-y-4">
@@ -1158,29 +1238,42 @@ export function CatalogEditor({
                       </div>
                     </div>
 
-                    <div className="flex justify-end gap-2 pt-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
                       <Button
                         type="button"
-                        variant="outline"
-                        onClick={() => setEditingProductId(null)}
-                        className="min-h-11"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => handleOpenActionEditor(selectedProduct.id)}
+                        className="min-h-11 text-xs gap-1.5"
+                        data-testid="edit-product-open-actions-btn"
                       >
-                        Cancel
+                        <FolderTree className="size-3.5" />
+                        <span>Configure Buttons</span>
                       </Button>
-                      <Button
-                        type="button"
-                        onClick={handleSaveProduct}
-                        disabled={isPending}
-                        className="min-h-11 gap-2"
-                        data-testid="save-product-btn"
-                      >
-                        {isPending ? (
-                          <Loader2 className="size-4 animate-spin" />
-                        ) : (
-                          <Save className="size-4" />
-                        )}
-                        <span>Save Product</span>
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => setEditingProductId(null)}
+                          className="min-h-11"
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={handleSaveProduct}
+                          disabled={isPending}
+                          className="min-h-11 gap-2"
+                          data-testid="save-product-btn"
+                        >
+                          {isPending ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <Save className="size-4" />
+                          )}
+                          <span>Save Product</span>
+                        </Button>
+                      </div>
                     </div>
                   </CardContent>
                 </Card>

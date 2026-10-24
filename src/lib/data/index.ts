@@ -41,6 +41,7 @@ import "server-only";
  * server code, and the caller is where the one trust decision belongs.
  */
 
+export * from "./actions";
 export * from "./catalog";
 export * from "./errors";
 export * from "./languages";
