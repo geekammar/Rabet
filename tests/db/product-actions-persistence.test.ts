@@ -897,4 +897,233 @@ describe.skipIf(!shouldRun)("product actions persistence & integrity", () => {
     expect(preserved?.translations.en?.label).toBe("Original URL Button");
     expect(preserved?.translations.en?.templateBody).toBeNull();
   });
+
+  it("enforces default-language message body invariants, fallback, and zero writes on rejection", async () => {
+    const testProductId = await createProductFixture("msg-body-invariants");
+    const appDb = asAppDb(testDb!.db);
+
+    // 1. Rejects creation of SEND_TEMPLATE_MESSAGE without default language body
+    await expect(
+      createProductAction(appDb, {
+        productId: testProductId,
+        actionType: "SEND_TEMPLATE_MESSAGE",
+        translations: [
+          {
+            languageId: defaultLangId,
+            languageCode: "en",
+            label: "No Body",
+            templateBody: "   ",
+          },
+        ],
+      }),
+    ).rejects.toThrow(/message body in the store's default language is required/i);
+
+    // 2. Create valid active SEND_TEMPLATE_MESSAGE action
+    const created = await createProductAction(appDb, {
+      productId: testProductId,
+      actionType: "SEND_TEMPLATE_MESSAGE",
+      isActive: true,
+      translations: [
+        {
+          languageId: defaultLangId,
+          languageCode: "en",
+          label: "Specs",
+          templateBody: "Product specs: {{product_name}}",
+        },
+      ],
+    });
+
+    // 3. Rejects clearing default-language body while action is active
+    await expect(
+      editProductAction(appDb, {
+        actionId: created.actionId,
+        productId: testProductId,
+        actionType: "SEND_TEMPLATE_MESSAGE",
+        isActive: true,
+        translation: {
+          languageId: defaultLangId,
+          languageCode: "en",
+          label: "Specs",
+          templateBody: "",
+        },
+      }),
+    ).rejects.toThrow(/message body in the store's default language is required for an active/i);
+
+    // Verify zero writes: templateBody in DB remains original
+    const preserved1 = await readProductAction(appDb, created.actionId);
+    expect(preserved1?.translations.en?.templateBody).toBe("Product specs: {{product_name}}");
+
+    // 4. Omitted body on same-type update preserves saved value
+    const updatedLabelOnly = await editProductAction(appDb, {
+      actionId: created.actionId,
+      productId: testProductId,
+      actionType: "SEND_TEMPLATE_MESSAGE",
+      isActive: true,
+      translation: {
+        languageId: defaultLangId,
+        languageCode: "en",
+        label: "Updated Specs Label",
+        templateBody: undefined,
+      },
+    });
+    expect(updatedLabelOnly.action.translations.en?.label).toBe("Updated Specs Label");
+    expect(updatedLabelOnly.action.translations.en?.templateBody).toBe("Product specs: {{product_name}}");
+
+    // 5. Explicit optional-language body clearing is allowed
+    // First set Arabic body
+    await editProductAction(appDb, {
+      actionId: created.actionId,
+      productId: testProductId,
+      actionType: "SEND_TEMPLATE_MESSAGE",
+      isActive: true,
+      translation: {
+        languageId: arabicLangId,
+        languageCode: "ar",
+        label: "المواصفات",
+        templateBody: "مواصفات المنتج: {{product_name}}",
+      },
+    });
+    // Now explicitly clear Arabic body
+    const clearedAr = await editProductAction(appDb, {
+      actionId: created.actionId,
+      productId: testProductId,
+      actionType: "SEND_TEMPLATE_MESSAGE",
+      isActive: true,
+      translation: {
+        languageId: arabicLangId,
+        languageCode: "ar",
+        label: "المواصفات",
+        templateBody: "",
+      },
+    });
+    expect(clearedAr.action.translations.ar?.templateBody).toBeNull();
+    // English translation remains unaffected
+    const preservedEn = await readProductAction(appDb, created.actionId);
+    expect(preservedEn?.translations.en?.templateBody).toBe("Product specs: {{product_name}}");
+
+    // 6. Safe deactivation remains possible even if default body is empty
+    const deactivated = await editProductAction(appDb, {
+      actionId: created.actionId,
+      productId: testProductId,
+      actionType: "SEND_TEMPLATE_MESSAGE",
+      isActive: false,
+      translation: {
+        languageId: defaultLangId,
+        languageCode: "en",
+        label: "Deactivated Button",
+        templateBody: "",
+      },
+    });
+    expect(deactivated.action.isActive).toBe(false);
+    expect(deactivated.action.translations.en?.templateBody).toBeNull();
+
+    // 7. Reactivation of invalid action is rejected
+    await expect(
+      editProductAction(appDb, {
+        actionId: created.actionId,
+        productId: testProductId,
+        actionType: "SEND_TEMPLATE_MESSAGE",
+        isActive: true,
+      }),
+    ).rejects.toThrow(/message body in the store's default language is required for an active/i);
+
+    // 8. Conversion to SEND_TEMPLATE_MESSAGE without default body is rejected
+    const urlAction = await createProductAction(appDb, {
+      productId: testProductId,
+      actionType: "OPEN_URL",
+      url: "https://example.com",
+      translations: [{ languageId: defaultLangId, languageCode: "en", label: "Web Link" }],
+    });
+
+    await expect(
+      editProductAction(appDb, {
+        actionId: urlAction.actionId,
+        productId: testProductId,
+        actionType: "SEND_TEMPLATE_MESSAGE",
+        isActive: false,
+        translation: {
+          languageId: defaultLangId,
+          languageCode: "en",
+          label: "Web Link",
+          templateBody: "",
+        },
+      }),
+    ).rejects.toThrow(/message body in the store's default language is required when converting/i);
+
+    // Converting while editing a non-default language without default body is rejected
+    await expect(
+      editProductAction(appDb, {
+        actionId: urlAction.actionId,
+        productId: testProductId,
+        actionType: "SEND_TEMPLATE_MESSAGE",
+        isActive: false,
+        translation: {
+          languageId: arabicLangId,
+          languageCode: "ar",
+          label: "رابط",
+          templateBody: "نص عربي",
+        },
+      }),
+    ).rejects.toThrow(/message body in the store's default language is required when converting/i);
+  });
+
+  it("allows deactivating NAVIGATE_CATALOG with soft-deleted target while preserving stored target in DB", async () => {
+    const testProductId = await createProductFixture("nav-deact-soft-delete");
+    const appDb = asAppDb(testDb!.db);
+
+    // Create a disposable target category
+    const targetCat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "disposable-target-cat",
+      translations: [{ languageId: defaultLangId, name: "Disposable Target Category" }],
+    });
+
+    // Create an active NAVIGATE_CATALOG pointing to this target category
+    const navAction = await createProductAction(appDb, {
+      productId: testProductId,
+      actionType: "NAVIGATE_CATALOG",
+      isActive: true,
+      navigateCategoryId: targetCat.categoryId,
+      translations: [{ languageId: defaultLangId, languageCode: "en", label: "Jump to Category" }],
+    });
+    expect(navAction.action.navigateCategoryId).toBe(targetCat.categoryId);
+    expect(navAction.action.isActive).toBe(true);
+
+    // Soft-delete the target category in PostgreSQL
+    await appDb
+      .update(category)
+      .set({ deletedAt: new Date() })
+      .where(eq(category.id, targetCat.categoryId));
+
+    // Deactivate the action with the UNCHANGED navigateCategoryId
+    const deactivated = await editProductAction(appDb, {
+      actionId: navAction.actionId,
+      productId: testProductId,
+      actionType: "NAVIGATE_CATALOG",
+      isActive: false,
+      navigateCategoryId: targetCat.categoryId,
+    });
+
+    expect(deactivated.action.isActive).toBe(false);
+    expect(deactivated.action.navigateCategoryId).toBe(targetCat.categoryId);
+
+    // Verify in database: is_active=false, navigate_category_id is unchanged
+    const [rowInDb] = await appDb
+      .select()
+      .from(productAction)
+      .where(eq(productAction.id, navAction.actionId));
+    expect(rowInDb.isActive).toBe(false);
+    expect(rowInDb.navigateCategoryId).toBe(targetCat.categoryId);
+
+    // Reactivation attempt without selecting a new valid target is rejected
+    await expect(
+      editProductAction(appDb, {
+        actionId: navAction.actionId,
+        productId: testProductId,
+        actionType: "NAVIGATE_CATALOG",
+        isActive: true,
+        navigateCategoryId: targetCat.categoryId,
+      }),
+    ).rejects.toThrow(/deleted/i);
+  });
 });

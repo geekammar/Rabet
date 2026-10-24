@@ -1781,10 +1781,396 @@ async function main() {
     await fail("Scenario 11: Database was improperly mutated during invalid URL submission!");
   }
 
+  const preservedInvalidDraft = await cdp.evaluate(`(() => {
+    const input = document.querySelector('[data-testid="edit-action-url-input"]');
+    return input ? input.value : '';
+  })()`);
+  if (preservedInvalidDraft !== "http://insecure-url.com") {
+    await fail(`Scenario 11: Invalid URL draft was not preserved: '${preservedInvalidDraft}'`);
+  }
+
+  // 8. Edit SEND_TEMPLATE_MESSAGE body and verify persistence on reload
+  log("Scenario 11: Editing SEND_TEMPLATE_MESSAGE body and verifying persistence...");
+  await cdp.evaluate(`(() => {
+    const node = document.querySelector('[data-action-id="${dbMsg.id}"] [data-testid="select-action-btn"]');
+    if (node) node.click();
+  })()`);
+  await sleep(500);
+
+  await setInputValue(
+    cdp,
+    '[data-testid="edit-action-template-body-input"]',
+    "Updated offer for {{customer_name}}: {{product_name}} is {{price}} at {{store_name}}."
+  );
+  await sleep(300);
+
+  await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
+  await sleep(1500);
+
+  // Reload page and check DB and DOM
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(1500);
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="product-buttons-btn-cloud-suite-actions-four"]');
+    if (btn) btn.click();
+  })()`);
+  await sleep(1000);
+
+  const [dbMsgUpdated] = await pgClient`
+    SELECT template_body FROM product_action_translation
+    WHERE action_id = ${dbMsg.id} AND language_id = ${langEn.id}
+  `;
+  if (!dbMsgUpdated?.template_body?.includes("Updated offer for {{customer_name}}")) {
+    await fail(`Scenario 11: Updated template_body not persisted in DB: '${dbMsgUpdated?.template_body}'`);
+  }
+
+  // 9. Optional-language body draft preservation during another-language save
+  log("Scenario 11: Testing optional-language body draft preservation during another-language save...");
+  await cdp.evaluate(`(() => {
+    const node = document.querySelector('[data-action-id="${dbMsg.id}"] [data-testid="select-action-btn"]');
+    if (node) node.click();
+  })()`);
+  await sleep(500);
+
+  // Switch to Arabic tab
+  await cdp.evaluate(`(() => {
+    const arBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('العربية'));
+    if (arBtn) arBtn.click();
+  })()`);
+  await sleep(300);
+
+  // Set unsaved draft in Arabic template body
+  await setInputValue(cdp, '[data-testid="edit-action-template-body-input"]', "مسودة عربية غير محفوظة");
+  await sleep(300);
+
+  // Switch back to English tab
+  await cdp.evaluate(`(() => {
+    const enBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('English'));
+    if (enBtn) enBtn.click();
+  })()`);
+  await sleep(300);
+
+  // Edit English label and save
+  await setInputValue(cdp, '[data-testid="edit-action-label-input"]', "Special Offer Updated");
+  await sleep(300);
+  await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
+  await sleep(1500);
+
+  // Switch to Arabic tab again to verify draft was preserved in memory
+  await cdp.evaluate(`(() => {
+    const arBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('العربية'));
+    if (arBtn) arBtn.click();
+  })()`);
+  await sleep(300);
+
+  const preservedArDraft = await cdp.evaluate(`(() => {
+    const input = document.querySelector('[data-testid="edit-action-template-body-input"]');
+    return input ? input.value : '';
+  })()`);
+  if (!preservedArDraft.includes("مسودة عربية غير محفوظة")) {
+    await fail(`Scenario 11: Arabic draft body was lost after English save: '${preservedArDraft}'`);
+  }
+
+  // Verify in PostgreSQL that the unsaved Arabic draft was NOT written to DB
+  const [dbArTransCheck] = await pgClient`
+    SELECT template_body FROM product_action_translation
+    WHERE action_id = ${dbMsg.id} AND language_id = (SELECT id FROM language WHERE code = 'ar')
+  `;
+  if (dbArTransCheck?.template_body?.includes("مسودة عربية غير محفوظة")) {
+    await fail("Scenario 11: Unsaved Arabic draft template body was committed to database!");
+  }
+
+  // 10. Invalid default-body rejection
+  log("Scenario 11: Testing invalid default message body rejection...");
+  // Switch to English tab
+  await cdp.evaluate(`(() => {
+    const enBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('English'));
+    if (enBtn) enBtn.click();
+  })()`);
+  await sleep(300);
+
+  // Clear English template body on active button and attempt to save
+  await setInputValue(cdp, '[data-testid="edit-action-template-body-input"]', "");
+  await sleep(300);
+  await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
+  await sleep(1000);
+
+  const invalidBodyAlert = await cdp.evaluate(`(() => {
+    const alert = document.querySelector('[role="alert"]');
+    return alert ? alert.innerText : '';
+  })()`);
+  if (!invalidBodyAlert.toLowerCase().includes("message body") && !invalidBodyAlert.toLowerCase().includes("default language")) {
+    await fail(`Scenario 11: Expected default-body rejection alert, got '${invalidBodyAlert}'`);
+  }
+
+  // Verify DB retains previous valid template body
+  const [dbMsgUnmutated] = await pgClient`
+    SELECT template_body FROM product_action_translation
+    WHERE action_id = ${dbMsg.id} AND language_id = ${langEn.id}
+  `;
+  if (!dbMsgUnmutated?.template_body?.includes("Updated offer for {{customer_name}}")) {
+    await fail("Scenario 11: DB was improperly mutated on invalid default body clearing!");
+  }
+
+  // 11. Edit OPEN_SUPPORT category and persistence
+  log("Scenario 11: Editing OPEN_SUPPORT configuration and verifying persistence...");
+  await cdp.evaluate(`(() => {
+    const node = document.querySelector('[data-action-id="${dbSupport.id}"] [data-testid="select-action-btn"]');
+    if (node) node.click();
+  })()`);
+  await sleep(500);
+
+  await setInputValue(cdp, '[data-testid="edit-action-support-category-select"]', "Returns");
+  await sleep(300);
+  await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
+  await sleep(1500);
+
+  const [dbSupportUpdated] = await pgClient`
+    SELECT action_config FROM product_action WHERE id = ${dbSupport.id}
+  `;
+  const parsedSupportConfig = typeof dbSupportUpdated?.action_config === "string" ? JSON.parse(dbSupportUpdated.action_config) : dbSupportUpdated?.action_config;
+  if (parsedSupportConfig?.support_category !== "Returns") {
+    await fail(`Scenario 11: Support category update not persisted: ${JSON.stringify(parsedSupportConfig)}`);
+  }
+
+  // 12. Edit NAVIGATE_CATALOG target to product
+  log("Scenario 11: Editing NAVIGATE_CATALOG destination to product and verifying persistence...");
+  await cdp.evaluate(`(() => {
+    const node = document.querySelector('[data-action-id="${dbNav.id}"] [data-testid="select-action-btn"]');
+    if (node) node.click();
+  })()`);
+  await sleep(500);
+
+  await setInputValue(cdp, '[data-testid="edit-action-nav-kind-select"]', "product");
+  await sleep(300);
+  await setInputValue(cdp, '[data-testid="edit-action-nav-target-select"]', prod.id);
+  await sleep(300);
+  await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
+  await sleep(1500);
+
+  const [dbNavUpdated] = await pgClient`
+    SELECT navigate_category_id, navigate_product_id FROM product_action WHERE id = ${dbNav.id}
+  `;
+  if (dbNavUpdated?.navigate_product_id !== prod.id || dbNavUpdated?.navigate_category_id !== null) {
+    await fail(`Scenario 11: NAVIGATE_CATALOG product target update failed: ${JSON.stringify(dbNavUpdated)}`);
+  }
+
+  // 13. Safe deactivation through UI with unavailable soft-deleted target
+  log("Scenario 11: Testing safe UI deactivation of action with soft-deleted target...");
+  // Create a category and an active navigation action pointing to it
+  const [softDelCat] = await pgClient`
+    INSERT INTO category (id, slug, is_active, sort_order)
+    VALUES (${crypto.randomUUID()}, 'soft-del-target-cat', true, 99)
+    RETURNING id
+  `;
+  await pgClient`
+    INSERT INTO category_translation (category_id, language_id, name)
+    VALUES (${softDelCat.id}, ${langEn.id}, 'Soft Delete Target Cat')
+  `;
+  const [softDelAction] = await pgClient`
+    INSERT INTO product_action (id, product_id, action_type, is_active, navigate_category_id, sort_order)
+    VALUES (${crypto.randomUUID()}, ${prod4.id}, 'NAVIGATE_CATALOG', true, ${softDelCat.id}, 99)
+    RETURNING id
+  `;
+  await pgClient`
+    INSERT INTO product_action_translation (action_id, language_id, label)
+    VALUES (${softDelAction.id}, ${langEn.id}, 'Jump to Soft Del Cat')
+  `;
+
+  // Soft-delete the target category in PostgreSQL
+  await pgClient`
+    UPDATE category SET deleted_at = NOW() WHERE id = ${softDelCat.id}
+  `;
+
+  // Reload page to reflect updated categories
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(1500);
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="product-buttons-btn-cloud-suite-actions-four"]');
+    if (btn) btn.click();
+  })()`);
+  await sleep(1000);
+
+  // Open the action in edit drawer
+  await cdp.evaluate(`(() => {
+    const node = document.querySelector('[data-action-id="${softDelAction.id}"] [data-testid="select-action-btn"]');
+    if (node) node.click();
+  })()`);
+  await sleep(500);
+
+  // Verify honest target display in select
+  const navTargetSelectHtml = await cdp.evaluate(`(() => {
+    const sel = document.querySelector('[data-testid="edit-action-nav-target-select"]');
+    return sel ? sel.innerHTML : '';
+  })()`);
+  if (!navTargetSelectHtml.includes("Unavailable / Deleted")) {
+    await fail(`Scenario 11: Target select did not honestly display deleted category: '${navTargetSelectHtml}'`);
+  }
+
+  // Toggle active off
+  await cdp.evaluate(`(() => {
+    const toggle = document.querySelector('[data-testid="edit-action-is-active"]');
+    if (toggle && toggle.checked) toggle.click();
+  })()`);
+  await sleep(300);
+
+  // Click Save Changes
+  await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
+  await sleep(1500);
+
+  // Verify in PostgreSQL: is_active=false, navigate_category_id unchanged
+  const [softDelDbAction] = await pgClient`
+    SELECT is_active, navigate_category_id FROM product_action WHERE id = ${softDelAction.id}
+  `;
+  if (softDelDbAction?.is_active !== false) {
+    await fail(`Scenario 11: Expected is_active=false on deactivation, found: ${softDelDbAction?.is_active}`);
+  }
+  if (softDelDbAction?.navigate_category_id !== softDelCat.id) {
+    await fail(`Scenario 11: navigate_category_id was modified or cleared on deactivation: ${softDelDbAction?.navigate_category_id}`);
+  }
+
+  // Attempt reactivation without selecting valid target should be rejected
+  await cdp.evaluate(`(() => {
+    const node = document.querySelector('[data-action-id="${softDelAction.id}"] [data-testid="select-action-btn"]');
+    if (node) node.click();
+  })()`);
+  await sleep(500);
+  await cdp.evaluate(`(() => {
+    const toggle = document.querySelector('[data-testid="edit-action-is-active"]');
+    if (toggle && !toggle.checked) toggle.click();
+  })()`);
+  await sleep(300);
+  await cdp.evaluate(`(() => { document.querySelector('[data-testid="save-action-btn"]').click(); })()`);
+  await sleep(1000);
+
+  const reactivateAlert = await cdp.evaluate(`(() => {
+    const alert = document.querySelector('[role="alert"]');
+    return alert ? alert.innerText : '';
+  })()`);
+  if (!reactivateAlert.toLowerCase().includes("deleted") && !reactivateAlert.toLowerCase().includes("target")) {
+    await fail(`Scenario 11: Reactivation with deleted target was not rejected: '${reactivateAlert}'`);
+  }
+
+  // 14. Hidden ancestor warning check
+  log("Scenario 11: Verifying hidden-by-ancestor warning for inactive category ancestor...");
+  // Create an inactive parent category and an active child category
+  const [parentInactiveCat] = await pgClient`
+    INSERT INTO category (id, slug, is_active, sort_order)
+    VALUES (${crypto.randomUUID()}, 'inactive-parent-cat', false, 101)
+    RETURNING id
+  `;
+  await pgClient`
+    INSERT INTO category_translation (category_id, language_id, name)
+    VALUES (${parentInactiveCat.id}, ${langEn.id}, 'Inactive Parent Category')
+  `;
+  const [childActiveCat] = await pgClient`
+    INSERT INTO category (id, parent_id, slug, is_active, sort_order)
+    VALUES (${crypto.randomUUID()}, ${parentInactiveCat.id}, 'active-child-cat', true, 102)
+    RETURNING id
+  `;
+  await pgClient`
+    INSERT INTO category_translation (category_id, language_id, name)
+    VALUES (${childActiveCat.id}, ${langEn.id}, 'Active Child Category')
+  `;
+
+  // Reload page to refresh categories list in React
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(1500);
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="product-buttons-btn-cloud-suite-actions-four"]');
+    if (btn) btn.click();
+  })()`);
+  await sleep(1000);
+
+  // Open create modal for NAVIGATE_CATALOG
+  await cdp.evaluate(`(() => {
+    document.querySelector('[data-testid="add-root-action-btn"]').click();
+  })()`);
+  await sleep(500);
+  await setInputValue(cdp, '[data-testid="create-action-type-select"]', "NAVIGATE_CATALOG");
+  await sleep(300);
+
+  // Inspect the options in the category select
+  const childOptionText = await cdp.evaluate(`(() => {
+    const sel = document.querySelector('[data-testid="create-action-nav-target-select"]');
+    if (!sel) return '';
+    const opt = Array.from(sel.options).find(o => o.value === '${childActiveCat.id}');
+    return opt ? opt.innerText : '';
+  })()`);
+  if (!childOptionText.includes("Hidden - Inactive ancestor")) {
+    await fail(`Scenario 11: Target option did not display hidden-by-ancestor status: '${childOptionText}'`);
+  }
+
+  // Close create modal
+  await cdp.evaluate(`(() => {
+    const cancelBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Cancel'));
+    if (cancelBtn) cancelBtn.click();
+  })()`);
+  await sleep(500);
+
+  // 15. Touch targets >=44px and no horizontal overflow at 360px viewport
+  log("Scenario 11: Verifying placeholder touch targets (>=44x44px) and 360px responsiveness...");
+  // Set viewport to 360px width
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 360,
+    height: 740,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await sleep(500);
+
+  // Open create modal for SEND_TEMPLATE_MESSAGE
+  await cdp.evaluate(`(() => {
+    document.querySelector('[data-testid="add-root-action-btn"]').click();
+  })()`);
+  await sleep(500);
+  await setInputValue(cdp, '[data-testid="create-action-type-select"]', "SEND_TEMPLATE_MESSAGE");
+  await sleep(500);
+
+  // Verify no horizontal overflow in dialog
+  const createModalOverflow = await cdp.evaluate(`(() => {
+    return {
+      scrollWidth: document.body.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    };
+  })()`);
+  if (createModalOverflow.scrollWidth > createModalOverflow.clientWidth) {
+    await fail(`Scenario 11: Horizontal overflow detected in create modal at 360px: scrollWidth=${createModalOverflow.scrollWidth}, clientWidth=${createModalOverflow.clientWidth}`);
+  }
+
+  // Check placeholder touch target sizes
+  const placeholderSizes = await cdp.evaluate(`(() => {
+    const buttons = Array.from(document.querySelectorAll('button')).filter(b => b.innerText.includes('{{'));
+    return buttons.map(b => {
+      const rect = b.getBoundingClientRect();
+      return { text: b.innerText, width: rect.width, height: rect.height };
+    });
+  })()`);
+
+  const undersizedPlaceholders = placeholderSizes.filter(p => p.width < 44 || p.height < 44);
+  if (undersizedPlaceholders.length > 0) {
+    await fail(`Scenario 11: Undersized placeholder touch targets detected (<44px): ${JSON.stringify(undersizedPlaceholders)}`);
+  }
+
+  // Close create modal and reset viewport
+  await cdp.evaluate(`(() => {
+    const cancelBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Cancel'));
+    if (cancelBtn) cancelBtn.click();
+  })()`);
+  await sleep(500);
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await sleep(500);
+
   log("Scenario 11 passed: All four new action types created, persisted, and edited successfully.");
 
   log("\n=======================================================");
-  log("ALL 10 ACCEPTANCE SCENARIOS PASSED SUCCESSFULLY!");
+  log("ALL 11 ACCEPTANCE SCENARIOS PASSED SUCCESSFULLY!");
   log("=======================================================\n");
 
   await cdp.close();

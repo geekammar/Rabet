@@ -16,8 +16,10 @@ import {
   MAX_ACTIVE_CHILDREN,
   type SupportedActionType,
 } from "@/lib/product-actions/constants";
+import { validateActionTemplateBody } from "@/lib/product-actions/templates";
 import { executeAtomicBatch } from "./catalog";
 import { mapDatabaseError, RabetDataError } from "./errors";
+import { resolveDefaultLanguage } from "./languages";
 
 /**
  * ===========================================================================
@@ -396,6 +398,52 @@ export async function createProductAction(
       }
     }
 
+    if (input.actionType === "SEND_TEMPLATE_MESSAGE") {
+      const defaultLanguage = await resolveDefaultLanguage(db);
+      if (!defaultLanguage) {
+        throw new RabetDataError(
+          "SETTINGS_NOT_INITIALIZED",
+          "Store default language is not configured.",
+        );
+      }
+      const defaultTrans = input.translations.find(
+        (t) =>
+          t.languageId === defaultLanguage.id ||
+          t.languageCode === defaultLanguage.code,
+      );
+      if (
+        !defaultTrans ||
+        !defaultTrans.templateBody ||
+        defaultTrans.templateBody.trim().length === 0
+      ) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "A valid message body in the store's default language is required when creating a SEND_TEMPLATE_MESSAGE button.",
+        );
+      }
+      const val = validateActionTemplateBody(defaultTrans.templateBody.trim(), {
+        required: true,
+      });
+      if (!val.success) {
+        throw new RabetDataError("INVALID_INPUT", val.error || "Invalid message body.");
+      }
+      for (const t of input.translations) {
+        if (
+          t.languageId !== defaultLanguage.id &&
+          t.languageCode !== defaultLanguage.code &&
+          t.templateBody &&
+          t.templateBody.trim().length > 0
+        ) {
+          const optVal = validateActionTemplateBody(t.templateBody.trim(), {
+            required: false,
+          });
+          if (!optVal.success) {
+            throw new RabetDataError("INVALID_INPUT", optVal.error || "Invalid message body.");
+          }
+        }
+      }
+    }
+
     // 5. Deterministic next sibling sort order
     const [maxOrderRow] = await db
       .select({ maxOrder: sql<number | null>`max(${productAction.sortOrder})` })
@@ -605,13 +653,72 @@ export async function editProductAction(
       }
     }
 
+    // Resolve store default language for validation invariants
+    const defaultLanguage = await resolveDefaultLanguage(db);
+    const defaultLangCode = defaultLanguage?.code ?? "en";
+
     // 4. Validate destination type parameters and targets
     let urlToSet: string | null = null;
     let navCatToSet: string | null = null;
     let navProdToSet: string | null = null;
     let configToSet: unknown = sql`'{}'::jsonb`;
 
-    if (input.actionType === "OPEN_URL") {
+    if (input.actionType === "SEND_TEMPLATE_MESSAGE") {
+      let resultingDefaultBody: string | null = null;
+      if (input.translation && input.translation.languageCode === defaultLangCode) {
+        if (input.translation.templateBody !== undefined) {
+          resultingDefaultBody =
+            input.translation.templateBody !== null &&
+            input.translation.templateBody.trim().length > 0
+              ? input.translation.templateBody.trim()
+              : null;
+        } else {
+          resultingDefaultBody = isTypeChange
+            ? null
+            : (existing.translations[defaultLangCode]?.templateBody?.trim() ?? null);
+        }
+      } else {
+        resultingDefaultBody = isTypeChange
+          ? null
+          : (existing.translations[defaultLangCode]?.templateBody?.trim() ?? null);
+      }
+
+      // Invariant 1: Converting to SEND_TEMPLATE_MESSAGE requires a valid nonblank default-language body
+      if (isTypeChange) {
+        if (!resultingDefaultBody || resultingDefaultBody.length === 0) {
+          throw new RabetDataError(
+            "INVALID_INPUT",
+            "A valid message body in the store's default language is required when converting to SEND_TEMPLATE_MESSAGE.",
+          );
+        }
+        const val = validateActionTemplateBody(resultingDefaultBody, { required: true });
+        if (!val.success) {
+          throw new RabetDataError("INVALID_INPUT", val.error || "Invalid message body.");
+        }
+      }
+
+      // Invariant 2: Active SEND_TEMPLATE_MESSAGE requires a valid nonblank default-language body
+      if (input.isActive) {
+        if (!resultingDefaultBody || resultingDefaultBody.length === 0) {
+          throw new RabetDataError(
+            "INVALID_INPUT",
+            "A valid message body in the store's default language is required for an active SEND_TEMPLATE_MESSAGE button.",
+          );
+        }
+        const val = validateActionTemplateBody(resultingDefaultBody, { required: true });
+        if (!val.success) {
+          throw new RabetDataError("INVALID_INPUT", val.error || "Invalid message body.");
+        }
+      }
+
+      // Invariant 3: Inactive same-type update with non-empty body must still have valid syntax
+      if (!input.isActive && !isTypeChange && resultingDefaultBody) {
+        const val = validateActionTemplateBody(resultingDefaultBody, { required: false });
+        if (!val.success) {
+          throw new RabetDataError("INVALID_INPUT", val.error || "Invalid message body.");
+        }
+      }
+    } else if (input.actionType === "OPEN_URL") {
       urlToSet =
         input.url !== undefined
           ? (input.url?.trim() ?? null)
@@ -640,6 +747,16 @@ export async function editProductAction(
           "Cannot specify both a category and a product navigation target.",
         );
       }
+
+      const isCategoryTargetChanged =
+        isTypeChange ||
+        (input.navigateCategoryId !== undefined &&
+          (input.navigateCategoryId?.trim() || null) !== existing.navigateCategoryId);
+
+      const isProductTargetChanged =
+        isTypeChange ||
+        (input.navigateProductId !== undefined &&
+          (input.navigateProductId?.trim() || null) !== existing.navigateProductId);
 
       if (input.isActive) {
         if (!navCatToSet && !navProdToSet) {
@@ -679,8 +796,10 @@ export async function editProductAction(
           }
         }
       } else {
-        // Safe deactivation: if target was explicitly submitted, validate it
-        if (input.navigateCategoryId !== undefined && navCatToSet) {
+        // Safe deactivation:
+        // If the target is newly selected (changed), validate that it exists and is not soft-deleted.
+        // If the target is UNCHANGED, retain it on deactivation without rejecting.
+        if (isCategoryTargetChanged && navCatToSet) {
           const [targetCat] = await db
             .select({ id: category.id, deletedAt: category.deletedAt })
             .from(category)
@@ -695,7 +814,7 @@ export async function editProductAction(
           }
         }
 
-        if (input.navigateProductId !== undefined && navProdToSet) {
+        if (isProductTargetChanged && navProdToSet) {
           const [targetProd] = await db
             .select({ id: product.id, deletedAt: product.deletedAt })
             .from(product)
@@ -856,9 +975,25 @@ export async function editProductAction(
       let templateBodyToSet: string | null = null;
       if (input.actionType === "SEND_TEMPLATE_MESSAGE") {
         if (input.translation.templateBody !== undefined) {
-          templateBodyToSet = input.translation.templateBody ?? null;
+          if (
+            input.translation.templateBody === null ||
+            input.translation.templateBody.trim().length === 0
+          ) {
+            templateBodyToSet = null;
+          } else {
+            const bodyVal = validateActionTemplateBody(
+              input.translation.templateBody.trim(),
+              { required: false },
+            );
+            if (!bodyVal.success) {
+              throw new RabetDataError("INVALID_INPUT", bodyVal.error || "Invalid message body.");
+            }
+            templateBodyToSet = bodyVal.data ?? null;
+          }
         } else {
-          templateBodyToSet = isTypeChange ? null : (existingTrans?.templateBody ?? null);
+          templateBodyToSet = isTypeChange
+            ? null
+            : (existingTrans?.templateBody ?? null);
         }
       }
 

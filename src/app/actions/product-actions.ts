@@ -321,14 +321,6 @@ export async function createProductActionAction(
     }
   }
 
-  // Pre-load store settings for validation of support category only when OPEN_SUPPORT
-  const db = getDb();
-  let availableCategories: string[] = [];
-  if (typeRes.success && typeRes.data === "OPEN_SUPPORT") {
-    const settings = await readSettings(db);
-    availableCategories = settings?.supportCategory ?? [];
-  }
-
   // Check if raw values were submitted for incompatible parameter check
   const submittedMenuText =
     rawMenuText !== undefined && rawMenuText !== null && String(rawMenuText).trim().length > 0
@@ -347,7 +339,23 @@ export async function createProductActionAction(
       ? String(rawArabicTemplateBody).trim()
       : null;
 
-  if (typeRes.success) {
+  if (Object.keys(errors).length > 0 || !prodIdRes.success || !typeRes.success) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Please correct the errors in the form.",
+      errors,
+    };
+  }
+
+  try {
+    const db = getDb();
+    let availableCategories: string[] = [];
+    if (typeRes.data === "OPEN_SUPPORT") {
+      const settings = await readSettings(db);
+      availableCategories = settings?.supportCategory ?? [];
+    }
+
     const paramRes = validateActionParameters({
       actionType: typeRes.data,
       menuText: submittedMenuText,
@@ -362,20 +370,13 @@ export async function createProductActionAction(
       availableCategories,
     });
     if (!paramRes.success) {
-      errors.parameters = paramRes.error;
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        message: "Please correct the errors in the form.",
+        errors: { parameters: paramRes.error },
+      };
     }
-  }
-
-  if (Object.keys(errors).length > 0 || !prodIdRes.success || !typeRes.success) {
-    return {
-      success: false,
-      code: "INVALID_INPUT",
-      message: "Please correct the errors in the form.",
-      errors,
-    };
-  }
-
-  try {
     const [languages, defaultLanguage] = await Promise.all([
       listLanguages(db),
       resolveDefaultLanguage(db),
@@ -530,14 +531,6 @@ export async function updateProductActionAction(
   let menuText: string | null | undefined = undefined;
   let templateBody: string | null | undefined = undefined;
 
-  // Pre-load store settings for support category validation only when OPEN_SUPPORT
-  const db = getDb();
-  let availableCategories: string[] = [];
-  if (typeRes.success && typeRes.data === "OPEN_SUPPORT") {
-    const settings = await readSettings(db);
-    availableCategories = settings?.supportCategory ?? [];
-  }
-
   if (isTranslationSubmitted) {
     if (typeof rawLangCode !== "string" || rawLangCode.trim().length === 0) {
       errors.languageCode = "Language code is required when updating translations.";
@@ -667,40 +660,6 @@ export async function updateProductActionAction(
     }
   }
 
-  let parsedConfig: Record<string, unknown> | undefined = undefined;
-  if (rawConfig !== undefined) {
-    const configRes = validateActionConfig(
-      rawConfig,
-      typeRes.success ? typeRes.data : "OPEN_SUBMENU",
-      isFormData,
-      availableCategories,
-    );
-    if (!configRes.success) {
-      errors.actionConfig = configRes.error;
-    } else {
-      parsedConfig = configRes.data;
-    }
-  }
-
-  if (typeRes.success) {
-    const paramRes = validateActionParameters({
-      actionType: typeRes.data,
-      menuText:
-        isTranslationSubmitted && typeof menuText === "string" ? menuText : null,
-      templateBody:
-        isTranslationSubmitted && typeof templateBody === "string" ? templateBody : null,
-      url: rawUrl,
-      navigateCategoryId: rawNavCat,
-      navigateProductId: rawNavProd,
-      actionConfig: rawConfig,
-      isFormData,
-      availableCategories,
-    });
-    if (!paramRes.success) {
-      errors.parameters = paramRes.error;
-    }
-  }
-
   if (
     Object.keys(errors).length > 0 ||
     !actionIdRes.success ||
@@ -717,6 +676,54 @@ export async function updateProductActionAction(
   }
 
   try {
+    const db = getDb();
+    let availableCategories: string[] = [];
+    if (typeRes.data === "OPEN_SUPPORT") {
+      const settings = await readSettings(db);
+      availableCategories = settings?.supportCategory ?? [];
+    }
+
+    let parsedConfig: Record<string, unknown> | undefined = undefined;
+    if (rawConfig !== undefined) {
+      const configRes = validateActionConfig(
+        rawConfig,
+        typeRes.data,
+        isFormData,
+        availableCategories,
+      );
+      if (!configRes.success) {
+        return {
+          success: false,
+          code: "INVALID_INPUT",
+          message: "Please correct the errors in the form.",
+          errors: { actionConfig: configRes.error },
+        };
+      }
+      parsedConfig = configRes.data;
+    }
+
+    const paramRes = validateActionParameters({
+      actionType: typeRes.data,
+      menuText:
+        isTranslationSubmitted && typeof menuText === "string" ? menuText : null,
+      templateBody:
+        isTranslationSubmitted && typeof templateBody === "string" ? templateBody : null,
+      url: rawUrl,
+      navigateCategoryId: rawNavCat,
+      navigateProductId: rawNavProd,
+      actionConfig: rawConfig,
+      isFormData,
+      availableCategories,
+    });
+    if (!paramRes.success) {
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        message: "Please correct the errors in the form.",
+        errors: { parameters: paramRes.error },
+      };
+    }
+
     const languages = await listLanguages(db);
 
     let translationToUpdate:

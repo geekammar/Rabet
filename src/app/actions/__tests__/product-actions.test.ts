@@ -798,5 +798,95 @@ describe("Product Action Server Actions", () => {
         );
       });
     });
+
+    describe("Database Error Boundaries", () => {
+      it("sanitizes database acquisition errors without leaking connection details on create", async () => {
+        mockGetDb.mockImplementationOnce(() => {
+          throw new Error("connect ECONNREFUSED postgres://admin:secretPass@10.0.0.1:5432/rabet");
+        });
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_URL",
+          label: "Link",
+          url: "https://example.com",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("DATABASE_ERROR");
+        expect(res.message).toMatch(/could not be completed/i);
+        expect(res.message).not.toContain("secretPass");
+        expect(res.message).not.toContain("10.0.0.1");
+      });
+
+      it("sanitizes database acquisition errors without leaking connection details on update", async () => {
+        mockGetDb.mockImplementationOnce(() => {
+          throw new Error("connect ECONNREFUSED postgres://admin:secretPass@10.0.0.1:5432/rabet");
+        });
+
+        const res = await updateProductActionAction({
+          actionId: validActionId,
+          productId: validProductId,
+          actionType: "OPEN_URL",
+          isActive: true,
+          url: "https://example.com",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("DATABASE_ERROR");
+        expect(res.message).toMatch(/could not be completed/i);
+        expect(res.message).not.toContain("secretPass");
+        expect(res.message).not.toContain("10.0.0.1");
+      });
+
+      it("sanitizes readSettings rejection without leaking SQL diagnostics on create", async () => {
+        mockReadSettings.mockRejectedValueOnce(
+          new Error("syntax error at or near 'SELECT * FROM bot_setting'"),
+        );
+
+        const res = await createProductActionAction({
+          productId: validProductId,
+          actionType: "OPEN_SUPPORT",
+          label: "Support",
+          actionConfig: { support_category: "Returns" },
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("DATABASE_ERROR");
+        expect(res.message).toMatch(/could not be completed/i);
+        expect(res.message).not.toContain("SELECT");
+      });
+
+      it("sanitizes readSettings rejection without leaking SQL diagnostics on update", async () => {
+        mockReadSettings.mockRejectedValueOnce(
+          new Error("syntax error at or near 'SELECT * FROM bot_setting'"),
+        );
+
+        const res = await updateProductActionAction({
+          actionId: validActionId,
+          productId: validProductId,
+          actionType: "OPEN_SUPPORT",
+          isActive: true,
+          actionConfig: { support_category: "Returns" },
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("DATABASE_ERROR");
+        expect(res.message).toMatch(/could not be completed/i);
+        expect(res.message).not.toContain("SELECT");
+      });
+
+      it("rejects malformed local input without calling getDb or touching database", async () => {
+        const res = await createProductActionAction({
+          productId: "not-a-valid-uuid",
+          actionType: "INVALID_ACTION_TYPE" as unknown as "OPEN_SUBMENU",
+          label: "",
+        });
+
+        expect(res.success).toBe(false);
+        expect(res.code).toBe("INVALID_INPUT");
+        expect(mockGetDb).not.toHaveBeenCalled();
+      });
+    });
   });
 });

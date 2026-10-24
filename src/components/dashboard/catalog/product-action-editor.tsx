@@ -257,16 +257,22 @@ export function ProductActionEditor({
     });
   }, [actions, isProductActive, isCategoryActive, activeLangTab, defaultLangCode]);
 
-  // Build category paths for target pickers
+  // Build category paths and ancestor availability for target pickers
   const categoryPaths = useMemo(() => {
     const catMap = new Map<string, CatalogCategoryRecord>(
       categories.map((c) => [c.id, c]),
     );
 
-    const getPath = (c: CatalogCategoryRecord): string => {
+    const getPathAndStatus = (c: CatalogCategoryRecord): {
+      path: string;
+      hasInactiveAncestor: boolean;
+      inactiveAncestorName?: string;
+    } => {
       const names: string[] = [];
       let current: CatalogCategoryRecord | undefined = c;
       const visited = new Set<string>();
+      let hasInactiveAncestor = false;
+      let inactiveAncestorName: string | undefined = undefined;
 
       while (current && !visited.has(current.id)) {
         visited.add(current.id);
@@ -275,14 +281,39 @@ export function ProductActionEditor({
           current.translations["en"]?.name ||
           current.slug;
         names.unshift(name);
-        current = current.parentId ? catMap.get(current.parentId) : undefined;
+
+        const parent: CatalogCategoryRecord | undefined = current.parentId
+          ? catMap.get(current.parentId)
+          : undefined;
+        if (parent && !parent.isActive && !hasInactiveAncestor) {
+          hasInactiveAncestor = true;
+          inactiveAncestorName =
+            parent.translations[defaultLangCode]?.name ||
+            parent.translations["en"]?.name ||
+            parent.slug;
+        }
+        current = parent;
       }
-      return names.join(" > ");
+      return { path: names.join(" > "), hasInactiveAncestor, inactiveAncestorName };
     };
 
-    const result = new Map<string, { path: string; record: CatalogCategoryRecord }>();
+    const result = new Map<
+      string,
+      {
+        path: string;
+        record: CatalogCategoryRecord;
+        hasInactiveAncestor: boolean;
+        inactiveAncestorName?: string;
+      }
+    >();
     for (const cat of categories) {
-      result.set(cat.id, { path: getPath(cat), record: cat });
+      const { path, hasInactiveAncestor, inactiveAncestorName } = getPathAndStatus(cat);
+      result.set(cat.id, {
+        path,
+        record: cat,
+        hasInactiveAncestor,
+        inactiveAncestorName,
+      });
     }
     return result;
   }, [categories, defaultLangCode]);
@@ -1011,6 +1042,7 @@ export function ProductActionEditor({
                   <input
                     type="checkbox"
                     id="edit-is-active"
+                    data-testid="edit-action-is-active"
                     checked={editIsActive}
                     disabled={isBusy}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditIsActive(e.target.checked)}
@@ -1126,12 +1158,36 @@ export function ProductActionEditor({
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       >
                         <option value="">-- Choose destination --</option>
+                        {editNavTargetKind === "category" &&
+                          Boolean(
+                            editNavTargetId &&
+                              !categories.some((c) => c.id === editNavTargetId),
+                          ) && (
+                            <option value={editNavTargetId}>
+                              (Unavailable / Deleted category)
+                            </option>
+                          )}
+                        {editNavTargetKind === "product" &&
+                          Boolean(
+                            editNavTargetId &&
+                              !products.some((p) => p.id === editNavTargetId),
+                          ) && (
+                            <option value={editNavTargetId}>
+                              (Unavailable / Deleted product)
+                            </option>
+                          )}
                         {editNavTargetKind === "category"
                           ? categories.map((cat) => {
-                              const path = categoryPaths.get(cat.id)?.path || cat.slug;
+                              const catInfo = categoryPaths.get(cat.id);
+                              const path = catInfo?.path || cat.slug;
+                              const statusBadge = !cat.isActive
+                                ? "(Inactive)"
+                                : catInfo?.hasInactiveAncestor
+                                ? "(Hidden - Inactive ancestor)"
+                                : "";
                               return (
                                 <option key={cat.id} value={cat.id}>
-                                  {path} {!cat.isActive ? "(Inactive)" : ""}
+                                  {path} {statusBadge}
                                 </option>
                               );
                             })
@@ -1140,12 +1196,20 @@ export function ProductActionEditor({
                                 prod.translations[defaultLangCode]?.name ||
                                 prod.translations["en"]?.name ||
                                 prod.slug;
-                              const catPath = prod.categoryId
-                                ? categoryPaths.get(prod.categoryId)?.path
+                              const catInfo = prod.categoryId
+                                ? categoryPaths.get(prod.categoryId)
+                                : undefined;
+                              const catPath = catInfo?.path ? `(${catInfo.path})` : "";
+                              const statusBadge = !prod.isActive
+                                ? "(Inactive)"
+                                : catInfo && !catInfo.record.isActive
+                                ? "(Hidden - Inactive category)"
+                                : catInfo?.hasInactiveAncestor
+                                ? "(Hidden - Inactive category ancestor)"
                                 : "";
                               return (
                                 <option key={prod.id} value={prod.id}>
-                                  {name} {catPath ? `(${catPath})` : ""} {!prod.isActive ? "(Inactive)" : ""}
+                                  {name} {catPath} {statusBadge}
                                 </option>
                               );
                             })}
@@ -1166,14 +1230,22 @@ export function ProductActionEditor({
                         if (!cat) {
                           return (
                             <p className="text-[11px] text-destructive">
-                              Target category no longer exists or has been deleted.
+                              Target category no longer exists or has been deleted. Action cannot be activated until a new destination is selected.
                             </p>
                           );
                         }
+                        const catInfo = categoryPaths.get(cat.id);
                         if (!cat.isActive) {
                           return (
                             <p className="text-[11px] text-amber-600">
                               Selected category is currently inactive and hidden from customers.
+                            </p>
+                          );
+                        }
+                        if (catInfo?.hasInactiveAncestor) {
+                          return (
+                            <p className="text-[11px] text-amber-600">
+                              Selected category is active, but hidden from customers because ancestor &quot;{catInfo.inactiveAncestorName}&quot; is inactive.
                             </p>
                           );
                         }
@@ -1182,14 +1254,31 @@ export function ProductActionEditor({
                         if (!prod) {
                           return (
                             <p className="text-[11px] text-destructive">
-                              Target product no longer exists or has been deleted.
+                              Target product no longer exists or has been deleted. Action cannot be activated until a new destination is selected.
                             </p>
                           );
                         }
+                        const prodCatInfo = prod.categoryId
+                          ? categoryPaths.get(prod.categoryId)
+                          : undefined;
                         if (!prod.isActive) {
                           return (
                             <p className="text-[11px] text-amber-600">
                               Selected product is currently inactive and hidden from customers.
+                            </p>
+                          );
+                        }
+                        if (prodCatInfo && !prodCatInfo.record.isActive) {
+                          return (
+                            <p className="text-[11px] text-amber-600">
+                              Selected product is active, but hidden from customers because category &quot;{prodCatInfo.record.translations[defaultLangCode]?.name || prodCatInfo.record.translations["en"]?.name || prodCatInfo.record.slug}&quot; is inactive.
+                            </p>
+                          );
+                        }
+                        if (prodCatInfo?.hasInactiveAncestor) {
+                          return (
+                            <p className="text-[11px] text-amber-600">
+                              Selected product is active, but hidden from customers because category ancestor &quot;{prodCatInfo.inactiveAncestorName}&quot; is inactive.
                             </p>
                           );
                         }
@@ -1234,6 +1323,7 @@ export function ProductActionEditor({
                     const status = resolveActionTranslationStatus({
                       currentLang: activeLangTab,
                       savedTranslations: selectedNode.translations,
+                      actionType: editActionType,
                       defaultLanguageCode: defaultLangCode,
                       defaultLanguageLabel: defaultLangLabel,
                     });
@@ -1387,11 +1477,12 @@ export function ProductActionEditor({
                         <p className="text-[11px] text-muted-foreground font-medium">
                           Supported placeholders (click to insert):
                         </p>
-                        <div className="flex flex-wrap gap-1">
+                        <div className="flex flex-wrap gap-2">
                           {ACTION_MESSAGE_PLACEHOLDERS.map((ph) => (
                             <button
                               key={ph}
                               type="button"
+                              disabled={isBusy}
                               onClick={() => {
                                 const current = editDraftTranslations[activeLangTab]?.templateBody ?? "";
                                 const updated = `${current}{{${ph}}}`;
@@ -1404,7 +1495,7 @@ export function ProductActionEditor({
                                   },
                                 }));
                               }}
-                              className="text-[10px] font-mono px-2 py-0.5 rounded border bg-muted/60 hover:bg-muted text-foreground"
+                              className="text-xs font-mono px-3 py-2.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-md border bg-muted/60 hover:bg-muted text-foreground transition-colors disabled:opacity-50 disabled:pointer-events-none"
                             >
                               {`{{${ph}}}`}
                             </button>
@@ -1413,24 +1504,58 @@ export function ProductActionEditor({
                       </div>
 
                       {/* Safe Preview Box */}
-                      <div className="rounded-xl border bg-muted/30 p-3 space-y-1">
-                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
-                          <Info className="size-3.5" />
-                          <span>Preview with sample values (not Telegram delivery):</span>
-                        </div>
-                        <div
-                          className="text-xs p-2.5 rounded bg-background border whitespace-pre-wrap break-words"
-                          dir={activeLangTab === "ar" ? "rtl" : "ltr"}
-                        >
-                          {interpolateActionTemplate(
-                            editDraftTranslations[activeLangTab]?.templateBody ||
-                              (activeLangTab !== defaultLangCode
-                                ? editDraftTranslations[defaultLangCode]?.templateBody || ""
-                                : ""),
-                            sampleContext,
-                          ) || <span className="text-muted-foreground italic">No message content</span>}
-                        </div>
-                      </div>
+                      {(() => {
+                        const currentDraft =
+                          editDraftTranslations[activeLangTab]?.templateBody ?? "";
+                        const hasCurrentDraft = currentDraft.trim().length > 0;
+                        const status = resolveActionTranslationStatus({
+                          currentLang: activeLangTab,
+                          savedTranslations: selectedNode.translations,
+                          actionType: editActionType,
+                          defaultLanguageCode: defaultLangCode,
+                          defaultLanguageLabel: defaultLangLabel,
+                        });
+
+                        let previewHeader = `Preview with sample values (not Telegram delivery):`;
+                        let previewText = "";
+                        let isFallback = false;
+
+                        if (hasCurrentDraft) {
+                          previewHeader = `Sample preview of current ${activeLangTab.toUpperCase()} draft (not Telegram delivery):`;
+                          previewText = interpolateActionTemplate(currentDraft, sampleContext);
+                        } else if (activeLangTab === defaultLangCode) {
+                          previewHeader = `Default language message body (required for active button):`;
+                          previewText = "";
+                        } else if (status.effectiveSavedBody) {
+                          previewHeader = `Fallback preview from saved ${defaultLangLabel} message body:`;
+                          previewText = interpolateActionTemplate(status.effectiveSavedBody, sampleContext);
+                          isFallback = true;
+                        } else {
+                          previewHeader = `Message body preview (${activeLangTab.toUpperCase()}):`;
+                          previewText = "";
+                        }
+
+                        return (
+                          <div className="rounded-xl border bg-muted/30 p-3 space-y-1">
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+                              <Info className="size-3.5" />
+                              <span>{previewHeader}</span>
+                            </div>
+                            <div
+                              className="text-xs p-2.5 rounded bg-background border whitespace-pre-wrap break-words"
+                              dir={isFallback ? defaultLangDir : activeLangTab === "ar" ? "rtl" : "ltr"}
+                            >
+                              {previewText || (
+                                <span className="text-muted-foreground italic">
+                                  {activeLangTab === defaultLangCode
+                                    ? "No message content entered"
+                                    : "No saved default message body to fall back to"}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
 
@@ -1646,10 +1771,16 @@ export function ProductActionEditor({
                       <option value="">-- Choose destination --</option>
                       {createNavTargetKind === "category"
                         ? categories.map((cat) => {
-                            const path = categoryPaths.get(cat.id)?.path || cat.slug;
+                            const catInfo = categoryPaths.get(cat.id);
+                            const path = catInfo?.path || cat.slug;
+                            const statusBadge = !cat.isActive
+                              ? "(Inactive)"
+                              : catInfo?.hasInactiveAncestor
+                              ? "(Hidden - Inactive ancestor)"
+                              : "";
                             return (
                               <option key={cat.id} value={cat.id}>
-                                {path} {!cat.isActive ? "(Inactive)" : ""}
+                                {path} {statusBadge}
                               </option>
                             );
                           })
@@ -1658,12 +1789,20 @@ export function ProductActionEditor({
                               prod.translations[defaultLangCode]?.name ||
                               prod.translations["en"]?.name ||
                               prod.slug;
-                            const catPath = prod.categoryId
-                              ? categoryPaths.get(prod.categoryId)?.path
+                            const catInfo = prod.categoryId
+                              ? categoryPaths.get(prod.categoryId)
+                              : undefined;
+                            const catPath = catInfo?.path ? `(${catInfo.path})` : "";
+                            const statusBadge = !prod.isActive
+                              ? "(Inactive)"
+                              : catInfo && !catInfo.record.isActive
+                              ? "(Hidden - Inactive category)"
+                              : catInfo?.hasInactiveAncestor
+                              ? "(Hidden - Inactive category ancestor)"
                               : "";
                             return (
                               <option key={prod.id} value={prod.id}>
-                                {name} {catPath ? `(${catPath})` : ""} {!prod.isActive ? "(Inactive)" : ""}
+                                {name} {catPath} {statusBadge}
                               </option>
                             );
                           })}
@@ -1770,13 +1909,14 @@ export function ProductActionEditor({
                     <p className="text-[11px] text-muted-foreground font-medium">
                       Supported placeholders:
                     </p>
-                    <div className="flex flex-wrap gap-1">
+                    <div className="flex flex-wrap gap-2">
                       {ACTION_MESSAGE_PLACEHOLDERS.map((ph) => (
                         <button
                           key={ph}
                           type="button"
+                          disabled={isBusy}
                           onClick={() => setCreateTemplateBody((prev) => `${prev}{{${ph}}}`)}
-                          className="text-[10px] font-mono px-2 py-0.5 rounded border bg-muted/60 hover:bg-muted text-foreground"
+                          className="text-xs font-mono px-3 py-2.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-md border bg-muted/60 hover:bg-muted text-foreground transition-colors disabled:opacity-50 disabled:pointer-events-none"
                         >
                           {`{{${ph}}}`}
                         </button>
@@ -1869,6 +2009,24 @@ export function ProductActionEditor({
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60 font-mono text-xs"
                         placeholder="أهلاً {{customer_name}}! تفاصيل المنتج: {{product_name}} بسعر {{price}}."
                       />
+                      <div className="space-y-1">
+                        <p className="text-[11px] text-muted-foreground font-medium">
+                          Supported placeholders:
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {ACTION_MESSAGE_PLACEHOLDERS.map((ph) => (
+                            <button
+                              key={ph}
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => setCreateArabicTemplateBody((prev) => `${prev}{{${ph}}}`)}
+                              className="text-xs font-mono px-3 py-2.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-md border bg-muted/60 hover:bg-muted text-foreground transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                            >
+                              {`{{${ph}}}`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>

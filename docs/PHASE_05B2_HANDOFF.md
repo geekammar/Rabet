@@ -35,7 +35,11 @@ No database migrations or schema alterations were performed. Existing columns on
 - **Preview & Drafts:**
   - Administrative preview renders with clearly identified sample context (`Customer Name`, product name, store display name, formatted price).
   - Draft inputs are preserved across language tabs.
-  - Default-language body is required when creating, activating, or switching to this type. Optional language bodies support fallback to default language or explicit clearing.
+  - Default-language body is authoritatively required when creating, activating, or converting to this type. Evaluated dynamically against store default language.
+  - Safe deactivation of invalid actions is allowed without throwing.
+  - Omitted same-type body preserves stored value; optional language body clearing is permitted and falls back to default body.
+  - Structured safe errors returned at server action boundary.
+  - Placeholder helper chips provide >=44x44px touch targets and coordinate with pending/busy state.
 
 ### 2.2. `OPEN_URL`
 - **Storage:** Persisted in `product_action.url`.
@@ -65,8 +69,9 @@ No database migrations or schema alterations were performed. Existing columns on
   - Both target kinds cannot be submitted together.
 - **Hierarchy Distinction:** Catalog navigation is a navigation jump, not an ownership tree edge. It has no effect on `parent_action_id`, ancestry cycles, or tree depth limits.
 - **Truthful Availability:**
-  - Inactive targets or targets with inactive ancestors are configurable, but clearly marked in UI with `(Hidden from customers)`.
-  - Soft-deleted or missing targets are marked `(Deleted target - reconfiguration required)`. Activating an invalid target is blocked; safe deactivation is permitted without load mutation.
+  - Inactive targets or targets with inactive ancestors are configurable, but clearly marked in UI with `(Hidden - Inactive ancestor)` or `(Hidden - Inactive category)`.
+  - Soft-deleted or missing targets are marked `(Unavailable / Deleted target)`. Activating an invalid target is blocked.
+  - Safe deactivation is permitted without selecting a replacement target, retaining the stored target in PostgreSQL without load mutations.
 
 ---
 
@@ -113,11 +118,11 @@ In the edit drawer, changing the type selector displays an informative warning b
 
 1. **ESLint (`npm run lint`):** Passed with 0 errors and 0 warnings.
 2. **TypeScript (`npm run typecheck`):** Passed with 0 errors.
-3. **Unit Tests (`npm test`):** Passed (30 test files passed, 466 tests passed, 0 failures).
-4. **Database Integration (`npm run test:db`):** Passed (15 test files passed, 175 tests passed against disposable PostgreSQL, 0 failures).
+3. **Unit Tests (`npm test`):** Passed (30 test files passed, 474 tests passed, 0 failures).
+4. **Database Integration (`npm run test:db`):** Passed (15 test files passed, 177 tests passed against disposable PostgreSQL, 0 failures).
 5. **Schema Drift Check (`npm run db:check`):** Passed (`Everything's fine 🐶🔥`, 0 schema drift).
 6. **Production Build (`env -u DATABASE_URL npm run build`):** Succeeded with DATABASE_URL unset.
-7. **Browser Acceptance (`npm run test:browser:actions`):** All 11 scenarios passed, including Scenario 11 testing UI creation, configuration, reload persistence in DOM and PostgreSQL, and validation failure rejection across all four new action types.
+7. **Browser Acceptance (`npm run test:browser:actions`):** All 11 scenarios passed, including Scenario 11 verifying UI creation, configuration, draft preservation, reload persistence in DOM and PostgreSQL, validation failure rejection, safe navigation deactivation with soft-deleted target, and 360px touch targets (>=44x44px).
 
 ---
 
