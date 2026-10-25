@@ -226,48 +226,62 @@ export function validateIncomingUpdate(
     if (
       typeof from.id !== "number" ||
       !Number.isInteger(from.id) ||
-      from.id < 1 ||
-      from.id > Number.MAX_SAFE_INTEGER
+      !Number.isSafeInteger(from.id) ||
+      from.id < 1
     ) {
       return { valid: false, error: "Malformed callback_query from.id" };
     }
-    if (from.first_name !== undefined && typeof from.first_name !== "string") {
-      return { valid: false, error: "Malformed callback_query from.first_name" };
+    if (
+      typeof from.first_name !== "string" ||
+      from.first_name.trim().length === 0
+    ) {
+      return { valid: false, error: "Missing or empty callback_query from.first_name" };
     }
     if (from.is_bot !== undefined && typeof from.is_bot !== "boolean") {
       return { valid: false, error: "Malformed callback_query from.is_bot" };
     }
+    if (from.last_name !== undefined && typeof from.last_name !== "string") {
+      return { valid: false, error: "Malformed callback_query from.last_name" };
+    }
+    if (from.username !== undefined && typeof from.username !== "string") {
+      return { valid: false, error: "Malformed callback_query from.username" };
+    }
+    if (from.language_code !== undefined && typeof from.language_code !== "string") {
+      return { valid: false, error: "Malformed callback_query from.language_code" };
+    }
 
-    // message (if present)
-    if (cb.message !== undefined && cb.message !== null) {
-      if (typeof cb.message !== "object" || cb.message === null) {
-        return { valid: false, error: "Malformed callback message" };
-      }
-      const cbMsg = cb.message as Record<string, unknown>;
-      if (
-        typeof cbMsg.message_id !== "number" ||
-        !Number.isInteger(cbMsg.message_id) ||
-        cbMsg.message_id < 1 ||
-        cbMsg.message_id > Number.MAX_SAFE_INTEGER
-      ) {
-        return { valid: false, error: "Malformed callback message_id" };
-      }
-      if (typeof cbMsg.chat !== "object" || cbMsg.chat === null) {
-        return { valid: false, error: "Missing callback chat" };
-      }
-      const cbChat = cbMsg.chat as Record<string, unknown>;
-      if (
-        typeof cbChat.id !== "number" ||
-        !Number.isInteger(cbChat.id) ||
-        !Number.isSafeInteger(cbChat.id) ||
-        typeof cbChat.type !== "string"
-      ) {
-        return { valid: false, error: "Malformed callback chat fields" };
-      }
+    // Callbacks without a message (e.g. inline-mode queries) are unsupported
+    if (cb.message === undefined || cb.message === null) {
+      return { valid: true, ignored: true };
+    }
 
-      if (cbChat.type !== "private") {
-        return { valid: true, ignored: true };
-      }
+    if (typeof cb.message !== "object" || cb.message === null) {
+      return { valid: false, error: "Malformed callback message" };
+    }
+    const cbMsg = cb.message as Record<string, unknown>;
+    if (
+      typeof cbMsg.message_id !== "number" ||
+      !Number.isInteger(cbMsg.message_id) ||
+      !Number.isSafeInteger(cbMsg.message_id) ||
+      cbMsg.message_id < 1
+    ) {
+      return { valid: false, error: "Malformed callback message_id" };
+    }
+    if (typeof cbMsg.chat !== "object" || cbMsg.chat === null) {
+      return { valid: false, error: "Missing callback chat" };
+    }
+    const cbChat = cbMsg.chat as Record<string, unknown>;
+    if (
+      typeof cbChat.id !== "number" ||
+      !Number.isInteger(cbChat.id) ||
+      !Number.isSafeInteger(cbChat.id) ||
+      typeof cbChat.type !== "string"
+    ) {
+      return { valid: false, error: "Malformed callback chat fields" };
+    }
+
+    if (cbChat.type !== "private") {
+      return { valid: true, ignored: true };
     }
 
     // data and grammar validation BEFORE claim/customer effects

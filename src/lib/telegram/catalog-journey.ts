@@ -622,10 +622,15 @@ export async function handleCallbackQuery(
   // Acknowledge callback immediately to clear loading indicator
   const ack = await transport.answerCallbackQuery({ callbackQueryId: callbackQuery.id });
   if (!ack.ok) {
-    throw new TelegramTransportError(ack.error ?? "Failed to answer callback query", {
-      errorKind: ack.errorKind ?? "api_error",
-      retryAfterSeconds: ack.retryAfterSeconds,
-    });
+    if (ack.errorKind === "callback_expired") {
+      // Confirmed terminal acknowledgement condition caused by an expired callback query.
+      // Continue catalog rendering under existing attempt ownership and execution deadline.
+    } else {
+      throw new TelegramTransportError(ack.error ?? "Failed to answer callback query", {
+        errorKind: ack.errorKind ?? "api_error",
+        retryAfterSeconds: ack.retryAfterSeconds,
+      });
+    }
   }
 
   const message = callbackQuery.message;
@@ -866,95 +871,17 @@ export async function handleCallbackQuery(
 
   // 4. Product card callback: p:<productId>
   if (parsed.type === "product") {
-    const productCheck = await isProductHierarchyActive(db, parsed.productId);
-    if (!productCheck.valid || !productCheck.productRow) {
-      await editOrThrow(transport, {
-        chatId,
-        messageId,
-        text: ui.productUnavailable,
-        replyMarkup: {
-          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
-        },
-      });
-      return;
-    }
-
-    const prodRow = productCheck.productRow;
-
-    // Load translations
-    const prodTranslations = await db
-      .select({
-        languageId: productTranslation.languageId,
-        name: productTranslation.name,
-        description: productTranslation.description,
-      })
-      .from(productTranslation)
-      .where(eq(productTranslation.productId, prodRow.id));
-
-    const preferred = prodTranslations.find((t) => t.languageId === langContext.id);
-    const fallback = prodTranslations.find((t) => t.languageId === settings.defaultLanguageId);
-    const prodName = preferred?.name ?? fallback?.name ?? prodRow.slug;
-    const prodDesc = preferred?.description ?? fallback?.description ?? null;
-
-    let bodyText = prodName;
-    if (prodDesc && prodDesc.trim().length > 0) {
-      bodyText += `\n\n${prodDesc.trim()}`;
-    }
-    // Exact decimal price display without floating-point conversion
-    bodyText += `\n\n${ui.priceLabel} ${prodRow.price} ${settings.currency}`;
-
-    // Root product actions with deterministic tie-breaking
-    const rootActions = await db
-      .select({
-        id: productAction.id,
-        actionType: productAction.actionType,
-        sortOrder: productAction.sortOrder,
-      })
-      .from(productAction)
-      .where(
-        and(
-          eq(productAction.productId, prodRow.id),
-          isNull(productAction.parentActionId),
-          eq(productAction.isActive, true),
-        ),
-      )
-      .orderBy(asc(productAction.sortOrder), asc(productAction.id));
-
-    const keyboard: TelegramInlineKeyboardButton[][] = [];
-
-    for (const act of rootActions) {
-      const trans = await db
-        .select({
-          languageId: productActionTranslation.languageId,
-          label: productActionTranslation.label,
-        })
-        .from(productActionTranslation)
-        .where(eq(productActionTranslation.actionId, act.id));
-
-      const pTrans = trans.find((t) => t.languageId === langContext.id);
-      const fTrans = trans.find((t) => t.languageId === settings.defaultLanguageId);
-      const label = pTrans?.label ?? fTrans?.label ?? act.actionType;
-
-      keyboard.push([
-        {
-          text: label,
-          callback_data: tokens.action(act.id),
-        },
-      ]);
-    }
-
-    // Navigation row: Back to category & Home
-    keyboard.push([
-      { text: ui.back, callback_data: tokens.category(prodRow.categoryId) },
-      { text: ui.home, callback_data: tokens.home() },
-    ]);
-
-    await editOrThrow(transport, {
+    await renderProductCard(
+      db,
+      transport,
       chatId,
       messageId,
-      text: bodyText,
-      replyMarkup: { inline_keyboard: keyboard },
-    });
+      user,
+      parsed.productId,
+      settings,
+      langContext,
+      ui,
+    );
     return;
   }
 
@@ -976,13 +903,32 @@ export async function handleCallbackQuery(
     }
 
     if (act.parentActionId) {
-      // Re-route to parent action submenu
-      callbackQuery.data = tokens.action(act.parentActionId);
-      await handleCallbackQuery(db, transport, callbackQuery);
+      // Direct navigation to parent action submenu (no redundant answerCallbackQuery)
+      await handleActionExecution(
+        db,
+        transport,
+        chatId,
+        messageId,
+        user,
+        act.parentActionId,
+        settings,
+        langContext,
+        ui,
+        1,
+      );
     } else {
-      // Re-route to product card
-      callbackQuery.data = tokens.product(act.productId);
-      await handleCallbackQuery(db, transport, callbackQuery);
+      // Direct navigation to product card (no redundant answerCallbackQuery)
+      await renderProductCard(
+        db,
+        transport,
+        chatId,
+        messageId,
+        user,
+        act.productId,
+        settings,
+        langContext,
+        ui,
+      );
     }
     return;
   }
@@ -1025,6 +971,111 @@ export async function handleCallbackQuery(
 
   // Fallback for unknown tokens
   await renderRootCatalog(db, transport, chatId, user, messageId);
+}
+
+/**
+ * Renders the product card view with localized name, description, price, and root actions.
+ */
+async function renderProductCard(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+  user: TelegramUser,
+  productId: string,
+  settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>,
+  langContext: ResolvedLanguageContext,
+  ui: ReturnType<typeof getLocalizedUiStrings>,
+): Promise<void> {
+  const productCheck = await isProductHierarchyActive(db, productId);
+  if (!productCheck.valid || !productCheck.productRow) {
+    await editOrThrow(transport, {
+      chatId,
+      messageId,
+      text: ui.productUnavailable,
+      replyMarkup: {
+        inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+      },
+    });
+    return;
+  }
+
+  const prodRow = productCheck.productRow;
+
+  // Load translations
+  const prodTranslations = await db
+    .select({
+      languageId: productTranslation.languageId,
+      name: productTranslation.name,
+      description: productTranslation.description,
+    })
+    .from(productTranslation)
+    .where(eq(productTranslation.productId, prodRow.id));
+
+  const preferred = prodTranslations.find((t) => t.languageId === langContext.id);
+  const fallback = prodTranslations.find((t) => t.languageId === settings.defaultLanguageId);
+  const prodName = preferred?.name ?? fallback?.name ?? prodRow.slug;
+  const prodDesc = preferred?.description ?? fallback?.description ?? null;
+
+  let bodyText = prodName;
+  if (prodDesc && prodDesc.trim().length > 0) {
+    bodyText += `\n\n${prodDesc.trim()}`;
+  }
+  // Exact decimal price display without floating-point conversion
+  bodyText += `\n\n${ui.priceLabel} ${prodRow.price} ${settings.currency}`;
+
+  // Root product actions with deterministic tie-breaking
+  const rootActions = await db
+    .select({
+      id: productAction.id,
+      actionType: productAction.actionType,
+      sortOrder: productAction.sortOrder,
+    })
+    .from(productAction)
+    .where(
+      and(
+        eq(productAction.productId, prodRow.id),
+        isNull(productAction.parentActionId),
+        eq(productAction.isActive, true),
+      ),
+    )
+    .orderBy(asc(productAction.sortOrder), asc(productAction.id));
+
+  const keyboard: TelegramInlineKeyboardButton[][] = [];
+
+  for (const act of rootActions) {
+    const trans = await db
+      .select({
+        languageId: productActionTranslation.languageId,
+        label: productActionTranslation.label,
+      })
+      .from(productActionTranslation)
+      .where(eq(productActionTranslation.actionId, act.id));
+
+    const pTrans = trans.find((t) => t.languageId === langContext.id);
+    const fTrans = trans.find((t) => t.languageId === settings.defaultLanguageId);
+    const label = pTrans?.label ?? fTrans?.label ?? act.actionType;
+
+    keyboard.push([
+      {
+        text: label,
+        callback_data: tokens.action(act.id),
+      },
+    ]);
+  }
+
+  // Navigation row: Back to category & Home
+  keyboard.push([
+    { text: ui.back, callback_data: tokens.category(prodRow.categoryId) },
+    { text: ui.home, callback_data: tokens.home() },
+  ]);
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: bodyText,
+    replyMarkup: { inline_keyboard: keyboard },
+  });
 }
 
 /**

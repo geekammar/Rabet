@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 
 import {
   botSetting,
@@ -2600,6 +2600,522 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
         .where(eq(telegramUpdate.updateId, 8802));
       expect(row.processedAt).toBeNull();
       expect(row.processingError).toBe("category=network_error");
+    });
+  });
+
+  describe("Callback Retry Recovery, Single-Ack Back Routing, and Callback Validation", () => {
+    it("recovers on retry when callback acknowledgement expired but catalog render succeeds", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 88112233;
+
+      const [prod] = await db
+        .select()
+        .from(product)
+        .where(eq(product.slug, "pro-portfolio-template"));
+
+      const [enLang] = await db
+        .select()
+        .from(language)
+        .where(eq(language.code, "en"));
+
+      await db.insert(customer).values({
+        telegramId: customerTelegramId,
+        firstName: "RetryUser",
+        selectedLanguageId: enLang.id,
+      });
+
+      const updateId = 9101;
+      const callbackReqPayload = {
+        update_id: updateId,
+        callback_query: {
+          id: "cb_retry_ack_expired",
+          from: {
+            id: customerTelegramId,
+            is_bot: false,
+            first_name: "RetryUser",
+          },
+          message: {
+            message_id: 200,
+            chat: { id: customerTelegramId, type: "private" },
+          },
+          data: tokens.product(prod.id),
+        },
+      };
+
+      // 1. First attempt: answerCallbackQuery succeeds, but editMessageText fails
+      fakeTransport.failEditWith = "Transient network disconnect";
+      fakeTransport.failEditKind = "network_error";
+
+      const req1 = createWebhookRequest(callbackReqPayload, TEST_WEBHOOK_SECRET);
+      const res1 = await handleTelegramWebhookRequest(req1, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res1.status).toBe(500);
+
+      const [attempt1Row] = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(attempt1Row.processedAt).toBeNull();
+      expect(attempt1Row.processingError).toBe("category=network_error");
+
+      // 2. Second attempt: Telegram redelivers the update.
+      // Now, answerCallbackQuery fails with terminal 'query is too old', but editMessageText succeeds.
+      fakeTransport.clear();
+      fakeTransport.failAnswerWith =
+        "Bad Request: query is too old and response timeout expired or query id is invalid";
+
+      const req2 = createWebhookRequest(callbackReqPayload, TEST_WEBHOOK_SECRET);
+      const res2 = await handleTelegramWebhookRequest(req2, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res2.status).toBe(200);
+
+      // Verify update is marked processed and error cleared
+      const [attempt2Row] = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(attempt2Row.processedAt).not.toBeNull();
+      expect(attempt2Row.processingError).toBeNull();
+
+      // Product card content was delivered via editMessageText
+      expect(fakeTransport.editedMessages).toHaveLength(1);
+      expect(fakeTransport.editedMessages[0].text).toContain("49.99 USD");
+    });
+
+    it("does not treat expired callback as success if catalog edit also fails", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 88112234;
+
+      const [prod] = await db
+        .select()
+        .from(product)
+        .where(eq(product.slug, "pro-portfolio-template"));
+
+      const [enLang] = await db
+        .select()
+        .from(language)
+        .where(eq(language.code, "en"));
+
+      await db.insert(customer).values({
+        telegramId: customerTelegramId,
+        firstName: "DoubleFailUser",
+        selectedLanguageId: enLang.id,
+      });
+
+      const updateId = 9102;
+      const reqPayload = {
+        update_id: updateId,
+        callback_query: {
+          id: "cb_double_fail",
+          from: {
+            id: customerTelegramId,
+            is_bot: false,
+            first_name: "DoubleFailUser",
+          },
+          message: {
+            message_id: 201,
+            chat: { id: customerTelegramId, type: "private" },
+          },
+          data: tokens.product(prod.id),
+        },
+      };
+
+      // Both callback ack expired AND edit fails
+      fakeTransport.failAnswerWith = "Bad Request: query is too old";
+      fakeTransport.failEditWith = "Telegram server unavailable";
+      fakeTransport.failEditKind = "timeout";
+
+      const req = createWebhookRequest(reqPayload, TEST_WEBHOOK_SECRET);
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(500);
+
+      const [row] = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(row.processedAt).toBeNull();
+      expect(row.processingError).toBe("category=timeout");
+    });
+
+    it("halts dispatch and returns 429 when callback acknowledgement is rate-limited", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 88112235;
+
+      const [prod] = await db
+        .select()
+        .from(product)
+        .where(eq(product.slug, "pro-portfolio-template"));
+
+      const [enLang] = await db
+        .select()
+        .from(language)
+        .where(eq(language.code, "en"));
+
+      await db.insert(customer).values({
+        telegramId: customerTelegramId,
+        firstName: "RateLimitedUser",
+        selectedLanguageId: enLang.id,
+      });
+
+      fakeTransport.failAnswerWith = "Too Many Requests: retry after 11";
+      fakeTransport.failAnswerKind = "rate_limited";
+      fakeTransport.failAnswerRetryAfter = 11;
+
+      const updateId = 9103;
+      const req = createWebhookRequest(
+        {
+          update_id: updateId,
+          callback_query: {
+            id: "cb_rate_limited",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "RateLimitedUser",
+            },
+            message: {
+              message_id: 202,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.product(prod.id),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).toBe("11");
+
+      // No edits should have occurred
+      expect(fakeTransport.editedMessages).toHaveLength(0);
+
+      const [row] = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(row.processedAt).toBeNull();
+      expect(row.processingError).toBe("category=rate_limited;status=429;retry_after=11");
+    });
+
+    it("halts dispatch on network or unknown api error during callback acknowledgement", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 88112236;
+
+      const [prod] = await db
+        .select()
+        .from(product)
+        .where(eq(product.slug, "pro-portfolio-template"));
+
+      const [enLang] = await db
+        .select()
+        .from(language)
+        .where(eq(language.code, "en"));
+
+      await db.insert(customer).values({
+        telegramId: customerTelegramId,
+        firstName: "AckFailUser",
+        selectedLanguageId: enLang.id,
+      });
+
+      fakeTransport.failAnswerWith = "Network socket timeout";
+      fakeTransport.failAnswerKind = "timeout";
+
+      const updateId = 9104;
+      const req = createWebhookRequest(
+        {
+          update_id: updateId,
+          callback_query: {
+            id: "cb_ack_fail",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "AckFailUser",
+            },
+            message: {
+              message_id: 203,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.product(prod.id),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(500);
+      expect(fakeTransport.editedMessages).toHaveLength(0);
+
+      const [row] = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(row.processedAt).toBeNull();
+      expect(row.processingError).toBe("category=timeout");
+    });
+
+    it("executes Back-routing (b:<actionId>) with exactly 1 callback acknowledgement (no double-ack)", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 88112237;
+
+      const [prod] = await db
+        .select()
+        .from(product)
+        .where(eq(product.slug, "pro-portfolio-template"));
+
+      const [enLang] = await db
+        .select()
+        .from(language)
+        .where(eq(language.code, "en"));
+
+      const [detailsAct] = await db
+        .select()
+        .from(productAction)
+        .where(
+          and(
+            eq(productAction.productId, prod.id),
+            eq(productAction.actionType, "SHOW_DETAILS"),
+          ),
+        );
+
+      await db.insert(customer).values({
+        telegramId: customerTelegramId,
+        firstName: "BackNavUser",
+        selectedLanguageId: enLang.id,
+      });
+
+      // 1. Back from child action (SHOW_DETAILS) -> returns to parent submenu
+      const updateId1 = 9105;
+      const req1 = createWebhookRequest(
+        {
+          update_id: updateId1,
+          callback_query: {
+            id: "cb_back_child",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "BackNavUser",
+            },
+            message: {
+              message_id: 204,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.back(detailsAct.id),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res1 = await handleTelegramWebhookRequest(req1, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res1.status).toBe(200);
+      // Exactly ONE answerCallbackQuery call was made! (no double-ack)
+      expect(fakeTransport.answeredCallbacks).toHaveLength(1);
+      expect(fakeTransport.answeredCallbacks[0].callbackQueryId).toBe("cb_back_child");
+      // Edited message contains parent submenu
+      expect(fakeTransport.editedMessages).toHaveLength(1);
+      expect(fakeTransport.editedMessages[0].text).toContain("Choose your customized package options");
+
+      // 2. Back from root action (OPEN_SUBMENU) -> returns to product card
+      fakeTransport.clear();
+      const [rootAct] = await db
+        .select()
+        .from(productAction)
+        .where(
+          and(
+            eq(productAction.productId, prod.id),
+            isNull(productAction.parentActionId),
+          ),
+        );
+
+      const updateId2 = 9106;
+      const req2 = createWebhookRequest(
+        {
+          update_id: updateId2,
+          callback_query: {
+            id: "cb_back_root",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "BackNavUser",
+            },
+            message: {
+              message_id: 204,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.back(rootAct.id),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res2 = await handleTelegramWebhookRequest(req2, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res2.status).toBe(200);
+      // Exactly ONE answerCallbackQuery call was made! (no double-ack)
+      expect(fakeTransport.answeredCallbacks).toHaveLength(1);
+      expect(fakeTransport.answeredCallbacks[0].callbackQueryId).toBe("cb_back_root");
+      // Edited message contains product card
+      expect(fakeTransport.editedMessages).toHaveLength(1);
+      expect(fakeTransport.editedMessages[0].text).toContain("49.99 USD");
+    });
+
+    it("rejects callback query with wrong-type optional user fields upfront without DB writes", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const testCases = [
+        { field: "last_name", value: 12345 },
+        { field: "username", value: true },
+        { field: "language_code", value: ["en"] },
+      ];
+
+      for (let i = 0; i < testCases.length; i++) {
+        const tc = testCases[i];
+        const updateId = 9110 + i;
+        const fakeUserId = 883300 + i;
+
+        const req = createWebhookRequest(
+          {
+            update_id: updateId,
+            callback_query: {
+              id: `cb_bad_user_${i}`,
+              from: {
+                id: fakeUserId,
+                is_bot: false,
+                first_name: "TestUser",
+                [tc.field]: tc.value,
+              },
+              message: {
+                message_id: 300,
+                chat: { id: fakeUserId, type: "private" },
+              },
+              data: tokens.home(),
+            },
+          },
+          TEST_WEBHOOK_SECRET,
+        );
+
+        const res = await handleTelegramWebhookRequest(req, {
+          db: asAppDb(db),
+          transport: fakeTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        });
+
+        expect(res.status).toBe(400);
+
+        // Zero DB records created
+        const updateRows = await db
+          .select()
+          .from(telegramUpdate)
+          .where(eq(telegramUpdate.updateId, updateId));
+        expect(updateRows).toHaveLength(0);
+
+        const custRows = await db
+          .select()
+          .from(customer)
+          .where(eq(customer.telegramId, fakeUserId));
+        expect(custRows).toHaveLength(0);
+
+        // Zero transport calls
+        expect(fakeTransport.answeredCallbacks).toHaveLength(0);
+        expect(fakeTransport.editedMessages).toHaveLength(0);
+        expect(fakeTransport.sentMessages).toHaveLength(0);
+      }
+    });
+
+    it("safely ignores callbacks without message (inline-mode queries) before claim/writes", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const fakeUserId = 884400;
+      const updateId = 9120;
+
+      // Inline callback query has NO message object
+      const req = createWebhookRequest(
+        {
+          update_id: updateId,
+          callback_query: {
+            id: "cb_inline_no_msg",
+            from: {
+              id: fakeUserId,
+              is_bot: false,
+              first_name: "InlineUser",
+            },
+            data: tokens.home(),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, ignored: true });
+
+      // Zero DB records created
+      const updateRows = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(updateRows).toHaveLength(0);
+
+      const custRows = await db
+        .select()
+        .from(customer)
+        .where(eq(customer.telegramId, fakeUserId));
+      expect(custRows).toHaveLength(0);
+
+      // Zero transport calls
+      expect(fakeTransport.answeredCallbacks).toHaveLength(0);
+      expect(fakeTransport.editedMessages).toHaveLength(0);
+      expect(fakeTransport.sentMessages).toHaveLength(0);
     });
   });
 });

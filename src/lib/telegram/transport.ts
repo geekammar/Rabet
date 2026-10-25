@@ -138,9 +138,10 @@ interface TelegramApiResponse<T = unknown> {
   };
 }
 
-function classifyHttpError(
+export function classifyHttpError(
   status: number,
   data?: TelegramApiResponse,
+  method?: string,
 ): { errorKind: TelegramErrorKind; retryAfterSeconds?: number } {
   const desc = (data?.description ?? "").toLowerCase();
 
@@ -161,6 +162,12 @@ function classifyHttpError(
     desc.includes("message cannot be edited")
   ) {
     return { errorKind: "not_editable" };
+  }
+
+  // Narrowly classify expired callback query on answerCallbackQuery ONLY
+  // Telegram Bot API returns HTTP 400 with "query is too old and response timeout expired or query id is invalid"
+  if (method === "answerCallbackQuery" && desc.includes("query is too old")) {
+    return { errorKind: "callback_expired" };
   }
 
   return { errorKind: "api_error" };
@@ -233,7 +240,7 @@ export function createFetchTelegramTransport(
 
       if (!res.ok || !data?.ok) {
         const desc = data?.description ?? `HTTP ${res.status}`;
-        const classification = classifyHttpError(res.status, data);
+        const classification = classifyHttpError(res.status, data, method);
 
         // Special case: "message is not modified" on editMessageText is treated as success
         if (classification.errorKind === "not_modified") {
@@ -466,10 +473,19 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
         throw new BudgetExceededError("Execution budget exceeded in fake transport");
       }
       if (transport.failAnswerWith) {
+        let errorKind = transport.failAnswerKind;
+        if (!errorKind) {
+          const lower = transport.failAnswerWith.toLowerCase();
+          if (lower.includes("query is too old")) {
+            errorKind = "callback_expired";
+          } else {
+            errorKind = "api_error";
+          }
+        }
         return {
           ok: false,
           error: transport.failAnswerWith,
-          errorKind: transport.failAnswerKind ?? "api_error",
+          errorKind,
           retryAfterSeconds: transport.failAnswerRetryAfter,
         };
       }

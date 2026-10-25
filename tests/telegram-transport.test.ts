@@ -96,6 +96,12 @@ describe("telegram transport and error sanitization", () => {
     expect(failedSend.error).toBe("Network Timeout");
     expect(failedSend.errorKind).toBe("timeout");
 
+    // Simulated callback answer failure with query is too old
+    fake.failAnswerWith = "Bad Request: query is too old";
+    const failedAnswer = await fake.answerCallbackQuery({ callbackQueryId: "cb_expired" });
+    expect(failedAnswer.ok).toBe(false);
+    expect(failedAnswer.errorKind).toBe("callback_expired");
+
     fake.clear();
     expect(fake.sentMessages).toHaveLength(0);
     expect(fake.failSendWith).toBeUndefined();
@@ -219,6 +225,72 @@ describe("telegram transport and error sanitization", () => {
 
       expect(res.ok).toBe(false);
       expect(res.errorKind).toBe("timeout");
+    });
+
+    it("classifies 400 'query is too old' on answerCallbackQuery as callback_expired", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () =>
+          JSON.stringify({
+            ok: false,
+            error_code: 400,
+            description:
+              "Bad Request: query is too old and response timeout expired or query id is invalid",
+          }),
+      } as unknown as Response);
+
+      const transport = createFetchTelegramTransport(token);
+      const res = await transport.answerCallbackQuery({ callbackQueryId: "cb_expired_1" });
+
+      expect(res.ok).toBe(false);
+      expect(res.errorKind).toBe("callback_expired");
+      expect(res.error).toContain("query is too old");
+    });
+
+    it("does not classify 400 'query is too old' on sendMessage or editMessageText as callback_expired", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () =>
+          JSON.stringify({
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: query is too old",
+          }),
+      } as unknown as Response);
+
+      const transport = createFetchTelegramTransport(token);
+      const sendRes = await transport.sendMessage({ chatId: 123, text: "test" });
+      expect(sendRes.ok).toBe(false);
+      expect(sendRes.errorKind).toBe("api_error");
+
+      const editRes = await transport.editMessageText({
+        chatId: 123,
+        messageId: 456,
+        text: "test",
+      });
+      expect(editRes.ok).toBe(false);
+      expect(editRes.errorKind).toBe("api_error");
+    });
+
+    it("classifies other 400 errors on answerCallbackQuery as api_error", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () =>
+          JSON.stringify({
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: query ID invalid",
+          }),
+      } as unknown as Response);
+
+      const transport = createFetchTelegramTransport(token);
+      const res = await transport.answerCallbackQuery({ callbackQueryId: "cb_invalid_1" });
+
+      expect(res.ok).toBe(false);
+      expect(res.errorKind).toBe("api_error");
     });
   });
 

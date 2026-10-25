@@ -61,6 +61,7 @@ export type TelegramErrorKind =
   | "rate_limited"
   | "timeout"
   | "network_error"
+  | "callback_expired"
   | "api_error";
 
 export interface TelegramSendResult {
@@ -146,6 +147,7 @@ export type SafeDiagnosticCategory =
   | "rate_limited"
   | "not_editable"
   | "not_modified"
+  | "callback_expired"
   | "api_error"
   | "db_error"
   | "budget_exceeded"

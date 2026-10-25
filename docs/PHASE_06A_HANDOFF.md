@@ -75,7 +75,8 @@ The webhook deduplication and retry mechanism is database-backed and compatible 
 2. **Concurrent Claim Contention & Retryable In-Flight Response Policy:**
    - If a competing delivery arrives while an active owner holds the lease, `claimTelegramUpdate` returns `status: "in_flight"`.
    - The webhook returns **HTTP 429 (Too Many Requests)** with header `Retry-After: 5` and `{ error: "Update is currently in flight" }`.
-   - **Why HTTP 429 instead of HTTP 200:** Returning HTTP 200 on in-flight updates would cause Telegram to acknowledge delivery even if the active owner crashed 2 seconds later. Returning HTTP 429 tells Telegram to retry if the current owner fails or abandons, while preserving **zero duplicate work** because the competing worker exits without processing.
+   - **Why HTTP 429 instead of HTTP 200:** Returning HTTP 200 on in-flight updates would cause Telegram to acknowledge delivery even if the active owner crashed shortly after. Returning HTTP 429 signals to Telegram to retry delivery if the current owner fails or abandons, while preserving **zero duplicate work** because the competing worker exits without processing.
+   - **Delivery Timing Nuance:** A non-2xx response requests redelivery from Telegram. Telegram is not guaranteed or promised to honor `Retry-After` as an exact delivery schedule; our handler exposes retry timing recommendations, not an internal durable scheduler.
 3. **Atomic Retry / Lease Recovery:**
    - When an update previously failed (`processing_error IS NOT NULL`) or an in-flight attempt was abandoned past the lease window (`> 30s`), a worker claims ownership via a single conditional atomic update:
    ```sql
@@ -101,20 +102,29 @@ The webhook deduplication and retry mechanism is database-backed and compatible 
    - Remaining budget is tracked across database calls, catalog queries, and outbound HTTP requests.
    - If the budget expires during execution, `deadline.checkOrThrow()` throws `BudgetExceededError`, halting any further outbound sends.
    - Returns HTTP 503 (Service Unavailable) with `Retry-After: 5` and stores allowlisted safe diagnostic `category=budget_exceeded`.
+   - **Deadline Scope:** The execution deadline prevents new Telegram requests from initiating after expiry and bounds transport fetch calls; it does not cancel already in-progress database driver queries.
 6. **Completion Fencing Result Enforcement:**
    - The result of `markTelegramUpdateProcessed` is strictly checked. If it returns `false` (e.g. lease expired and another worker reclaimed ownership), the handler throws `FencingRejectedError`.
    - The rejected completion returns HTTP 500/503 and records failure, preventing stolen work from reporting misleading success.
 7. **Delivery Ambiguity Boundary:**
-   - External HTTP delivery to Telegram cannot be physical-atomically committed with a database transaction across arbitrary crash windows. Our architecture guarantees single-owner attempt execution, stale-attempt fencing, and idempotency without heavyweight external queue infrastructure.
+   - Attempt fencing and deadlines minimize duplicate execution risk, but external HTTP delivery to Telegram and database completion are not physical-atomically committed across all possible crash windows. Single-owner attempt execution, stale-attempt fencing, and idempotency provide robust bounded safety without heavyweight external queue infrastructure.
 
 ---
 
 ## 5. Callback Acknowledgement, Rate Limiting & Safe Persisted Diagnostics
 
-### 5.1 Callback Query Failure Policy
-- In Telegram Bot API, tapping an inline button displays a loading spinner that stops when `answerCallbackQuery` is received.
-- The handler defines an explicit failure policy: `answerCallbackQuery` results are **never silently ignored**.
-- If `answerCallbackQuery` fails (e.g. query expired or Telegram API error), `TelegramTransportError` is thrown, halting further dispatch, recording the attempt failure with a safe diagnostic, and returning HTTP 500.
+### 5.1 Callback Query Failure Policy & Expired Acknowledgement Recovery
+- In Telegram Bot API, tapping an inline button displays a client loading spinner that stops when `answerCallbackQuery` is received.
+- `answerCallbackQuery` results are **never silently ignored**.
+- **Expired Query Recovery Policy:**
+  - Telegram Bot API expires callback query tokens after ~30–60 seconds, returning HTTP 400 with `query is too old and response timeout expired or query id is invalid`.
+  - On a legitimate redelivery/retry (e.g. if the initial callback acknowledgement succeeded but message editing failed due to a network glitch), `answerCallbackQuery` will now fail because the query has expired.
+  - The transport narrowly classifies HTTP 400 with description containing `"query is too old"` strictly on `answerCallbackQuery` (never on `sendMessage` or `editMessageText`) as `errorKind: "callback_expired"`.
+  - For this narrowly classified terminal acknowledgement condition, the handler allows the customer's intended read-only catalog rendering (e.g. `editMessageText`) to proceed under the existing attempt ownership and execution deadline.
+  - The failed acknowledgement itself is **not** treated as successful (`ack.ok` remains false); the update is marked `processed_at` only after catalog rendering and completion fencing succeed.
+  - Acknowledgement network errors, timeouts, rate limits, and unrecognized API errors continue to fail and trigger normal retry mechanics.
+- **Single-Ack Back Routing:**
+  - Back-button routing (`b:<actionId>`) directly invokes the destination view renderers (`handleActionExecution` for parent submenus or `renderProductCard` for root product cards) rather than recursively calling `handleCallbackQuery`. This completely eliminates redundant duplicate callback query acknowledgements during a single customer interaction.
 
 ### 5.2 Rate Limiting (`HTTP 429` & `Retry-After`)
 - When Telegram API returns 429 (Too Many Requests) with `parameters.retry_after`, the transport parses `retryAfterSeconds`.
@@ -131,6 +141,7 @@ The webhook deduplication and retry mechanism is database-backed and compatible 
 | `category=rate_limited;status=429;retry_after=N` | Telegram Bot API rate limiting with retry window | `category=rate_limited;status=429;retry_after=8` |
 | `category=budget_exceeded` | Worker reached 25s execution budget before completion | `category=budget_exceeded` |
 | `category=fencing_rejected` | Worker completed work after losing attempt lease | `category=fencing_rejected` |
+| `category=callback_expired` | Terminal expired callback token on answerCallbackQuery | `category=callback_expired` |
 | `category=api_error` | Other Telegram Bot API error status (4xx/5xx) | `category=api_error` |
 | `category=db_error` | Database constraint or query execution error | `category=db_error` |
 | `category=internal_error` | Unexpected internal exception | `category=internal_error` |
@@ -146,7 +157,7 @@ Telegram Bot API enforces a hard ceiling of **4096 code units** per message text
 ### 6.1 Unicode-Safe Chunking (`splitMessageText`)
 - `splitMessageText(text, maxChunkLength = 4096)` splits text into sequential chunks each `<= 4096` code units.
 - **Content Integrity Guarantee:** `chunks.join("") === text` (no characters or disclosures dropped).
-- **Surrogate Pair Safety:** Never splits inside UTF-16 surrogate pairs (e.g. emojis `\uD83D\uDE00` or multibyte Arabic graphemes). If index lands on a high surrogate, split shifts back by 1 code unit.
+- **Surrogate Pair Safety & Chunking Boundaries:** Never splits inside UTF-16 surrogate pairs (e.g. standard 2-code-unit emoji pairs like `\uD83D\uDE00` or multibyte Arabic graphemes). If index lands on a high surrogate, the split point shifts backward by 1 code unit. (Note: chunking guarantees exact text preservation and surrogate-pair integrity, but does not claim atomic encapsulation for every arbitrary multi-codepoint Unicode grapheme cluster such as complex ZWJ emoji sequences spanning across chunk boundaries).
 - **Natural Boundary Preference:** Breaks cleanly on paragraph breaks (`\n\n`), then line breaks (`\n`), then word spaces (` `), falling back to hard split only when no delimiter exists within the 400-character window.
 
 ### 6.2 Sequential Delivery Order & Navigation Placement
@@ -199,9 +210,9 @@ All test suites executed and passed against real disposable PostgreSQL and clean
 | --- | --- | --- |
 | `npm run lint` | ESLint across all source and test files | ✅ Pass (0 errors, 0 warnings) |
 | `npm run typecheck` | Strict TypeScript compilation check | ✅ Pass (0 errors) |
-| `npm test` | All unit tests across all application modules | ✅ Pass (497 passed) |
-| `npm run test:telegram` | Webhook, retry ownership, privacy, tokens, chunking, and transport suites | ✅ Pass (56 passed) |
-| `npm run test:db` | All real PostgreSQL database integration tests | ✅ Pass (210 passed) |
+| `npm test` | All unit tests across all application modules | ✅ Pass (500 passed) |
+| `npm run test:telegram` | Webhook, retry ownership, privacy, tokens, chunking, and transport suites | ✅ Pass (66 passed) |
+| `npm run test:db` | All real PostgreSQL database integration tests | ✅ Pass (217 passed) |
 | `npm run db:check` | Drizzle schema check against migration chain | ✅ Pass (Everything's fine) |
 | `env -u DATABASE_URL npm run build` | Next.js production build without database or credentials | ✅ Pass (Route `/api/telegram/webhook` registered) |
 
@@ -214,8 +225,8 @@ Real bot tokens, webhook registrations, remote database migrations, and live Tel
 
 ### 9.1 Mandatory Database & Store Requirements Before Live Webhook Setup
 Before configuring Telegram webhook in production:
-1. **Approved Initialized Database:**
-   - Production must run against its own dedicated database initialized with all Drizzle migrations (`0000_...` through `0003_...`).
+1. **Approved Initialized Production Database:**
+   - Production requires its own approved, dedicated initialized production database containing all applied Drizzle migrations (`drizzle/0000_initial_schema.sql` and `drizzle/0001_tree_and_snapshot_integrity.sql`).
    - **CRITICAL SAFEGUARD:** Never point Production at `Rabet_dev`. Production and development databases must remain strictly isolated.
 2. **Store Settings Singleton:**
    - `bot_setting` table row (`id = 1`) must exist with an approved `default_language_id`, `currency`, and `display_name`.
