@@ -231,11 +231,8 @@ export function validateIncomingUpdate(
     ) {
       return { valid: false, error: "Malformed callback_query from.id" };
     }
-    if (
-      typeof from.first_name !== "string" ||
-      from.first_name.trim().length === 0
-    ) {
-      return { valid: false, error: "Missing or empty callback_query from.first_name" };
+    if (from.first_name !== undefined && typeof from.first_name !== "string") {
+      return { valid: false, error: "Malformed callback_query from.first_name" };
     }
     if (from.is_bot !== undefined && typeof from.is_bot !== "boolean") {
       return { valid: false, error: "Malformed callback_query from.is_bot" };

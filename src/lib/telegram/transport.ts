@@ -272,6 +272,11 @@ export function createFetchTelegramTransport(
 
   return {
     async sendMessage({ chatId, text, replyMarkup }): Promise<TelegramSendResult> {
+      const check = validatePayloadLimits(text, replyMarkup);
+      if (!check.ok) {
+        return check;
+      }
+
       const body: Record<string, unknown> = {
         chat_id: chatId,
         text,
@@ -297,6 +302,11 @@ export function createFetchTelegramTransport(
     },
 
     async editMessageText({ chatId, messageId, text, replyMarkup }): Promise<TelegramSendResult> {
+      const check = validatePayloadLimits(text, replyMarkup);
+      if (!check.ok) {
+        return check;
+      }
+
       const body: Record<string, unknown> = {
         chat_id: chatId,
         message_id: messageId,
@@ -380,7 +390,7 @@ export interface FakeTelegramTransport extends TelegramTransport {
   clear(): void;
 }
 
-function validatePayloadLimits(
+export function validatePayloadLimits(
   text: string,
   replyMarkup?: TelegramInlineKeyboardMarkup,
 ): { ok: true } | { ok: false; error: string; errorKind: TelegramErrorKind } {
@@ -395,6 +405,20 @@ function validatePayloadLimits(
   if (replyMarkup?.inline_keyboard) {
     for (const row of replyMarkup.inline_keyboard) {
       for (const btn of row) {
+        if (btn.url && btn.callback_data) {
+          return {
+            ok: false,
+            error: "Button representation cannot combine url and callback_data",
+            errorKind: "api_error",
+          };
+        }
+        if (!btn.url && !btn.callback_data) {
+          return {
+            ok: false,
+            error: "Button must have either url or callback_data",
+            errorKind: "api_error",
+          };
+        }
         if (btn.callback_data) {
           const byteLen = Buffer.byteLength(btn.callback_data, "utf8");
           if (byteLen > TELEGRAM_MAX_CALLBACK_BYTES) {

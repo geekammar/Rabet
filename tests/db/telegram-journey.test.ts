@@ -3118,5 +3118,1817 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       expect(fakeTransport.sentMessages).toHaveLength(0);
     });
   });
+
+  describe("Phase 06-B: Non-Conversation Product Action Runtime", () => {
+    let enLangId: string;
+    let arLangId: string;
+    let p6bProductId: string;
+    let p6bCatId: string;
+    let p6bSubCatId: string;
+    let p6bMenuActionId: string;
+    let templateActionId: string;
+    let templateSubmenuActionId: string;
+    let templateFallbackActionId: string;
+    let templateInvalidSyntaxActionId: string;
+    let templateMissingBodyActionId: string;
+    let templateLongActionId: string;
+    let urlValidActionId: string;
+    let urlHttpActionId: string;
+    let urlCredentialsActionId: string;
+    let urlMissingActionId: string;
+    let navCategoryActionId: string;
+    let navProductActionId: string;
+    let navNoTargetActionId: string;
+    let navInactiveCatActionId: string;
+    let navDeletedCatActionId: string;
+    let navInactiveProdActionId: string;
+    let navInactiveAncestorCatActionId: string;
+    let targetCatId: string;
+    let targetProdId: string;
+    let inactiveCatId: string;
+    let deletedCatId: string;
+    let inactiveProdId: string;
+    let inactiveAncestorParentCatId: string;
+    let inactiveAncestorChildCatId: string;
+
+    beforeAll(async () => {
+      const db = testDb!.db;
+
+      // 1. Languages setup (retrieve en and ar created in parent suite)
+      const langs = await db.select().from(language);
+      const en = langs.find((l) => l.code === "en")!;
+      const ar = langs.find((l) => l.code === "ar")!;
+      enLangId = en.id;
+      arLangId = ar.id;
+
+      // 2. Create a dedicated category hierarchy for Phase 06-B
+      const [p6bCat] = await db
+        .insert(category)
+        .values({
+          slug: "hardware-6b",
+          sortOrder: 10,
+          isActive: true,
+        })
+        .returning();
+      p6bCatId = p6bCat.id;
+
+      await db.insert(categoryTranslation).values([
+        {
+          categoryId: p6bCatId,
+          languageId: enLangId,
+          name: "Hardware Devices",
+          description: "Physical devices and components",
+        },
+        {
+          categoryId: p6bCatId,
+          languageId: arLangId,
+          name: "أجهزة وعتاد",
+          description: "عتاد مادي وملحقات",
+        },
+      ]);
+
+      const [p6bSubCat] = await db
+        .insert(category)
+        .values({
+          parentId: p6bCatId,
+          slug: "keyboards-6b",
+          sortOrder: 1,
+          isActive: true,
+        })
+        .returning();
+      p6bSubCatId = p6bSubCat.id;
+
+      await db.insert(categoryTranslation).values([
+        {
+          categoryId: p6bSubCatId,
+          languageId: enLangId,
+          name: "Mechanical Keyboards",
+          description: "Custom mechanical keyboards",
+        },
+        {
+          categoryId: p6bSubCatId,
+          languageId: arLangId,
+          name: "لوحات مفاتيح ميكانيكية",
+          description: "لوحات مخصصة",
+        },
+      ]);
+
+      // 3. Create a dedicated product
+      const [p6bProd] = await db
+        .insert(product)
+        .values({
+          categoryId: p6bSubCatId,
+          slug: "custom-keyboard-pro",
+          price: "129.50",
+          isActive: true,
+          sortOrder: 1,
+        })
+        .returning();
+      p6bProductId = p6bProd.id;
+
+      await db.insert(productTranslation).values([
+        {
+          productId: p6bProductId,
+          languageId: enLangId,
+          name: "Custom Keyboard Pro",
+          description: "Premium mechanical keyboard with hot-swappable switches.",
+          details: "Aluminum case, RGB backlighting, custom stabilizers.",
+        },
+        {
+          productId: p6bProductId,
+          languageId: arLangId,
+          name: "لوحة مفاتيح احترافية مخصصة",
+          description: "لوحة مفاتيح ميكانيكية فاخرة بمفاتيح قابلة للتبديل.",
+          details: "هيكل ألمنيوم، إضاءة RGB، مثبتات مخصصة.",
+        },
+      ]);
+
+      // 4. Root submenu for Phase 06-B
+      const [menuAct] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "OPEN_SUBMENU",
+          sortOrder: 1,
+          isActive: true,
+        })
+        .returning();
+      p6bMenuActionId = menuAct.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: p6bMenuActionId,
+          languageId: enLangId,
+          label: "More Options",
+          menuText: "Choose a sub-action:",
+        },
+        {
+          actionId: p6bMenuActionId,
+          languageId: arLangId,
+          label: "المزيد من الخيارات",
+          menuText: "اختر إجراء فرعي:",
+        },
+      ]);
+
+      // 5. SEND_TEMPLATE_MESSAGE Actions:
+      // A. Root template action with all 4 placeholders
+      const [t1] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          sortOrder: 2,
+          isActive: true,
+        })
+        .returning();
+      templateActionId = t1.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: templateActionId,
+          languageId: enLangId,
+          label: "Request Invoice",
+          templateBody:
+            "Hello {{customer_name}}, {{product_name}} is {{price}} at {{store_name}}.",
+        },
+        {
+          actionId: templateActionId,
+          languageId: arLangId,
+          label: "طلب فاتورة",
+          templateBody:
+            "مرحباً {{customer_name}}، {{product_name}} بسعر {{price}} في {{store_name}}.",
+        },
+      ]);
+
+      // B. Child template action in submenu
+      const [tSub] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          parentActionId: p6bMenuActionId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          sortOrder: 1,
+          isActive: true,
+        })
+        .returning();
+      templateSubmenuActionId = tSub.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: templateSubmenuActionId,
+          languageId: enLangId,
+          label: "Get Quick Quote",
+          templateBody: "Quote for {{customer_name}}: {{product_name}} - {{price}}.",
+        },
+      ]);
+
+      // C. Template with body fallback (Arabic row has label but whitespace body)
+      const [tFb] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          sortOrder: 3,
+          isActive: true,
+        })
+        .returning();
+      templateFallbackActionId = tFb.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: templateFallbackActionId,
+          languageId: enLangId,
+          label: "Warranty Info",
+          templateBody:
+            "Warranty for {{product_name}} at {{store_name}}: 2 years full coverage.",
+        },
+        {
+          actionId: templateFallbackActionId,
+          languageId: arLangId,
+          label: "معلومات الضمان",
+          templateBody: "   ", // whitespace only! Must fall back to English
+        },
+      ]);
+
+      // D. Template with invalid syntax (triple braces)
+      const [tInv] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          sortOrder: 4,
+          isActive: true,
+        })
+        .returning();
+      templateInvalidSyntaxActionId = tInv.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: templateInvalidSyntaxActionId,
+          languageId: enLangId,
+          label: "Broken Template",
+          templateBody: "Malformed {{{price}}}",
+        },
+      ]);
+
+      // E. Template with missing body (null body in all languages)
+      const [tMiss] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          sortOrder: 5,
+          isActive: true,
+        })
+        .returning();
+      templateMissingBodyActionId = tMiss.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: templateMissingBodyActionId,
+          languageId: enLangId,
+          label: "No Body Action",
+          templateBody: null,
+        },
+      ]);
+
+      // F. Template that expands to > 4096 characters
+      const [tLong] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "SEND_TEMPLATE_MESSAGE",
+          sortOrder: 6,
+          isActive: true,
+        })
+        .returning();
+      templateLongActionId = tLong.id;
+
+      const longBodyPrefix = "Detailed terms:\n\n" + "X".repeat(3950) + "\n\n";
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: templateLongActionId,
+          languageId: enLangId,
+          label: "Long Terms",
+          templateBody: `${longBodyPrefix}Item: {{product_name}} | Customer: {{customer_name}} | Price: {{price}} | Store: {{store_name}}`,
+        },
+      ]);
+
+      // 6. OPEN_URL Actions:
+      // A. Valid HTTPS URL
+      const [uValid] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "OPEN_URL",
+          url: "https://docs.example.com/guide/keyboards",
+          sortOrder: 7,
+          isActive: true,
+        })
+        .returning();
+      urlValidActionId = uValid.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: urlValidActionId,
+          languageId: enLangId,
+          label: "Online Manual",
+        },
+        {
+          actionId: urlValidActionId,
+          languageId: arLangId,
+          label: "دليل الاستخدام",
+        },
+      ]);
+
+      // B. URL with whitespace (rejected by WHATWG / validation)
+      const [uWhitespace] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "OPEN_URL",
+          url: "https://example.com/with space",
+          sortOrder: 8,
+          isActive: true,
+        })
+        .returning();
+      urlHttpActionId = uWhitespace.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: urlHttpActionId,
+          languageId: enLangId,
+          label: "Whitespace Link",
+        },
+      ]);
+
+      // C. URL with embedded credentials
+      const [uCreds] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "OPEN_URL",
+          url: "https://user:pass@example.com/secret",
+          sortOrder: 9,
+          isActive: true,
+        })
+        .returning();
+      urlCredentialsActionId = uCreds.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: urlCredentialsActionId,
+          languageId: enLangId,
+          label: "Credentials Link",
+        },
+      ]);
+
+      // D. Missing URL (null)
+      const [uMiss] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "OPEN_URL",
+          url: null,
+          sortOrder: 10,
+          isActive: true,
+        })
+        .returning();
+      urlMissingActionId = uMiss.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: urlMissingActionId,
+          languageId: enLangId,
+          label: "Missing Link",
+        },
+      ]);
+
+      // 7. NAVIGATE_CATALOG Actions:
+      // Valid target category:
+      const [tCat] = await db
+        .insert(category)
+        .values({
+          slug: "accessories-6b",
+          sortOrder: 20,
+          isActive: true,
+        })
+        .returning();
+      targetCatId = tCat.id;
+
+      await db.insert(categoryTranslation).values([
+        {
+          categoryId: targetCatId,
+          languageId: enLangId,
+          name: "Accessories",
+          description: "Keyboard accessories and cables",
+        },
+        {
+          categoryId: targetCatId,
+          languageId: arLangId,
+          name: "إكسسوارات",
+          description: "ملحقات وكابلات",
+        },
+      ]);
+
+      // Valid target product:
+      const [tProd] = await db
+        .insert(product)
+        .values({
+          categoryId: targetCatId,
+          slug: "custom-usb-c-cable",
+          price: "19.99",
+          isActive: true,
+          sortOrder: 1,
+        })
+        .returning();
+      targetProdId = tProd.id;
+
+      await db.insert(productTranslation).values([
+        {
+          productId: targetProdId,
+          languageId: enLangId,
+          name: "Coiled USB-C Cable",
+          description: "Aviator connector coiled cable.",
+        },
+        {
+          productId: targetProdId,
+          languageId: arLangId,
+          name: "كابل USB-C حلزوني",
+          description: "كابل حلزوني مع موصل طيران.",
+        },
+      ]);
+
+      // Inactive target category:
+      const [inactCat] = await db
+        .insert(category)
+        .values({
+          slug: "secret-cat-6b",
+          sortOrder: 21,
+          isActive: false,
+        })
+        .returning();
+      inactiveCatId = inactCat.id;
+
+      await db.insert(categoryTranslation).values([
+        {
+          categoryId: inactiveCatId,
+          languageId: enLangId,
+          name: "Hidden Category Name",
+          description: "Secret description",
+        },
+      ]);
+
+      // Deleted target category:
+      const [delCat] = await db
+        .insert(category)
+        .values({
+          slug: "deleted-cat-6b",
+          sortOrder: 22,
+          isActive: true,
+          deletedAt: new Date(),
+        })
+        .returning();
+      deletedCatId = delCat.id;
+
+      // Inactive target product:
+      const [inactProd] = await db
+        .insert(product)
+        .values({
+          categoryId: targetCatId,
+          slug: "secret-product-6b",
+          price: "999.00",
+          isActive: false,
+          sortOrder: 2,
+        })
+        .returning();
+      inactiveProdId = inactProd.id;
+
+      await db.insert(productTranslation).values([
+        {
+          productId: inactiveProdId,
+          languageId: enLangId,
+          name: "Top Secret Prototype",
+          description: "Confidential prototype",
+        },
+      ]);
+
+      // Category with inactive parent:
+      const [inactParent] = await db
+        .insert(category)
+        .values({
+          slug: "inactive-parent-6b",
+          sortOrder: 23,
+          isActive: false,
+        })
+        .returning();
+      inactiveAncestorParentCatId = inactParent.id;
+
+      const [inactChild] = await db
+        .insert(category)
+        .values({
+          parentId: inactiveAncestorParentCatId,
+          slug: "child-of-inactive-6b",
+          sortOrder: 1,
+          isActive: true, // child active, but parent is inactive
+        })
+        .returning();
+      inactiveAncestorChildCatId = inactChild.id;
+
+      await db.insert(categoryTranslation).values([
+        {
+          categoryId: inactiveAncestorChildCatId,
+          languageId: enLangId,
+          name: "Orphaned Active Subcategory",
+        },
+      ]);
+
+      // Action: Navigate to valid category
+      const [navCat] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "NAVIGATE_CATALOG",
+          navigateCategoryId: targetCatId,
+          sortOrder: 11,
+          isActive: true,
+        })
+        .returning();
+      navCategoryActionId = navCat.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: navCategoryActionId,
+          languageId: enLangId,
+          label: "View Accessories",
+        },
+        {
+          actionId: navCategoryActionId,
+          languageId: arLangId,
+          label: "عرض الإكسسوارات",
+        },
+      ]);
+
+      // Action: Navigate to valid product
+      const [navProd] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "NAVIGATE_CATALOG",
+          navigateProductId: targetProdId,
+          sortOrder: 12,
+          isActive: true,
+        })
+        .returning();
+      navProductActionId = navProd.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: navProductActionId,
+          languageId: enLangId,
+          label: "Buy Coiled Cable",
+        },
+        {
+          actionId: navProductActionId,
+          languageId: arLangId,
+          label: "شراء الكابل الحلزوني",
+        },
+      ]);
+
+      // Action: Navigate with no targets
+      const [navNoTarget] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "NAVIGATE_CATALOG",
+          navigateCategoryId: null,
+          navigateProductId: null,
+          sortOrder: 13,
+          isActive: true,
+        })
+        .returning();
+      navNoTargetActionId = navNoTarget.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: navNoTargetActionId,
+          languageId: enLangId,
+          label: "No Target Action",
+        },
+      ]);
+
+      // Action: Navigate to inactive category
+      const [navInactCat] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "NAVIGATE_CATALOG",
+          navigateCategoryId: inactiveCatId,
+          sortOrder: 14,
+          isActive: true,
+        })
+        .returning();
+      navInactiveCatActionId = navInactCat.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: navInactiveCatActionId,
+          languageId: enLangId,
+          label: "Go to Inactive Category",
+        },
+      ]);
+
+      // Action: Navigate to deleted category
+      const [navDelCat] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "NAVIGATE_CATALOG",
+          navigateCategoryId: deletedCatId,
+          sortOrder: 15,
+          isActive: true,
+        })
+        .returning();
+      navDeletedCatActionId = navDelCat.id;
+
+      // Action: Navigate to inactive product
+      const [navInactProd] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "NAVIGATE_CATALOG",
+          navigateProductId: inactiveProdId,
+          sortOrder: 16,
+          isActive: true,
+        })
+        .returning();
+      navInactiveProdActionId = navInactProd.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: navInactiveProdActionId,
+          languageId: enLangId,
+          label: "Go to Inactive Product",
+        },
+      ]);
+
+      // Action: Navigate to category with inactive ancestor
+      const [navInactAncestor] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "NAVIGATE_CATALOG",
+          navigateCategoryId: inactiveAncestorChildCatId,
+          sortOrder: 17,
+          isActive: true,
+        })
+        .returning();
+      navInactiveAncestorCatActionId = navInactAncestor.id;
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: navInactiveAncestorCatActionId,
+          languageId: enLangId,
+          label: "Go to Orphaned Cat",
+        },
+      ]);
+    });
+
+    // -------------------------------------------------------------------------
+    // 1. SEND_TEMPLATE_MESSAGE Tests
+    // -------------------------------------------------------------------------
+    it("SEND_TEMPLATE_MESSAGE: uses all 4 real placeholders and delivers sendMessage with navigation on final chunk", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7001;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20001,
+          callback_query: {
+            id: "cb_tpl_1",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "Tariq",
+              last_name: "Mansour",
+            },
+            message: {
+              message_id: 10,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.action(templateActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.answeredCallbacks).toHaveLength(1);
+      // Delivered via sendMessage (bot response to customer in chat), not editMessageText
+      expect(fakeTransport.sentMessages).toHaveLength(1);
+      expect(fakeTransport.editedMessages).toHaveLength(0);
+
+      const sent = fakeTransport.sentMessages[0];
+      expect(sent.chatId).toBe(customerTelegramId);
+      // Expected placeholder substitution:
+      // {{store_name}} -> Acme Digital Store
+      // {{product_name}} -> Custom Keyboard Pro
+      // {{customer_name}} -> Tariq Mansour
+      // {{price}} -> 129.50 USD
+      expect(sent.text).toBe(
+        "Hello Tariq Mansour, Custom Keyboard Pro is 129.50 USD at Acme Digital Store.",
+      );
+
+      // Navigation: Back returns to product (root action), Return to Product is absent, Home is present
+      expect(sent.replyMarkup?.inline_keyboard).toEqual([
+        [{ text: "◀ Back", callback_data: tokens.product(p6bProductId) }],
+        [{ text: "🏠 Home", callback_data: tokens.home() }],
+      ]);
+    });
+
+    it("SEND_TEMPLATE_MESSAGE in submenu: navigation includes Return to Product and Back returns to submenu", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7002;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20002,
+          callback_query: {
+            id: "cb_tpl_sub",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "Layla",
+            },
+            message: {
+              message_id: 11,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.action(templateSubmenuActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.sentMessages).toHaveLength(1);
+      const sent = fakeTransport.sentMessages[0];
+      expect(sent.text).toBe("Quote for Layla: Custom Keyboard Pro - 129.50 USD.");
+
+      // In submenu: Back points to submenu, Return to Product points to product
+      expect(sent.replyMarkup?.inline_keyboard).toEqual([
+        [{ text: "◀ Back", callback_data: tokens.action(p6bMenuActionId) }],
+        [{ text: "📦 Return to Product", callback_data: tokens.product(p6bProductId) }],
+        [{ text: "🏠 Home", callback_data: tokens.home() }],
+      ]);
+    });
+
+    it("SEND_TEMPLATE_MESSAGE: uses preferred body when present in customer language", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7003;
+
+      // Select Arabic language for this customer
+      const langs = await db.select().from(language);
+      const ar = langs.find((l) => l.code === "ar")!;
+      await db
+        .insert(customer)
+        .values({
+          telegramId: customerTelegramId,
+          selectedLanguageId: ar.id,
+        })
+        .onConflictDoUpdate({
+          target: customer.telegramId,
+          set: { selectedLanguageId: ar.id },
+        });
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20003,
+          callback_query: {
+            id: "cb_tpl_ar",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "سارة",
+              last_name: "أحمد",
+            },
+            message: {
+              message_id: 12,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.action(templateActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.sentMessages).toHaveLength(1);
+      const sent = fakeTransport.sentMessages[0];
+      expect(sent.text).toBe(
+        "مرحباً سارة أحمد، لوحة مفاتيح احترافية مخصصة بسعر 129.50 USD في Acme Digital Store.",
+      );
+      // Navigation buttons in Arabic
+      expect(sent.replyMarkup?.inline_keyboard[0][0].text).toBe("◀ رجوع");
+      expect(sent.replyMarkup?.inline_keyboard[1][0].text).toBe("🏠 الرئيسية");
+    });
+
+    it("SEND_TEMPLATE_MESSAGE: falls back when optional-language body is whitespace, even if its label exists", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7004;
+
+      // Customer language is Arabic
+      const langs = await db.select().from(language);
+      const ar = langs.find((l) => l.code === "ar")!;
+      await db
+        .insert(customer)
+        .values({
+          telegramId: customerTelegramId,
+          selectedLanguageId: ar.id,
+        })
+        .onConflictDoUpdate({
+          target: customer.telegramId,
+          set: { selectedLanguageId: ar.id },
+        });
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20004,
+          callback_query: {
+            id: "cb_tpl_fb",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "خالد",
+            },
+            message: {
+              message_id: 13,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.action(templateFallbackActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.sentMessages).toHaveLength(1);
+      const sent = fakeTransport.sentMessages[0];
+      // Body fell back to English default, but product_name used Arabic customer translation
+      expect(sent.text).toBe(
+        "Warranty for لوحة مفاتيح احترافية مخصصة at Acme Digital Store: 2 years full coverage.",
+      );
+    });
+
+    it("SEND_TEMPLATE_MESSAGE: supports Arabic-default store and generic customer fallback", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7005;
+
+      const langs = await db.select().from(language);
+      const en = langs.find((l) => l.code === "en")!;
+      const ar = langs.find((l) => l.code === "ar")!;
+
+      // Temporarily switch bot_setting defaultLanguageId to Arabic
+      await db
+        .update(botSetting)
+        .set({ defaultLanguageId: ar.id })
+        .where(eq(botSetting.id, 1));
+
+      try {
+        // Customer with NO first or last name
+        const req = createWebhookRequest(
+          {
+            update_id: 20005,
+            callback_query: {
+              id: "cb_tpl_ar_default",
+              from: {
+                id: customerTelegramId,
+                is_bot: false,
+                first_name: "   ", // whitespace only
+              },
+              message: {
+                message_id: 14,
+                chat: { id: customerTelegramId, type: "private" },
+              },
+              data: tokens.action(templateActionId),
+            },
+          },
+          TEST_WEBHOOK_SECRET,
+        );
+
+        const res = await handleTelegramWebhookRequest(req, {
+          db: asAppDb(db),
+          transport: fakeTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        });
+
+        expect(res.status).toBe(200);
+        expect(fakeTransport.sentMessages).toHaveLength(1);
+        const sent = fakeTransport.sentMessages[0];
+        // Arabic customer fallback "عميلنا العزيز" substituted
+        expect(sent.text).toBe(
+          "مرحباً عميلنا العزيز، لوحة مفاتيح احترافية مخصصة بسعر 129.50 USD في Acme Digital Store.",
+        );
+      } finally {
+        // Restore defaultLanguageId to English
+        await db
+          .update(botSetting)
+          .set({ defaultLanguageId: en.id })
+          .where(eq(botSetting.id, 1));
+      }
+    });
+
+    it("SEND_TEMPLATE_MESSAGE: uses English generic fallback when customer has no name in English context", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7006;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20006,
+          callback_query: {
+            id: "cb_tpl_en_noname",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "",
+            },
+            message: {
+              message_id: 15,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.action(templateActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.sentMessages).toHaveLength(1);
+      const sent = fakeTransport.sentMessages[0];
+      // English generic fallback "Customer" substituted
+      expect(sent.text).toBe(
+        "Hello Customer, Custom Keyboard Pro is 129.50 USD at Acme Digital Store.",
+      );
+    });
+
+    it("SEND_TEMPLATE_MESSAGE: does not recursively expand placeholder-looking text inside substituted values", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7007;
+
+      // Customer whose first name contains {{price}} and last name contains {{store_name}}
+      const req = createWebhookRequest(
+        {
+          update_id: 20007,
+          callback_query: {
+            id: "cb_tpl_non_recursive",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "Eve {{price}}",
+              last_name: "{{store_name}}",
+            },
+            message: {
+              message_id: 16,
+              chat: { id: customerTelegramId, type: "private" },
+            },
+            data: tokens.action(templateActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.sentMessages).toHaveLength(1);
+      const sent = fakeTransport.sentMessages[0];
+      // Substituted customer name was treated as literal text, never re-expanded
+      expect(sent.text).toBe(
+        "Hello Eve {{price}} {{store_name}}, Custom Keyboard Pro is 129.50 USD at Acme Digital Store.",
+      );
+    });
+
+    it("SEND_TEMPLATE_MESSAGE: handles missing or default-invalid body safely", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+
+      // Case 1: Malformed syntax (triple braces)
+      const req1 = createWebhookRequest(
+        {
+          update_id: 20008,
+          callback_query: {
+            id: "cb_tpl_malformed",
+            from: { id: 7008, is_bot: false, first_name: "Alex" },
+            message: { message_id: 17, chat: { id: 7008, type: "private" } },
+            data: tokens.action(templateInvalidSyntaxActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res1 = await handleTelegramWebhookRequest(req1, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(res1.status).toBe(200);
+      expect(fakeTransport.sentMessages[0].text).toContain("This option is no longer available.");
+      expect(fakeTransport.sentMessages[0].replyMarkup?.inline_keyboard).toBeDefined();
+
+      fakeTransport.clear();
+
+      // Case 2: Missing body entirely (null)
+      const req2 = createWebhookRequest(
+        {
+          update_id: 20009,
+          callback_query: {
+            id: "cb_tpl_missing",
+            from: { id: 7009, is_bot: false, first_name: "Ben" },
+            message: { message_id: 18, chat: { id: 7009, type: "private" } },
+            data: tokens.action(templateMissingBodyActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res2 = await handleTelegramWebhookRequest(req2, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(res2.status).toBe(200);
+      expect(fakeTransport.sentMessages[0].text).toContain("This option is no longer available.");
+    });
+
+    it("SEND_TEMPLATE_MESSAGE: expanded long content is fully reconstructable from chunks and navigation is on final chunk", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7010;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20010,
+          callback_query: {
+            id: "cb_tpl_long",
+            from: {
+              id: customerTelegramId,
+              is_bot: false,
+              first_name: "CustomerWithVeryLongName".repeat(5),
+            },
+            message: { message_id: 19, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(templateLongActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      // Because length > 4096, must be delivered in multiple sequential chunks
+      expect(fakeTransport.sentMessages.length).toBeGreaterThanOrEqual(2);
+
+      // Reconstructable without dropped characters
+      const fullText = fakeTransport.sentMessages.map((m) => m.text).join("");
+      expect(fullText).toContain("Custom Keyboard Pro");
+      expect(fullText).toContain("129.50 USD");
+      expect(fullText).toContain("Acme Digital Store");
+      expect(fullText).toContain("CustomerWithVeryLongName");
+
+      // Intermediate chunk(s) must NOT have replyMarkup
+      for (let i = 0; i < fakeTransport.sentMessages.length - 1; i++) {
+        expect(fakeTransport.sentMessages[i].replyMarkup).toBeUndefined();
+      }
+
+      // Final chunk MUST have navigation replyMarkup attached
+      const lastChunk = fakeTransport.sentMessages[fakeTransport.sentMessages.length - 1];
+      expect(lastChunk.replyMarkup?.inline_keyboard).toBeDefined();
+      expect(lastChunk.replyMarkup?.inline_keyboard[0][0].text).toBe("◀ Back");
+    });
+
+    it("SEND_TEMPLATE_MESSAGE: transport failure leaves update retryable rather than processed", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      fakeTransport.failSendWith = "Telegram Bot API 500 Network Disconnect";
+      const updateId = 20011;
+
+      const req = createWebhookRequest(
+        {
+          update_id: updateId,
+          callback_query: {
+            id: "cb_tpl_fail",
+            from: { id: 7011, is_bot: false, first_name: "FailUser" },
+            message: { message_id: 20, chat: { id: 7011, type: "private" } },
+            data: tokens.action(templateActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(500);
+
+      // Update record in database must NOT be marked processed
+      const [updateRow] = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(updateRow).toBeDefined();
+      expect(updateRow.processedAt).toBeNull();
+      expect(updateRow.processingError).toContain("category=api_error");
+    });
+
+    // -------------------------------------------------------------------------
+    // 2. OPEN_URL Tests
+    // -------------------------------------------------------------------------
+    it("OPEN_URL: valid informational HTTPS URL renders small view with URL button and Back/Home", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7012;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20012,
+          callback_query: {
+            id: "cb_url_valid",
+            from: { id: customerTelegramId, is_bot: false, first_name: "UrlUser" },
+            message: { message_id: 21, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(urlValidActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.answeredCallbacks).toHaveLength(1);
+      expect(fakeTransport.editedMessages).toHaveLength(1);
+
+      const edited = fakeTransport.editedMessages[0];
+      expect(edited.text).toBe("Online Manual");
+
+      const rows = edited.replyMarkup?.inline_keyboard ?? [];
+      expect(rows).toHaveLength(3);
+
+      // Row 0: URL button (contains url, NO callback_data)
+      expect(rows[0][0].text).toBe("🌐 Open link");
+      expect(rows[0][0].url).toBe("https://docs.example.com/guide/keyboards");
+      expect(rows[0][0].callback_data).toBeUndefined();
+
+      // Row 1: Back (contains callback_data, NO url)
+      expect(rows[1][0].text).toBe("◀ Back");
+      expect(rows[1][0].callback_data).toBe(tokens.product(p6bProductId));
+      expect(rows[1][0].url).toBeUndefined();
+
+      // Row 2: Home
+      expect(rows[2][0].text).toBe("🏠 Home");
+      expect(rows[2][0].callback_data).toBe(tokens.home());
+      expect(rows[2][0].url).toBeUndefined();
+    });
+
+    it("OPEN_URL: invalid or insecure URLs produce safe feedback without a URL button", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+
+      // 1. Insecure http: URL
+      const reqHttp = createWebhookRequest(
+        {
+          update_id: 20013,
+          callback_query: {
+            id: "cb_url_http",
+            from: { id: 7013, is_bot: false, first_name: "InsecureUser" },
+            message: { message_id: 22, chat: { id: 7013, type: "private" } },
+            data: tokens.action(urlHttpActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+      const resHttp = await handleTelegramWebhookRequest(reqHttp, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(resHttp.status).toBe(200);
+      const editedHttp = fakeTransport.editedMessages[0];
+      expect(editedHttp.text).toContain("This option is no longer available.");
+      // MUST NOT contain a URL button
+      for (const row of editedHttp.replyMarkup?.inline_keyboard ?? []) {
+        for (const btn of row) {
+          expect(btn.url).toBeUndefined();
+        }
+      }
+
+      fakeTransport.clear();
+
+      // 2. Embedded credentials URL
+      const reqCreds = createWebhookRequest(
+        {
+          update_id: 20014,
+          callback_query: {
+            id: "cb_url_creds",
+            from: { id: 7014, is_bot: false, first_name: "CredsUser" },
+            message: { message_id: 23, chat: { id: 7014, type: "private" } },
+            data: tokens.action(urlCredentialsActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+      const resCreds = await handleTelegramWebhookRequest(reqCreds, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(resCreds.status).toBe(200);
+      const editedCreds = fakeTransport.editedMessages[0];
+      expect(editedCreds.text).toContain("This option is no longer available.");
+      for (const row of editedCreds.replyMarkup?.inline_keyboard ?? []) {
+        for (const btn of row) {
+          expect(btn.url).toBeUndefined();
+        }
+      }
+
+      fakeTransport.clear();
+
+      // 3. Missing URL (null)
+      const reqMiss = createWebhookRequest(
+        {
+          update_id: 20015,
+          callback_query: {
+            id: "cb_url_null",
+            from: { id: 7015, is_bot: false, first_name: "NullUser" },
+            message: { message_id: 24, chat: { id: 7015, type: "private" } },
+            data: tokens.action(urlMissingActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+      const resMiss = await handleTelegramWebhookRequest(reqMiss, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(resMiss.status).toBe(200);
+      const editedMiss = fakeTransport.editedMessages[0];
+      expect(editedMiss.text).toContain("This option is no longer available.");
+      for (const row of editedMiss.replyMarkup?.inline_keyboard ?? []) {
+        for (const btn of row) {
+          expect(btn.url).toBeUndefined();
+        }
+      }
+    });
+
+    it("OPEN_URL: rechecks action and product hierarchy activation on tap", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7016;
+
+      // Deactivate the OPEN_URL action in the database
+      await db
+        .update(productAction)
+        .set({ isActive: false })
+        .where(eq(productAction.id, urlValidActionId));
+
+      try {
+        const req = createWebhookRequest(
+          {
+            update_id: 20016,
+            callback_query: {
+              id: "cb_url_deact",
+              from: { id: customerTelegramId, is_bot: false, first_name: "TapUser" },
+              message: { message_id: 25, chat: { id: customerTelegramId, type: "private" } },
+              data: tokens.action(urlValidActionId),
+            },
+          },
+          TEST_WEBHOOK_SECRET,
+        );
+
+        const res = await handleTelegramWebhookRequest(req, {
+          db: asAppDb(db),
+          transport: fakeTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        });
+
+        expect(res.status).toBe(200);
+        const edited = fakeTransport.editedMessages[0];
+        expect(edited.text).toContain("This option is no longer available.");
+        // URL button not rendered
+        for (const row of edited.replyMarkup?.inline_keyboard ?? []) {
+          for (const btn of row) {
+            expect(btn.url).toBeUndefined();
+          }
+        }
+      } finally {
+        // Restore action isActive
+        await db
+          .update(productAction)
+          .set({ isActive: true })
+          .where(eq(productAction.id, urlValidActionId));
+      }
+    });
+
+    it("OPEN_URL: rendering failure follows existing attempt failure policy", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      fakeTransport.failEditWith = "Telegram Bot API edit timeout";
+      const updateId = 20017;
+
+      const req = createWebhookRequest(
+        {
+          update_id: updateId,
+          callback_query: {
+            id: "cb_url_fail",
+            from: { id: 7017, is_bot: false, first_name: "FailUser" },
+            message: { message_id: 26, chat: { id: 7017, type: "private" } },
+            data: tokens.action(urlValidActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(500);
+      const [updateRow] = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, updateId));
+      expect(updateRow).toBeDefined();
+      expect(updateRow.processedAt).toBeNull();
+      expect(updateRow.processingError).toContain("category=api_error");
+    });
+
+    // -------------------------------------------------------------------------
+    // 3. NAVIGATE_CATALOG Tests
+    // -------------------------------------------------------------------------
+    it("NAVIGATE_CATALOG: valid category target renders expected category page and acknowledges callback once", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7018;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20018,
+          callback_query: {
+            id: "cb_nav_cat",
+            from: { id: customerTelegramId, is_bot: false, first_name: "NavUser" },
+            message: { message_id: 27, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(navCategoryActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      // Callback acknowledged exactly once!
+      expect(fakeTransport.answeredCallbacks).toHaveLength(1);
+      expect(fakeTransport.editedMessages).toHaveLength(1);
+
+      const edited = fakeTransport.editedMessages[0];
+      // Target category name and description rendered
+      expect(edited.text).toContain("Accessories");
+      expect(edited.text).toContain("Keyboard accessories and cables");
+
+      // Contains target category's product button
+      const flatButtons = (edited.replyMarkup?.inline_keyboard ?? []).flat();
+      const cableBtn = flatButtons.find((b) => b.text === "Coiled USB-C Cable");
+      expect(cableBtn).toBeDefined();
+      expect(cableBtn?.callback_data).toBe(tokens.product(targetProdId));
+
+      // Destination Back button points to parent (home since targetCat is root) and Home
+      const backBtn = flatButtons.find((b) => b.text === "◀ Back");
+      expect(backBtn?.callback_data).toBe(tokens.home());
+    });
+
+    it("NAVIGATE_CATALOG: valid product target renders product card, exact price, actions, and does not execute further", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7019;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20019,
+          callback_query: {
+            id: "cb_nav_prod",
+            from: { id: customerTelegramId, is_bot: false, first_name: "ProdNavUser" },
+            message: { message_id: 28, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(navProductActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.answeredCallbacks).toHaveLength(1);
+      expect(fakeTransport.editedMessages).toHaveLength(1);
+
+      const edited = fakeTransport.editedMessages[0];
+      // Rendered target product card
+      expect(edited.text).toContain("Coiled USB-C Cable");
+      expect(edited.text).toContain("Aviator connector coiled cable.");
+      expect(edited.text).toContain("Price: 19.99 USD");
+
+      // Destination Back points to product's category
+      const flatButtons = (edited.replyMarkup?.inline_keyboard ?? []).flat();
+      const backBtn = flatButtons.find((b) => b.text === "◀ Back");
+      expect(backBtn?.callback_data).toBe(tokens.category(targetCatId));
+
+      // Home button
+      const homeBtn = flatButtons.find((b) => b.text === "🏠 Home");
+      expect(homeBtn?.callback_data).toBe(tokens.home());
+    });
+
+    it("NAVIGATE_CATALOG: no target produces safe unavailable feedback with source navigation", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7020;
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20020,
+          callback_query: {
+            id: "cb_nav_notarget",
+            from: { id: customerTelegramId, is_bot: false, first_name: "NoTargetUser" },
+            message: { message_id: 29, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(navNoTargetActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      const edited = fakeTransport.editedMessages[0];
+      expect(edited.text).toContain("This option is no longer available.");
+
+      // Back navigation points back to SOURCE product
+      const flatButtons = (edited.replyMarkup?.inline_keyboard ?? []).flat();
+      const backBtn = flatButtons.find((b) => b.text === "◀ Back");
+      expect(backBtn?.callback_data).toBe(tokens.product(p6bProductId));
+    });
+
+    it("NAVIGATE_CATALOG: inactive, deleted, or hidden-by-ancestor targets produce safe feedback without exposing details", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+
+      // 1. Inactive category target
+      const reqInact = createWebhookRequest(
+        {
+          update_id: 20021,
+          callback_query: {
+            id: "cb_nav_inact_cat",
+            from: { id: 7021, is_bot: false, first_name: "InactUser" },
+            message: { message_id: 30, chat: { id: 7021, type: "private" } },
+            data: tokens.action(navInactiveCatActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+      const resInact = await handleTelegramWebhookRequest(reqInact, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(resInact.status).toBe(200);
+      const editedInact = fakeTransport.editedMessages[0];
+      expect(editedInact.text).toContain("This category is no longer available.");
+      // MUST NOT expose hidden category details!
+      expect(editedInact.text).not.toContain("Hidden Category Name");
+      expect(editedInact.text).not.toContain("Secret description");
+
+      fakeTransport.clear();
+
+      // 2. Deleted category target
+      const reqDel = createWebhookRequest(
+        {
+          update_id: 20022,
+          callback_query: {
+            id: "cb_nav_del_cat",
+            from: { id: 7022, is_bot: false, first_name: "DelUser" },
+            message: { message_id: 31, chat: { id: 7022, type: "private" } },
+            data: tokens.action(navDeletedCatActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+      const resDel = await handleTelegramWebhookRequest(reqDel, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(resDel.status).toBe(200);
+      const editedDel = fakeTransport.editedMessages[0];
+      expect(editedDel.text).toContain("This category is no longer available.");
+
+      fakeTransport.clear();
+
+      // 3. Inactive product target
+      const reqInactProd = createWebhookRequest(
+        {
+          update_id: 20023,
+          callback_query: {
+            id: "cb_nav_inact_prod",
+            from: { id: 7023, is_bot: false, first_name: "InactProdUser" },
+            message: { message_id: 32, chat: { id: 7023, type: "private" } },
+            data: tokens.action(navInactiveProdActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+      const resInactProd = await handleTelegramWebhookRequest(reqInactProd, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(resInactProd.status).toBe(200);
+      const editedInactProd = fakeTransport.editedMessages[0];
+      expect(editedInactProd.text).toContain("This product is no longer available.");
+      // MUST NOT expose hidden product name or price!
+      expect(editedInactProd.text).not.toContain("Top Secret Prototype");
+      expect(editedInactProd.text).not.toContain("999.00");
+
+      fakeTransport.clear();
+
+      // 4. Category whose parent ancestor is inactive
+      const reqAncestor = createWebhookRequest(
+        {
+          update_id: 20024,
+          callback_query: {
+            id: "cb_nav_inact_ancestor",
+            from: { id: 7024, is_bot: false, first_name: "AncestorUser" },
+            message: { message_id: 33, chat: { id: 7024, type: "private" } },
+            data: tokens.action(navInactiveAncestorCatActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+      const resAncestor = await handleTelegramWebhookRequest(reqAncestor, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(resAncestor.status).toBe(200);
+      const editedAncestor = fakeTransport.editedMessages[0];
+      expect(editedAncestor.text).toContain("This category is no longer available.");
+      expect(editedAncestor.text).not.toContain("Orphaned Active Subcategory");
+    });
+
+    // -------------------------------------------------------------------------
+    // 4. Regression & Boundary Tests
+    // -------------------------------------------------------------------------
+    it("Regression: duplicate processed update_id does not resend action responses", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7025;
+      const updateId = 20025;
+
+      const req = createWebhookRequest(
+        {
+          update_id: updateId,
+          callback_query: {
+            id: "cb_dup_test",
+            from: { id: customerTelegramId, is_bot: false, first_name: "DupUser" },
+            message: { message_id: 34, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(templateActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      // First run: processes successfully
+      const res1 = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(res1.status).toBe(200);
+      expect(fakeTransport.sentMessages).toHaveLength(1);
+
+      fakeTransport.clear();
+
+      // Second run with fresh Request object: duplicate detection recognizes already-processed update
+      const req2 = createWebhookRequest(
+        {
+          update_id: updateId,
+          callback_query: {
+            id: "cb_dup_test",
+            from: { id: customerTelegramId, is_bot: false, first_name: "DupUser" },
+            message: { message_id: 34, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(templateActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+      const res2 = await handleTelegramWebhookRequest(req2, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(res2.status).toBe(200);
+      expect(await res2.json()).toEqual({ ok: true, status: "already_processed" });
+      expect(fakeTransport.sentMessages).toHaveLength(0);
+      expect(fakeTransport.editedMessages).toHaveLength(0);
+    });
+
+    it("Regression: START_INQUIRY and OPEN_SUPPORT remain deferred with zero inquiry/conversation rows", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 7026;
+
+      // Count inquiry rows before
+      const inqBefore = await db.select().from(inquiry);
+
+      // Create OPEN_SUPPORT action to verify both deferred actions
+      const [suppAct] = await db
+        .insert(productAction)
+        .values({
+          productId: p6bProductId,
+          actionType: "OPEN_SUPPORT",
+          sortOrder: 30,
+          isActive: true,
+        })
+        .returning();
+
+      await db.insert(productActionTranslation).values([
+        {
+          actionId: suppAct.id,
+          languageId: enLangId,
+          label: "Support Desk",
+        },
+      ]);
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20026,
+          callback_query: {
+            id: "cb_supp_deferred",
+            from: { id: customerTelegramId, is_bot: false, first_name: "SuppUser" },
+            message: { message_id: 35, chat: { id: customerTelegramId, type: "private" } },
+            data: tokens.action(suppAct.id),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const res = await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fakeTransport.editedMessages[0].text).toBe(
+        "This action is not yet supported in this version.",
+      );
+
+      // Zero inquiry rows created
+      const inqAfter = await db.select().from(inquiry);
+      expect(inqAfter).toHaveLength(inqBefore.length);
+    });
+
+    it("Regression: read and navigation operations do not mutate catalog or action configuration", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+
+      // Snapshot action rows
+      const actionsBefore = await db
+        .select()
+        .from(productAction)
+        .where(eq(productAction.productId, p6bProductId));
+
+      const req = createWebhookRequest(
+        {
+          update_id: 20027,
+          callback_query: {
+            id: "cb_read_pure",
+            from: { id: 7027, is_bot: false, first_name: "PureUser" },
+            message: { message_id: 36, chat: { id: 7027, type: "private" } },
+            data: tokens.action(navCategoryActionId),
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      await handleTelegramWebhookRequest(req, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      const actionsAfter = await db
+        .select()
+        .from(productAction)
+        .where(eq(productAction.productId, p6bProductId));
+
+      expect(actionsAfter).toHaveLength(actionsBefore.length);
+      for (let i = 0; i < actionsBefore.length; i++) {
+        expect(actionsAfter[i].updatedAt).toEqual(actionsBefore[i].updatedAt);
+        expect(actionsAfter[i].isActive).toEqual(actionsBefore[i].isActive);
+      }
+    });
+  });
 });
 

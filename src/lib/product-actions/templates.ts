@@ -52,6 +52,7 @@ export function validateActionTemplateBody(
     required?: boolean;
     languageLabel?: string;
     sampleContext?: Record<string, string>;
+    skipPreviewLengthCheck?: boolean;
   },
 ): ActionTemplateValidationResult {
   const languageLabel = options?.languageLabel ?? "the selected language";
@@ -141,17 +142,19 @@ export function validateActionTemplateBody(
   }
 
   // Preview length validation
-  const previewContext = {
-    ...DEFAULT_ACTION_SAMPLE_CONTEXT,
-    ...(options?.sampleContext ?? {}),
-  };
-  const preview = interpolateActionTemplate(trimmed, previewContext);
-  const previewCount = countCharacters(preview);
-  if (previewCount > MAX_ACTION_TEMPLATE_BODY_LENGTH) {
-    return {
-      success: false,
-      error: `Rendered preview exceeds ${MAX_ACTION_TEMPLATE_BODY_LENGTH} characters when sample values are substituted (currently ${previewCount}).`,
+  if (!options?.skipPreviewLengthCheck) {
+    const previewContext = {
+      ...DEFAULT_ACTION_SAMPLE_CONTEXT,
+      ...(options?.sampleContext ?? {}),
     };
+    const preview = interpolateActionTemplate(trimmed, previewContext);
+    const previewCount = countCharacters(preview);
+    if (previewCount > MAX_ACTION_TEMPLATE_BODY_LENGTH) {
+      return {
+        success: false,
+        error: `Rendered preview exceeds ${MAX_ACTION_TEMPLATE_BODY_LENGTH} characters when sample values are substituted (currently ${previewCount}).`,
+      };
+    }
   }
 
   return {

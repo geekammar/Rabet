@@ -20,7 +20,12 @@ import {
   setCustomerSelectedLanguage,
   upsertCustomer,
 } from "@/lib/data";
-import { parseToken, tokens, type ParsedToken } from "./tokens";
+import { parseToken, tokens, UUID_REGEX, type ParsedToken } from "./tokens";
+import {
+  interpolateActionTemplate,
+  validateActionTemplateBody,
+} from "@/lib/product-actions/templates";
+import { validateHttpsUrl } from "@/lib/product-actions/validation";
 import {
   TELEGRAM_MAX_MESSAGE_CHARS,
 } from "./transport";
@@ -60,6 +65,8 @@ function getLocalizedUiStrings(isRtl: boolean) {
       actionNotSupported: "هذا الإجراء غير مدعوم حالياً في هذا الإصدار.",
       storeUnavailable: "المتجر غير متاح حالياً.",
       selectLanguagePrompt: "يرجى اختيار اللغة / Please select your language:",
+      openLink: "🌐 فتح الرابط",
+      customerFallback: "عميلنا العزيز",
     };
   }
   return {
@@ -76,6 +83,8 @@ function getLocalizedUiStrings(isRtl: boolean) {
     actionNotSupported: "This action is not yet supported in this version.",
     storeUnavailable: "This store is currently unavailable.",
     selectLanguagePrompt: "Please select your language / يرجى اختيار اللغة:",
+    openLink: "🌐 Open link",
+    customerFallback: "Customer",
   };
 }
 
@@ -276,7 +285,11 @@ async function isProductHierarchyActive(
 async function isActionHierarchyActive(
   db: Database,
   actionId: string,
-): Promise<{ valid: boolean; actionRow?: typeof productAction.$inferSelect }> {
+): Promise<{
+  valid: boolean;
+  actionRow?: typeof productAction.$inferSelect;
+  productRow?: typeof product.$inferSelect;
+}> {
   let currentId: string | null = actionId;
   let depth = 0;
   let targetRow: typeof productAction.$inferSelect | undefined;
@@ -319,11 +332,11 @@ async function isActionHierarchyActive(
 
   // Check product hierarchy
   const productCheck = await isProductHierarchyActive(db, targetRow.productId);
-  if (!productCheck.valid) {
+  if (!productCheck.valid || !productCheck.productRow) {
     return { valid: false };
   }
 
-  return { valid: true, actionRow: targetRow };
+  return { valid: true, actionRow: targetRow, productRow: productCheck.productRow };
 }
 
 async function sendOrThrow(
@@ -611,6 +624,171 @@ export async function handleStartCommand(
 }
 
 /**
+ * Renders a category view (subcategories, products, pagination, Back/Home).
+ */
+async function renderCategory(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+  catRow: typeof category.$inferSelect,
+  settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>,
+  langContext: ResolvedLanguageContext,
+  ui: ReturnType<typeof getLocalizedUiStrings>,
+  page = 1,
+): Promise<void> {
+  // Load translations
+  const catTranslations = await db
+    .select({
+      languageId: categoryTranslation.languageId,
+      name: categoryTranslation.name,
+      description: categoryTranslation.description,
+    })
+    .from(categoryTranslation)
+    .where(eq(categoryTranslation.categoryId, catRow.id));
+
+  const preferred = catTranslations.find((t) => t.languageId === langContext.id);
+  const fallback = catTranslations.find((t) => t.languageId === settings.defaultLanguageId);
+  const catName = preferred?.name ?? fallback?.name ?? catRow.slug;
+  const catDesc = preferred?.description ?? fallback?.description ?? null;
+
+  let bodyText = catName;
+  if (catDesc && catDesc.trim().length > 0) {
+    bodyText += `\n\n${catDesc.trim()}`;
+  }
+
+  // Active subcategories with deterministic tie-breaking
+  const subcategories = await db
+    .select({
+      id: category.id,
+      slug: category.slug,
+      sortOrder: category.sortOrder,
+    })
+    .from(category)
+    .where(
+      and(
+        eq(category.parentId, catRow.id),
+        eq(category.isActive, true),
+        isNull(category.deletedAt),
+      ),
+    )
+    .orderBy(asc(category.sortOrder), asc(category.id));
+
+  // Active products with deterministic tie-breaking
+  const productsList = await db
+    .select({
+      id: product.id,
+      slug: product.slug,
+      price: product.price,
+      sortOrder: product.sortOrder,
+    })
+    .from(product)
+    .where(
+      and(
+        eq(product.categoryId, catRow.id),
+        eq(product.isActive, true),
+        isNull(product.deletedAt),
+      ),
+    )
+    .orderBy(asc(product.sortOrder), asc(product.id));
+
+  // Combine items for deterministic pagination
+  const allItems: Array<
+    | { type: "subcat"; id: string; slug: string }
+    | { type: "product"; id: string; slug: string; price: string }
+  > = [
+    ...subcategories.map((s) => ({ type: "subcat" as const, id: s.id, slug: s.slug })),
+    ...productsList.map((p) => ({
+      type: "product" as const,
+      id: p.id,
+      slug: p.slug,
+      price: p.price,
+    })),
+  ];
+
+  const totalPages = Math.max(1, Math.ceil(allItems.length / TELEGRAM_MENU_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(1, page), totalPages);
+  const startIndex = (currentPage - 1) * TELEGRAM_MENU_PAGE_SIZE;
+  const pageItems = allItems.slice(startIndex, startIndex + TELEGRAM_MENU_PAGE_SIZE);
+
+  const keyboard: TelegramInlineKeyboardButton[][] = [];
+
+  for (const item of pageItems) {
+    if (item.type === "subcat") {
+      const trans = await db
+        .select({
+          languageId: categoryTranslation.languageId,
+          name: categoryTranslation.name,
+        })
+        .from(categoryTranslation)
+        .where(eq(categoryTranslation.categoryId, item.id));
+
+      const pTrans = trans.find((t) => t.languageId === langContext.id);
+      const fTrans = trans.find((t) => t.languageId === settings.defaultLanguageId);
+      const subName = pTrans?.name ?? fTrans?.name ?? item.slug;
+
+      keyboard.push([
+        {
+          text: subName,
+          callback_data: tokens.category(item.id),
+        },
+      ]);
+    } else {
+      const trans = await db
+        .select({
+          languageId: productTranslation.languageId,
+          name: productTranslation.name,
+        })
+        .from(productTranslation)
+        .where(eq(productTranslation.productId, item.id));
+
+      const pTrans = trans.find((t) => t.languageId === langContext.id);
+      const fTrans = trans.find((t) => t.languageId === settings.defaultLanguageId);
+      const prodName = pTrans?.name ?? fTrans?.name ?? item.slug;
+
+      keyboard.push([
+        {
+          text: prodName,
+          callback_data: tokens.product(item.id),
+        },
+      ]);
+    }
+  }
+
+  // Pagination row
+  if (totalPages > 1) {
+    const navButtons: TelegramInlineKeyboardButton[] = [];
+    if (currentPage > 1) {
+      navButtons.push({
+        text: ui.prevPage,
+        callback_data: tokens.category(catRow.id, currentPage - 1),
+      });
+    }
+    if (currentPage < totalPages) {
+      navButtons.push({
+        text: ui.nextPage,
+        callback_data: tokens.category(catRow.id, currentPage + 1),
+      });
+    }
+    keyboard.push(navButtons);
+  }
+
+  // Navigation row: Back & Home
+  const backTarget = catRow.parentId ? tokens.category(catRow.parentId) : tokens.home();
+  keyboard.push([
+    { text: ui.back, callback_data: backTarget },
+    { text: ui.home, callback_data: tokens.home() },
+  ]);
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: bodyText,
+    replyMarkup: { inline_keyboard: keyboard },
+  });
+}
+
+/**
  * Handles callback queries for catalog browsing and product actions.
  */
 export async function handleCallbackQuery(
@@ -715,157 +893,17 @@ export async function handleCallbackQuery(
       return;
     }
 
-    const catRow = categoryCheck.categoryRow;
-
-    // Load translations
-    const catTranslations = await db
-      .select({
-        languageId: categoryTranslation.languageId,
-        name: categoryTranslation.name,
-        description: categoryTranslation.description,
-      })
-      .from(categoryTranslation)
-      .where(eq(categoryTranslation.categoryId, catRow.id));
-
-    const preferred = catTranslations.find((t) => t.languageId === langContext.id);
-    const fallback = catTranslations.find((t) => t.languageId === settings.defaultLanguageId);
-    const catName = preferred?.name ?? fallback?.name ?? catRow.slug;
-    const catDesc = preferred?.description ?? fallback?.description ?? null;
-
-    let bodyText = catName;
-    if (catDesc && catDesc.trim().length > 0) {
-      bodyText += `\n\n${catDesc.trim()}`;
-    }
-
-    // Active subcategories with deterministic tie-breaking
-    const subcategories = await db
-      .select({
-        id: category.id,
-        slug: category.slug,
-        sortOrder: category.sortOrder,
-      })
-      .from(category)
-      .where(
-        and(
-          eq(category.parentId, catRow.id),
-          eq(category.isActive, true),
-          isNull(category.deletedAt),
-        ),
-      )
-      .orderBy(asc(category.sortOrder), asc(category.id));
-
-    // Active products with deterministic tie-breaking
-    const productsList = await db
-      .select({
-        id: product.id,
-        slug: product.slug,
-        price: product.price,
-        sortOrder: product.sortOrder,
-      })
-      .from(product)
-      .where(
-        and(
-          eq(product.categoryId, catRow.id),
-          eq(product.isActive, true),
-          isNull(product.deletedAt),
-        ),
-      )
-      .orderBy(asc(product.sortOrder), asc(product.id));
-
-    // Combine items for deterministic pagination
-    const allItems: Array<
-      | { type: "subcat"; id: string; slug: string }
-      | { type: "product"; id: string; slug: string; price: string }
-    > = [
-      ...subcategories.map((s) => ({ type: "subcat" as const, id: s.id, slug: s.slug })),
-      ...productsList.map((p) => ({
-        type: "product" as const,
-        id: p.id,
-        slug: p.slug,
-        price: p.price,
-      })),
-    ];
-
-    const totalPages = Math.max(1, Math.ceil(allItems.length / TELEGRAM_MENU_PAGE_SIZE));
-    const currentPage = Math.min(Math.max(1, parsed.page), totalPages);
-    const startIndex = (currentPage - 1) * TELEGRAM_MENU_PAGE_SIZE;
-    const pageItems = allItems.slice(startIndex, startIndex + TELEGRAM_MENU_PAGE_SIZE);
-
-    const keyboard: TelegramInlineKeyboardButton[][] = [];
-
-    for (const item of pageItems) {
-      if (item.type === "subcat") {
-        const trans = await db
-          .select({
-            languageId: categoryTranslation.languageId,
-            name: categoryTranslation.name,
-          })
-          .from(categoryTranslation)
-          .where(eq(categoryTranslation.categoryId, item.id));
-
-        const pTrans = trans.find((t) => t.languageId === langContext.id);
-        const fTrans = trans.find((t) => t.languageId === settings.defaultLanguageId);
-        const subName = pTrans?.name ?? fTrans?.name ?? item.slug;
-
-        keyboard.push([
-          {
-            text: subName,
-            callback_data: tokens.category(item.id),
-          },
-        ]);
-      } else {
-        const trans = await db
-          .select({
-            languageId: productTranslation.languageId,
-            name: productTranslation.name,
-          })
-          .from(productTranslation)
-          .where(eq(productTranslation.productId, item.id));
-
-        const pTrans = trans.find((t) => t.languageId === langContext.id);
-        const fTrans = trans.find((t) => t.languageId === settings.defaultLanguageId);
-        const prodName = pTrans?.name ?? fTrans?.name ?? item.slug;
-
-        keyboard.push([
-          {
-            text: prodName,
-            callback_data: tokens.product(item.id),
-          },
-        ]);
-      }
-    }
-
-    // Pagination row
-    if (totalPages > 1) {
-      const navButtons: TelegramInlineKeyboardButton[] = [];
-      if (currentPage > 1) {
-        navButtons.push({
-          text: ui.prevPage,
-          callback_data: tokens.category(catRow.id, currentPage - 1),
-        });
-      }
-      if (currentPage < totalPages) {
-        navButtons.push({
-          text: ui.nextPage,
-          callback_data: tokens.category(catRow.id, currentPage + 1),
-        });
-      }
-      keyboard.push(navButtons);
-    }
-
-    // Navigation row: Back & Home
-    const backTarget = catRow.parentId ? tokens.category(catRow.parentId) : tokens.home();
-    keyboard.push([
-      { text: ui.back, callback_data: backTarget },
-      { text: ui.home, callback_data: tokens.home() },
-    ]);
-
-    await editOrThrow(transport, {
+    await renderCategory(
+      db,
+      transport,
       chatId,
       messageId,
-      text: bodyText,
-      replyMarkup: { inline_keyboard: keyboard },
-    });
+      categoryCheck.categoryRow,
+      settings,
+      langContext,
+      ui,
+      parsed.page,
+    );
     return;
   }
 
@@ -1255,8 +1293,243 @@ async function handleActionExecution(
     return;
   }
 
-  // C. DEFERRED RUNTIME ACTIONS:
-  // START_INQUIRY, OPEN_SUPPORT, SEND_TEMPLATE_MESSAGE, OPEN_URL, NAVIGATE_CATALOG
+  // C. SEND_TEMPLATE_MESSAGE
+  if (actRow.actionType === "SEND_TEMPLATE_MESSAGE") {
+    const actTranslations = await db
+      .select({
+        languageId: productActionTranslation.languageId,
+        label: productActionTranslation.label,
+        templateBody: productActionTranslation.templateBody,
+      })
+      .from(productActionTranslation)
+      .where(eq(productActionTranslation.actionId, actRow.id));
+
+    const preferred = actTranslations.find((t) => t.languageId === langContext.id);
+    const fallback = actTranslations.find((t) => t.languageId === settings.defaultLanguageId);
+
+    const preferredBody =
+      preferred?.templateBody && preferred.templateBody.trim().length > 0
+        ? preferred.templateBody.trim()
+        : null;
+    const fallbackBody =
+      fallback?.templateBody && fallback.templateBody.trim().length > 0
+        ? fallback.templateBody.trim()
+        : null;
+    const rawBody = preferredBody ?? fallbackBody;
+
+    const keyboard: TelegramInlineKeyboardButton[][] = [
+      [{ text: ui.back, callback_data: backTarget }],
+    ];
+    if (actRow.parentActionId) {
+      keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+    }
+    keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+    if (!rawBody) {
+      await sendOrThrow(transport, {
+        chatId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    const syntaxCheck = validateActionTemplateBody(rawBody, {
+      required: true,
+      skipPreviewLengthCheck: true,
+    });
+    if (!syntaxCheck.success) {
+      await sendOrThrow(transport, {
+        chatId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    const prodTranslations = await db
+      .select({
+        languageId: productTranslation.languageId,
+        name: productTranslation.name,
+      })
+      .from(productTranslation)
+      .where(eq(productTranslation.productId, actRow.productId));
+
+    const preferredProd = prodTranslations.find((t) => t.languageId === langContext.id);
+    const fallbackProd = prodTranslations.find((t) => t.languageId === settings.defaultLanguageId);
+    const productName = preferredProd?.name ?? fallbackProd?.name ?? actionCheck.productRow!.slug;
+
+    const first = user.first_name ? user.first_name.trim() : "";
+    const last = user.last_name ? user.last_name.trim() : "";
+    const nameParts = [first, last].filter((part) => part.length > 0);
+    const customerName = nameParts.length > 0 ? nameParts.join(" ") : ui.customerFallback;
+
+    const priceStr = `${actionCheck.productRow!.price} ${settings.currency}`;
+
+    const renderedText = interpolateActionTemplate(rawBody, {
+      store_name: settings.displayName,
+      product_name: productName,
+      customer_name: customerName,
+      price: priceStr,
+    });
+
+    await sendOrThrow(transport, {
+      chatId,
+      text: renderedText,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+    return;
+  }
+
+  // D. OPEN_URL
+  if (actRow.actionType === "OPEN_URL") {
+    const urlValidation = validateHttpsUrl(actRow.url);
+    const keyboard: TelegramInlineKeyboardButton[][] = [];
+
+    if (!urlValidation.success) {
+      keyboard.push([{ text: ui.back, callback_data: backTarget }]);
+      if (actRow.parentActionId) {
+        keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+      }
+      keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    const actTranslations = await db
+      .select({
+        languageId: productActionTranslation.languageId,
+        label: productActionTranslation.label,
+      })
+      .from(productActionTranslation)
+      .where(eq(productActionTranslation.actionId, actRow.id));
+
+    const preferred = actTranslations.find((t) => t.languageId === langContext.id);
+    const fallback = actTranslations.find((t) => t.languageId === settings.defaultLanguageId);
+    const label = preferred?.label ?? fallback?.label ?? (langContext.isRtl ? "رابط" : "Link");
+
+    keyboard.push([{ text: ui.openLink, url: urlValidation.data }]);
+    keyboard.push([{ text: ui.back, callback_data: backTarget }]);
+    if (actRow.parentActionId) {
+      keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+    }
+    keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+    await editOrThrow(transport, {
+      chatId,
+      messageId,
+      text: label,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+    return;
+  }
+
+  // E. NAVIGATE_CATALOG
+  if (actRow.actionType === "NAVIGATE_CATALOG") {
+    const hasCat = Boolean(actRow.navigateCategoryId);
+    const hasProd = Boolean(actRow.navigateProductId);
+
+    const unavailableKeyboard: TelegramInlineKeyboardButton[][] = [
+      [{ text: ui.back, callback_data: backTarget }],
+    ];
+    if (actRow.parentActionId) {
+      unavailableKeyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+    }
+    unavailableKeyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+    if ((!hasCat && !hasProd) || (hasCat && hasProd)) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: unavailableKeyboard },
+      });
+      return;
+    }
+
+    if (hasCat) {
+      const catId = actRow.navigateCategoryId!;
+      if (!UUID_REGEX.test(catId)) {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: ui.optionUnavailable,
+          replyMarkup: { inline_keyboard: unavailableKeyboard },
+        });
+        return;
+      }
+
+      const catCheck = await isCategoryHierarchyActive(db, catId);
+      if (!catCheck.valid || !catCheck.categoryRow) {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: ui.categoryUnavailable,
+          replyMarkup: { inline_keyboard: unavailableKeyboard },
+        });
+        return;
+      }
+
+      await renderCategory(
+        db,
+        transport,
+        chatId,
+        messageId,
+        catCheck.categoryRow,
+        settings,
+        langContext,
+        ui,
+        1,
+      );
+      return;
+    }
+
+    if (hasProd) {
+      const prodId = actRow.navigateProductId!;
+      if (!UUID_REGEX.test(prodId)) {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: ui.optionUnavailable,
+          replyMarkup: { inline_keyboard: unavailableKeyboard },
+        });
+        return;
+      }
+
+      const prodCheck = await isProductHierarchyActive(db, prodId);
+      if (!prodCheck.valid || !prodCheck.productRow) {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: ui.productUnavailable,
+          replyMarkup: { inline_keyboard: unavailableKeyboard },
+        });
+        return;
+      }
+
+      await renderProductCard(
+        db,
+        transport,
+        chatId,
+        messageId,
+        user,
+        prodId,
+        settings,
+        langContext,
+        ui,
+      );
+      return;
+    }
+  }
+
+  // F. DEFERRED RUNTIME ACTIONS:
+  // START_INQUIRY, OPEN_SUPPORT
   // Truthful unavailable response. Does NOT execute or claim a message was sent.
   const keyboard: TelegramInlineKeyboardButton[][] = [
     [{ text: ui.back, callback_data: backTarget }],
