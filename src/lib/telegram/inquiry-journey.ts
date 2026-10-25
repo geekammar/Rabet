@@ -4,6 +4,8 @@ import type { Database } from "@/db/client";
 import {
   category,
   categoryTranslation,
+  customer,
+  inquiry,
   product,
   productAction,
   productActionTranslation,
@@ -15,23 +17,22 @@ import {
   createOrResumeProductInquiry,
   createOrResumeSupportInquiry,
   getActiveCustomerInquiryByReference,
-  listActiveCustomerInquiries,
+  listActiveCustomerInquiriesPaged,
   readSettings,
   recordTelegramUpdateReceipt,
   resolveMessageText,
+  routeAndAppendCustomerText,
   upsertCustomer,
   type TelegramBusinessReceipt,
 } from "@/lib/data";
-import { splitMessageText } from "./catalog-journey";
+import { editOrThrow, sendOrThrow, type getLocalizedUiStrings } from "./catalog-journey";
 import { tokens } from "./tokens";
-import { TELEGRAM_MAX_MESSAGE_CHARS } from "./transport";
 import type {
   TelegramInlineKeyboardButton,
   TelegramMessage,
   TelegramTransport,
   TelegramUser,
 } from "./types";
-import { TelegramTransportError } from "./types";
 import { and, eq, isNull } from "drizzle-orm";
 
 export const MAX_SAFEGUARD_DEPTH = 64;
@@ -47,69 +48,6 @@ export interface InquiryJourneyOptions {
   updateId: number;
   attemptId: string;
   receipt?: TelegramBusinessReceipt | null;
-}
-
-async function sendOrThrow(
-  transport: TelegramTransport,
-  params: {
-    chatId: number | string;
-    text: string;
-  },
-): Promise<void> {
-  const chunks = splitMessageText(params.text, TELEGRAM_MAX_MESSAGE_CHARS);
-  for (const chunk of chunks) {
-    const res = await transport.sendMessage({
-      chatId: params.chatId,
-      text: chunk,
-    });
-    if (!res.ok) {
-      throw new TelegramTransportError(
-        res.error ?? "Failed to send Telegram message",
-        {
-          errorKind: res.errorKind ?? "api_error",
-          retryAfterSeconds: res.retryAfterSeconds,
-        },
-      );
-    }
-  }
-}
-
-async function editOrThrow(
-  transport: TelegramTransport,
-  params: {
-    chatId: number | string;
-    messageId: number;
-    text: string;
-    replyMarkup?: { inline_keyboard: TelegramInlineKeyboardButton[][] };
-  },
-): Promise<void> {
-  const chunks = splitMessageText(params.text, TELEGRAM_MAX_MESSAGE_CHARS);
-  const firstChunk = chunks[0] ?? "";
-
-  const res = await transport.editMessageText({
-    chatId: params.chatId,
-    messageId: params.messageId,
-    text: firstChunk,
-    replyMarkup: params.replyMarkup,
-  });
-
-  if (!res.ok) {
-    throw new TelegramTransportError(
-      res.error ?? "Failed to edit Telegram message",
-      {
-        errorKind: res.errorKind ?? "api_error",
-        retryAfterSeconds: res.retryAfterSeconds,
-      },
-    );
-  }
-
-  // If text exceeded single message length, send remaining chunks sequentially
-  for (let i = 1; i < chunks.length; i++) {
-    await sendOrThrow(transport, {
-      chatId: params.chatId,
-      text: chunks[i],
-    });
-  }
 }
 
 /**
@@ -202,6 +140,156 @@ export async function getCategoryAncestorsRootToLeaf(
 }
 
 /**
+ * Recovers an inquiry callback from a committed receipt before evaluating live catalog action/hierarchy state.
+ */
+export async function recoverAndRenderCommittedInquiryCallback(
+  db: Database,
+  transport: TelegramTransport,
+  params: {
+    chatId: number | string;
+    messageId: number;
+    user: TelegramUser;
+    customerRecord: typeof customer.$inferSelect;
+    settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>;
+    langContext: ResolvedLanguageContext;
+    ui: ReturnType<typeof getLocalizedUiStrings>;
+    receipt: Extract<TelegramBusinessReceipt, { kind: "inquiry" }>;
+  },
+): Promise<void> {
+  const { chatId, messageId, customerRecord, settings, langContext, ui, receipt } = params;
+
+  // 1. Recover owned inquiry by receipt.inquiryId
+  const [inq] = await db
+    .select()
+    .from(inquiry)
+    .where(
+      and(
+        eq(inquiry.id, receipt.inquiryId),
+        eq(inquiry.customerId, customerRecord.id),
+      ),
+    )
+    .limit(1);
+
+  const keyboard: TelegramInlineKeyboardButton[][] = [
+    [{ text: ui.home, callback_data: tokens.home() }],
+  ];
+
+  if (!inq) {
+    await editOrThrow(transport, {
+      chatId,
+      messageId,
+      text: ui.optionUnavailable,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+    return;
+  }
+
+  const isClosed = inq.status === "closed" || inq.status === "resolved";
+
+  if (inq.productId) {
+    const snapshot = inq.productSnapshot as {
+      name?: string;
+      price?: string;
+      currency?: string;
+      categoryPath?: string[];
+    };
+    const snapName = snapshot?.name ?? "Product";
+    const snapPrice = snapshot?.price
+      ? `${snapshot.price} ${snapshot.currency ?? settings.currency}`
+      : `${settings.currency}`;
+    const snapOptions = (inq.selectedOptions as string[] | null) ?? null;
+    const optString =
+      snapOptions && snapOptions.length > 0
+        ? `\n${langContext.isRtl ? "الخيارات:" : "Options:"} ${snapOptions.join(" › ")}`
+        : "";
+
+    if (isClosed) {
+      const closedNotice = langContext.isRtl
+        ? `المرجع: ${inq.reference} (مغلق)\nالمنتج: ${snapName}\nالسعر: ${snapPrice}${optString}\n\nتم إغلاق هذه المحادثة.`
+        : `Reference: ${inq.reference} (Closed)\nProduct: ${snapName}\nPrice: ${snapPrice}${optString}\n\nThis inquiry is now closed.`;
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: closedNotice,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    let confirmationBody = "";
+    const tmpl = await resolveMessageText(db, {
+      templateKey: "inquiry_received",
+      languageCode: langContext.code,
+    });
+    if (tmpl && tmpl.status === "resolved") {
+      confirmationBody = interpolateTemplate(tmpl.body, {
+        store_name: settings.displayName,
+        product_name: snapName,
+      });
+    } else {
+      confirmationBody = langContext.isRtl
+        ? `شكرًا لاستفسارك عن ${snapName} في ${settings.displayName}.`
+        : `Thank you for your inquiry about ${snapName} at ${settings.displayName}.`;
+    }
+
+    const details = langContext.isRtl
+      ? `\n\nالمرجع: ${inq.reference}\nالسعر: ${snapPrice}${optString}\n\nيرجى إرسال رسالتك هنا للتواصل معنا.`
+      : `\n\nReference: ${inq.reference}\nPrice: ${snapPrice}${optString}\n\nPlease send your message here to communicate with us.`;
+
+    await editOrThrow(transport, {
+      chatId,
+      messageId,
+      text: confirmationBody + details,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+    return;
+  }
+
+  const catNotice = inq.category
+    ? `\n${langContext.isRtl ? "القسم:" : "Category:"} ${inq.category}`
+    : "";
+
+  if (isClosed) {
+    const closedNotice = langContext.isRtl
+      ? `المرجع: ${inq.reference} (مغلق)${catNotice}\n\nتم إغلاق طلب الدعم هذا.`
+      : `Reference: ${inq.reference} (Closed)${catNotice}\n\nThis support inquiry is now closed.`;
+    await editOrThrow(transport, {
+      chatId,
+      messageId,
+      text: closedNotice,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+    return;
+  }
+
+  let confirmationBody = "";
+  const tmpl = await resolveMessageText(db, {
+    templateKey: "support_received",
+    languageCode: langContext.code,
+  });
+  if (tmpl && tmpl.status === "resolved") {
+    confirmationBody = interpolateTemplate(tmpl.body, {
+      store_name: settings.displayName,
+    });
+  } else {
+    confirmationBody = langContext.isRtl
+      ? `شكرًا لتواصلك مع الدعم في ${settings.displayName}.`
+      : `Thank you for contacting ${settings.displayName} support.`;
+  }
+
+  const details = langContext.isRtl
+    ? `\n\nالمرجع: ${inq.reference}${catNotice}\n\nيرجى إرسال رسالتك هنا للتواصل معنا.`
+    : `\n\nReference: ${inq.reference}${catNotice}\n\nPlease send your message here to communicate with us.`;
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: confirmationBody + details,
+    replyMarkup: { inline_keyboard: keyboard },
+  });
+}
+
+/**
  * Handles START_INQUIRY inline action button tap.
  */
 export async function handleProductInquiryCallback(
@@ -214,7 +302,7 @@ export async function handleProductInquiryCallback(
     actionRow: typeof productAction.$inferSelect;
     productRow: typeof product.$inferSelect;
     langContext: ResolvedLanguageContext;
-    ui: { back: string; home: string; returnToProduct: string; optionUnavailable: string };
+    ui: ReturnType<typeof getLocalizedUiStrings>;
     backTarget: string;
     returnToProductTarget: string;
     options: InquiryJourneyOptions;
@@ -260,45 +348,7 @@ export async function handleProductInquiryCallback(
   }
   keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
 
-  // 3. Check for committed receipt (retry recovery)
-  if (options.receipt && options.receipt.kind === "inquiry") {
-    const receipt = options.receipt;
-    const snapshot = receipt.productSnapshot as { name?: string; price?: string; currency?: string } | undefined;
-    const snapshotName = snapshot?.name ?? "Product";
-    const snapshotPrice = snapshot?.price
-      ? `${snapshot.price} ${snapshot?.currency ?? defaultCurrency}`
-      : `${productRow.price} ${defaultCurrency}`;
-
-    let confirmationBody = "";
-    const tmpl = await resolveMessageText(db, {
-      templateKey: "inquiry_received",
-      languageCode: langContext.code,
-    });
-    if (tmpl && tmpl.status === "resolved") {
-      confirmationBody = interpolateTemplate(tmpl.body, {
-        store_name: displayName,
-        product_name: snapshotName,
-      });
-    } else {
-      confirmationBody = langContext.isRtl
-        ? `شكرًا لاستفسارك عن ${snapshotName} في ${displayName}.`
-        : `Thank you for your inquiry about ${snapshotName} at ${displayName}.`;
-    }
-
-    const details = langContext.isRtl
-      ? `\n\nالمرجع: ${receipt.reference}\nالسعر: ${snapshotPrice}\n\nيرجى إرسال رسالتك هنا للتواصل معنا.`
-      : `\n\nReference: ${receipt.reference}\nPrice: ${snapshotPrice}\n\nPlease send your message here to communicate with us.`;
-
-    await editOrThrow(transport, {
-      chatId,
-      messageId,
-      text: confirmationBody + details,
-      replyMarkup: { inline_keyboard: keyboard },
-    });
-    return;
-  }
-
-  // 4. Resolve ancestors root-to-leaf for option path
+  // 3. Resolve ancestors root-to-leaf for option path
   const ancestorsCheck = await getActionAncestorsRootToLeaf(db, actionRow.id);
   if (!ancestorsCheck.valid || !ancestorsCheck.ancestors) {
     await editOrThrow(transport, {
@@ -325,7 +375,7 @@ export async function handleProductInquiryCallback(
     selectedOptions.push(preferred?.label ?? fallback?.label ?? "Option");
   }
 
-  // 5. Resolve category path root-to-leaf
+  // 4. Resolve category path root-to-leaf
   const categoryCheck = await getCategoryAncestorsRootToLeaf(db, productRow.categoryId);
   const categoryPath: string[] = [];
   if (categoryCheck.valid && categoryCheck.categories) {
@@ -344,7 +394,7 @@ export async function handleProductInquiryCallback(
     }
   }
 
-  // 6. Resolve localized product name
+  // 5. Resolve localized product name
   const prodTranslations = await db
     .select({
       languageId: productTranslation.languageId,
@@ -365,7 +415,7 @@ export async function handleProductInquiryCallback(
     categoryPath,
   };
 
-  // 7. Atomic create or resume
+  // 6. Atomic create or resume
   const inqResult = await createOrResumeProductInquiry(db, {
     customerId: customerRecord.id,
     productId: productRow.id,
@@ -386,7 +436,7 @@ export async function handleProductInquiryCallback(
     : `${productRow.price} ${defaultCurrency}`;
   const activeProductName = activeSnapshot?.name ?? productName;
 
-  // 8. Format confirmation
+  // 7. Format confirmation
   let confirmationBody = "";
   const tmpl = await resolveMessageText(db, {
     templateKey: "inquiry_received",
@@ -433,7 +483,7 @@ export async function handleSupportInquiryCallback(
     user: TelegramUser;
     actionRow: typeof productAction.$inferSelect;
     langContext: ResolvedLanguageContext;
-    ui: { back: string; home: string; returnToProduct: string; optionUnavailable: string };
+    ui: ReturnType<typeof getLocalizedUiStrings>;
     backTarget: string;
     returnToProductTarget: string;
     options: InquiryJourneyOptions;
@@ -480,7 +530,6 @@ export async function handleSupportInquiryCallback(
   keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
 
   if (supportCategory && !(settings?.supportCategory ?? []).includes(supportCategory)) {
-    // Configured category removed: fail closed with safe feedback
     await editOrThrow(transport, {
       chatId,
       messageId,
@@ -492,27 +541,7 @@ export async function handleSupportInquiryCallback(
     return;
   }
 
-  // 3. Check for committed receipt (retry recovery)
-  if (options.receipt && options.receipt.kind === "inquiry") {
-    const receipt = options.receipt;
-    const catNotice = supportCategory
-      ? `\n${langContext.isRtl ? "القسم:" : "Category:"} ${supportCategory}`
-      : "";
-
-    const text = langContext.isRtl
-      ? `شكرًا لتواصلك مع الدعم في ${displayName}.\n\nالمرجع: ${receipt.reference}${catNotice}\n\nيرجى إرسال رسالتك هنا للتواصل معنا.`
-      : `Thank you for contacting ${displayName} support.\n\nReference: ${receipt.reference}${catNotice}\n\nPlease send your message here to communicate with us.`;
-
-    await editOrThrow(transport, {
-      chatId,
-      messageId,
-      text,
-      replyMarkup: { inline_keyboard: keyboard },
-    });
-    return;
-  }
-
-  // 4. Atomic create or resume general support inquiry
+  // 3. Atomic create or resume general support inquiry
   const inqResult = await createOrResumeSupportInquiry(db, {
     customerId: customerRecord.id,
     category: supportCategory,
@@ -525,24 +554,119 @@ export async function handleSupportInquiryCallback(
     ? `\n${langContext.isRtl ? "القسم:" : "Category:"} ${activeInquiry.category}`
     : "";
 
-  const text = langContext.isRtl
-    ? `شكرًا لتواصلك مع الدعم في ${displayName}.\n\nالمرجع: ${activeInquiry.reference}${catNotice}\n\nيرجى إرسال رسالتك هنا للتواصل معنا.`
-    : `Thank you for contacting ${displayName} support.\n\nReference: ${activeInquiry.reference}${catNotice}\n\nPlease send your message here to communicate with us.`;
+  let confirmationBody = "";
+  const tmpl = await resolveMessageText(db, {
+    templateKey: "support_received",
+    languageCode: langContext.code,
+  });
+  if (tmpl && tmpl.status === "resolved") {
+    confirmationBody = interpolateTemplate(tmpl.body, {
+      store_name: displayName,
+    });
+  } else {
+    confirmationBody = langContext.isRtl
+      ? `شكرًا لتواصلك مع الدعم في ${displayName}.`
+      : `Thank you for contacting ${displayName} support.`;
+  }
+
+  const details = langContext.isRtl
+    ? `\n\nالمرجع: ${activeInquiry.reference}${catNotice}\n\nيرجى إرسال رسالتك هنا للتواصل معنا.`
+    : `\n\nReference: ${activeInquiry.reference}${catNotice}\n\nPlease send your message here to communicate with us.`;
 
   await editOrThrow(transport, {
     chatId,
     messageId,
-    text,
+    text: confirmationBody + details,
     replyMarkup: { inline_keyboard: keyboard },
   });
 }
 
-const START_COMMAND_REGEX = /^\/start(?:@\w+)?(?:\s+.*)?$/i;
-const REPLY_COMMAND_REGEX = /^\/reply(?:@\w+)?(?:\s+(\S+)(?:\s+([\s\S]+))?)?$/i;
-const ANY_SLASH_COMMAND_REGEX = /^\/[a-zA-Z0-9_]+(?:@\w+)?(?:\s+.*)?$/;
+/**
+ * Helper to build the text and inline keyboard for ambiguous multiple active inquiries.
+ */
+function buildAmbiguousResponse(
+  inquiries: (typeof inquiry.$inferSelect)[],
+  page: number,
+  totalPages: number,
+  langContext: ResolvedLanguageContext,
+  ui: ReturnType<typeof getLocalizedUiStrings>,
+): { text: string; replyMarkup?: { inline_keyboard: TelegramInlineKeyboardButton[][] } } {
+  const referencesList = inquiries.map((inq) => {
+    let contextName = "Support";
+    if (inq.productId) {
+      const snapshot = inq.productSnapshot as { name?: string } | null;
+      contextName = snapshot?.name ?? "Product Inquiry";
+    } else if (inq.category) {
+      contextName = `Support (${inq.category})`;
+    }
+    return `• ${inq.reference}: ${contextName}`;
+  });
+
+  const exampleRef = inquiries[0]?.reference ?? "INQ-ABC123";
+  const prompt = langContext.isRtl
+    ? `لم يتم حفظ رسالتك نظراً لوجود عدة محادثات نشطة. يرجى تحديد المحادثة التي تود الرد عليها:\n\n` +
+      referencesList.join("\n") +
+      `\n\nمثال:\n/reply ${exampleRef} رسالتك\n\nيرجى إعادة إرسال رسالتك باستخدام الصيغة أعلاه.`
+    : `Your message was not saved because you have multiple active inquiries. Please specify which conversation to reply to:\n\n` +
+      referencesList.join("\n") +
+      `\n\nExample:\n/reply ${exampleRef} Your message\n\nPlease resend your message using the command above.`;
+
+  const keyboard: TelegramInlineKeyboardButton[][] = [];
+  const navRow: TelegramInlineKeyboardButton[] = [];
+
+  if (page > 1) {
+    navRow.push({ text: ui.prevPage, callback_data: tokens.inquiries(page - 1) });
+  }
+  if (page < totalPages) {
+    navRow.push({ text: ui.nextPage, callback_data: tokens.inquiries(page + 1) });
+  }
+  if (navRow.length > 0) {
+    keyboard.push(navRow);
+  }
+  keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+  return { text: prompt, replyMarkup: { inline_keyboard: keyboard } };
+}
 
 /**
- * Handles incoming private-chat messages: commands, /reply routing, free-text routing, and non-text rejection.
+ * Renders the paginated active inquiries list when customer taps pagination buttons.
+ */
+export async function renderCustomerInquiriesList(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+  customerId: string,
+  page: number,
+  langContext: ResolvedLanguageContext,
+  ui: ReturnType<typeof getLocalizedUiStrings>,
+): Promise<void> {
+  const paged = await listActiveCustomerInquiriesPaged(db, customerId, {
+    page,
+    pageSize: 5,
+  });
+
+  const resp = buildAmbiguousResponse(
+    paged.inquiries,
+    paged.page,
+    paged.totalPages,
+    langContext,
+    ui,
+  );
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: resp.text,
+    replyMarkup: resp.replyMarkup,
+  });
+}
+
+const START_COMMAND_REGEX = /^\/start(?:@\w+)?(?:\s+.*)?$/i;
+const ANY_SLASH_COMMAND_REGEX = /^\/[a-zA-Z0-9_]+(?:@\w+)?(?:\s+[\s\S]*)?$/;
+
+/**
+ * Handles incoming private-chat messages: commands, /reply routing, atomic free-text routing, and non-text rejection.
  */
 export async function handleIncomingMessage(
   db: Database,
@@ -551,6 +675,7 @@ export async function handleIncomingMessage(
   options: InquiryJourneyOptions,
   startCommandHandler: (db: Database, transport: TelegramTransport, msg: TelegramMessage) => Promise<void>,
   resolveLangContext: (db: Database, telegramId: number, fallbackDefaultLangId: string) => Promise<ResolvedLanguageContext>,
+  uiStringsGetter: (isRtl: boolean) => ReturnType<typeof getLocalizedUiStrings>,
 ): Promise<void> {
   const from = msg.from;
   if (!from) {
@@ -572,28 +697,34 @@ export async function handleIncomingMessage(
   const settings = await readSettings(db);
   const defaultLangId = settings?.defaultLanguageId ?? "";
   const langContext = await resolveLangContext(db, from.id, defaultLangId);
+  const ui = uiStringsGetter(langContext.isRtl);
 
   // 1. Retry recovery from durable receipt
   if (options.receipt) {
     const receipt = options.receipt;
     if (receipt.kind === "message") {
-      const ack = langContext.isRtl
-        ? `تم استلام رسالتك للمحادثة ${receipt.reference}. يمكنك مواصلة إرسال الرسائل هنا.`
-        : `Message received for inquiry ${receipt.reference}. You can continue sending messages here.`;
+      const ack = receipt.isNewSupport
+        ? langContext.isRtl
+          ? `تم فتح طلب الدعم (المرجع: ${receipt.reference}). لقد استلمنا رسالتك.`
+          : `Support inquiry opened (Reference: ${receipt.reference}). We received your message.`
+        : langContext.isRtl
+          ? `تم استلام رسالتك للمحادثة ${receipt.reference}. يمكنك مواصلة إرسال الرسائل هنا.`
+          : `Message received for inquiry ${receipt.reference}. You can continue sending messages here.`;
       await sendOrThrow(transport, { chatId: msg.chat.id, text: ack });
       return;
     }
 
     if (receipt.kind === "ambiguous") {
-      const exampleRef = receipt.activeReferences[0] ?? "INQ-XXXX";
-      const prompt = langContext.isRtl
-        ? `لم يتم حفظ رسالتك نظراً لوجود عدة محادثات نشطة. يرجى تحديد المحادثة المطلوبة:\n\n` +
-          receipt.activeReferences.map((r) => `• ${r}`).join("\n") +
-          `\n\nمثال:\n/reply ${exampleRef} رسالتك\n\nيرجى إعادة إرسال رسالتك باستخدام الصيغة أعلاه.`
-        : `Your message was not saved because you have multiple active inquiries. Please specify which conversation to reply to:\n\n` +
-          receipt.activeReferences.map((r) => `• ${r}`).join("\n") +
-          `\n\nExample:\n/reply ${exampleRef} Your message\n\nPlease resend your message using the command above.`;
-      await sendOrThrow(transport, { chatId: msg.chat.id, text: prompt });
+      const paged = await listActiveCustomerInquiriesPaged(db, customerRecord.id, {
+        page: 1,
+        pageSize: 5,
+      });
+      const resp = buildAmbiguousResponse(paged.inquiries, 1, paged.totalPages, langContext, ui);
+      await sendOrThrow(transport, {
+        chatId: msg.chat.id,
+        text: resp.text,
+        replyMarkup: resp.replyMarkup,
+      });
       return;
     }
 
@@ -608,12 +739,14 @@ export async function handleIncomingMessage(
     const notice = langContext.isRtl
       ? "نستقبل الرسائل النصية فقط في هذا الإصدار."
       : "We only support text messages in this version.";
-    await recordTelegramUpdateReceipt(db, {
+    const recorded = await recordTelegramUpdateReceipt(db, {
       updateId: options.updateId,
       attemptId: options.attemptId,
       receipt: { kind: "guidance", notice },
     });
-    await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+    if (recorded) {
+      await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+    }
     return;
   }
 
@@ -624,52 +757,58 @@ export async function handleIncomingMessage(
     const notice = langContext.isRtl
       ? "الرسالة طويلة جداً (الحد الأقصى 4096 حرفاً)."
       : "Message is too long (maximum 4096 characters).";
-    await recordTelegramUpdateReceipt(db, {
+    const recorded = await recordTelegramUpdateReceipt(db, {
       updateId: options.updateId,
       attemptId: options.attemptId,
       receipt: { kind: "guidance", notice },
     });
-    await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+    if (recorded) {
+      await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+    }
     return;
   }
 
   // 4. Reject blank message (whitespace only)
-  const trimmedText = rawText.trim();
-  if (trimmedText.length === 0) {
+  if (rawText.trim().length === 0) {
     const notice = langContext.isRtl
       ? "يرجى إرسال رسالة غير فارغة."
       : "Please send a non-empty message.";
-    await recordTelegramUpdateReceipt(db, {
+    const recorded = await recordTelegramUpdateReceipt(db, {
       updateId: options.updateId,
       attemptId: options.attemptId,
       receipt: { kind: "guidance", notice },
     });
-    await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+    if (recorded) {
+      await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+    }
     return;
   }
 
   // 5. Slash commands handling
-  if (trimmedText.startsWith("/")) {
-    if (START_COMMAND_REGEX.test(trimmedText)) {
+  const trimmed = rawText.trim();
+  if (trimmed.startsWith("/")) {
+    if (START_COMMAND_REGEX.test(trimmed)) {
       await startCommandHandler(db, transport, msg);
       return;
     }
 
-    if (trimmedText.toLowerCase().startsWith("/reply")) {
-      const match = trimmedText.match(REPLY_COMMAND_REGEX);
-      const refArg = match?.[1]?.trim();
-      const bodyArg = match?.[2]?.trim();
+    if (trimmed.toLowerCase().startsWith("/reply")) {
+      const replyMatch = rawText.match(/^\/reply(?:@\w+)?(?:\s+(\S+)(?:[ \t\r\n]([\s\S]*))?)?$/i);
+      const refArg = replyMatch?.[1]?.trim();
+      const bodyArg = replyMatch?.[2] ?? "";
 
-      if (!refArg || !bodyArg) {
+      if (!refArg || bodyArg.trim().length === 0) {
         const notice = langContext.isRtl
           ? "يرجى استخدام الصيغة:\n/reply <المرجع> <رسالتك>\n\nمثال:\n/reply INQ-ABC123 مرحباً"
           : "Please use the format:\n/reply <REFERENCE> <your message>\n\nExample:\n/reply INQ-ABC123 Hello";
-        await recordTelegramUpdateReceipt(db, {
+        const recorded = await recordTelegramUpdateReceipt(db, {
           updateId: options.updateId,
           attemptId: options.attemptId,
           receipt: { kind: "guidance", notice },
         });
-        await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+        if (recorded) {
+          await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+        }
         return;
       }
 
@@ -680,21 +819,23 @@ export async function handleIncomingMessage(
       });
 
       if (!targetInquiry) {
-        // Unknown, another customer's, resolved, or closed reference: safe feedback
         const notice = langContext.isRtl
           ? "المحادثة غير موجودة أو تم إغلاقها بالفعل. يرجى التأكد من المرجع والمحاولة مجدداً."
           : "Inquiry not found or already closed. Please check the reference and try again.";
-        await recordTelegramUpdateReceipt(db, {
+        const recorded = await recordTelegramUpdateReceipt(db, {
           updateId: options.updateId,
           attemptId: options.attemptId,
           receipt: { kind: "guidance", notice },
         });
-        await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+        if (recorded) {
+          await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+        }
         return;
       }
 
       // Append inbound message atomically with receipt
       await appendInboundCustomerMessage(db, {
+        customerId: customerRecord.id,
         inquiryId: targetInquiry.id,
         reference: targetInquiry.reference,
         body: bodyArg,
@@ -710,97 +851,54 @@ export async function handleIncomingMessage(
       return;
     }
 
-    // Any other unknown slash command: provide safe guidance, do NOT store
-    if (ANY_SLASH_COMMAND_REGEX.test(trimmedText)) {
+    // Any other unknown slash command (including multiline): provide safe guidance, do NOT store
+    if (ANY_SLASH_COMMAND_REGEX.test(rawText)) {
       const notice = langContext.isRtl
         ? "لتصفح المتجر، يرجى إرسال /start"
         : "To browse our catalog, please send /start";
-      await recordTelegramUpdateReceipt(db, {
+      const recorded = await recordTelegramUpdateReceipt(db, {
         updateId: options.updateId,
         attemptId: options.attemptId,
         receipt: { kind: "guidance", notice },
       });
-      await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+      if (recorded) {
+        await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
+      }
       return;
     }
   }
 
-  // 6. Ordinary free text routing
-  const activeInquiries = await listActiveCustomerInquiries(db, customerRecord.id, 10);
-
-  // Case 6A: Exactly ONE active inquiry -> Append directly
-  if (activeInquiries.length === 1) {
-    const target = activeInquiries[0];
-    await appendInboundCustomerMessage(db, {
-      inquiryId: target.id,
-      reference: target.reference,
-      body: trimmedText,
-      telegramMessageId: msg.message_id,
-      updateId: options.updateId,
-      attemptId: options.attemptId,
-    });
-
-    const ack = langContext.isRtl
-      ? `تم استلام رسالتك للمحادثة ${target.reference}. يمكنك مواصلة إرسال الرسائل هنا.`
-      : `Message received for inquiry ${target.reference}. You can continue sending messages here.`;
-    await sendOrThrow(transport, { chatId: msg.chat.id, text: ack });
-    return;
-  }
-
-  // Case 6B: ZERO active inquiries -> Create/resume general support (category NULL) and save text
-  if (activeInquiries.length === 0) {
-    const supportInq = await createOrResumeSupportInquiry(db, {
-      customerId: customerRecord.id,
-      category: null,
-      updateId: options.updateId,
-      attemptId: options.attemptId,
-    });
-
-    await appendInboundCustomerMessage(db, {
-      inquiryId: supportInq.inquiry.id,
-      reference: supportInq.inquiry.reference,
-      body: trimmedText,
-      telegramMessageId: msg.message_id,
-      updateId: options.updateId,
-      attemptId: options.attemptId,
-    });
-
-    const ack = langContext.isRtl
-      ? `تم فتح طلب الدعم (المرجع: ${supportInq.inquiry.reference}). لقد استلمنا رسالتك.`
-      : `Support inquiry opened (Reference: ${supportInq.inquiry.reference}). We received your message.`;
-    await sendOrThrow(transport, { chatId: msg.chat.id, text: ack });
-    return;
-  }
-
-  // Case 6C: MORE THAN ONE active inquiry -> Do NOT guess, do NOT save text. Require /reply <REF>
-  const referencesList = activeInquiries.map((inq) => {
-    let contextName = "Support";
-    if (inq.productId) {
-      const snapshot = inq.productSnapshot as { name?: string } | null;
-      contextName = snapshot?.name ?? "Product Inquiry";
-    } else if (inq.category) {
-      contextName = `Support (${inq.category})`;
-    }
-    return `• ${inq.reference}: ${contextName}`;
-  });
-
-  const exampleRef = activeInquiries[0].reference;
-  const prompt = langContext.isRtl
-    ? `لم يتم حفظ رسالتك نظراً لوجود عدة محادثات نشطة. يرجى تحديد المحادثة التي تود الرد عليها:\n\n` +
-      referencesList.join("\n") +
-      `\n\nمثال:\n/reply ${exampleRef} رسالتك\n\nيرجى إعادة إرسال رسالتك باستخدام الصيغة أعلاه.`
-    : `Your message was not saved because you have multiple active inquiries. Please specify which conversation to reply to:\n\n` +
-      referencesList.join("\n") +
-      `\n\nExample:\n/reply ${exampleRef} Your message\n\nPlease resend your message using the command above.`;
-
-  await recordTelegramUpdateReceipt(db, {
+  // 6. Ordinary free text routing: atomic operation in one protected transaction
+  // Preserve exact customer body (rawText)
+  const routeResult = await routeAndAppendCustomerText(db, {
+    customerId: customerRecord.id,
+    body: rawText,
+    telegramMessageId: msg.message_id,
     updateId: options.updateId,
     attemptId: options.attemptId,
-    receipt: {
-      kind: "ambiguous",
-      activeReferences: activeInquiries.map((i) => i.reference),
-    },
   });
 
-  await sendOrThrow(transport, { chatId: msg.chat.id, text: prompt });
+  if (routeResult.status === "saved") {
+    const ack = routeResult.isNewSupport
+      ? langContext.isRtl
+        ? `تم فتح طلب الدعم (المرجع: ${routeResult.inquiry.reference}). لقد استلمنا رسالتك.`
+        : `Support inquiry opened (Reference: ${routeResult.inquiry.reference}). We received your message.`
+      : langContext.isRtl
+        ? `تم استلام رسالتك للمحادثة ${routeResult.inquiry.reference}. يمكنك مواصلة إرسال الرسائل هنا.`
+        : `Message received for inquiry ${routeResult.inquiry.reference}. You can continue sending messages here.`;
+    await sendOrThrow(transport, { chatId: msg.chat.id, text: ack });
+    return;
+  }
+
+  // Ambiguous (> 1 active inquiry)
+  const paged = await listActiveCustomerInquiriesPaged(db, customerRecord.id, {
+    page: 1,
+    pageSize: 5,
+  });
+  const resp = buildAmbiguousResponse(paged.inquiries, 1, paged.totalPages, langContext, ui);
+  await sendOrThrow(transport, {
+    chatId: msg.chat.id,
+    text: resp.text,
+    replyMarkup: resp.replyMarkup,
+  });
 }

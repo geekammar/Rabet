@@ -23,6 +23,8 @@ import {
 import {
   handleProductInquiryCallback,
   handleSupportInquiryCallback,
+  recoverAndRenderCommittedInquiryCallback,
+  renderCustomerInquiriesList,
   type InquiryJourneyOptions,
 } from "./inquiry-journey";
 import { parseToken, tokens, UUID_REGEX, type ParsedToken } from "./tokens";
@@ -54,7 +56,7 @@ export interface ResolvedLanguageContext {
   isRtl: boolean;
 }
 
-function getLocalizedUiStrings(isRtl: boolean) {
+export function getLocalizedUiStrings(isRtl: boolean) {
   if (isRtl) {
     return {
       back: "◀ رجوع",
@@ -349,7 +351,7 @@ async function isActionHierarchyActive(
   return { valid: true, actionRow: targetRow, productRow: productCheck.productRow };
 }
 
-async function sendOrThrow(
+export async function sendOrThrow(
   transport: TelegramTransport,
   params: {
     chatId: number | string;
@@ -374,7 +376,7 @@ async function sendOrThrow(
   }
 }
 
-async function editOrThrow(
+export async function editOrThrow(
   transport: TelegramTransport,
   params: {
     chatId: number | string;
@@ -877,6 +879,36 @@ export async function handleCallbackQuery(
     settings.defaultLanguageId,
   );
   const ui = getLocalizedUiStrings(langContext.isRtl);
+
+  // 1.5. Committed inquiry callback recovery: process committed receipt before live action/hierarchy checks
+  if (journeyOptions?.receipt && journeyOptions.receipt.kind === "inquiry") {
+    await recoverAndRenderCommittedInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      customerRecord,
+      settings,
+      langContext,
+      ui,
+      receipt: journeyOptions.receipt,
+    });
+    return;
+  }
+
+  // Inquiries pagination callback: inq[:<page>]
+  if (parsed.type === "inquiries") {
+    await renderCustomerInquiriesList(
+      db,
+      transport,
+      chatId,
+      messageId,
+      customerRecord.id,
+      parsed.page,
+      langContext,
+      ui,
+    );
+    return;
+  }
 
   // 2. Home or Root callback
   if (parsed.type === "home") {
@@ -1545,6 +1577,23 @@ async function handleActionExecution(
 
   // F. START_INQUIRY
   if (actRow.actionType === "START_INQUIRY") {
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      const keyboard: TelegramInlineKeyboardButton[][] = [
+        [{ text: ui.back, callback_data: backTarget }],
+      ];
+      if (actRow.parentActionId) {
+        keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+      }
+      keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
     await handleProductInquiryCallback(db, transport, {
       chatId,
       messageId,
@@ -1555,16 +1604,30 @@ async function handleActionExecution(
       ui,
       backTarget,
       returnToProductTarget,
-      options: journeyOptions ?? {
-        updateId: 0,
-        attemptId: crypto.randomUUID(),
-      },
+      options: journeyOptions,
     });
     return;
   }
 
   // G. OPEN_SUPPORT
   if (actRow.actionType === "OPEN_SUPPORT") {
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      const keyboard: TelegramInlineKeyboardButton[][] = [
+        [{ text: ui.back, callback_data: backTarget }],
+      ];
+      if (actRow.parentActionId) {
+        keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+      }
+      keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
     await handleSupportInquiryCallback(db, transport, {
       chatId,
       messageId,
@@ -1574,10 +1637,7 @@ async function handleActionExecution(
       ui,
       backTarget,
       returnToProductTarget,
-      options: journeyOptions ?? {
-        updateId: 0,
-        attemptId: crypto.randomUUID(),
-      },
+      options: journeyOptions,
     });
     return;
   }

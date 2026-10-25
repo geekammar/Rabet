@@ -17,12 +17,21 @@ import {
   productTranslation,
   telegramUpdate,
 } from "@/db/schema";
+import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
 import {
   asAppDb,
   createTestDatabase,
   hasTestCluster,
   type TestDatabase,
 } from "./helpers";
+import {
+  appendInboundCustomerMessage,
+  createOrResumeProductInquiry,
+  createOrResumeSupportInquiry,
+  routeAndAppendCustomerText,
+  upsertCustomer,
+} from "@/lib/data";
 import { createFakeTelegramTransport } from "@/lib/telegram/transport";
 import { handleTelegramWebhookRequest } from "@/lib/telegram/webhook";
 import { tokens } from "@/lib/telegram/tokens";
@@ -962,7 +971,7 @@ describe.skipIf(!shouldRun)("Phase 07: Unified Customer Inquiries, Support & Inb
 
       // Confirmation delivered using recovered receipt
       expect(fakeTransport.sentMessages).toHaveLength(1);
-      expect(fakeTransport.sentMessages[0].text).toContain(`Message received for inquiry ${savedRef}`);
+      expect(fakeTransport.sentMessages[0].text).toContain(`Support inquiry opened (Reference: ${savedRef})`);
 
       // Update marked processed
       const [updAfter] = await db
@@ -1222,6 +1231,762 @@ describe.skipIf(!shouldRun)("Phase 07: Unified Customer Inquiries, Support & Inb
       expect(res.status).toBe(200);
       expect(fakeTransport.sentMessages[0].text).toContain("تم فتح طلب الدعم (المرجع: INQ-");
       expect(fakeTransport.sentMessages[0].text).toContain("لقد استلمنا رسالتك.");
+    });
+  });
+
+  describe("5. Phase 07 PR #18 Repair Regressions: Concurrency, Fencing, Atomic Routing & Recovery", () => {
+    it("A. Concurrent support creation: same customer/category produces exactly one active thread with valid receipts", async () => {
+      const sql1 = postgres(testDb!.url, { max: 1 });
+      const sql2 = postgres(testDb!.url, { max: 1 });
+      const sqlGate = postgres(testDb!.url, { max: 1 });
+      const db1 = drizzle(sql1);
+      const db2 = drizzle(sql2);
+
+      try {
+        const custA = await upsertCustomer(asAppDb(db1), {
+          telegramId: 70001,
+          firstName: "Concurrent",
+          lastName: "SupportCust",
+        });
+
+        // Seed 2 update rows
+        await sql1`INSERT INTO telegram_update (update_id, update_type, payload) VALUES
+          (80001, 'callback_query', jsonb_build_object('attemptId', 'att-80001')),
+          (80002, 'callback_query', jsonb_build_object('attemptId', 'att-80002'))`;
+
+        // Explicit Gate: sqlGate holds customer lock, ensuring both p1 and p2 queue in PostgreSQL
+        await sqlGate.unsafe(`BEGIN; SELECT id FROM customer WHERE id = '${custA.id}' FOR UPDATE;`);
+
+        const p1 = createOrResumeSupportInquiry(asAppDb(db1), {
+          customerId: custA.id,
+          category: null,
+          updateId: 80001,
+          attemptId: "att-80001",
+        });
+
+        const p2 = createOrResumeSupportInquiry(asAppDb(db2), {
+          customerId: custA.id,
+          category: null,
+          updateId: 80002,
+          attemptId: "att-80002",
+        });
+
+        // Give both queries time to enter PostgreSQL and block on the gate
+        await new Promise((r) => setTimeout(r, 60));
+
+        // Release the lock gate: PostgreSQL serializes them on the customer lock
+        await sqlGate.unsafe("COMMIT;");
+
+        const [r1, r2] = await Promise.all([p1, p2]);
+
+        // Assert: Exactly ONE active support thread exists
+        const allSupport = await sql1`
+          SELECT id, reference, status FROM inquiry
+          WHERE customer_id = ${custA.id}::uuid AND product_id IS NULL AND status IN ('open', 'waiting_on_customer')
+        `;
+        expect(allSupport).toHaveLength(1);
+
+        // Both requests received the exact same active inquiry
+        expect(r1.inquiry.id).toBe(r2.inquiry.id);
+        expect(r1.inquiry.reference).toBe(r2.inquiry.reference);
+        const resumeFlags = [r1.isResume, r2.isResume];
+        expect(resumeFlags).toContain(false);
+        expect(resumeFlags).toContain(true);
+
+        // Receipts in both update rows are valid and non-null
+        const [upd1] = await sql1`SELECT payload FROM telegram_update WHERE update_id = 80001`;
+        const [upd2] = await sql1`SELECT payload FROM telegram_update WHERE update_id = 80002`;
+        expect(upd1.payload.receipt.inquiryId).toBe(r1.inquiry.id);
+        expect(upd2.payload.receipt.inquiryId).toBe(r1.inquiry.id);
+
+        // Different category produces a distinct active thread
+        await sql1`INSERT INTO telegram_update (update_id, update_type, payload) VALUES
+          (80003, 'callback_query', jsonb_build_object('attemptId', 'att-80003'))`;
+
+        const r3 = await createOrResumeSupportInquiry(asAppDb(db1), {
+          customerId: custA.id,
+          category: "Billing",
+          updateId: 80003,
+          attemptId: "att-80003",
+        });
+        expect(r3.inquiry.id).not.toBe(r1.inquiry.id);
+        expect(r3.inquiry.category).toBe("Billing");
+      } finally {
+        await sql1.end();
+        await sql2.end();
+        await sqlGate.end();
+      }
+    });
+
+    it("B. Concurrent product creation: exactly one active thread with valid non-null receipts", async () => {
+      const sql1 = postgres(testDb!.url, { max: 1 });
+      const sql2 = postgres(testDb!.url, { max: 1 });
+      const sqlGate = postgres(testDb!.url, { max: 1 });
+      const db1 = drizzle(sql1);
+      const db2 = drizzle(sql2);
+
+      try {
+        const custB = await upsertCustomer(asAppDb(db1), {
+          telegramId: 70002,
+          firstName: "Concurrent",
+          lastName: "ProdCust",
+        });
+
+        await sql1`INSERT INTO telegram_update (update_id, update_type, payload) VALUES
+          (80011, 'callback_query', jsonb_build_object('attemptId', 'att-80011')),
+          (80012, 'callback_query', jsonb_build_object('attemptId', 'att-80012'))`;
+
+        // Explicit Gate: sqlGate holds customer lock, ensuring both p1 and p2 queue in PostgreSQL
+        await sqlGate.unsafe(`BEGIN; SELECT id FROM customer WHERE id = '${custB.id}' FOR UPDATE;`);
+
+        const p1 = createOrResumeProductInquiry(asAppDb(db1), {
+          customerId: custB.id,
+          productId: prodAId,
+          productSnapshot: { name: "Laptop Pro 14", price: "999.00", currency: "USD" },
+          selectedOptions: ["Option 1"],
+          updateId: 80011,
+          attemptId: "att-80011",
+        });
+
+        const p2 = createOrResumeProductInquiry(asAppDb(db2), {
+          customerId: custB.id,
+          productId: prodAId,
+          productSnapshot: { name: "Laptop Pro 14", price: "999.00", currency: "USD" },
+          selectedOptions: ["Option 1"],
+          updateId: 80012,
+          attemptId: "att-80012",
+        });
+
+        await new Promise((r) => setTimeout(r, 60));
+
+        await sqlGate.unsafe("COMMIT;");
+
+        const [r1, r2] = await Promise.all([p1, p2]);
+
+        const allProdInq = await sql1`
+          SELECT id, reference FROM inquiry
+          WHERE customer_id = ${custB.id}::uuid AND product_id = ${prodAId}::uuid AND status IN ('open', 'waiting_on_customer')
+        `;
+        expect(allProdInq).toHaveLength(1);
+        expect(r1.inquiry.id).toBe(r2.inquiry.id);
+        const resumeFlags = [r1.isResume, r2.isResume];
+        expect(resumeFlags).toContain(false);
+        expect(resumeFlags).toContain(true);
+
+        const [upd1] = await sql1`SELECT payload FROM telegram_update WHERE update_id = 80011`;
+        const [upd2] = await sql1`SELECT payload FROM telegram_update WHERE update_id = 80012`;
+        expect(upd1.payload.receipt.inquiryId).toBe(r1.inquiry.id);
+        expect(upd2.payload.receipt.inquiryId).toBe(r1.inquiry.id);
+      } finally {
+        await sql1.end();
+        await sql2.end();
+        await sqlGate.end();
+      }
+    });
+
+    it("C. Stale attempt fencing: replaces attempt ownership before write, creating zero rows", async () => {
+      const db = testDb!.db;
+      const custC = await upsertCustomer(asAppDb(db), {
+        telegramId: 70003,
+        firstName: "Stale",
+        lastName: "AttemptCust",
+      });
+
+      // Update claimed under attempt-1
+      await db.insert(telegramUpdate).values({
+        updateId: 80020,
+        updateType: "message",
+        payload: { attemptId: "attempt-1", claimedAt: new Date().toISOString() },
+        processedAt: null,
+      });
+
+      // Competing worker steals ownership -> sets attemptId: "attempt-2"
+      await db
+        .update(telegramUpdate)
+        .set({
+          payload: { attemptId: "attempt-2", claimedAt: new Date().toISOString() },
+        })
+        .where(eq(telegramUpdate.updateId, 80020));
+
+      // Attempt-1 attempts to run createOrResumeProductInquiry -> MUST FAIL
+      await expect(
+        createOrResumeProductInquiry(asAppDb(db), {
+          customerId: custC.id,
+          productId: prodAId,
+          productSnapshot: { name: "Laptop", price: "999.00" },
+          updateId: 80020,
+          attemptId: "attempt-1",
+        }),
+      ).rejects.toThrow();
+
+      // Zero inquiries created for customer C
+      const inqs = await db.select().from(inquiry).where(eq(inquiry.customerId, custC.id));
+      expect(inqs).toHaveLength(0);
+
+      // Attempt-1 attempts to run routeAndAppendCustomerText -> MUST FAIL
+      await expect(
+        routeAndAppendCustomerText(asAppDb(db), {
+          customerId: custC.id,
+          body: "Hello from stale worker",
+          telegramMessageId: 1001,
+          updateId: 80020,
+          attemptId: "attempt-1",
+        }),
+      ).rejects.toThrow();
+
+      // Zero messages and zero inquiries created
+      const inqs2 = await db.select().from(inquiry).where(eq(inquiry.customerId, custC.id));
+      expect(inqs2).toHaveLength(0);
+
+      const msgs = await db.select().from(inquiryMessage);
+      const staleMsgs = msgs.filter((m) => m.body === "Hello from stale worker");
+      expect(staleMsgs).toHaveLength(0);
+
+      // Telegram update payload receipt was NOT written for attempt-1
+      const [upd] = await db
+        .select()
+        .from(telegramUpdate)
+        .where(eq(telegramUpdate.updateId, 80020));
+      expect((upd.payload as Record<string, unknown>).receipt).toBeUndefined();
+    });
+
+    it("D. Inactive or foreign destination: reject direct write and controlled close-before-append", async () => {
+      const db = testDb!.db;
+      const custOwner = await upsertCustomer(asAppDb(db), {
+        telegramId: 70004,
+        firstName: "Owner",
+      });
+      const custAttacker = await upsertCustomer(asAppDb(db), {
+        telegramId: 70005,
+        firstName: "Attacker",
+      });
+
+      // Create inquiry for custOwner
+      await db.insert(telegramUpdate).values({
+        updateId: 80031,
+        updateType: "callback_query",
+        payload: { attemptId: "att-80031" },
+      });
+      const inqResult = await createOrResumeSupportInquiry(asAppDb(db), {
+        customerId: custOwner.id,
+        category: null,
+        updateId: 80031,
+        attemptId: "att-80031",
+      });
+
+      // 1. Foreign customer attempts append to custOwner's inquiry
+      await db.insert(telegramUpdate).values({
+        updateId: 80032,
+        updateType: "message",
+        payload: { attemptId: "att-80032" },
+      });
+      await expect(
+        appendInboundCustomerMessage(asAppDb(db), {
+          customerId: custAttacker.id,
+          inquiryId: inqResult.inquiry.id,
+          reference: inqResult.inquiry.reference,
+          body: "Injected text",
+          telegramMessageId: 9001,
+          updateId: 80032,
+          attemptId: "att-80032",
+        }),
+      ).rejects.toThrow();
+
+      // Zero message rows created
+      const msgs1 = await db
+        .select()
+        .from(inquiryMessage)
+        .where(eq(inquiryMessage.inquiryId, inqResult.inquiry.id));
+      expect(msgs1).toHaveLength(0);
+
+      // 2. Controlled close-before-append: close inquiry, then customer attempts to append
+      await db
+        .update(inquiry)
+        .set({ status: "closed", closedAt: new Date() })
+        .where(eq(inquiry.id, inqResult.inquiry.id));
+
+      await db.insert(telegramUpdate).values({
+        updateId: 80033,
+        updateType: "message",
+        payload: { attemptId: "att-80033" },
+      });
+
+      await expect(
+        appendInboundCustomerMessage(asAppDb(db), {
+          customerId: custOwner.id,
+          inquiryId: inqResult.inquiry.id,
+          reference: inqResult.inquiry.reference,
+          body: "Text to closed inquiry",
+          telegramMessageId: 9002,
+          updateId: 80033,
+          attemptId: "att-80033",
+        }),
+      ).rejects.toThrow();
+
+      const msgs2 = await db
+        .select()
+        .from(inquiryMessage)
+        .where(eq(inquiryMessage.inquiryId, inqResult.inquiry.id));
+      expect(msgs2).toHaveLength(0);
+
+      // Inquiry remains closed
+      const [inqAfter] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, inqResult.inquiry.id));
+      expect(inqAfter.status).toBe("closed");
+    });
+
+    it("E. Atomic zero-active flow: failure rollback leaves zero partial support threads and clean retry", async () => {
+      const db = testDb!.db;
+      const custE = await upsertCustomer(asAppDb(db), {
+        telegramId: 70006,
+        firstName: "ZeroActiveCust",
+      });
+
+      // 1. Stale attempt failure: transaction aborts
+      await db.insert(telegramUpdate).values({
+        updateId: 80040,
+        updateType: "message",
+        payload: { attemptId: "att-fresh" },
+      });
+
+      await expect(
+        routeAndAppendCustomerText(asAppDb(db), {
+          customerId: custE.id,
+          body: "Initial text that should roll back",
+          telegramMessageId: 4001,
+          updateId: 80040,
+          attemptId: "att-STALE",
+        }),
+      ).rejects.toThrow();
+
+      // Verify no partial support inquiry was committed
+      const inqs = await db.select().from(inquiry).where(eq(inquiry.customerId, custE.id));
+      expect(inqs).toHaveLength(0);
+
+      // 2. Successful execution saves one message to one support thread
+      const routeRes = await routeAndAppendCustomerText(asAppDb(db), {
+        customerId: custE.id,
+        body: "Durable first text",
+        telegramMessageId: 4002,
+        updateId: 80040,
+        attemptId: "att-fresh",
+      });
+
+      expect(routeRes.status).toBe("saved");
+      if (routeRes.status === "saved") {
+        expect(routeRes.isNewSupport).toBe(true);
+        expect(routeRes.message.body).toBe("Durable first text");
+
+        // Receipt was recorded
+        const [upd] = await db
+          .select()
+          .from(telegramUpdate)
+          .where(eq(telegramUpdate.updateId, 80040));
+        expect((upd.payload as { receipt: Record<string, unknown> }).receipt.kind).toBe("message");
+        expect((upd.payload as { receipt: Record<string, unknown> }).receipt.isNewSupport).toBe(true);
+      }
+    });
+
+    it("F. Post-commit retry: confirmation failure does not reroute or duplicate when new inquiry opened", async () => {
+      const db = testDb!.db;
+      const custF = await upsertCustomer(asAppDb(db), {
+        telegramId: 70007,
+        firstName: "PostCommitCust",
+      });
+
+      // First webhook request with failing transport
+      const failingTransport = createFakeTelegramTransport();
+      failingTransport.sendMessage = async () => {
+        return { ok: false, error: "Network timeout", errorKind: "timeout" };
+      };
+
+      const req1 = createWebhookRequest({
+        update_id: 80050,
+        message: {
+          message_id: 501,
+          chat: { id: 70007, type: "private" },
+          from: { id: 70007, is_bot: false, first_name: "PostCommitCust" },
+          text: "Message destined for thread 1",
+        },
+      });
+
+      const res1 = await handleTelegramWebhookRequest(req1, {
+        db: asAppDb(db),
+        transport: failingTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      // Transport failed -> HTTP 500
+      expect(res1.status).toBe(500);
+
+      // But message was committed!
+      const msgs = await db.select().from(inquiryMessage);
+      const savedMsg = msgs.find((m) => m.body === "Message destined for thread 1");
+      expect(savedMsg).toBeDefined();
+
+      const [origInq] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, savedMsg!.inquiryId));
+
+      // Meanwhile, customer creates a SECOND inquiry (e.g. for product B)
+      await db.insert(telegramUpdate).values({
+        updateId: 80051,
+        updateType: "callback_query",
+        payload: { attemptId: "att-80051" },
+      });
+      await createOrResumeProductInquiry(asAppDb(db), {
+        customerId: custF.id,
+        productId: prodBId,
+        productSnapshot: { name: "Laptop Max 16", price: "1499.00" },
+        updateId: 80051,
+        attemptId: "att-80051",
+      });
+
+      // Now customer has 2 active inquiries!
+      // When update 80050 is retried by Telegram, it MUST NOT treat it as ambiguous and MUST NOT reroute!
+      const workingTransport = createFakeTelegramTransport();
+      const req2 = createWebhookRequest({
+        update_id: 80050,
+        message: {
+          message_id: 501,
+          chat: { id: 70007, type: "private" },
+          from: { id: 70007, is_bot: false, first_name: "PostCommitCust" },
+          text: "Message destined for thread 1",
+        },
+      });
+
+      const res2 = await handleTelegramWebhookRequest(req2, {
+        db: asAppDb(db),
+        transport: workingTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(res2.status).toBe(200);
+
+      // Confirmation acknowledges the ORIGINAL inquiry reference
+      expect(workingTransport.sentMessages[0].text).toContain(origInq.reference);
+
+      // Exactly ONE message row exists (zero duplicate message)
+      const msgsAfter = await db.select().from(inquiryMessage);
+      const matchingMsgs = msgsAfter.filter((m) => m.body === "Message destined for thread 1");
+      expect(matchingMsgs).toHaveLength(1);
+    });
+
+    it("G. Callback recovery: catalog changed/disabled after commit preserves frozen snapshot", async () => {
+      const db = testDb!.db;
+      const custG = await upsertCustomer(asAppDb(db), {
+        telegramId: 70008,
+        firstName: "RecoveryCust",
+      });
+
+      // 1. Initial product inquiry callback commit fails on confirmation delivery
+      const failingTransport = createFakeTelegramTransport();
+      failingTransport.editMessageText = async () => {
+        return { ok: false, error: "Network timeout", errorKind: "timeout" };
+      };
+
+      const req1 = createWebhookRequest({
+        update_id: 80060,
+        callback_query: {
+          id: "cb_80060",
+          from: { id: 70008, is_bot: false, first_name: "RecoveryCust" },
+          data: tokens.action(startInqActId),
+          message: {
+            message_id: 601,
+            date: Math.floor(Date.now() / 1000),
+            chat: { id: 70008, type: "private" },
+            text: "Product Card",
+          },
+        },
+      });
+
+      const res1 = await handleTelegramWebhookRequest(req1, {
+        db: asAppDb(db),
+        transport: failingTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(res1.status).toBe(500);
+
+      // Verify inquiry was committed
+      const inqs = await db.select().from(inquiry).where(eq(inquiry.customerId, custG.id));
+      expect(inqs).toHaveLength(1);
+      const committedInq = inqs[0];
+
+      // 2. Catalog changes after commit:
+      // - Product price changed from 999.00 to 1999.00
+      // - Product name changed
+      // - Product action disabled (is_active = false)
+      await db
+        .update(product)
+        .set({ price: "1999.00" })
+        .where(eq(product.id, prodAId));
+      await db
+        .update(productAction)
+        .set({ isActive: false })
+        .where(eq(productAction.id, startInqActId));
+
+      // 3. Retry arrives
+      const workingTransport = createFakeTelegramTransport();
+      const req2 = createWebhookRequest({
+        update_id: 80060,
+        callback_query: {
+          id: "cb_80060",
+          from: { id: 70008, is_bot: false, first_name: "RecoveryCust" },
+          data: tokens.action(startInqActId),
+          message: {
+            message_id: 601,
+            date: Math.floor(Date.now() / 1000),
+            chat: { id: 70008, type: "private" },
+            text: "Product Card",
+          },
+        },
+      });
+
+      const res2 = await handleTelegramWebhookRequest(req2, {
+        db: asAppDb(db),
+        transport: workingTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(res2.status).toBe(200);
+
+      // Must succeed and render the FROZEN price and name, NOT 1999.00, and NOT option unavailable!
+      expect(workingTransport.editedMessages).toHaveLength(1);
+      const editedText = workingTransport.editedMessages[0].text;
+      expect(editedText).toContain("Laptop Pro 14");
+      expect(editedText).toContain("1199.00 USD");
+      expect(editedText).not.toContain("1999.00");
+      expect(editedText).toContain(committedInq.reference);
+
+      // Restore product price and action for subsequent tests
+      await db
+        .update(product)
+        .set({ price: "1199.00" })
+        .where(eq(product.id, prodAId));
+      await db
+        .update(productAction)
+        .set({ isActive: true })
+        .where(eq(productAction.id, startInqActId));
+    });
+
+    it("H. Contracts: whitespace preservation, multiline commands, pagination > 10, not_editable fallback", async () => {
+      const db = testDb!.db;
+      const custH = await upsertCustomer(asAppDb(db), {
+        telegramId: 70009,
+        firstName: "ContractsCust",
+      });
+
+      // 1. Whitespace preservation in ordinary text
+      await db.insert(telegramUpdate).values({
+        updateId: 80071,
+        updateType: "message",
+        payload: { attemptId: "att-80071" },
+      });
+
+      const rawCustomerText = "   hello   \n\n  world   ";
+      const routeRes = await routeAndAppendCustomerText(asAppDb(db), {
+        customerId: custH.id,
+        body: rawCustomerText,
+        telegramMessageId: 701,
+        updateId: 80071,
+        attemptId: "att-80071",
+      });
+      expect(routeRes.status).toBe("saved");
+      if (routeRes.status === "saved") {
+        expect(routeRes.message.body).toBe(rawCustomerText); // Exact raw content preserved!
+      }
+
+      // 2. Whitespace preservation in /reply command body
+      const [activeInq] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.customerId, custH.id))
+        .limit(1);
+
+      const fakeTransport = createFakeTelegramTransport();
+      const replyReq = createWebhookRequest({
+        update_id: 80072,
+        message: {
+          message_id: 702,
+          chat: { id: 70009, type: "private" },
+          from: { id: 70009, is_bot: false, first_name: "ContractsCust" },
+          text: `/reply ${activeInq.reference}   line1  \n  line2   `,
+        },
+      });
+
+      await handleTelegramWebhookRequest(replyReq, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      const msgs = await db.select().from(inquiryMessage);
+      const replyMsg = msgs.find((m) => m.telegramMessageId === 702);
+      expect(replyMsg).toBeDefined();
+      expect(replyMsg!.body).toBe("  line1  \n  line2   "); // Body after ref preserved!
+
+      // 3. Multiline unknown command returns guidance, 0 message rows
+      const multilineCmdReq = createWebhookRequest({
+        update_id: 80073,
+        message: {
+          message_id: 703,
+          chat: { id: 70009, type: "private" },
+          from: { id: 70009, is_bot: false, first_name: "ContractsCust" },
+          text: "/mycommand@bot\nThis is multiline text under command",
+        },
+      });
+      const transport3 = createFakeTelegramTransport();
+      await handleTelegramWebhookRequest(multilineCmdReq, {
+        db: asAppDb(db),
+        transport: transport3,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(transport3.sentMessages[0].text).toContain("/start");
+      const msgs3 = await db
+        .select()
+        .from(inquiryMessage)
+        .where(eq(inquiryMessage.telegramMessageId, 703));
+      expect(msgs3).toHaveLength(0);
+
+      // 4. More than 10 active references remain reachable via pagination
+      // Seed 12 active inquiries for custH
+      for (let i = 0; i < 11; i++) {
+        await db.insert(inquiry).values({
+          customerId: custH.id,
+          reference: `INQ-TEST${i}X`,
+          status: "open",
+          productSnapshot: { type: "support" },
+          category: `Dept ${i}`,
+        });
+      }
+
+      // Customer sends text -> triggers ambiguous response
+      const ambigTransport = createFakeTelegramTransport();
+      const ambigReq = createWebhookRequest({
+        update_id: 80074,
+        message: {
+          message_id: 704,
+          chat: { id: 70009, type: "private" },
+          from: { id: 70009, is_bot: false, first_name: "ContractsCust" },
+          text: "Which inquiry does this go to?",
+        },
+      });
+      await handleTelegramWebhookRequest(ambigReq, {
+        db: asAppDb(db),
+        transport: ambigTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(ambigTransport.sentMessages[0].text).toContain("multiple active inquiries");
+      expect(ambigTransport.sentMessages[0].replyMarkup?.inline_keyboard).toBeDefined();
+
+      // Keyboard has Next button pointing to page 2 (inq:2)
+      const kb = ambigTransport.sentMessages[0].replyMarkup!.inline_keyboard;
+      const nextBtn = kb.flat().find((b) => b.callback_data === "inq:2");
+      expect(nextBtn).toBeDefined();
+
+      // Tap inq:2 callback query
+      const p2Transport = createFakeTelegramTransport();
+      const p2Req = createWebhookRequest({
+        update_id: 80075,
+        callback_query: {
+          id: "cb_inq2",
+          from: { id: 70009, is_bot: false, first_name: "ContractsCust" },
+          data: "inq:2",
+          message: {
+            message_id: 705,
+            date: Math.floor(Date.now() / 1000),
+            chat: { id: 70009, type: "private" },
+            text: "List Page 1",
+          },
+        },
+      });
+      await handleTelegramWebhookRequest(p2Req, {
+        db: asAppDb(db),
+        transport: p2Transport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(p2Transport.editedMessages).toHaveLength(1);
+      const p2Kb = p2Transport.editedMessages[0].replyMarkup!.inline_keyboard;
+      const prevBtn = p2Kb.flat().find((b) => b.callback_data === "inq");
+      const next3Btn = p2Kb.flat().find((b) => b.callback_data === "inq:3");
+      expect(prevBtn).toBeDefined();
+      expect(next3Btn).toBeDefined();
+
+      // 5. not_editable fallback vs retryable network errors
+      // When editMessageText returns not_editable: falls back to sendMessage
+      const notEditableTransport = createFakeTelegramTransport();
+      notEditableTransport.editMessageText = async () => ({
+        ok: false,
+        error: "Message is not modified",
+        errorKind: "not_editable",
+      });
+
+      const fallbackReq = createWebhookRequest({
+        update_id: 80076,
+        callback_query: {
+          id: "cb_fallback",
+          from: { id: 70009, is_bot: false, first_name: "ContractsCust" },
+          data: tokens.home(),
+          message: {
+            message_id: 706,
+            date: Math.floor(Date.now() / 1000),
+            chat: { id: 70009, type: "private" },
+            text: "Previous",
+          },
+        },
+      });
+
+      const fallbackRes = await handleTelegramWebhookRequest(fallbackReq, {
+        db: asAppDb(db),
+        transport: notEditableTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(fallbackRes.status).toBe(200);
+      expect(notEditableTransport.sentMessages).toHaveLength(1); // Sent fallback message!
+
+      // When editMessageText returns timeout: DOES NOT fall back to sendMessage, throws 500
+      const timeoutTransport = createFakeTelegramTransport();
+      timeoutTransport.editMessageText = async () => ({
+        ok: false,
+        error: "Connection timed out",
+        errorKind: "timeout",
+      });
+
+      const timeoutReq = createWebhookRequest({
+        update_id: 80077,
+        callback_query: {
+          id: "cb_timeout",
+          from: { id: 70009, is_bot: false, first_name: "ContractsCust" },
+          data: tokens.home(),
+          message: {
+            message_id: 707,
+            date: Math.floor(Date.now() / 1000),
+            chat: { id: 70009, type: "private" },
+            text: "Previous",
+          },
+        },
+      });
+
+      const timeoutRes = await handleTelegramWebhookRequest(timeoutReq, {
+        db: asAppDb(db),
+        transport: timeoutTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(timeoutRes.status).toBe(500);
+      expect(timeoutTransport.sentMessages).toHaveLength(0); // Zero replacement message sent!
     });
   });
 });

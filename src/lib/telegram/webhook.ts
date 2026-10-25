@@ -11,6 +11,7 @@ import {
   type TelegramBusinessReceipt,
 } from "@/lib/data/telegram";
 import {
+  getLocalizedUiStrings,
   handleCallbackQuery,
   handleStartCommand,
   resolveCustomerLanguageContext,
@@ -462,6 +463,7 @@ export async function handleTelegramWebhookRequest(
         journeyOptions,
         handleStartCommand,
         resolveCustomerLanguageContext,
+        getLocalizedUiStrings,
       );
     } else {
       await handleCallbackQuery(

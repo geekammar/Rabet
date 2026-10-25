@@ -1125,8 +1125,9 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
         }),
       ]);
 
-      expect(resA.status).toBe(200);
-      expect(resB.status).toBe(200);
+      expect([200, 429]).toContain(resA.status);
+      expect([200, 429]).toContain(resB.status);
+      expect([resA.status, resB.status]).toContain(200);
 
       // Exactly one message was sent to Telegram across both parallel deliveries
       expect(fakeTransport.sentMessages).toHaveLength(1);

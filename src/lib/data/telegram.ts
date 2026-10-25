@@ -20,16 +20,15 @@ export type TelegramBusinessReceipt =
       isResume: boolean;
       status: string;
       productId: string | null;
-      productSnapshot?: Record<string, unknown> | null;
-      selectedOptions?: string[] | null;
+      category?: string | null;
     }
   | {
       kind: "message";
       inquiryId: string;
       messageId: string;
       reference: string;
-      body: string;
       telegramMessageId: number;
+      isNewSupport?: boolean;
     }
   | {
       kind: "ambiguous";
