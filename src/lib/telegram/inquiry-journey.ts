@@ -662,8 +662,6 @@ export async function renderCustomerInquiriesList(
   });
 }
 
-const START_COMMAND_REGEX = /^\/start(?:@\w+)?(?:\s+.*)?$/i;
-const ANY_SLASH_COMMAND_REGEX = /^\/[a-zA-Z0-9_]+(?:@\w+)?(?:\s+[\s\S]*)?$/;
 
 /**
  * Handles incoming private-chat messages: commands, /reply routing, atomic free-text routing, and non-text rejection.
@@ -785,17 +783,23 @@ export async function handleIncomingMessage(
   }
 
   // 5. Slash commands handling
-  const trimmed = rawText.trim();
-  if (trimmed.startsWith("/")) {
-    if (START_COMMAND_REGEX.test(trimmed)) {
+  // One consistent normalized view: match command with optional leading whitespace
+  const commandMatch = rawText.match(/^\s*\/([a-zA-Z0-9_]+)(?:@\w+)?(?:\s*([\s\S]*))?$/);
+
+  if (commandMatch) {
+    const cmd = commandMatch[1].toLowerCase();
+
+    if (cmd === "start") {
       await startCommandHandler(db, transport, msg);
       return;
     }
 
-    if (trimmed.toLowerCase().startsWith("/reply")) {
-      const replyMatch = rawText.match(/^\/reply(?:@\w+)?(?:\s+(\S+)(?:[ \t\r\n]([\s\S]*))?)?$/i);
-      const refArg = replyMatch?.[1]?.trim();
-      const bodyArg = replyMatch?.[2] ?? "";
+    if (cmd === "reply") {
+      const argsRaw = commandMatch[2] ?? "";
+      // Parse ref and body: single whitespace delimiter separating ref from authored body
+      const replyArgsMatch = argsRaw.match(/^(\S+)(?:[ \t\r\n]([\s\S]*))?$/);
+      const refArg = replyArgsMatch?.[1]?.trim();
+      const bodyArg = replyArgsMatch?.[2] ?? "";
 
       if (!refArg || bodyArg.trim().length === 0) {
         const notice = langContext.isRtl
@@ -851,21 +855,19 @@ export async function handleIncomingMessage(
       return;
     }
 
-    // Any other unknown slash command (including multiline): provide safe guidance, do NOT store
-    if (ANY_SLASH_COMMAND_REGEX.test(rawText)) {
-      const notice = langContext.isRtl
-        ? "لتصفح المتجر، يرجى إرسال /start"
-        : "To browse our catalog, please send /start";
-      const recorded = await recordTelegramUpdateReceipt(db, {
-        updateId: options.updateId,
-        attemptId: options.attemptId,
-        receipt: { kind: "guidance", notice },
-      });
-      if (recorded) {
-        await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
-      }
-      return;
+    // Any other unknown slash command (including multiline or /replyall): return safe guidance, do NOT store
+    const notice = langContext.isRtl
+      ? "لتصفح المتجر، يرجى إرسال /start"
+      : "To browse our catalog, please send /start";
+    const recorded = await recordTelegramUpdateReceipt(db, {
+      updateId: options.updateId,
+      attemptId: options.attemptId,
+      receipt: { kind: "guidance", notice },
+    });
+    if (recorded) {
+      await sendOrThrow(transport, { chatId: msg.chat.id, text: notice });
     }
+    return;
   }
 
   // 6. Ordinary free text routing: atomic operation in one protected transaction

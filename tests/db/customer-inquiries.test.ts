@@ -29,6 +29,7 @@ import {
   appendInboundCustomerMessage,
   createOrResumeProductInquiry,
   createOrResumeSupportInquiry,
+  listActiveCustomerInquiriesPaged,
   routeAndAppendCustomerText,
   upsertCustomer,
 } from "@/lib/data";
@@ -1987,6 +1988,413 @@ describe.skipIf(!shouldRun)("Phase 07: Unified Customer Inquiries, Support & Inb
       });
       expect(timeoutRes.status).toBe(500);
       expect(timeoutTransport.sentMessages).toHaveLength(0); // Zero replacement message sent!
+    });
+
+    it("I. Controlled concurrent closure on ordinary text routing with independent connections", async () => {
+      const db = testDb!.db;
+      const custI = await upsertCustomer(asAppDb(db), {
+        telegramId: 70010,
+        firstName: "ConcurrentCloseCust",
+      });
+
+      // Seed 1 active support inquiry for custI
+      await db.insert(telegramUpdate).values({
+        updateId: 80080,
+        updateType: "message",
+        payload: { attemptId: "att-80080" },
+      });
+      const inqRes = await createOrResumeSupportInquiry(asAppDb(db), {
+        customerId: custI.id,
+        category: null,
+        updateId: 80080,
+        attemptId: "att-80080",
+      });
+      const inqId = inqRes.inquiry.id;
+
+      // 1. Independent connection 1 begins and holds uncommitted closure on inqId
+      const sqlGate = postgres(testDb!.url, { max: 1 });
+      let releaseGate: () => void;
+      const gatePromise = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+
+      const tx1Promise = sqlGate.begin(async (sqlTx) => {
+        // Hold lock and update status to closed
+        await sqlTx`UPDATE inquiry SET status = 'closed', closed_at = now() WHERE id = ${inqId}::uuid`;
+        // Wait on release signal
+        await gatePromise;
+      });
+
+      // Give connection 1 time to execute the update and hold the row lock
+      await new Promise((r) => setTimeout(r, 80));
+
+      // 2. Connection 2 attempts ordinary-text routing while status change is in flight
+      await db.insert(telegramUpdate).values({
+        updateId: 80081,
+        updateType: "message",
+        payload: { attemptId: "att-80081" },
+      });
+
+      const routePromise = routeAndAppendCustomerText(asAppDb(db), {
+        customerId: custI.id,
+        body: "Text dispatched while closure in flight",
+        telegramMessageId: 801,
+        updateId: 80081,
+        attemptId: "att-80081",
+      });
+      const routeExpectPromise = expect(routePromise).rejects.toThrow();
+
+      // Give connection 2 time to reach and block on the locked destination inquiry
+      await new Promise((r) => setTimeout(r, 80));
+
+      // 3. Commit closure on connection 1
+      releaseGate!();
+      await tx1Promise;
+      await sqlGate.end();
+
+      // 4. Connection 2 must fail safely with batch rollback
+      await routeExpectPromise;
+
+      // 5. Verification: zero messages land on closed inquiry, status remains closed, lastReplyAt is null, zero new support threads
+      const msgs = await db
+        .select()
+        .from(inquiryMessage)
+        .where(eq(inquiryMessage.inquiryId, inqId));
+      expect(msgs).toHaveLength(0);
+
+      const [inqAfter] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, inqId));
+      expect(inqAfter.status).toBe("closed");
+      expect(inqAfter.lastReplyAt).toBeNull();
+
+      const allInquiries = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.customerId, custI.id));
+      expect(allInquiries).toHaveLength(1); // No new support inquiry was created!
+
+      // 6. Test legitimate ordering: message commits BEFORE closure
+      const custI2 = await upsertCustomer(asAppDb(db), {
+        telegramId: 70011,
+        firstName: "LegitOrderCust",
+      });
+      await db.insert(telegramUpdate).values({
+        updateId: 80082,
+        updateType: "message",
+        payload: { attemptId: "att-80082" },
+      });
+      const inqRes2 = await createOrResumeSupportInquiry(asAppDb(db), {
+        customerId: custI2.id,
+        category: null,
+        updateId: 80082,
+        attemptId: "att-80082",
+      });
+
+      // Message commits first
+      await db.insert(telegramUpdate).values({
+        updateId: 80083,
+        updateType: "message",
+        payload: { attemptId: "att-80083" },
+      });
+      const legitRouteRes = await routeAndAppendCustomerText(asAppDb(db), {
+        customerId: custI2.id,
+        body: "Legit message before close",
+        telegramMessageId: 802,
+        updateId: 80083,
+        attemptId: "att-80083",
+      });
+      expect(legitRouteRes.status).toBe("saved");
+
+      // THEN closure commits
+      await db
+        .update(inquiry)
+        .set({ status: "closed", closedAt: new Date() })
+        .where(eq(inquiry.id, inqRes2.inquiry.id));
+
+      const msgsLegit = await db
+        .select()
+        .from(inquiryMessage)
+        .where(eq(inquiryMessage.inquiryId, inqRes2.inquiry.id));
+      expect(msgsLegit).toHaveLength(1);
+      expect(msgsLegit[0].body).toBe("Legit message before close");
+
+      const [inqLegitAfter] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, inqRes2.inquiry.id));
+      expect(inqLegitAfter.status).toBe("closed");
+      expect(inqLegitAfter.lastReplyAt).not.toBeNull();
+    });
+
+    it("J. Post-mutation rollback proof: fault injection suppresses receipt write, rolling back business writes", async () => {
+      const db = testDb!.db;
+      const rawSql = postgres(testDb!.url, { max: 1 });
+      const custJ = await upsertCustomer(asAppDb(db), {
+        telegramId: 70012,
+        firstName: "FaultCust",
+      });
+
+      // Install temporary trigger that suppresses receipt update
+      await rawSql.unsafe(`
+        CREATE OR REPLACE FUNCTION fail_receipt_update() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.payload ? 'receipt' THEN
+            NEW.payload = NEW.payload - 'receipt';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER inject_receipt_suppress
+          BEFORE UPDATE ON telegram_update
+          FOR EACH ROW
+          EXECUTE FUNCTION fail_receipt_update();
+      `);
+
+      try {
+        await db.insert(telegramUpdate).values({
+          updateId: 80090,
+          updateType: "callback_query",
+          payload: { attemptId: "att-80090" },
+        });
+
+        // Business mutation (support inquiry creation) executes, but receipt write is suppressed by trigger
+        // Assertion query at end of batch must fail and roll back all mutations!
+        await expect(
+          createOrResumeSupportInquiry(asAppDb(db), {
+            customerId: custJ.id,
+            category: "FaultTest",
+            updateId: 80090,
+            attemptId: "att-80090",
+          }),
+        ).rejects.toThrow();
+
+        // Verify rollback: no inquiry was committed
+        const inqs = await db
+          .select()
+          .from(inquiry)
+          .where(eq(inquiry.customerId, custJ.id));
+        expect(inqs).toHaveLength(0);
+
+        // Verify telegram_update has no receipt
+        const [upd] = await db
+          .select()
+          .from(telegramUpdate)
+          .where(eq(telegramUpdate.updateId, 80090));
+        expect((upd.payload as Record<string, unknown>).receipt).toBeUndefined();
+      } finally {
+        await rawSql.unsafe(`
+          DROP TRIGGER IF EXISTS inject_receipt_suppress ON telegram_update;
+          DROP FUNCTION IF EXISTS fail_receipt_update();
+        `);
+        await rawSql.end();
+      }
+    });
+
+    it("K. First support message persisted metadata on database rows and timestamp behavior", async () => {
+      const db = testDb!.db;
+      const custK = await upsertCustomer(asAppDb(db), {
+        telegramId: 70013,
+        firstName: "MetadataCust",
+      });
+
+      const beforeTime = Date.now() - 1000;
+
+      // 1. First ordinary message with zero active inquiries
+      await db.insert(telegramUpdate).values({
+        updateId: 80100,
+        updateType: "message",
+        payload: { attemptId: "att-80100" },
+      });
+
+      const routeRes = await routeAndAppendCustomerText(asAppDb(db), {
+        customerId: custK.id,
+        body: "First support text",
+        telegramMessageId: 1001,
+        updateId: 80100,
+        attemptId: "att-80100",
+      });
+      expect(routeRes.status).toBe("saved");
+      if (routeRes.status !== "saved") return;
+
+      // Inspect actual persisted database row, not just returned object
+      const [persistedInq] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, routeRes.inquiry.id));
+
+      expect(persistedInq.lastReplyAt).not.toBeNull();
+      expect(persistedInq.lastReplyAt!.getTime()).toBeGreaterThanOrEqual(beforeTime);
+      expect(persistedInq.updatedAt.getTime()).toBeGreaterThanOrEqual(beforeTime);
+      expect(persistedInq.status).toBe("open");
+
+      const firstReplyAt = persistedInq.lastReplyAt!;
+      const firstUpdatedAt = persistedInq.updatedAt;
+
+      // 2. Existing waiting_on_customer inquiry receiving a new message
+      await db
+        .update(inquiry)
+        .set({ status: "waiting_on_customer" })
+        .where(eq(inquiry.id, persistedInq.id));
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      await db.insert(telegramUpdate).values({
+        updateId: 80101,
+        updateType: "message",
+        payload: { attemptId: "att-80101" },
+      });
+
+      const routeRes2 = await routeAndAppendCustomerText(asAppDb(db), {
+        customerId: custK.id,
+        body: "Customer response to advance timestamps",
+        telegramMessageId: 1002,
+        updateId: 80101,
+        attemptId: "att-80101",
+      });
+      expect(routeRes2.status).toBe("saved");
+
+      const [persistedInq2] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, persistedInq.id));
+
+      expect(persistedInq2.status).toBe("open");
+      expect(persistedInq2.lastReplyAt!.getTime()).toBeGreaterThan(firstReplyAt.getTime());
+      expect(persistedInq2.updatedAt.getTime()).toBeGreaterThan(firstUpdatedAt.getTime());
+
+      // 3. Duplicate delivery does not advance timestamps again
+      const replyAtBeforeDup = persistedInq2.lastReplyAt!;
+      const updatedAtBeforeDup = persistedInq2.updatedAt;
+
+      const dupRes = await routeAndAppendCustomerText(asAppDb(db), {
+        customerId: custK.id,
+        body: "Customer response to advance timestamps",
+        telegramMessageId: 1002,
+        updateId: 80101,
+        attemptId: "att-80101",
+      });
+      expect(dupRes.status).toBe("saved");
+      if (dupRes.status === "saved") {
+        expect(dupRes.isDuplicate).toBe(true);
+      }
+
+      const [persistedInqDup] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, persistedInq.id));
+
+      expect(persistedInqDup.lastReplyAt!.getTime()).toBe(replyAtBeforeDup.getTime());
+      expect(persistedInqDup.updatedAt.getTime()).toBe(updatedAtBeforeDup.getTime());
+    });
+
+    it("L. Command recognition & stable pagination tie-breaker contracts", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const custL = await upsertCustomer(asAppDb(db), {
+        telegramId: 70014,
+        firstName: "CommandCust",
+      });
+
+      // 1. Leading whitespace followed by unknown multiline slash command: returns guidance, 0 message rows
+      const leadingSpaceCmdReq = createWebhookRequest({
+        update_id: 80110,
+        message: {
+          message_id: 1101,
+          chat: { id: 70014, type: "private" },
+          from: { id: 70014, is_bot: false, first_name: "CommandCust" },
+          text: "   /unknowncmd\nLine two of unknown command",
+        },
+      });
+
+      await handleTelegramWebhookRequest(leadingSpaceCmdReq, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(fakeTransport.sentMessages[0].text).toContain("/start");
+      const msgs1 = await db
+        .select()
+        .from(inquiryMessage)
+        .where(eq(inquiryMessage.telegramMessageId, 1101));
+      expect(msgs1).toHaveLength(0);
+
+      // 2. /replyall is treated as an unknown command, NOT /reply
+      fakeTransport.clear();
+      const replyallReq = createWebhookRequest({
+        update_id: 80111,
+        message: {
+          message_id: 1102,
+          chat: { id: 70014, type: "private" },
+          from: { id: 70014, is_bot: false, first_name: "CommandCust" },
+          text: "/replyall INQ-TEST Hello to all",
+        },
+      });
+
+      await handleTelegramWebhookRequest(replyallReq, {
+        db: asAppDb(db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+
+      expect(fakeTransport.sentMessages[0].text).toContain("/start");
+      const msgs2 = await db
+        .select()
+        .from(inquiryMessage)
+        .where(eq(inquiryMessage.telegramMessageId, 1102));
+      expect(msgs2).toHaveLength(0);
+
+      // 3. Stable pagination tie-breaker with identical updated_at across pages
+      const fixedTime = new Date("2026-10-25T12:00:00Z");
+      const seededRefs: string[] = [];
+      for (let i = 0; i < 9; i++) {
+        const ref = `INQ-TIE${i}`;
+        seededRefs.push(ref);
+        await db.insert(inquiry).values({
+          customerId: custL.id,
+          reference: ref,
+          status: "open",
+          productSnapshot: { type: "support" },
+          category: `TieCategory`,
+          updatedAt: fixedTime,
+          createdAt: fixedTime,
+        });
+      }
+
+      // Fetch page 1 (pageSize 4), page 2 (pageSize 4), page 3 (pageSize 4)
+      const p1 = await listActiveCustomerInquiriesPaged(asAppDb(db), custL.id, {
+        page: 1,
+        pageSize: 4,
+      });
+      const p2 = await listActiveCustomerInquiriesPaged(asAppDb(db), custL.id, {
+        page: 2,
+        pageSize: 4,
+      });
+      const p3 = await listActiveCustomerInquiriesPaged(asAppDb(db), custL.id, {
+        page: 3,
+        pageSize: 4,
+      });
+
+      expect(p1.inquiries).toHaveLength(4);
+      expect(p2.inquiries).toHaveLength(4);
+      expect(p3.inquiries).toHaveLength(1);
+
+      const allFetchedRefs = [
+        ...p1.inquiries.map((inq) => inq.reference),
+        ...p2.inquiries.map((inq) => inq.reference),
+        ...p3.inquiries.map((inq) => inq.reference),
+      ];
+
+      // Every reference reachable once with zero duplicates and zero omissions
+      expect(new Set(allFetchedRefs).size).toBe(9);
+      for (const ref of seededRefs) {
+        expect(allFetchedRefs).toContain(ref);
+      }
     });
   });
 });

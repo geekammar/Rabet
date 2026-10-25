@@ -10,10 +10,10 @@ Phase 07 delivers the customer-facing inquiry and conversation foundation for Ra
    - Ordinary text with 1 active inquiry: Appends message to that active thread.
    - Ordinary text with 0 active inquiries: Atomically creates/resumes general support (`category = NULL`) and saves the message in one protected transaction.
    - Ordinary text with >1 active inquiries: Fails closed without saving, prompting the customer with their active reference list and `/reply` syntax (paginated with `inq:page` buttons).
-   - Command priority: `/start` triggers catalog browsing; unknown slash commands (single or multiline) return guidance and are never stored.
+   - Command priority: `/start` triggers catalog browsing; unknown slash commands (single or multiline, with or without leading whitespace) return guidance and are never stored.
 4. Durable Update Receipts, Serialization & Idempotency:
    - Serializes create/resume via executed customer row locks (`FOR UPDATE`) in atomic multi-statement batches (`db.batch` / `executeAtomicBatch`).
-   - Guarantees attempt ownership and active destination status in SQL, rolling back via fencing guard if stale.
+   - Guarantees attempt ownership and active destination status in SQL, rolling back via runtime aggregate assertion (`createReceiptAssertionQuery`) if stale.
    - Recovers committed receipts on retry before live action/hierarchy validation, rendering frozen snapshots even if catalog items were subsequently modified or deactivated.
 
 **Explicit Scope Exclusions (Deferred to Later Phases):**
@@ -31,7 +31,7 @@ Phase 07 delivers the customer-facing inquiry and conversation foundation for Ra
 Both product inquiries and general support share the `inquiry` table:
 - **Product Inquiries:**
   - `product_id` is set to the source product's UUID.
-  - Guarded by the partial unique index `inquiry_active_product_idx` on `(customer_id, product_id) WHERE status IN ('open', 'waiting_on_customer')`.
+  - Guarded by the partial unique index `inquiry_active_per_customer_product_idx` on `(customer_id, product_id) WHERE status IN ('open', 'waiting_on_customer')`.
   - Exactly one active inquiry per customer and product is permitted at any time.
 - **Support Inquiries:**
   - `product_id = NULL`.
@@ -79,8 +79,8 @@ Customer private chat messages are routed through `handleIncomingMessage`:
                    │            guidance.        │         │    /reply syntax
                    ▼            Zero write.      │         │
              Append message                      │         ▼
-             to that inquiry                     │    Append message
-                                                 │    to that inquiry
+             to that inquiry                     │    Lock destination
+                                                 │    and append
                                                  ▼
                                         Single Atomic Batch:
                                         Create support + append message
@@ -93,12 +93,12 @@ Customer private chat messages are routed through `handleIncomingMessage`:
   - Must match an active inquiry (`open` or `waiting_on_customer`).
   - Unknown references, references belonging to other customers, or closed/resolved inquiries return safe guidance.
   - Never reveals whether an inquiry reference exists for another customer.
-- Unknown slash commands (including multiline strings): Return safe localized command guidance; text is never saved to conversations.
+- Unknown slash commands (including multiline strings and commands with leading whitespace): Return safe localized command guidance; text is never saved to conversations. Unrelated commands (like `/replyall`) are not confused with `/reply`.
 
 ### 3.2 Non-Command Text
-- **0 Active Inquiries:** Transparently creates general support inquiry (`category = NULL`), appends message, updates timestamps, and writes receipt in a single atomic transaction (`routeAndAppendCustomerText`).
-- **1 Active Inquiry:** Appends message directly to that active thread, touches `last_customer_message_at`, sets status to `open`, and writes receipt in a single atomic transaction.
-- **>1 Active Inquiries:** Halts routing without persisting message. Records ambiguous receipt, responds with localized guidance, and lists active references (paginated via `inq:page` when >5 inquiries exist).
+- **0 Active Inquiries:** Transparently creates general support inquiry (`category = NULL`), appends message, updates timestamps (both `last_customer_message_at` and `last_reply_at`), and writes receipt in a single atomic transaction (`routeAndAppendCustomerText`).
+- **1 Active Inquiry:** Atomically locks the destination row `FOR UPDATE`, checks active status (`open` or `waiting_on_customer`), appends message, touches `last_customer_message_at`, updates status to `open`, and writes receipt. If the destination was concurrently closed by an admin or seller before the write locks the row, the message write and receipt are skipped, and the transaction assertion aborts the batch cleanly without saving to a closed thread or rerouting.
+- **>1 Active Inquiries:** Halts routing without persisting message. Records ambiguous receipt, responds with localized guidance, and lists active references (paginated via `inq:page` with primary sort `updated_at DESC` and secondary tie-breaker `id DESC`).
 
 ### 3.3 Message Validation & Rejection
 - Blank or whitespace-only messages: Rejected with localized guidance; zero message rows created.
@@ -118,9 +118,10 @@ Committed business outcomes are bound to `telegram_update.payload.receipt` withi
 - Ambiguous routing receipt: `{ kind: "ambiguous", activeReferences }`
 - Guidance receipts: `{ kind: "guidance", notice }`
 
-### 4.2 Database Serialization & Neon HTTP Batch
+### 4.2 Database Serialization & Lock Ordering
+- **Strict Lock Hierarchy:** `customer` -> `inquiry` -> `telegram_update`. All writers acquire locks in this sequence, eliminating deadlock opportunities between concurrent customer actions and administrative operations.
 - **Customer Lock as Executed Statement:** Executed prior to inquiry query in `executeAtomicBatch` / `db.batch`. Statement 2 runs with a fresh snapshot in READ COMMITTED isolation that observes competing commits.
-- **SQL Fencing Guard:** Checks `receipt_update` row count. If 0 rows are affected (stale attempt or superseded claim), aborts via division-by-zero trigger, guaranteeing atomic rollback of all batch mutations.
+- **Real Transaction Assertions (`createReceiptAssertionQuery`):** Fences batch completion via an executed statement checking runtime aggregate `count(*)` on `telegram_update`. If the receipt update did not write exactly 1 row (superseded claim or stale attempt), it triggers an intentional invalid date cast error (`22007`), aborting the multi-statement batch and rolling back all mutations.
 - **Callback Recovery:** Intercepts committed callbacks before live action validation. Recovers frozen snapshot from database and renders confirmation even if products or actions were subsequently modified or disabled.
 
 ---
@@ -129,11 +130,11 @@ Committed business outcomes are bound to `telegram_update.payload.receipt` withi
 
 | Test Suite | File | Tests | Status |
 | --- | --- | --- | --- |
-| Customer Inquiries Unit, Integration & Concurrency | `tests/db/customer-inquiries.test.ts` | 30 | Passed |
+| Customer Inquiries Unit, Integration & Concurrency | `tests/db/customer-inquiries.test.ts` | 34 | Passed |
 | Telegram Journey Integration | `tests/db/telegram-journey.test.ts` | 61 | Passed |
 | Telegram Transport | `tests/telegram-transport.test.ts` | 24 | Passed |
 | Telegram Tokens | `tests/telegram-tokens.test.ts` | 5 | Passed |
-| Database Integration (All Suites) | `tests/db/*.test.ts` (17 files) | 268 | Passed |
-| Unit, Auth & Wizard Suites | `tests/**/*.test.ts` | 503 | Passed |
+| Database Integration (All Suites) | `tests/db/*.test.ts` (17 files) | 272 | Passed |
+| Unit, Auth & Wizard Suites | `tests/**/*.test.ts` | 507 | Passed |
 
 All tests run on real PostgreSQL with strict schema migrations and trigger checks. Linting, TypeScript typechecking, and Next.js production build (`env -u DATABASE_URL npm run build`) pass cleanly with 0 errors and 0 warnings.

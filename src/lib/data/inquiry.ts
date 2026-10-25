@@ -33,6 +33,41 @@ export function generateInquiryReference(): string {
   return `INQ-${code}`;
 }
 
+/**
+ * Creates an explicit final assertion statement within the atomic batch.
+ *
+ * Guarantees:
+ * 1. Fails inside the same transaction when the expected receipt was not recorded for the attempt.
+ * 2. Depends on real database result data (runtime aggregate count(*)).
+ * 3. Does not rely on constant-folded planning errors.
+ * 4. Raises a PostgreSQL type conversion error (22007) when count != 1, rolling back all statements.
+ */
+function createReceiptAssertionQuery(
+  db: Database,
+  updateId: number,
+  attemptId: string,
+) {
+  return toBatchable(
+    db,
+    sql`
+      SELECT CASE
+        WHEN (
+          SELECT count(*) FROM ${telegramUpdate}
+          WHERE update_id = ${updateId}::bigint
+            AND payload->'receipt' IS NOT NULL
+            AND payload->>'attemptId' = ${attemptId}::text
+        ) = 1 THEN 'ok'
+        ELSE CAST('ASSERTION_FAILED_MISSING_RECEIPT_' || (
+          SELECT count(*) FROM ${telegramUpdate}
+          WHERE update_id = ${updateId}::bigint
+            AND payload->'receipt' IS NOT NULL
+            AND payload->>'attemptId' = ${attemptId}::text
+        ) AS date)::text
+      END AS assertion_status;
+    `,
+  );
+}
+
 export interface CreateOrResumeProductInquiryInput {
   customerId: string;
   productId: string;
@@ -166,18 +201,10 @@ export async function createOrResumeProductInquiry(
           AND payload->>'attemptId' = ${input.attemptId}::text
           AND EXISTS (SELECT 1 FROM resolved_inquiry)
         RETURNING update_id
-      ),
-      fencing_guard AS (
-        SELECT CASE
-          WHEN (SELECT count(*) FROM receipt_update) != 1
-          THEN (1 / 0)::text
-          ELSE 'ok'
-        END AS fence_status
       )
       SELECT
         r.*
-      FROM resolved_inquiry r
-      CROSS JOIN fencing_guard fg;
+      FROM resolved_inquiry r;
     `,
     );
 
@@ -185,7 +212,14 @@ export async function createOrResumeProductInquiry(
       lockCustomerQuery,
       lockAttemptQuery,
       resolveQuery,
+      createReceiptAssertionQuery(db, input.updateId, input.attemptId),
     ]);
+
+    const assertRaw = batchResults[3];
+    const assertRows = Array.isArray(assertRaw) ? assertRaw : (assertRaw as { rows: unknown[] })?.rows ?? [];
+    if ((assertRows[0] as { assertion_status?: string })?.assertion_status !== "ok") {
+      throw new Error("Transaction assertion failed: receipt missing for attempt " + input.attemptId);
+    }
 
     const resRaw = batchResults[2];
     const rows = Array.isArray(resRaw) ? resRaw : (resRaw as { rows: unknown[] })?.rows ?? [];
@@ -356,18 +390,10 @@ export async function createOrResumeSupportInquiry(
           AND payload->>'attemptId' = ${input.attemptId}::text
           AND EXISTS (SELECT 1 FROM resolved_inquiry)
         RETURNING update_id
-      ),
-      fencing_guard AS (
-        SELECT CASE
-          WHEN (SELECT count(*) FROM receipt_update) != 1
-          THEN (1 / 0)::text
-          ELSE 'ok'
-        END AS fence_status
       )
       SELECT
         r.*
-      FROM resolved_inquiry r
-      CROSS JOIN fencing_guard fg;
+      FROM resolved_inquiry r;
     `,
     );
 
@@ -375,7 +401,14 @@ export async function createOrResumeSupportInquiry(
       lockCustomerQuery,
       lockAttemptQuery,
       resolveQuery,
+      createReceiptAssertionQuery(db, input.updateId, input.attemptId),
     ]);
+
+    const assertRaw = batchResults[3];
+    const assertRows = Array.isArray(assertRaw) ? assertRaw : (assertRaw as { rows: unknown[] })?.rows ?? [];
+    if ((assertRows[0] as { assertion_status?: string })?.assertion_status !== "ok") {
+      throw new Error("Transaction assertion failed: receipt missing for attempt " + input.attemptId);
+    }
 
     const resRaw = batchResults[2];
     const rows = Array.isArray(resRaw) ? resRaw : (resRaw as { rows: unknown[] })?.rows ?? [];
@@ -530,7 +563,8 @@ export async function appendInboundCustomerMessage(
             ELSE status
           END
         WHERE id = ${input.inquiryId}::uuid
-          AND EXISTS (SELECT 1 FROM final_message)
+          AND status IN ('open', 'waiting_on_customer')
+          AND EXISTS (SELECT 1 FROM inserted_message)
         RETURNING *
       ),
       resolved_inquiry AS (
@@ -559,13 +593,6 @@ export async function appendInboundCustomerMessage(
           AND payload->>'attemptId' = ${input.attemptId}::text
           AND EXISTS (SELECT 1 FROM final_message)
         RETURNING update_id
-      ),
-      fencing_guard AS (
-        SELECT CASE
-          WHEN (SELECT count(*) FROM receipt_update) != 1
-          THEN (1 / 0)::text
-          ELSE 'ok'
-        END AS fence_status
       )
       SELECT
         m.id AS msg_id,
@@ -592,8 +619,7 @@ export async function appendInboundCustomerMessage(
         i.updated_at AS inq_updated_at,
         m.is_dup AS is_duplicate
       FROM final_message m
-      JOIN resolved_inquiry i ON i.id = m.inquiry_id
-      CROSS JOIN fencing_guard fg;
+      JOIN resolved_inquiry i ON i.id = m.inquiry_id;
     `,
     );
 
@@ -601,7 +627,14 @@ export async function appendInboundCustomerMessage(
       lockCustomerQuery,
       lockAttemptQuery,
       appendQuery,
+      createReceiptAssertionQuery(db, input.updateId, input.attemptId),
     ]);
+
+    const assertRaw = batchResults[3];
+    const assertRows = Array.isArray(assertRaw) ? assertRaw : (assertRaw as { rows: unknown[] })?.rows ?? [];
+    if ((assertRows[0] as { assertion_status?: string })?.assertion_status !== "ok") {
+      throw new Error("Transaction assertion failed: receipt missing for attempt " + input.attemptId);
+    }
 
     const resRaw = batchResults[2];
     const rows = Array.isArray(resRaw) ? resRaw : (resRaw as { rows: unknown[] })?.rows ?? [];
@@ -734,19 +767,30 @@ export async function routeAndAppendCustomerText(
           AND payload->>'attemptId' = ${input.attemptId}::text
         FOR UPDATE
       ),
-      active_inquiries AS (
-        SELECT * FROM ${inquiry}
+      candidate_inquiries AS (
+        SELECT id, customer_id, product_id, reference, status, category,
+               product_snapshot, selected_options, opened_at, last_reply_at,
+               closed_at, created_at, updated_at
+        FROM ${inquiry}
         WHERE customer_id = ${input.customerId}::uuid
           AND status IN ('open', 'waiting_on_customer')
-        ORDER BY updated_at DESC
+        ORDER BY updated_at DESC, id DESC
       ),
       active_count AS (
-        SELECT count(*)::int AS cnt FROM active_inquiries
+        SELECT count(*)::int AS cnt FROM candidate_inquiries
+      ),
+      locked_destination AS (
+        SELECT i.* FROM ${inquiry} i
+        JOIN candidate_inquiries c ON c.id = i.id
+        WHERE (SELECT cnt FROM active_count) = 1
+          AND i.customer_id = ${input.customerId}::uuid
+          AND i.status IN ('open', 'waiting_on_customer')
+        FOR UPDATE
       ),
       created_support AS (
         INSERT INTO ${inquiry} (
           id, customer_id, product_id, reference, status, category,
-          product_snapshot, selected_options, opened_at, created_at, updated_at
+          product_snapshot, selected_options, opened_at, last_reply_at, created_at, updated_at
         )
         SELECT
           ${newInqId}::uuid,
@@ -759,6 +803,7 @@ export async function routeAndAppendCustomerText(
           NULL,
           now(),
           now(),
+          now(),
           now()
         WHERE EXISTS (SELECT 1 FROM locked_attempt)
           AND (SELECT cnt FROM active_count) = 0
@@ -767,7 +812,7 @@ export async function routeAndAppendCustomerText(
       target_inquiry AS (
         SELECT *, true AS is_new FROM created_support
         UNION ALL
-        SELECT *, false AS is_new FROM active_inquiries
+        SELECT *, false AS is_new FROM locked_destination
         WHERE (SELECT cnt FROM active_count) = 1
       ),
       inserted_message AS (
@@ -812,8 +857,9 @@ export async function routeAndAppendCustomerText(
             WHEN status = 'waiting_on_customer' AND EXISTS (SELECT 1 FROM inserted_message) THEN 'open'
             ELSE status
           END
-        WHERE id IN (SELECT id FROM target_inquiry)
-          AND EXISTS (SELECT 1 FROM final_message)
+        WHERE id IN (SELECT id FROM locked_destination)
+          AND status IN ('open', 'waiting_on_customer')
+          AND EXISTS (SELECT 1 FROM inserted_message)
         RETURNING *
       ),
       resolved_inquiry AS (
@@ -853,7 +899,7 @@ export async function routeAndAppendCustomerText(
           '{receipt}',
           jsonb_build_object(
             'kind', 'ambiguous',
-            'activeReferences', (SELECT coalesce(jsonb_agg(reference), '[]'::jsonb) FROM active_inquiries)
+            'activeReferences', (SELECT coalesce(jsonb_agg(reference), '[]'::jsonb) FROM candidate_inquiries)
           )
         )
         WHERE update_id = ${input.updateId}::bigint
@@ -861,16 +907,6 @@ export async function routeAndAppendCustomerText(
           AND payload->>'attemptId' = ${input.attemptId}::text
           AND (SELECT cnt FROM active_count) > 1
         RETURNING update_id
-      ),
-      fencing_guard AS (
-        SELECT CASE
-          WHEN (
-            (SELECT count(*) FROM msg_receipt_update) +
-            (SELECT count(*) FROM ambiguous_receipt_update)
-          ) != 1
-          THEN (1 / 0)::text
-          ELSE 'ok'
-        END AS fence_status
       )
       SELECT
         (SELECT cnt FROM active_count) AS active_count,
@@ -898,11 +934,38 @@ export async function routeAndAppendCustomerText(
         i.created_at AS inq_created_at,
         i.updated_at AS inq_updated_at,
         t.is_new AS inq_is_new
-      FROM (SELECT 1) AS dummy
-      CROSS JOIN fencing_guard fg
-      LEFT JOIN final_message m ON true
-      LEFT JOIN resolved_inquiry i ON i.id = m.inquiry_id
-      LEFT JOIN target_inquiry t ON t.id = i.id;
+      FROM final_message m
+      JOIN resolved_inquiry i ON i.id = m.inquiry_id
+      JOIN target_inquiry t ON t.id = i.id
+      UNION ALL
+      SELECT
+        (SELECT cnt FROM active_count) AS active_count,
+        NULL AS msg_id,
+        NULL AS msg_inquiry_id,
+        NULL AS msg_author,
+        NULL AS msg_body,
+        NULL AS msg_telegram_message_id,
+        NULL AS msg_delivery_status,
+        NULL AS msg_delivery_error,
+        NULL AS msg_delivered_at,
+        NULL AS msg_created_at,
+        false AS is_duplicate,
+        NULL AS inq_id,
+        NULL AS inq_customer_id,
+        NULL AS inq_product_id,
+        NULL AS inq_reference,
+        NULL AS inq_status,
+        NULL AS inq_category,
+        NULL AS inq_product_snapshot,
+        NULL AS inq_selected_options,
+        NULL AS inq_opened_at,
+        NULL AS inq_last_reply_at,
+        NULL AS inq_closed_at,
+        NULL AS inq_created_at,
+        NULL AS inq_updated_at,
+        false AS inq_is_new
+      WHERE (SELECT cnt FROM active_count) > 1
+        AND EXISTS (SELECT 1 FROM ambiguous_receipt_update);
     `,
     );
 
@@ -910,7 +973,14 @@ export async function routeAndAppendCustomerText(
       lockCustomerQuery,
       lockAttemptQuery,
       routeQuery,
+      createReceiptAssertionQuery(db, input.updateId, input.attemptId),
     ]);
+
+    const assertRaw = batchResults[3];
+    const assertRows = Array.isArray(assertRaw) ? assertRaw : (assertRaw as { rows: unknown[] })?.rows ?? [];
+    if ((assertRows[0] as { assertion_status?: string })?.assertion_status !== "ok") {
+      throw new Error("Transaction assertion failed: receipt missing for attempt " + input.attemptId);
+    }
 
     const resRaw = batchResults[2];
     const rows = Array.isArray(resRaw) ? resRaw : (resRaw as { rows: unknown[] })?.rows ?? [];
@@ -1011,7 +1081,7 @@ export async function listActiveCustomerInquiries(
           inArray(inquiry.status, [...ACTIVE_INQUIRY_STATUSES]),
         ),
       )
-      .orderBy(desc(inquiry.updatedAt))
+      .orderBy(desc(inquiry.updatedAt), desc(inquiry.id))
       .limit(limit);
   } catch (error) {
     throw mapDatabaseError(error);
@@ -1059,7 +1129,7 @@ export async function listActiveCustomerInquiriesPaged(
           inArray(inquiry.status, [...ACTIVE_INQUIRY_STATUSES]),
         ),
       )
-      .orderBy(desc(inquiry.updatedAt))
+      .orderBy(desc(inquiry.updatedAt), desc(inquiry.id))
       .limit(pageSize)
       .offset(offset);
 
