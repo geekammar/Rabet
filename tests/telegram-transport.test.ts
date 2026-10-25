@@ -439,4 +439,71 @@ describe("telegram transport and error sanitization", () => {
       });
     });
   });
+
+  describe("Telegram Button Payload Validation", () => {
+    it("rejects button combining url and callback_data", async () => {
+      const fake = createFakeTelegramTransport();
+      const res = await fake.sendMessage({
+        chatId: 123,
+        text: "Test",
+        replyMarkup: {
+          inline_keyboard: [
+            [
+              {
+                text: "Invalid Button",
+                url: "https://example.com",
+                callback_data: "home",
+              },
+            ],
+          ],
+        },
+      });
+      expect(res.ok).toBe(false);
+      expect(res.error).toContain("Button representation cannot combine url and callback_data");
+    });
+
+    it("rejects button with neither url nor callback_data", async () => {
+      const fake = createFakeTelegramTransport();
+      const res = await fake.sendMessage({
+        chatId: 123,
+        text: "Test",
+        replyMarkup: {
+          inline_keyboard: [
+            [
+              {
+                text: "No Action Button",
+              },
+            ],
+          ],
+        },
+      });
+      expect(res.ok).toBe(false);
+      expect(res.error).toContain("Button must have either url or callback_data");
+    });
+
+    it("accepts valid URL buttons without callback_data", async () => {
+      const fake = createFakeTelegramTransport();
+      const res = await fake.sendMessage({
+        chatId: 123,
+        text: "Test",
+        replyMarkup: {
+          inline_keyboard: [
+            [
+              {
+                text: "Open Link",
+                url: "https://example.com/info",
+              },
+            ],
+          ],
+        },
+      });
+      expect(res.ok).toBe(true);
+      expect(fake.sentMessages[0].replyMarkup?.inline_keyboard[0][0].url).toBe(
+        "https://example.com/info",
+      );
+      expect(
+        fake.sentMessages[0].replyMarkup?.inline_keyboard[0][0].callback_data,
+      ).toBeUndefined();
+    });
+  });
 });
