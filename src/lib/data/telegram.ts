@@ -12,6 +12,34 @@ export type TelegramUpdateRecord = typeof telegramUpdate.$inferSelect;
 /** Lease window (milliseconds) before an uncompleted in-flight update is deemed abandoned. */
 export const IN_FLIGHT_LEASE_MS = 30_000;
 
+export type TelegramBusinessReceipt =
+  | {
+      kind: "inquiry";
+      inquiryId: string;
+      reference: string;
+      isResume: boolean;
+      status: string;
+      productId: string | null;
+      productSnapshot?: Record<string, unknown> | null;
+      selectedOptions?: string[] | null;
+    }
+  | {
+      kind: "message";
+      inquiryId: string;
+      messageId: string;
+      reference: string;
+      body: string;
+      telegramMessageId: number;
+    }
+  | {
+      kind: "ambiguous";
+      activeReferences: string[];
+    }
+  | {
+      kind: "guidance";
+      notice: string;
+    };
+
 export interface ClaimTelegramUpdateInput {
   updateId: number;
   updateType: string;
@@ -34,6 +62,7 @@ export type ClaimTelegramUpdateResult =
  *    via a single conditional UPDATE statement. Two concurrent retries will race on PostgreSQL
  *    row-level serialization: exactly one acquires ownership, the other gets `status: "in_flight"`.
  * 3. Already-processed updates return `status: "already_processed"`.
+ * 4. Committed business receipts in `payload.receipt` are preserved on retry.
  */
 export async function claimTelegramUpdate(
   db: Database,
@@ -49,6 +78,7 @@ export async function claimTelegramUpdate(
       update: input.payload ?? null,
       attemptId,
       claimedAt: now.toISOString(),
+      receipt: null,
     };
 
     // 1. Initial attempt: insert with conflict avoidance
@@ -69,10 +99,16 @@ export async function claimTelegramUpdate(
     }
 
     // 2. Retry / Recovery: atomically claim if unprocessed AND (has error OR lease expired)
+    // Preserves any committed business receipt in `payload->'receipt'`.
     const [claimedRow] = await db
       .update(telegramUpdate)
       .set({
-        payload: envelope,
+        payload: sql`jsonb_build_object(
+          'update', coalesce(${telegramUpdate.payload}->'update', ${JSON.stringify(input.payload ?? null)}::jsonb),
+          'attemptId', ${attemptId}::text,
+          'claimedAt', ${now.toISOString()}::text,
+          'receipt', ${telegramUpdate.payload}->'receipt'
+        )`,
         processingError: null,
       })
       .where(
@@ -162,6 +198,44 @@ export async function markTelegramUpdateFailed(
       .update(telegramUpdate)
       .set({
         processingError: params.errorMessage.slice(0, 500),
+      })
+      .where(
+        and(
+          eq(telegramUpdate.updateId, params.updateId),
+          isNull(telegramUpdate.processedAt),
+          sql`${telegramUpdate.payload}->>'attemptId' = ${params.attemptId}`,
+        ),
+      )
+      .returning();
+
+    return Boolean(row);
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Durably records a server-owned business receipt in `telegram_update.payload.receipt`.
+ *
+ * Conditional on attempt ownership: a stale attempt that lost its lease cannot record a receipt.
+ */
+export async function recordTelegramUpdateReceipt(
+  db: Database,
+  params: {
+    updateId: number;
+    attemptId: string;
+    receipt: TelegramBusinessReceipt;
+  },
+): Promise<boolean> {
+  try {
+    const [row] = await db
+      .update(telegramUpdate)
+      .set({
+        payload: sql`jsonb_set(
+          coalesce(${telegramUpdate.payload}, '{}'::jsonb),
+          '{receipt}',
+          ${JSON.stringify(params.receipt)}::jsonb
+        )`,
       })
       .where(
         and(

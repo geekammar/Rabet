@@ -769,17 +769,21 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       });
       expect(deferredRes.status).toBe(200);
 
-      // Truthful unavailable response
+      // Phase 07: START_INQUIRY confirms the inquiry and creates inquiry record
+      expect(deferredRes.status).toBe(200);
       expect(fakeTransport.editedMessages).toHaveLength(1);
-      const deferredMsg = fakeTransport.editedMessages[0];
-      expect(deferredMsg.text).toContain("This action is not yet supported in this version.");
+      const inqMsg = fakeTransport.editedMessages[0];
+      expect(inqMsg.text).toContain("Thank you for your inquiry about Pro Portfolio Template");
+      expect(inqMsg.text).toContain("Reference: INQ-");
 
       // Verify answerCallbackQuery was called
       expect(fakeTransport.answeredCallbacks).toHaveLength(1);
 
-      // ZERO inquiries or conversation records created
+      // Inquiry was created
       const inquiries = await testDb!.db.select().from(inquiry);
-      expect(inquiries).toHaveLength(0);
+      expect(inquiries).toHaveLength(1);
+      expect(inquiries[0].productId).toBe(testProductId);
+      expect(inquiries[0].status).toBe("open");
 
       fakeTransport.clear();
 
@@ -4831,7 +4835,7 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       expect(fakeTransport.editedMessages).toHaveLength(0);
     });
 
-    it("Regression: START_INQUIRY and OPEN_SUPPORT remain deferred with zero inquiry/conversation rows", async () => {
+    it("Phase 07: OPEN_SUPPORT creates general support inquiry and confirms to customer", async () => {
       const db = testDb!.db;
       const fakeTransport = createFakeTelegramTransport();
       const customerTelegramId = 7026;
@@ -4839,7 +4843,7 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       // Count inquiry rows before
       const inqBefore = await db.select().from(inquiry);
 
-      // Create OPEN_SUPPORT action to verify both deferred actions
+      // Create OPEN_SUPPORT action
       const [suppAct] = await db
         .insert(productAction)
         .values({
@@ -4879,13 +4883,14 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       });
 
       expect(res.status).toBe(200);
-      expect(fakeTransport.editedMessages[0].text).toBe(
-        "This action is not yet supported in this version.",
+      expect(fakeTransport.editedMessages[0].text).toContain(
+        "Thank you for contacting Acme Digital Store support.",
       );
+      expect(fakeTransport.editedMessages[0].text).toContain("Reference: INQ-");
 
-      // Zero inquiry rows created
+      // Inquiry created
       const inqAfter = await db.select().from(inquiry);
-      expect(inqAfter).toHaveLength(inqBefore.length);
+      expect(inqAfter).toHaveLength(inqBefore.length + 1);
     });
 
     it("Regression: read and navigation operations do not mutate catalog or action configuration", async () => {

@@ -45,6 +45,7 @@ export * from "./actions";
 export * from "./catalog";
 export * from "./customer";
 export * from "./errors";
+export * from "./inquiry";
 export * from "./languages";
 export * from "./settings";
 export * from "./telegram";
