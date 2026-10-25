@@ -92,6 +92,35 @@ function isTransactionCapable(target: unknown): target is TransactionCapableDb {
 }
 
 /**
+ * Wraps an SQL template statement so it can participate in non-interactive `db.batch` on Neon HTTP
+ * or `executeAtomicBatch` on both Neon HTTP and Postgres-js.
+ */
+export function toBatchable(
+  db: Database,
+  sqlWrapper: import("drizzle-orm").SQLWrapper,
+) {
+  return {
+    _prepare() {
+      const dialect = (
+        db as unknown as {
+          dialect?: { sqlToQuery: (s: unknown) => { sql: string; params: unknown[] } };
+        }
+      ).dialect;
+      const built = dialect
+        ? dialect.sqlToQuery(sqlWrapper.getSQL())
+        : { sql: "", params: [] };
+      return {
+        getQuery: () => built,
+        isResponseInArrayMode: () => false,
+        mapResult: (res: { rows?: unknown[] } | unknown[]) =>
+          Array.isArray(res) ? res : res?.rows ?? [],
+      };
+    },
+    getSQL: () => sqlWrapper.getSQL(),
+  };
+}
+
+/**
  * Executes a batch of statements atomically.
  * On Neon HTTP, uses the driver's native non-interactive `db.batch(...)`.
  * In environments where `db.batch` is not supported (such as postgres-js test runner),

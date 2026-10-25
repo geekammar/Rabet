@@ -44,6 +44,8 @@ describe("telegram tokens", () => {
     expect(tokens.submenu(uuid)).toBe(`m:${uuid}`);
     expect(tokens.submenu(uuid, 3)).toBe(`m:${uuid}:3`);
     expect(tokens.back(uuid)).toBe(`b:${uuid}`);
+    expect(tokens.inquiries()).toBe("inq");
+    expect(tokens.inquiries(2)).toBe("inq:2");
 
     // All must be well below 64 bytes
     for (const token of [
@@ -55,6 +57,8 @@ describe("telegram tokens", () => {
       tokens.action(uuid),
       tokens.submenu(uuid, 99),
       tokens.back(uuid),
+      tokens.inquiries(),
+      tokens.inquiries(99),
     ]) {
       expect(Buffer.byteLength(token, "utf8")).toBeLessThanOrEqual(
         TELEGRAM_MAX_CALLBACK_DATA_BYTES,
@@ -83,6 +87,8 @@ describe("telegram tokens", () => {
     expect(parseToken("home")).toEqual({ type: "home" });
     expect(parseToken("c:root")).toEqual({ type: "root", page: 1 });
     expect(parseToken("c:root:3")).toEqual({ type: "root", page: 3 });
+    expect(parseToken("inq")).toEqual({ type: "inquiries", page: 1 });
+    expect(parseToken("inq:2")).toEqual({ type: "inquiries", page: 2 });
     expect(parseToken("lang:en")).toEqual({ type: "lang", code: "en" });
     expect(parseToken(`c:${uuid}`)).toEqual({
       type: "category",

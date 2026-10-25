@@ -8,8 +8,18 @@ import {
   claimTelegramUpdate,
   markTelegramUpdateFailed,
   markTelegramUpdateProcessed,
+  type TelegramBusinessReceipt,
 } from "@/lib/data/telegram";
-import { handleCallbackQuery, handleStartCommand } from "./catalog-journey";
+import {
+  getLocalizedUiStrings,
+  handleCallbackQuery,
+  handleStartCommand,
+  resolveCustomerLanguageContext,
+} from "./catalog-journey";
+import {
+  handleIncomingMessage,
+  type InquiryJourneyOptions,
+} from "./inquiry-journey";
 import { parseToken, type ParsedToken } from "./tokens";
 import {
   classifyErrorToSafeDiagnostic,
@@ -26,7 +36,6 @@ import type {
 } from "./types";
 import {
   FencingRejectedError,
-  TelegramTransportError,
 } from "./types";
 
 /**
@@ -45,7 +54,6 @@ export function safeCompareSecret(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-const START_COMMAND_REGEX = /^\/start(?:@\w+)?(?:\s+.*)?$/i;
 export const DEFAULT_EXECUTION_BUDGET_MS = 25_000;
 
 export interface WebhookHandlerOptions {
@@ -441,33 +449,29 @@ export async function handleTelegramWebhookRequest(
     deadline.checkOrThrow();
 
     // 7. Dispatch business logic
+    const journeyOptions: InquiryJourneyOptions = {
+      updateId: update.update_id,
+      attemptId,
+      receipt: (claim.row.payload as { receipt?: TelegramBusinessReceipt } | null)?.receipt,
+    };
+
     if (validatedData.updateType === "message") {
-      const msg = validatedData.message;
-      const text = msg.text?.trim() ?? "";
-      if (START_COMMAND_REGEX.test(text)) {
-        await handleStartCommand(db, transport, msg);
-      } else {
-        // Helpful plain-text guidance for non-start text messages
-        const guideRes = await transport.sendMessage({
-          chatId: msg.chat.id,
-          text: "To browse our catalog, please send /start",
-        });
-        if (!guideRes.ok) {
-          throw new TelegramTransportError(
-            guideRes.error ?? "Failed to deliver guidance message",
-            {
-              errorKind: guideRes.errorKind ?? "api_error",
-              retryAfterSeconds: guideRes.retryAfterSeconds,
-            },
-          );
-        }
-      }
+      await handleIncomingMessage(
+        db,
+        transport,
+        validatedData.message,
+        journeyOptions,
+        handleStartCommand,
+        resolveCustomerLanguageContext,
+        getLocalizedUiStrings,
+      );
     } else {
       await handleCallbackQuery(
         db,
         transport,
         validatedData.callbackQuery,
         validatedData.parsedToken,
+        journeyOptions,
       );
     }
 

@@ -76,6 +76,12 @@ export const tokens = {
     }
     return assertValidCallbackData(`b:${actionId}`);
   },
+  inquiries: (page?: number): string => {
+    if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
+      throw new Error(`Invalid page number: ${page}`);
+    }
+    return assertValidCallbackData(page && page > 1 ? `inq:${page}` : "inq");
+  },
 };
 
 export type ParsedToken =
@@ -87,6 +93,7 @@ export type ParsedToken =
   | { type: "action"; actionId: string }
   | { type: "submenu"; actionId: string; page: number }
   | { type: "back"; actionId: string }
+  | { type: "inquiries"; page: number }
   | { type: "unknown"; raw: string };
 
 export function parseToken(data?: string): ParsedToken {
@@ -101,6 +108,18 @@ export function parseToken(data?: string): ParsedToken {
 
   if (data === "home") {
     return { type: "home" };
+  }
+
+  if (data === "inq") {
+    return { type: "inquiries", page: 1 };
+  }
+
+  if (data.startsWith("inq:")) {
+    const pageStr = data.slice(4);
+    if (PAGE_REGEX.test(pageStr)) {
+      return { type: "inquiries", page: parseInt(pageStr, 10) };
+    }
+    return { type: "unknown", raw: data };
   }
 
   if (data.startsWith("lang:")) {

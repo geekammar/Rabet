@@ -20,6 +20,13 @@ import {
   setCustomerSelectedLanguage,
   upsertCustomer,
 } from "@/lib/data";
+import {
+  handleProductInquiryCallback,
+  handleSupportInquiryCallback,
+  recoverAndRenderCommittedInquiryCallback,
+  renderCustomerInquiriesList,
+  type InquiryJourneyOptions,
+} from "./inquiry-journey";
 import { parseToken, tokens, UUID_REGEX, type ParsedToken } from "./tokens";
 import {
   interpolateActionTemplate,
@@ -42,14 +49,14 @@ import { TelegramTransportError } from "./types";
 export const TELEGRAM_MENU_PAGE_SIZE = 10;
 export const MAX_SAFEGUARD_DEPTH = 64;
 
-interface ResolvedLanguageContext {
+export interface ResolvedLanguageContext {
   id: string;
   code: string;
   label: string;
   isRtl: boolean;
 }
 
-function getLocalizedUiStrings(isRtl: boolean) {
+export function getLocalizedUiStrings(isRtl: boolean) {
   if (isRtl) {
     return {
       back: "◀ رجوع",
@@ -91,7 +98,7 @@ function getLocalizedUiStrings(isRtl: boolean) {
 /**
  * Resolves the effective language for a customer interaction.
  */
-async function resolveCustomerLanguageContext(
+export async function resolveCustomerLanguageContext(
   db: Database,
   customerTelegramId: number,
   fallbackDefaultLangId: string,
@@ -111,6 +118,11 @@ async function resolveCustomerLanguageContext(
   let matchedLang = enabledLanguages.find(
     (l) => customerRecord?.selectedLanguageId && l.id === customerRecord.selectedLanguageId,
   );
+
+  if (!matchedLang && customerRecord?.languageCode) {
+    const hintCode = customerRecord.languageCode.toLowerCase().slice(0, 2);
+    matchedLang = enabledLanguages.find((l) => l.code === hintCode);
+  }
 
   if (!matchedLang) {
     matchedLang = enabledLanguages.find((l) => l.id === fallbackDefaultLangId);
@@ -339,7 +351,7 @@ async function isActionHierarchyActive(
   return { valid: true, actionRow: targetRow, productRow: productCheck.productRow };
 }
 
-async function sendOrThrow(
+export async function sendOrThrow(
   transport: TelegramTransport,
   params: {
     chatId: number | string;
@@ -364,7 +376,7 @@ async function sendOrThrow(
   }
 }
 
-async function editOrThrow(
+export async function editOrThrow(
   transport: TelegramTransport,
   params: {
     chatId: number | string;
@@ -796,6 +808,7 @@ export async function handleCallbackQuery(
   transport: TelegramTransport,
   callbackQuery: TelegramCallbackQuery,
   preValidatedToken?: ParsedToken,
+  journeyOptions?: InquiryJourneyOptions,
 ): Promise<void> {
   // Acknowledge callback immediately to clear loading indicator
   const ack = await transport.answerCallbackQuery({ callbackQueryId: callbackQuery.id });
@@ -866,6 +879,36 @@ export async function handleCallbackQuery(
     settings.defaultLanguageId,
   );
   const ui = getLocalizedUiStrings(langContext.isRtl);
+
+  // 1.5. Committed inquiry callback recovery: process committed receipt before live action/hierarchy checks
+  if (journeyOptions?.receipt && journeyOptions.receipt.kind === "inquiry") {
+    await recoverAndRenderCommittedInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      customerRecord,
+      settings,
+      langContext,
+      ui,
+      receipt: journeyOptions.receipt,
+    });
+    return;
+  }
+
+  // Inquiries pagination callback: inq[:<page>]
+  if (parsed.type === "inquiries") {
+    await renderCustomerInquiriesList(
+      db,
+      transport,
+      chatId,
+      messageId,
+      customerRecord.id,
+      parsed.page,
+      langContext,
+      ui,
+    );
+    return;
+  }
 
   // 2. Home or Root callback
   if (parsed.type === "home") {
@@ -953,6 +996,7 @@ export async function handleCallbackQuery(
         langContext,
         ui,
         1,
+        journeyOptions,
       );
     } else {
       // Direct navigation to product card (no redundant answerCallbackQuery)
@@ -986,6 +1030,7 @@ export async function handleCallbackQuery(
       langContext,
       ui,
       parsed.page,
+      journeyOptions,
     );
     return;
   }
@@ -1003,6 +1048,7 @@ export async function handleCallbackQuery(
       langContext,
       ui,
       1,
+      journeyOptions,
     );
     return;
   }
@@ -1130,6 +1176,7 @@ async function handleActionExecution(
   langContext: ResolvedLanguageContext,
   ui: ReturnType<typeof getLocalizedUiStrings>,
   page = 1,
+  journeyOptions?: InquiryJourneyOptions,
 ): Promise<void> {
   const actionCheck = await isActionHierarchyActive(db, actionId);
   if (!actionCheck.valid || !actionCheck.actionRow) {
@@ -1528,9 +1575,73 @@ async function handleActionExecution(
     }
   }
 
-  // F. DEFERRED RUNTIME ACTIONS:
-  // START_INQUIRY, OPEN_SUPPORT
-  // Truthful unavailable response. Does NOT execute or claim a message was sent.
+  // F. START_INQUIRY
+  if (actRow.actionType === "START_INQUIRY") {
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      const keyboard: TelegramInlineKeyboardButton[][] = [
+        [{ text: ui.back, callback_data: backTarget }],
+      ];
+      if (actRow.parentActionId) {
+        keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+      }
+      keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    await handleProductInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      actionRow: actRow,
+      productRow: actionCheck.productRow!,
+      langContext,
+      ui,
+      backTarget,
+      returnToProductTarget,
+      options: journeyOptions,
+    });
+    return;
+  }
+
+  // G. OPEN_SUPPORT
+  if (actRow.actionType === "OPEN_SUPPORT") {
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      const keyboard: TelegramInlineKeyboardButton[][] = [
+        [{ text: ui.back, callback_data: backTarget }],
+      ];
+      if (actRow.parentActionId) {
+        keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+      }
+      keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    await handleSupportInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      actionRow: actRow,
+      langContext,
+      ui,
+      backTarget,
+      returnToProductTarget,
+      options: journeyOptions,
+    });
+    return;
+  }
+
   const keyboard: TelegramInlineKeyboardButton[][] = [
     [{ text: ui.back, callback_data: backTarget }],
   ];
