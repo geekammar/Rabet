@@ -14,6 +14,7 @@ Phase 07 delivers the customer-facing inquiry and conversation foundation for Ra
 4. Durable Update Receipts, Serialization & Idempotency:
    - Serializes create/resume via executed customer row locks (`FOR UPDATE`) in atomic multi-statement batches (`db.batch` / `executeAtomicBatch`).
    - Guarantees attempt ownership and active destination status in SQL, rolling back via runtime aggregate assertion (`createReceiptAssertionQuery`) if stale.
+   - Rejects JSON null, missing keys, scalars, arrays, empty objects, and malformed receipt shapes.
    - Recovers committed receipts on retry before live action/hierarchy validation, rendering frozen snapshots even if catalog items were subsequently modified or deactivated.
 
 **Explicit Scope Exclusions (Deferred to Later Phases):**
@@ -121,8 +122,14 @@ Committed business outcomes are bound to `telegram_update.payload.receipt` withi
 ### 4.2 Database Serialization & Lock Ordering
 - **Strict Lock Hierarchy:** `customer` -> `inquiry` -> `telegram_update`. All writers acquire locks in this sequence, eliminating deadlock opportunities between concurrent customer actions and administrative operations.
 - **Customer Lock as Executed Statement:** Executed prior to inquiry query in `executeAtomicBatch` / `db.batch`. Statement 2 runs with a fresh snapshot in READ COMMITTED isolation that observes competing commits.
-- **Real Transaction Assertions (`createReceiptAssertionQuery`):** Fences batch completion via an executed statement checking runtime aggregate `count(*)` on `telegram_update`. If the receipt update did not write exactly 1 row (superseded claim or stale attempt), it triggers an intentional invalid date cast error (`22007`), aborting the multi-statement batch and rolling back all mutations.
-- **Callback Recovery:** Intercepts committed callbacks before live action validation. Recovers frozen snapshot from database and renders confirmation even if products or actions were subsequently modified or disabled.
+- **JSON Null vs. Missing Key Rejection:** In PostgreSQL JSONB, `'null'::jsonb IS NOT NULL` evaluates to `TRUE`. The initial claim envelope starts with `receipt: null`. The repaired assertion requires `jsonb_typeof(payload->'receipt') = 'object'`, strictly rejecting JSON null, missing keys, scalars, arrays, empty objects, and malformed shapes.
+- **Kind-Specific Invariant Validation:** Validates required recovery fields (`inquiryId`, `reference`, `messageId`, `activeReferences`, `notice`) matching the expected kind passed into each operation.
+- **Execution & Rollback Guarantee:** Fences batch completion via an executed statement checking runtime aggregate `count(*)` in `telegram_update`. When `count != 1`, it casts `'ASSERTION_FAILED_MISSING_RECEIPT_0'` to `date`, raising PostgreSQL error code `22007` (`invalid input syntax for type date`) and rolling back all mutations in the batch.
+- **Proven Fault Rollback (Tests M, N & O):**
+  - **Fault Form A (Suppression):** Trigger returns NULL on receipt update, leaving initial `receipt: null` unchanged.
+  - **Fault Form B (Corruption):** Trigger allows update but sets `receipt: null`.
+  - In both forms, operations reject, zero inquiries or messages survive, existing inquiry status and timestamps remain untouched, and no success acknowledgements are sent.
+- **External Telegram Delivery Ambiguity Boundary:** Database mutations and durable receipts commit together atomically. Once committed, network failures during external Telegram transport do not re-execute business mutations on retry; the committed outcome is recovered from the durable receipt and re-rendered truthfully.
 
 ---
 
@@ -130,11 +137,11 @@ Committed business outcomes are bound to `telegram_update.payload.receipt` withi
 
 | Test Suite | File | Tests | Status |
 | --- | --- | --- | --- |
-| Customer Inquiries Unit, Integration & Concurrency | `tests/db/customer-inquiries.test.ts` | 34 | Passed |
+| Customer Inquiries Unit, Integration & Concurrency | `tests/db/customer-inquiries.test.ts` | 37 | Passed |
 | Telegram Journey Integration | `tests/db/telegram-journey.test.ts` | 61 | Passed |
 | Telegram Transport | `tests/telegram-transport.test.ts` | 24 | Passed |
 | Telegram Tokens | `tests/telegram-tokens.test.ts` | 5 | Passed |
-| Database Integration (All Suites) | `tests/db/*.test.ts` (17 files) | 272 | Passed |
-| Unit, Auth & Wizard Suites | `tests/**/*.test.ts` | 507 | Passed |
+| Database Integration (All Suites) | `tests/db/*.test.ts` (17 files) | 275 | Passed |
+| Unit, Auth & Wizard Suites | `tests/**/*.test.ts` | 510 | Passed |
 
-All tests run on real PostgreSQL with strict schema migrations and trigger checks. Linting, TypeScript typechecking, and Next.js production build (`env -u DATABASE_URL npm run build`) pass cleanly with 0 errors and 0 warnings.
+All tests run on real disposable local PostgreSQL with strict schema migrations and trigger checks. Linting, TypeScript typechecking, and Next.js production build (`env -u DATABASE_URL npm run build`) pass cleanly with 0 errors and 0 warnings.

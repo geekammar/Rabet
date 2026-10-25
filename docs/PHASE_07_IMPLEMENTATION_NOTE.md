@@ -30,48 +30,79 @@
 
 ## 2. Real Transaction Assertions & Proven Rollback (`createReceiptAssertionQuery`)
 
-### Defect in CTE-Based Fencing Guards
-- Previously, a CTE `fencing_guard` computed `CASE WHEN (SELECT count(*) FROM receipt_update) != 1 THEN (1/0)::text ELSE 'ok' END`.
-- If the final outer projection (`SELECT ...`) does not consume or evaluate columns from that CTE, PostgreSQL optimizer can prune or bypass evaluating the expression. Furthermore, static division-by-zero or constant cast expressions may fail at query analysis/planning time or get optimized out.
-
-### Runtime Aggregate Assertion Pattern
-- We introduced `createReceiptAssertionQuery(updateId, attemptId)` as a dedicated executed statement within the atomic batch:
-  ```sql
-  SELECT CASE
-    WHEN (
-      SELECT count(*)
-      FROM telegram_update
-      WHERE update_id = $updateId
-        AND (payload->>'attemptId') = $attemptId
-        AND (payload->'receipt') IS NOT NULL
-    ) = 1 THEN 'ok'
-    ELSE CAST(
-      'ASSERTION_FAILED_MISSING_RECEIPT_' || (
-        SELECT count(*)
-        FROM telegram_update
-        WHERE update_id = $updateId
-          AND (payload->>'attemptId') = $attemptId
-          AND (payload->'receipt') IS NOT NULL
-      ) AS date
-    )::text
-  END AS fence_status
+### JSON Null vs. Missing Receipt Defect
+- In PostgreSQL JSONB, `'{"receipt": null}'::jsonb -> 'receipt'` evaluates to `'null'::jsonb`.
+- In SQL, `'null'::jsonb IS NOT NULL` evaluates to `TRUE` because `'null'::jsonb` is a non-null SQL value of type `jsonb` representing the JSON `null` literal. SQL `IS NOT NULL` only evaluates to `FALSE` when a key is completely missing from the object (yielding SQL `NULL`).
+- In Rabet's update processing lifecycle, `claimTelegramUpdate` initializes update rows with the envelope:
+  ```json
+  {
+    "update": ...,
+    "attemptId": "...",
+    "claimedAt": "...",
+    "receipt": null
+  }
   ```
-- **Execution Guarantee:**
-  1. Because it is a top-level statement in `db.batch` / `executeAtomicBatch`, its result is always consumed by the driver and cannot be skipped by an optimizer.
-  2. Because the error expression references a runtime aggregate query (`count(*)` from `telegram_update`), PostgreSQL cannot evaluate or fold it during query preparation or planning.
-  3. When `count(*) != 1` (stale attempt, missing receipt, or concurrent fence failure), PostgreSQL attempts to cast the string `'ASSERTION_FAILED_MISSING_RECEIPT_0'` to `date`. This immediately throws PostgreSQL error code `22007` (`invalid input syntax for type date`).
-  4. In both Neon HTTP transactions and PostgreSQL connection adapters, this error immediately aborts the transaction batch and rolls back all prior mutations (including any inserted messages, created inquiries, or modified timestamps).
+- Therefore, a naive check `payload->'receipt' IS NOT NULL` rejected missing keys, but accepted the initial `receipt: null` value. If a business statement's receipt `UPDATE` was suppressed, corrupted, or failed to match rows, the assertion could pass falsely without recording a recoverable result.
 
-### Proven Post-Mutation Rollback (Test J)
-- Verified with a controlled fault-injection test (`Test J` in `tests/db/customer-inquiries.test.ts`):
-  - A temporary `BEFORE UPDATE` trigger on `telegram_update` intentionally clears `NEW.payload = jsonb_set(NEW.payload, '{receipt}', 'null'::jsonb)`.
-  - When `routeAndAppendCustomerText` executes, the message insert and inquiry touches execute, but `createReceiptAssertionQuery` detects `count = 0` valid receipts.
-  - The transaction aborts with `22007`.
-  - Verification queries against PostgreSQL confirm:
-    - 0 new inquiries created.
-    - 0 messages inserted into `inquiry_message`.
-    - No timestamps or statuses modified.
-    - The batch rolled back completely.
+### The Repaired Assertion Pattern
+We parameterized `createReceiptAssertionQuery(db, updateId, attemptId, expectedKind)` to validate the receipt strictly in SQL:
+```sql
+WITH verified_receipt AS (
+  SELECT count(*) AS cnt FROM telegram_update
+  WHERE update_id = $updateId::bigint
+    AND processed_at IS NULL
+    AND payload->>'attemptId' = $attemptId::text
+    AND jsonb_typeof(payload->'receipt') = 'object'
+    AND (payload->'receipt'->>'kind') = ANY(ARRAY[$expectedKinds]::text[])
+    AND CASE (payload->'receipt'->>'kind')
+      WHEN 'inquiry' THEN
+        jsonb_typeof(payload->'receipt'->'inquiryId') = 'string'
+        AND length(trim(payload->'receipt'->>'inquiryId')) > 0
+        AND (payload->'receipt'->>'inquiryId') != 'null'
+        AND jsonb_typeof(payload->'receipt'->'reference') = 'string'
+        AND length(trim(payload->'receipt'->>'reference')) > 0
+        AND (payload->'receipt'->>'reference') != 'null'
+      WHEN 'message' THEN
+        jsonb_typeof(payload->'receipt'->'inquiryId') = 'string'
+        AND length(trim(payload->'receipt'->>'inquiryId')) > 0
+        AND (payload->'receipt'->>'inquiryId') != 'null'
+        AND jsonb_typeof(payload->'receipt'->'messageId') = 'string'
+        AND length(trim(payload->'receipt'->>'messageId')) > 0
+        AND (payload->'receipt'->>'messageId') != 'null'
+        AND jsonb_typeof(payload->'receipt'->'reference') = 'string'
+        AND length(trim(payload->'receipt'->>'reference')) > 0
+        AND (payload->'receipt'->>'reference') != 'null'
+      WHEN 'ambiguous' THEN
+        jsonb_typeof(payload->'receipt'->'activeReferences') = 'array'
+      WHEN 'guidance' THEN
+        jsonb_typeof(payload->'receipt'->'notice') = 'string'
+        AND length(trim(payload->'receipt'->>'notice')) > 0
+        AND (payload->'receipt'->>'notice') != 'null'
+      ELSE false
+    END
+)
+SELECT CASE
+  WHEN (SELECT cnt FROM verified_receipt) = 1 THEN 'ok'
+  ELSE CAST('ASSERTION_FAILED_MISSING_RECEIPT_' || (SELECT cnt FROM verified_receipt) AS date)::text
+END AS assertion_status;
+```
+
+### Actual Assertion Guarantees
+1. **Rejects JSON Null & Missing Keys:** `jsonb_typeof(payload->'receipt') = 'object'` requires a JSON object, strictly rejecting JSON `null` (where `jsonb_typeof` is `'null'`) and missing keys (where `jsonb_typeof` is SQL `NULL`).
+2. **Rejects Non-Object Shapes:** Strictly rejects scalars (strings, numbers, booleans) and arrays.
+3. **Rejects Empty Objects & Mismatches:** Rejects `{}` because `(payload->'receipt'->>'kind')` is NULL and cannot match the expected kinds. Rejects mismatched kinds (e.g. message receipt when expecting inquiry).
+4. **Validates Recovery Invariants:** Validates kind-specific recovery fields (non-empty `inquiryId`, `reference`, `messageId`, `activeReferences`, `notice`).
+5. **Execution Guarantee:** Because it is an executed statement in `db.batch` / `executeAtomicBatch`, its result is consumed by the driver. When `cnt != 1`, it casts `'ASSERTION_FAILED_MISSING_RECEIPT_0'` to `date`, which triggers PostgreSQL error code `22007` (`invalid input syntax for type date`), immediately aborting the batch and rolling back all prior statements.
+
+### Proven Post-Mutation Rollback Under Real Claim Envelopes (Tests M, N & O)
+Verified with real claimed updates (`receipt: null`) across both fault forms:
+1. **Fault Form A (Suppression - Test M):** A temporary trigger returns `NULL` on receipt updates, skipping the update and leaving the initial `receipt: null` unchanged.
+2. **Fault Form B (Corruption - Test N):** A temporary trigger allows the update but sets `NEW.payload = jsonb_set(NEW.payload, '{receipt}', 'null'::jsonb)`.
+3. **Covered Operations:**
+   - Support inquiry creation (`createOrResumeSupportInquiry`): Operation rejects; 0 inquiries survive in PostgreSQL.
+   - Zero-active ordinary text (`routeAndAppendCustomerText` and webhook): Operation rejects; 0 inquiries and 0 messages survive; webhook returns 500; fake transport sends 0 messages (no false success acknowledgement).
+   - Append to existing `waiting_on_customer` inquiry (`appendInboundCustomerMessage`): Operation rejects; 0 messages survive; existing inquiry status remains `waiting_on_customer` (never transitioned to `open`); timestamps (`updatedAt`, `lastReplyAt`) remain identical to baseline.
+4. **Shape Matrix Coverage (Test O):** Tests 18 distinct valid and invalid receipt shapes directly against the assertion statement, proving all malformed shapes reject with `22007` and all valid outcomes resolve with `'ok'`.
 
 ---
 
@@ -134,8 +165,9 @@
 
 ---
 
-## 7. Callback Recovery from Committed Outcomes
+## 7. Callback Recovery from Committed Outcomes & Transport Ambiguity Boundary
 
+### Callback Recovery Contract
 - Intercepts committed callbacks (`receipt.kind === "inquiry"`) before live action/hierarchy validation:
   1. Fetches the inquiry by `receipt.inquiryId` and verifies customer ownership.
   2. If closed, renders truthful closed notice.
@@ -143,14 +175,8 @@
   4. For support inquiries, renders the support confirmation (preserving configured category).
   5. Returns 200 without touching or revalidating modified catalog entities.
 
----
-
-## 8. Live Telegram Verification Boundaries
-
-- Automated test suites (34 tests in `customer-inquiries.test.ts`, 61 in `telegram-journey.test.ts`, transport and token tests) run against PostgreSQL test instances.
-- **Live Bot Scope:** Real Telegram interactions with live bot tokens depend on configured webhook endpoints and active bot tokens.
-- Boundaries verified:
-  - Valid private chat callbacks produce prompt visual confirmations and inline keyboards.
-  - Inbound text with single active inquiry acknowledges truthfully without false seller promises.
-  - Ambiguous inbound text prompts cleanly with paginated button menus.
-  - Multiline commands and media types (photos, documents) fail safely with localized notices.
+### External Telegram Delivery Ambiguity Boundary
+- Database mutations and durable receipts commit together atomically.
+- If network transport drops or times out after database commit, Telegram retries the webhook update.
+- `claimTelegramUpdate` preserves the committed `payload.receipt`.
+- On retry, Rabet reuses the committed receipt and delivers confirmation without re-executing business mutations, preventing duplicate inquiries or duplicate message rows.

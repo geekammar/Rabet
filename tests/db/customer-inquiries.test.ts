@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 import {
   botSetting,
@@ -27,8 +27,11 @@ import {
 } from "./helpers";
 import {
   appendInboundCustomerMessage,
+  claimTelegramUpdate,
   createOrResumeProductInquiry,
   createOrResumeSupportInquiry,
+  createReceiptAssertionQuery,
+  executeAtomicBatch,
   listActiveCustomerInquiriesPaged,
   routeAndAppendCustomerText,
   upsertCustomer,
@@ -2394,6 +2397,466 @@ describe.skipIf(!shouldRun)("Phase 07: Unified Customer Inquiries, Support & Inb
       expect(new Set(allFetchedRefs).size).toBe(9);
       for (const ref of seededRefs) {
         expect(allFetchedRefs).toContain(ref);
+      }
+    });
+
+    it("M. Real claim envelope rollback: JSON-null receipt suppression (Fault Form A - return NULL from trigger)", async () => {
+      const db = testDb!.db;
+      const rawSql = postgres(testDb!.url, { max: 1 });
+      const custM = await upsertCustomer(asAppDb(db), {
+        telegramId: 70020,
+        firstName: "CustFaultM",
+      });
+
+      // Install trigger returning NULL on receipt write (skipping update, leaving initial receipt:null unchanged)
+      await rawSql.unsafe(`
+        CREATE OR REPLACE FUNCTION test_suppress_receipt_return_null() RETURNS trigger AS $$
+        BEGIN
+          IF TG_OP = 'UPDATE' AND NEW.payload ? 'receipt' AND jsonb_typeof(NEW.payload->'receipt') = 'object' THEN
+            RETURN NULL;
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER test_inject_suppress_receipt
+          BEFORE UPDATE ON telegram_update
+          FOR EACH ROW
+          EXECUTE FUNCTION test_suppress_receipt_return_null();
+      `);
+
+      try {
+        // Exercise 1: Support inquiry creation
+        const claim1 = await claimTelegramUpdate(asAppDb(db), {
+          updateId: 80201,
+          updateType: "callback_query",
+          payload: { callback_query: { id: "cb-80201" } },
+        });
+        expect(claim1.status).toBe("claimed");
+        // Confirm initial stored receipt is JSON null
+        const [claimedRow1] = await db.select().from(telegramUpdate).where(eq(telegramUpdate.updateId, 80201));
+        expect((claimedRow1.payload as { receipt: unknown }).receipt).toBeNull();
+
+        await expect(
+          createOrResumeSupportInquiry(asAppDb(db), {
+            customerId: custM.id,
+            category: "FaultMSupport",
+            updateId: 80201,
+            attemptId: claim1.attemptId,
+          }),
+        ).rejects.toThrow();
+
+        // Verify zero inquiries survive
+        const inqs1 = await db.select().from(inquiry).where(eq(inquiry.customerId, custM.id));
+        expect(inqs1).toHaveLength(0);
+
+        // Exercise 2: Zero-active ordinary text (creation + first message)
+        const claim2 = await claimTelegramUpdate(asAppDb(db), {
+          updateId: 80202,
+          updateType: "message",
+          payload: { message: { message_id: 9101, text: "Hello from zero active fault M" } },
+        });
+        expect(claim2.status).toBe("claimed");
+        const [claimedRow2] = await db.select().from(telegramUpdate).where(eq(telegramUpdate.updateId, 80202));
+        expect((claimedRow2.payload as { receipt: unknown }).receipt).toBeNull();
+
+        await expect(
+          routeAndAppendCustomerText(asAppDb(db), {
+            customerId: custM.id,
+            body: "Hello from zero active fault M",
+            telegramMessageId: 9101,
+            updateId: 80202,
+            attemptId: claim2.attemptId,
+          }),
+        ).rejects.toThrow();
+
+        // Also test via webhook request: returns 500, no success acknowledgment sent
+        const fakeTransport2 = createFakeTelegramTransport();
+        const req2 = createWebhookRequest({
+          update_id: 80204,
+          message: {
+            message_id: 9104,
+            chat: { id: 70020, type: "private" },
+            from: { id: 70020, is_bot: false, first_name: "CustFaultM" },
+            text: "Hello from zero active fault M webhook",
+          },
+        });
+
+        const resp2 = await handleTelegramWebhookRequest(req2, {
+          db: asAppDb(db),
+          transport: fakeTransport2,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        });
+        expect(resp2.status).toBe(500);
+
+        // Verify 0 inquiries and 0 messages survive for this customer/attempt
+        const inqs2 = await db.select().from(inquiry).where(eq(inquiry.customerId, custM.id));
+        expect(inqs2).toHaveLength(0);
+        const msgs2 = await db.select().from(inquiryMessage).where(sql`${inquiryMessage.body} LIKE '%fault M%'`);
+        expect(msgs2).toHaveLength(0);
+        // Verify no success acknowledgement was sent
+        expect(fakeTransport2.sentMessages).toHaveLength(0);
+
+        // Exercise 3: Append to an existing waiting_on_customer inquiry
+        const baselineTime = new Date("2026-10-25T10:00:00.000Z");
+        const [existingInq] = await db
+          .insert(inquiry)
+          .values({
+            customerId: custM.id,
+            reference: "INQ-FLTM03",
+            status: "waiting_on_customer",
+            category: null,
+            productSnapshot: { type: "support" },
+            openedAt: baselineTime,
+            lastReplyAt: baselineTime,
+            createdAt: baselineTime,
+            updatedAt: baselineTime,
+          })
+          .returning();
+
+        const claim3 = await claimTelegramUpdate(asAppDb(db), {
+          updateId: 80203,
+          updateType: "message",
+          payload: { message: { message_id: 9102, text: "reply to waiting inquiry" } },
+        });
+        expect(claim3.status).toBe("claimed");
+        const [claimedRow3] = await db.select().from(telegramUpdate).where(eq(telegramUpdate.updateId, 80203));
+        expect((claimedRow3.payload as { receipt: unknown }).receipt).toBeNull();
+
+        await expect(
+          appendInboundCustomerMessage(asAppDb(db), {
+            customerId: custM.id,
+            inquiryId: existingInq.id,
+            reference: existingInq.reference,
+            body: "reply to waiting inquiry",
+            telegramMessageId: 9102,
+            updateId: 80203,
+            attemptId: claim3.attemptId,
+          }),
+        ).rejects.toThrow();
+
+        // Verify 0 messages survive
+        const msgs3 = await db.select().from(inquiryMessage).where(eq(inquiryMessage.inquiryId, existingInq.id));
+        expect(msgs3).toHaveLength(0);
+
+        // Verify existing inquiry status and timestamps remain untouched
+        const [freshInq] = await db.select().from(inquiry).where(eq(inquiry.id, existingInq.id));
+        expect(freshInq.status).toBe("waiting_on_customer");
+        expect(freshInq.updatedAt.toISOString()).toBe(baselineTime.toISOString());
+        expect(freshInq.lastReplyAt?.toISOString()).toBe(baselineTime.toISOString());
+      } finally {
+        await rawSql.unsafe(`
+          DROP TRIGGER IF EXISTS test_inject_suppress_receipt ON telegram_update;
+          DROP FUNCTION IF EXISTS test_suppress_receipt_return_null();
+        `);
+        await rawSql.end();
+      }
+    });
+
+    it("N. Real claim envelope rollback: JSON-null receipt corruption (Fault Form B - replace receipt with JSON null)", async () => {
+      const db = testDb!.db;
+      const rawSql = postgres(testDb!.url, { max: 1 });
+      const custN = await upsertCustomer(asAppDb(db), {
+        telegramId: 70030,
+        firstName: "CustFaultN",
+      });
+
+      // Install trigger replacing receipt with JSON null on update
+      await rawSql.unsafe(`
+        CREATE OR REPLACE FUNCTION test_corrupt_receipt_json_null() RETURNS trigger AS $$
+        BEGIN
+          IF TG_OP = 'UPDATE' AND NEW.payload ? 'receipt' THEN
+            NEW.payload = jsonb_set(NEW.payload, '{receipt}', 'null'::jsonb);
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER test_inject_corrupt_receipt
+          BEFORE UPDATE ON telegram_update
+          FOR EACH ROW
+          EXECUTE FUNCTION test_corrupt_receipt_json_null();
+      `);
+
+      try {
+        // Exercise 1: Support inquiry creation
+        const claim1 = await claimTelegramUpdate(asAppDb(db), {
+          updateId: 80301,
+          updateType: "callback_query",
+          payload: { callback_query: { id: "cb-80301" } },
+        });
+        expect(claim1.status).toBe("claimed");
+        const [claimedRow1] = await db.select().from(telegramUpdate).where(eq(telegramUpdate.updateId, 80301));
+        expect((claimedRow1.payload as { receipt: unknown }).receipt).toBeNull();
+
+        await expect(
+          createOrResumeSupportInquiry(asAppDb(db), {
+            customerId: custN.id,
+            category: "FaultNSupport",
+            updateId: 80301,
+            attemptId: claim1.attemptId,
+          }),
+        ).rejects.toThrow();
+
+        // Verify zero inquiries survive
+        const inqs1 = await db.select().from(inquiry).where(eq(inquiry.customerId, custN.id));
+        expect(inqs1).toHaveLength(0);
+
+        // Exercise 2: Zero-active ordinary text (creation + first message)
+        const claim2 = await claimTelegramUpdate(asAppDb(db), {
+          updateId: 80302,
+          updateType: "message",
+          payload: { message: { message_id: 9201, text: "Hello from zero active fault N" } },
+        });
+        expect(claim2.status).toBe("claimed");
+        const [claimedRow2] = await db.select().from(telegramUpdate).where(eq(telegramUpdate.updateId, 80302));
+        expect((claimedRow2.payload as { receipt: unknown }).receipt).toBeNull();
+
+        await expect(
+          routeAndAppendCustomerText(asAppDb(db), {
+            customerId: custN.id,
+            body: "Hello from zero active fault N",
+            telegramMessageId: 9201,
+            updateId: 80302,
+            attemptId: claim2.attemptId,
+          }),
+        ).rejects.toThrow();
+
+        // Also test via webhook request: returns 500, no success acknowledgment sent
+        const fakeTransport2 = createFakeTelegramTransport();
+        const req2 = createWebhookRequest({
+          update_id: 80304,
+          message: {
+            message_id: 9204,
+            chat: { id: 70030, type: "private" },
+            from: { id: 70030, is_bot: false, first_name: "CustFaultN" },
+            text: "Hello from zero active fault N webhook",
+          },
+        });
+
+        const resp2 = await handleTelegramWebhookRequest(req2, {
+          db: asAppDb(db),
+          transport: fakeTransport2,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        });
+        expect(resp2.status).toBe(500);
+
+        // Verify 0 inquiries and 0 messages survive for this customer/attempt
+        const inqs2 = await db.select().from(inquiry).where(eq(inquiry.customerId, custN.id));
+        expect(inqs2).toHaveLength(0);
+        const msgs2 = await db.select().from(inquiryMessage).where(sql`${inquiryMessage.body} LIKE '%fault N%'`);
+        expect(msgs2).toHaveLength(0);
+        expect(fakeTransport2.sentMessages).toHaveLength(0);
+
+        // Exercise 3: Append to an existing waiting_on_customer inquiry
+        const baselineTime = new Date("2026-10-25T11:00:00.000Z");
+        const [existingInq] = await db
+          .insert(inquiry)
+          .values({
+            customerId: custN.id,
+            reference: "INQ-FLTN03",
+            status: "waiting_on_customer",
+            category: null,
+            productSnapshot: { type: "support" },
+            openedAt: baselineTime,
+            lastReplyAt: baselineTime,
+            createdAt: baselineTime,
+            updatedAt: baselineTime,
+          })
+          .returning();
+
+        const claim3 = await claimTelegramUpdate(asAppDb(db), {
+          updateId: 80303,
+          updateType: "message",
+          payload: { message: { message_id: 9202, text: "reply to waiting inquiry N" } },
+        });
+        expect(claim3.status).toBe("claimed");
+        const [claimedRow3] = await db.select().from(telegramUpdate).where(eq(telegramUpdate.updateId, 80303));
+        expect((claimedRow3.payload as { receipt: unknown }).receipt).toBeNull();
+
+        await expect(
+          appendInboundCustomerMessage(asAppDb(db), {
+            customerId: custN.id,
+            inquiryId: existingInq.id,
+            reference: existingInq.reference,
+            body: "reply to waiting inquiry N",
+            telegramMessageId: 9202,
+            updateId: 80303,
+            attemptId: claim3.attemptId,
+          }),
+        ).rejects.toThrow();
+
+        // Verify 0 messages survive
+        const msgs3 = await db.select().from(inquiryMessage).where(eq(inquiryMessage.inquiryId, existingInq.id));
+        expect(msgs3).toHaveLength(0);
+
+        // Verify existing inquiry status and timestamps remain untouched
+        const [freshInq] = await db.select().from(inquiry).where(eq(inquiry.id, existingInq.id));
+        expect(freshInq.status).toBe("waiting_on_customer");
+        expect(freshInq.updatedAt.toISOString()).toBe(baselineTime.toISOString());
+        expect(freshInq.lastReplyAt?.toISOString()).toBe(baselineTime.toISOString());
+      } finally {
+        await rawSql.unsafe(`
+          DROP TRIGGER IF EXISTS test_inject_corrupt_receipt ON telegram_update;
+          DROP FUNCTION IF EXISTS test_corrupt_receipt_json_null();
+        `);
+        await rawSql.end();
+      }
+    });
+
+    it("O. Direct receipt shape validation matrix: reject malformed shapes and accept valid outcomes", async () => {
+      const db = testDb!.db;
+
+      const testCases: Array<{
+        name: string;
+        payload: Record<string, unknown>;
+        expectedKinds: ("inquiry" | "message" | "ambiguous" | "guidance")[];
+        shouldPass: boolean;
+      }> = [
+        // Malformed / rejected shapes
+        {
+          name: "JSON null receipt",
+          payload: { attemptId: "att-O", receipt: null },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "missing receipt key",
+          payload: { attemptId: "att-O" },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "scalar string receipt",
+          payload: { attemptId: "att-O", receipt: "inquiry" },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "scalar number receipt",
+          payload: { attemptId: "att-O", receipt: 42 },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "array receipt",
+          payload: { attemptId: "att-O", receipt: ["inquiry"] },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "empty object receipt",
+          payload: { attemptId: "att-O", receipt: {} },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "inquiry missing reference",
+          payload: { attemptId: "att-O", receipt: { kind: "inquiry", inquiryId: "inq-1" } },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "inquiry null inquiryId",
+          payload: { attemptId: "att-O", receipt: { kind: "inquiry", inquiryId: null, reference: "INQ-123" } },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "inquiry empty inquiryId",
+          payload: { attemptId: "att-O", receipt: { kind: "inquiry", inquiryId: "", reference: "INQ-123" } },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "inquiry whitespace reference",
+          payload: { attemptId: "att-O", receipt: { kind: "inquiry", inquiryId: "inq-1", reference: "   " } },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "message missing reference",
+          payload: { attemptId: "att-O", receipt: { kind: "message", inquiryId: "inq-1", messageId: "msg-1" } },
+          expectedKinds: ["message"],
+          shouldPass: false,
+        },
+        {
+          name: "message when expecting inquiry",
+          payload: { attemptId: "att-O", receipt: { kind: "message", inquiryId: "inq-1", messageId: "msg-1", reference: "INQ-1" } },
+          expectedKinds: ["inquiry"],
+          shouldPass: false,
+        },
+        {
+          name: "ambiguous with scalar activeReferences",
+          payload: { attemptId: "att-O", receipt: { kind: "ambiguous", activeReferences: "INQ-1" } },
+          expectedKinds: ["message", "ambiguous"],
+          shouldPass: false,
+        },
+        {
+          name: "guidance with empty notice",
+          payload: { attemptId: "att-O", receipt: { kind: "guidance", notice: "" } },
+          expectedKinds: ["guidance"],
+          shouldPass: false,
+        },
+
+        // Valid outcomes
+        {
+          name: "valid inquiry outcome",
+          payload: { attemptId: "att-O", receipt: { kind: "inquiry", inquiryId: "inq-1", reference: "INQ-123" } },
+          expectedKinds: ["inquiry"],
+          shouldPass: true,
+        },
+        {
+          name: "valid message outcome",
+          payload: { attemptId: "att-O", receipt: { kind: "message", inquiryId: "inq-1", messageId: "msg-1", reference: "INQ-123" } },
+          expectedKinds: ["message"],
+          shouldPass: true,
+        },
+        {
+          name: "valid ambiguous outcome",
+          payload: { attemptId: "att-O", receipt: { kind: "ambiguous", activeReferences: ["INQ-1", "INQ-2"] } },
+          expectedKinds: ["message", "ambiguous"],
+          shouldPass: true,
+        },
+        {
+          name: "valid guidance outcome",
+          payload: { attemptId: "att-O", receipt: { kind: "guidance", notice: "Text only please" } },
+          expectedKinds: ["guidance"],
+          shouldPass: true,
+        },
+      ];
+
+      for (let i = 0; i < testCases.length; i++) {
+        const tc = testCases[i];
+        const testUpdateId = 80400 + i;
+
+        await db.insert(telegramUpdate).values({
+          updateId: testUpdateId,
+          updateType: "message",
+          payload: tc.payload,
+          processedAt: null,
+        });
+
+        const assertQuery = createReceiptAssertionQuery(
+          asAppDb(db),
+          testUpdateId,
+          "att-O",
+          tc.expectedKinds,
+        );
+
+        if (tc.shouldPass) {
+          const results = await executeAtomicBatch(asAppDb(db), [assertQuery]);
+          const raw = results[0];
+          const rows = Array.isArray(raw) ? raw : (raw as { rows: unknown[] })?.rows ?? [];
+          expect((rows[0] as { assertion_status: string }).assertion_status, `Expected 'ok' for ${tc.name}`).toBe("ok");
+        } else {
+          await expect(
+            executeAtomicBatch(asAppDb(db), [assertQuery]),
+            `Expected rejection for ${tc.name}`,
+          ).rejects.toThrow();
+        }
       }
     });
   });

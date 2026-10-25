@@ -33,36 +33,68 @@ export function generateInquiryReference(): string {
   return `INQ-${code}`;
 }
 
+export type ExpectedReceiptKind = "inquiry" | "message" | "ambiguous" | "guidance";
+
 /**
  * Creates an explicit final assertion statement within the atomic batch.
  *
  * Guarantees:
  * 1. Fails inside the same transaction when the expected receipt was not recorded for the attempt.
- * 2. Depends on real database result data (runtime aggregate count(*)).
- * 3. Does not rely on constant-folded planning errors.
- * 4. Raises a PostgreSQL type conversion error (22007) when count != 1, rolling back all statements.
+ * 2. Rejects missing receipt, JSON null, scalars, arrays, empty objects, and malformed shapes.
+ * 3. Enforces that receipt matches expected kind(s) and contains valid non-empty identifiers needed for recovery.
+ * 4. Depends on real database result data (runtime aggregate count(*) in verified_receipt CTE).
+ * 5. Does not rely on constant-folded planning errors.
+ * 6. Raises a PostgreSQL type conversion error (22007) when count != 1, rolling back all statements.
  */
-function createReceiptAssertionQuery(
+export function createReceiptAssertionQuery(
   db: Database,
   updateId: number,
   attemptId: string,
+  expectedKind: ExpectedReceiptKind | readonly ExpectedReceiptKind[],
 ) {
+  const kinds = (Array.isArray(expectedKind) ? expectedKind : [expectedKind]) as string[];
+  const kindsSql = sql.join(kinds.map((k) => sql`${k}::text`), sql`, `);
+
   return toBatchable(
     db,
     sql`
+      WITH verified_receipt AS (
+        SELECT count(*) AS cnt FROM ${telegramUpdate}
+        WHERE update_id = ${updateId}::bigint
+          AND processed_at IS NULL
+          AND payload->>'attemptId' = ${attemptId}::text
+          AND jsonb_typeof(payload->'receipt') = 'object'
+          AND (payload->'receipt'->>'kind') = ANY(ARRAY[${kindsSql}])
+          AND CASE (payload->'receipt'->>'kind')
+            WHEN 'inquiry' THEN
+              jsonb_typeof(payload->'receipt'->'inquiryId') = 'string'
+              AND length(trim(payload->'receipt'->>'inquiryId')) > 0
+              AND (payload->'receipt'->>'inquiryId') != 'null'
+              AND jsonb_typeof(payload->'receipt'->'reference') = 'string'
+              AND length(trim(payload->'receipt'->>'reference')) > 0
+              AND (payload->'receipt'->>'reference') != 'null'
+            WHEN 'message' THEN
+              jsonb_typeof(payload->'receipt'->'inquiryId') = 'string'
+              AND length(trim(payload->'receipt'->>'inquiryId')) > 0
+              AND (payload->'receipt'->>'inquiryId') != 'null'
+              AND jsonb_typeof(payload->'receipt'->'messageId') = 'string'
+              AND length(trim(payload->'receipt'->>'messageId')) > 0
+              AND (payload->'receipt'->>'messageId') != 'null'
+              AND jsonb_typeof(payload->'receipt'->'reference') = 'string'
+              AND length(trim(payload->'receipt'->>'reference')) > 0
+              AND (payload->'receipt'->>'reference') != 'null'
+            WHEN 'ambiguous' THEN
+              jsonb_typeof(payload->'receipt'->'activeReferences') = 'array'
+            WHEN 'guidance' THEN
+              jsonb_typeof(payload->'receipt'->'notice') = 'string'
+              AND length(trim(payload->'receipt'->>'notice')) > 0
+              AND (payload->'receipt'->>'notice') != 'null'
+            ELSE false
+          END
+      )
       SELECT CASE
-        WHEN (
-          SELECT count(*) FROM ${telegramUpdate}
-          WHERE update_id = ${updateId}::bigint
-            AND payload->'receipt' IS NOT NULL
-            AND payload->>'attemptId' = ${attemptId}::text
-        ) = 1 THEN 'ok'
-        ELSE CAST('ASSERTION_FAILED_MISSING_RECEIPT_' || (
-          SELECT count(*) FROM ${telegramUpdate}
-          WHERE update_id = ${updateId}::bigint
-            AND payload->'receipt' IS NOT NULL
-            AND payload->>'attemptId' = ${attemptId}::text
-        ) AS date)::text
+        WHEN (SELECT cnt FROM verified_receipt) = 1 THEN 'ok'
+        ELSE CAST('ASSERTION_FAILED_MISSING_RECEIPT_' || (SELECT cnt FROM verified_receipt) AS date)::text
       END AS assertion_status;
     `,
   );
@@ -212,7 +244,7 @@ export async function createOrResumeProductInquiry(
       lockCustomerQuery,
       lockAttemptQuery,
       resolveQuery,
-      createReceiptAssertionQuery(db, input.updateId, input.attemptId),
+      createReceiptAssertionQuery(db, input.updateId, input.attemptId, "inquiry"),
     ]);
 
     const assertRaw = batchResults[3];
@@ -401,7 +433,7 @@ export async function createOrResumeSupportInquiry(
       lockCustomerQuery,
       lockAttemptQuery,
       resolveQuery,
-      createReceiptAssertionQuery(db, input.updateId, input.attemptId),
+      createReceiptAssertionQuery(db, input.updateId, input.attemptId, "inquiry"),
     ]);
 
     const assertRaw = batchResults[3];
@@ -627,7 +659,7 @@ export async function appendInboundCustomerMessage(
       lockCustomerQuery,
       lockAttemptQuery,
       appendQuery,
-      createReceiptAssertionQuery(db, input.updateId, input.attemptId),
+      createReceiptAssertionQuery(db, input.updateId, input.attemptId, "message"),
     ]);
 
     const assertRaw = batchResults[3];
@@ -973,7 +1005,7 @@ export async function routeAndAppendCustomerText(
       lockCustomerQuery,
       lockAttemptQuery,
       routeQuery,
-      createReceiptAssertionQuery(db, input.updateId, input.attemptId),
+      createReceiptAssertionQuery(db, input.updateId, input.attemptId, ["message", "ambiguous"]),
     ]);
 
     const assertRaw = batchResults[3];
