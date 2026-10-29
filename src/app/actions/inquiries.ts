@@ -26,6 +26,7 @@ export interface InquiryActionResult<T = unknown> {
   code?: string;
   errors?: Record<string, string>;
   data?: T;
+  reserved?: boolean;
 }
 
 export interface SendReplyActionInput {
@@ -83,6 +84,7 @@ export async function sendSellerReplyAction(
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return {
       success: false,
+      reserved: false,
       code: "INVALID_INPUT",
       message: "Payload must be a non-null object.",
     };
@@ -93,6 +95,7 @@ export async function sendSellerReplyAction(
   if (typeof rawInquiryId !== "string" || !UUID_REGEX.test(rawInquiryId.trim())) {
     return {
       success: false,
+      reserved: false,
       code: "INVALID_INPUT",
       message: "Valid inquiry ID is required.",
     };
@@ -103,6 +106,7 @@ export async function sendSellerReplyAction(
   if (typeof rawBody !== "string" || rawBody.trim().length === 0) {
     return {
       success: false,
+      reserved: false,
       code: "INVALID_INPUT",
       message: "Reply message cannot be empty or whitespace-only.",
     };
@@ -112,6 +116,7 @@ export async function sendSellerReplyAction(
   if (typeof rawOpId !== "string" || !UUID_REGEX.test(rawOpId.trim())) {
     return {
       success: false,
+      reserved: false,
       code: "INVALID_INPUT",
       message: "Client operation ID is required and must be a valid UUID.",
     };
@@ -119,8 +124,22 @@ export async function sendSellerReplyAction(
   const operationId = rawOpId.trim();
 
   try {
+    let transport: TelegramTransport;
+    try {
+      transport = resolveTransport(overrides?.transport);
+    } catch (err) {
+      if (err instanceof RabetDataError) {
+        return {
+          success: false,
+          reserved: false,
+          code: err.code,
+          message: err.message,
+        };
+      }
+      throw err;
+    }
+
     const db = overrides?.db ?? getDb();
-    const transport = resolveTransport(overrides?.transport);
 
     const result = await sendSellerReply(db, transport, {
       inquiryId,
@@ -134,6 +153,7 @@ export async function sendSellerReplyAction(
     if (result.outcome === "confirmed_sent") {
       return {
         success: true,
+        reserved: true,
         outcome: "confirmed_sent",
         message: result.alreadyReserved
           ? "Reply was already sent successfully."
@@ -145,6 +165,7 @@ export async function sendSellerReplyAction(
     if (result.outcome === "recorded_pending") {
       return {
         success: false,
+        reserved: true,
         outcome: "recorded_pending",
         code: "DELIVERY_PENDING",
         message: "Reply is already recorded and pending delivery.",
@@ -155,6 +176,7 @@ export async function sendSellerReplyAction(
     if (result.outcome === "unconfirmed_outcome") {
       return {
         success: false,
+        reserved: true,
         outcome: "unconfirmed_outcome",
         code: "DELIVERY_UNCONFIRMED",
         message: `Delivery status is unconfirmed (${result.error}). The message may have reached the customer.`,
@@ -164,6 +186,7 @@ export async function sendSellerReplyAction(
 
     return {
       success: false,
+      reserved: true,
       outcome: "confirmed_failed",
       code: "DELIVERY_FAILED",
       message: `Reply was recorded but delivery failed (${result.error ?? "Telegram error"}). You may retry sending.`,

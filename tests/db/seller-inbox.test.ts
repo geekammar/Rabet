@@ -404,7 +404,7 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
       })
       .returning();
 
-    // 1. Timeout failure
+    // 1. Timeout failure produces unconfirmed_outcome (leaves pending, never claims failed)
     const fakeTransport1 = createFakeTelegramTransport();
     fakeTransport1.failSendWith = "Request timed out";
     fakeTransport1.failSendKind = "timeout";
@@ -415,10 +415,55 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
     });
 
     expect(timeoutRes.success).toBe(false);
-    expect(timeoutRes.message.deliveryStatus).toBe("failed");
+    expect(timeoutRes.outcome).toBe("unconfirmed_outcome");
+    expect(timeoutRes.message.deliveryStatus).toBe("pending");
     expect(timeoutRes.message.deliveryError).toBe("category=timeout");
 
-    // 2. 429 Rate limit failure
+    // Authoritative DB state remains pending on reload/query
+    const [savedTimeoutMsg] = await db
+      .select()
+      .from(inquiryMessage)
+      .where(eq(inquiryMessage.id, timeoutRes.message.id))
+      .limit(1);
+    expect(savedTimeoutMsg.deliveryStatus).toBe("pending");
+    expect(savedTimeoutMsg.deliveryError).toBe("category=timeout");
+
+    // Duplicate request after uncertain delivery: returns unconfirmed_outcome with zero additional transport calls
+    const duplicateTimeoutRes = await sendSellerReply(db, fakeTransport1, {
+      inquiryId: inq.id,
+      body: "Timeout attempt",
+      operationId: timeoutRes.message.id,
+    });
+    expect(duplicateTimeoutRes.success).toBe(false);
+    expect(duplicateTimeoutRes.outcome).toBe("unconfirmed_outcome");
+    expect(duplicateTimeoutRes.alreadyReserved).toBe(true);
+    expect(fakeTransport1.sentMessages).toHaveLength(0);
+
+    // Stale-pending guard: retry within 2 minutes is rejected to avoid duplication risk
+    await expect(
+      retrySellerReply(db, fakeTransport1, {
+        inquiryId: inq.id,
+        sourceMessageId: timeoutRes.message.id,
+      }),
+    ).rejects.toThrow("A pending reply is still in flight. Please wait 2 minutes before retrying.");
+
+    // 1b. Thrown network exception also produces unconfirmed_outcome
+    const fakeTransportNet = createFakeTelegramTransport();
+    fakeTransportNet.sendMessage = async () => {
+      throw new Error("fetch failed: ECONNRESET");
+    };
+
+    const netExRes = await sendSellerReply(db, fakeTransportNet, {
+      inquiryId: inq.id,
+      body: "Network exception attempt",
+    });
+
+    expect(netExRes.success).toBe(false);
+    expect(netExRes.outcome).toBe("unconfirmed_outcome");
+    expect(netExRes.message.deliveryStatus).toBe("pending");
+    expect(netExRes.message.deliveryError).toBe("category=network_error");
+
+    // 2. 429 Rate limit failure (explicit Telegram rejection -> confirmed_failed)
     const fakeTransport2 = createFakeTelegramTransport();
     fakeTransport2.failSendWith = "Too Many Requests";
     fakeTransport2.failSendKind = "rate_limited";
@@ -1146,22 +1191,11 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
     expect(transportCalls).toBe(0);
   });
 
-  it("Q: Controlled concurrent resolve versus close using independent connections", async () => {
+  it("Q: Controlled serialization: Close-first prevents resolve; Resolve-first allows later close", async () => {
     const db = asAppDb(testDb!.db);
     const { prodId } = await seedBaseStore(db);
 
     const cust = await upsertCustomer(db, { telegramId: 10017, firstName: "Quinn" });
-
-    const [inq] = await db
-      .insert(inquiry)
-      .values({
-        customerId: cust.id,
-        productId: prodId,
-        reference: "INQ-TEST17",
-        status: "open",
-        productSnapshot: { name: "Cloud Hosting" },
-      })
-      .returning();
 
     const conn1 = postgres(testDb!.url);
     const conn2 = postgres(testDb!.url);
@@ -1170,48 +1204,81 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
       const db1 = asAppDb(drizzle(conn1));
       const db2 = asAppDb(drizzle(conn2));
 
-      // Racer 1 closes inquiry; Racer 2 attempts to resolve inquiry
-      // Under locks, one will win and one will lose
-      const [res1, res2] = await Promise.allSettled([
-        transitionInquiryStatus(db1, {
-          inquiryId: inq.id,
-          targetStatus: "closed",
-        }),
+      // Part 1: Close first -> resolve must not falsely succeed
+      const [inq1] = await db
+        .insert(inquiry)
+        .values({
+          customerId: cust.id,
+          productId: prodId,
+          reference: "INQ-TEST17A",
+          status: "open",
+          productSnapshot: { name: "Cloud Hosting" },
+        })
+        .returning();
+
+      // Close inquiry first on conn1
+      const closeRes = await transitionInquiryStatus(db1, {
+        inquiryId: inq1.id,
+        targetStatus: "closed",
+      });
+      expect(closeRes.status).toBe("closed");
+      expect(closeRes.alreadyAtTarget).toBe(false);
+
+      // Now attempt to resolve on conn2: must reject (closed -> resolved is invalid)
+      await expect(
         transitionInquiryStatus(db2, {
-          inquiryId: inq.id,
+          inquiryId: inq1.id,
           targetStatus: "resolved",
         }),
-      ]);
+      ).rejects.toThrow(/Invalid status transition from "closed" to "resolved"/);
 
-      // Exactly one succeeds, or if close wins, resolve gets a safe CONFLICT error
-      if (res1.status === "fulfilled") {
-        expect(res1.value.status).toBe("closed");
-        // res2 should have failed with conflict or invalid transition from closed
-        expect(res2.status).toBe("rejected");
-        if (res2.status === "rejected") {
-          expect(String(res2.reason)).toMatch(
-            /Cannot transition to "resolved"|Invalid status transition from "closed" to "resolved"/,
-          );
-        }
-      } else {
-        expect(res2.status).toBe("fulfilled");
-        expect(res1.status).toBe("rejected");
-      }
-
-      // Assert final DB status matches the winning operation
-      const [finalInq] = await db
+      // Final status matches the actual ordering: remains closed
+      const [finalInq1] = await db
         .select()
         .from(inquiry)
-        .where(eq(inquiry.id, inq.id));
+        .where(eq(inquiry.id, inq1.id));
+      expect(finalInq1.status).toBe("closed");
 
-      expect(["closed", "resolved"]).toContain(finalInq.status);
+      // Part 2: Resolve first -> later close may succeed (both operations validly succeed in order)
+      const [inq2] = await db
+        .insert(inquiry)
+        .values({
+          customerId: cust.id,
+          productId: null,
+          category: "General",
+          reference: "INQ-TEST17B",
+          status: "open",
+          productSnapshot: { type: "support" },
+        })
+        .returning();
+
+      const resolveRes = await transitionInquiryStatus(db1, {
+        inquiryId: inq2.id,
+        targetStatus: "resolved",
+      });
+      expect(resolveRes.status).toBe("resolved");
+      expect(resolveRes.alreadyAtTarget).toBe(false);
+
+      const laterCloseRes = await transitionInquiryStatus(db2, {
+        inquiryId: inq2.id,
+        targetStatus: "closed",
+      });
+      expect(laterCloseRes.status).toBe("closed");
+      expect(laterCloseRes.alreadyAtTarget).toBe(false);
+
+      // Each response described its own atomic result
+      const [finalInq2] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, inq2.id));
+      expect(finalInq2.status).toBe("closed");
     } finally {
       await conn1.end();
       await conn2.end();
     }
   });
 
-  it("R: Suppressed lifecycle UPDATE produces no false success and timestamps remain stable", async () => {
+  it("R1: Idempotent duplicate lifecycle transition produces alreadyAtTarget without rewriting timestamps", async () => {
     const db = asAppDb(testDb!.db);
     const { prodId } = await seedBaseStore(db);
 
@@ -1257,6 +1324,65 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
 
     // Timestamp must be completely stable (not rewritten)
     expect(recordedAfter.updatedAt.getTime()).toBe(recordedBefore.updatedAt.getTime());
+  });
+
+  it("R2: Fault injection: Suppressed lifecycle UPDATE produces no false success and no unintended mutations", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 100185, firstName: "Robbie" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST18-SUPPRESS",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    const rawSql = postgres(testDb!.url);
+    try {
+      // Install trigger to suppress UPDATE on inquiry (returns NULL, updating 0 rows)
+      await rawSql.unsafe(`
+        CREATE OR REPLACE FUNCTION suppress_inquiry_update()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS trg_suppress_inquiry_update ON inquiry;
+        CREATE TRIGGER trg_suppress_inquiry_update
+        BEFORE UPDATE ON inquiry
+        FOR EACH ROW
+        EXECUTE FUNCTION suppress_inquiry_update();
+      `);
+
+      // Attempt to transition to resolved: must reject because UPDATE affects 0 rows
+      await expect(
+        transitionInquiryStatus(db, {
+          inquiryId: inq.id,
+          targetStatus: "resolved",
+        }),
+      ).rejects.toThrow();
+
+      // Verify no unintended mutations occurred: status is still open
+      const [finalInq] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, inq.id));
+      expect(finalInq.status).toBe("open");
+      expect(finalInq.updatedAt.getTime()).toBe(inq.updatedAt.getTime());
+    } finally {
+      await rawSql.unsafe(`
+        DROP TRIGGER IF EXISTS trg_suppress_inquiry_update ON inquiry;
+        DROP FUNCTION IF EXISTS suppress_inquiry_update();
+      `);
+      await rawSql.end();
+    }
   });
 
   it("S: Reservation rollback after a controlled post-write failure", async () => {
@@ -1330,5 +1456,79 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
       .from(inquiry)
       .where(eq(inquiry.id, inq.id));
     expect(inqRow.status).toBe("open");
+  });
+
+  it("T: Exact reconciliation: Unrelated retry does not affect pending op; unchanged uncertain retry creates 0 extra transport calls", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10020, firstName: "Tina" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST20",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    // Regression 6: Unchanged ambiguous request retry creates ZERO additional transport calls
+    const fakeTransportAmbiguous = createFakeTelegramTransport();
+    fakeTransportAmbiguous.failSendKind = "timeout";
+    fakeTransportAmbiguous.failSendWith = "Gateway timeout";
+
+    const opIdA = crypto.randomUUID();
+    const sendA1 = await sendSellerReply(db, fakeTransportAmbiguous, {
+      inquiryId: inq.id,
+      body: "Operation A body",
+      operationId: opIdA,
+    });
+    expect(sendA1.outcome).toBe("unconfirmed_outcome");
+    expect(fakeTransportAmbiguous.sentMessages).toHaveLength(0);
+
+    // Re-sending unchanged ambiguous request with same opId
+    const sendA2 = await sendSellerReply(db, fakeTransportAmbiguous, {
+      inquiryId: inq.id,
+      body: "Operation A body",
+      operationId: opIdA,
+    });
+    expect(sendA2.outcome).toBe("unconfirmed_outcome");
+    expect(sendA2.alreadyReserved).toBe(true);
+    // ZERO additional transport calls
+    expect(fakeTransportAmbiguous.sentMessages).toHaveLength(0);
+
+    // Regression 2 & 3: Operation A is pending/unconfirmed, separate operation B retry succeeds
+    // Operation B was a previously failed reply
+    const opIdB = crypto.randomUUID();
+    const fakeTransportFailed = createFakeTelegramTransport();
+    fakeTransportFailed.failSendKind = "api_error";
+    fakeTransportFailed.failSendHttpStatus = 400;
+    fakeTransportFailed.failSendWith = "Bad Request: chat not found";
+
+    const sendB1 = await sendSellerReply(db, fakeTransportFailed, {
+      inquiryId: inq.id,
+      body: "Operation B body",
+      operationId: opIdB,
+    });
+    expect(sendB1.outcome).toBe("confirmed_failed");
+
+    // Retry operation B with a succeeding transport
+    const fakeTransportSuccess = createFakeTelegramTransport();
+    const retryBRes = await retrySellerReply(db, fakeTransportSuccess, {
+      inquiryId: inq.id,
+      sourceMessageId: opIdB,
+    });
+    expect(retryBRes.outcome).toBe("confirmed_sent");
+
+    // Operation A in the database remains completely intact and still pending
+    const [savedA] = await db
+      .select()
+      .from(inquiryMessage)
+      .where(eq(inquiryMessage.id, opIdA));
+    expect(savedA.deliveryStatus).toBe("pending");
+    expect(savedA.body).toBe("Operation A body");
   });
 });

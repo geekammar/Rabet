@@ -203,16 +203,22 @@ export function MessageList({
                         </Button>
                       ) : null}
                     </div>
-                  ) : isStalePending ? (
+                  ) : isStalePending || msg.deliveryError ? (
                     <div className="flex flex-col gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-300">
                       <div className="flex items-center gap-1.5 font-medium">
                         <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-                        <span>Delivery unconfirmed (pending &gt;2m)</span>
+                        <span>
+                          Delivery unconfirmed
+                          {isStalePending ? " (pending >2m)" : ""}
+                        </span>
                       </div>
                       <p className="text-[11px] leading-tight text-amber-700/90 dark:text-amber-400/90">
-                        Delivery could not be confirmed. The earlier message may have already reached the customer. Resending requires explicit seller action and may deliver a duplicate message.
+                        Delivery could not be confirmed
+                        {msg.deliveryError ? ` (${msg.deliveryError})` : ""}.
+                        The earlier message may have already reached the customer.
+                        Resending requires explicit seller action and may deliver a duplicate message.
                       </p>
-                      {isActive ? (
+                      {isStalePending && isActive ? (
                         <div className="pt-0.5">
                           <Button
                             variant="outline"
@@ -229,6 +235,10 @@ export function MessageList({
                             Resend message
                           </Button>
                         </div>
+                      ) : !isStalePending ? (
+                        <span className="text-[11px] text-amber-700/80 dark:text-amber-400/80 italic">
+                          In flight — please wait 2 minutes before resending.
+                        </span>
                       ) : null}
                     </div>
                   ) : (

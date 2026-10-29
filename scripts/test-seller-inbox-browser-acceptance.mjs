@@ -1196,6 +1196,54 @@ async function runAcceptance() {
   }
   log("✓ Unconfirmed delivery preserves draft, renders visible warning, and prevents duplicate transport call.");
 
+  // 10C: Edit draft after unconfirmed send -> warning retained -> require explicit duplication risk decision -> send
+  log("10C: Testing edit after unconfirmed send requires duplication risk decision...");
+  const editedUnconfirmedText = "Brand new reply after acknowledging unconfirmed duplication risk";
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(editedUnconfirmedText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(400);
+
+  // Submitting without checking the duplication risk box does not send
+  const ledgerCountBefore10C = readLedger().length;
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+  await sleep(600);
+  if (readLedger().length !== ledgerCountBefore10C) {
+    await fail("Expected no transport send when submitting edited draft without duplication confirmation!");
+  }
+
+  // Check the duplication risk confirmation checkbox
+  const hasCheckbox = await cdp.eval(`Boolean(document.querySelector('input[data-testid="confirm-duplication-risk"]'))`);
+  if (!hasCheckbox) {
+    await fail("Expected confirm-duplication-risk checkbox to be present when editing unconfirmed draft");
+  }
+  await cdp.eval(`(() => {
+    const cb = document.querySelector('input[data-testid="confirm-duplication-risk"]');
+    cb.click();
+  })()`);
+  await sleep(200);
+
+  // Now submit with explicit duplication confirmation
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes(editedUnconfirmedText) && body.includes("Sent via Telegram");
+    },
+    "edited reply after duplication confirmation delivered successfully"
+  );
+  log("✓ Editing after unconfirmed send enforces duplication risk confirmation before sending.");
+
   // Clear draft for clean exit
   await cdp.eval(`(() => {
     const textarea = document.querySelector('textarea');

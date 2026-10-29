@@ -903,6 +903,40 @@ export async function completeSellerReplyDelivery(
         retryAfterSeconds: sendRes.retryAfterSeconds,
       });
 
+  // Explicit Telegram rejection vs uncertain transport outcome:
+  // - Explicit rejection: Telegram responded rejecting delivery (403 blocked, 4xx client errors, 429 rate limit)
+  // - Uncertain transport outcome: Timeout, network exception, 5xx server/gateway errors, malformed response
+  const isUncertainTransportOutcome =
+    transportException !== null ||
+    sendRes.errorKind === "timeout" ||
+    sendRes.errorKind === "network_error" ||
+    (typeof sendRes.httpStatus === "number" && sendRes.httpStatus >= 500);
+
+  if (isUncertainTransportOutcome) {
+    try {
+      await db
+        .update(inquiryMessage)
+        .set({
+          deliveryError: safeDiag,
+        })
+        .where(
+          and(
+            eq(inquiryMessage.id, params.messageId),
+            eq(inquiryMessage.deliveryStatus, "pending"),
+          ),
+        );
+    } catch {
+      // Non-fatal if diagnostic persistence fails
+    }
+
+    return {
+      success: false,
+      outcome: "unconfirmed_outcome",
+      messageId: params.messageId,
+      error: safeDiag,
+    };
+  }
+
   if (sendRes.isBlocked || sendRes.errorKind === "blocked") {
     try {
       await setCustomerBlockedStatus(db, params.customerId, true);
@@ -1047,7 +1081,17 @@ export async function sendSellerReply(
         alreadyReserved: true,
       };
     }
-    // deliveryStatus === "pending": return recorded_pending (honest, not false success)
+    // deliveryStatus === "pending":
+    // Check if deliveryError indicates an unconfirmed outcome from an earlier transport attempt
+    if (reservation.message.deliveryError) {
+      return {
+        success: false,
+        outcome: "unconfirmed_outcome",
+        message: reservation.message,
+        error: reservation.message.deliveryError,
+        alreadyReserved: true,
+      };
+    }
     return {
       success: false,
       outcome: "recorded_pending",
@@ -1183,6 +1227,15 @@ export async function retrySellerReply(
         alreadyReserved: true,
       };
     }
+    if (existingRetry.deliveryError) {
+      return {
+        success: false,
+        outcome: "unconfirmed_outcome",
+        message: existingRetry,
+        error: existingRetry.deliveryError,
+        alreadyReserved: true,
+      };
+    }
     return {
       success: false,
       outcome: "recorded_pending",
@@ -1209,6 +1262,28 @@ export interface TransitionInquiryStatusInput {
 export type TransitionInquiryStatusResult = typeof inquiry.$inferSelect & {
   alreadyAtTarget: boolean;
 };
+
+function mapInquiryRow(row: Record<string, unknown>): typeof inquiry.$inferSelect {
+  return {
+    id: row.id as string,
+    customerId: ((row.customerId ?? row.customer_id) as string),
+    productId: (((row.productId ?? row.product_id) as string | null) ?? null),
+    reference: row.reference as string,
+    status: row.status as "open" | "waiting_on_customer" | "resolved" | "closed",
+    category: (((row.category as string | null) ?? null)),
+    productSnapshot: (row.productSnapshot ?? row.product_snapshot) as unknown,
+    selectedOptions: (row.selectedOptions ?? row.selected_options) as unknown,
+    openedAt: row.openedAt instanceof Date ? row.openedAt : new Date((row.openedAt ?? row.opened_at) as string | number),
+    lastReplyAt: (row.lastReplyAt || row.last_reply_at)
+      ? ((row.lastReplyAt ?? row.last_reply_at) instanceof Date ? (row.lastReplyAt ?? row.last_reply_at) as Date : new Date((row.lastReplyAt ?? row.last_reply_at) as string | number))
+      : null,
+    closedAt: (row.closedAt || row.closed_at)
+      ? ((row.closedAt ?? row.closed_at) instanceof Date ? (row.closedAt ?? row.closed_at) as Date : new Date((row.closedAt ?? row.closed_at) as string | number))
+      : null,
+    createdAt: row.createdAt instanceof Date ? row.createdAt : new Date((row.createdAt ?? row.created_at) as string | number),
+    updatedAt: row.updatedAt instanceof Date ? row.updatedAt : new Date((row.updatedAt ?? row.updated_at) as string | number),
+  };
+}
 
 /**
  * Transitions an inquiry's lifecycle status following strict allowed transitions:
@@ -1290,7 +1365,7 @@ export async function transitionInquiryStatus(
     // 2. Lock inquiry row second (consistent lock order)
     const lockInquiryQuery = toBatchable(
       db,
-      sql`SELECT id, status, closed_at, updated_at FROM ${inquiry} WHERE id = ${input.inquiryId}::uuid FOR UPDATE`,
+      sql`SELECT * FROM ${inquiry} WHERE id = ${input.inquiryId}::uuid FOR UPDATE`,
     );
 
     if (targetStatus === "open") {
@@ -1345,7 +1420,7 @@ export async function transitionInquiryStatus(
               updated_at = now()
           WHERE id = ${input.inquiryId}::uuid
             AND status = 'closed'
-          RETURNING id, status, closed_at, updated_at
+          RETURNING *
         `,
       );
 
@@ -1370,29 +1445,36 @@ export async function transitionInquiryStatus(
         assertionQuery,
       ]);
 
-      const [updatedRow] = await db
-        .select()
-        .from(inquiry)
-        .where(eq(inquiry.id, input.inquiryId))
-        .limit(1);
-
-      if (!updatedRow) {
-        throw new RabetDataError(
-          "NOT_FOUND",
-          `Inquiry not found after status transition: ${input.inquiryId}`,
-        );
-      }
+      const lockInqRaw = batchResults[1];
+      const lockInqRows = Array.isArray(lockInqRaw)
+        ? lockInqRaw
+        : (lockInqRaw as { rows?: unknown[] })?.rows ?? [];
+      const lockedRow = lockInqRows[0] as Record<string, unknown> | undefined;
 
       const updateResult = batchResults[3];
       const rows = Array.isArray(updateResult)
         ? updateResult
         : (updateResult as { rows?: unknown[] })?.rows ?? [];
-      const didUpdate = rows.length > 0;
+      const updatedRow = rows[0] as Record<string, unknown> | undefined;
 
-      return {
-        ...updatedRow,
-        alreadyAtTarget: !didUpdate,
-      };
+      if (updatedRow) {
+        return {
+          ...mapInquiryRow(updatedRow),
+          alreadyAtTarget: false,
+        };
+      }
+
+      if (lockedRow && lockedRow.status === "open") {
+        return {
+          ...mapInquiryRow(lockedRow),
+          alreadyAtTarget: true,
+        };
+      }
+
+      throw new RabetDataError(
+        "NOT_FOUND",
+        `Inquiry not found after status transition: ${input.inquiryId}`,
+      );
     } else if (targetStatus === "closed") {
       const closeUpdate = toBatchable(
         db,
@@ -1403,7 +1485,7 @@ export async function transitionInquiryStatus(
               updated_at = now()
           WHERE id = ${input.inquiryId}::uuid
             AND status IN ('open', 'waiting_on_customer', 'resolved')
-          RETURNING id, status, closed_at, updated_at
+          RETURNING *
         `,
       );
 
@@ -1427,29 +1509,36 @@ export async function transitionInquiryStatus(
         assertionQuery,
       ]);
 
-      const [updatedRow] = await db
-        .select()
-        .from(inquiry)
-        .where(eq(inquiry.id, input.inquiryId))
-        .limit(1);
-
-      if (!updatedRow) {
-        throw new RabetDataError(
-          "NOT_FOUND",
-          `Inquiry not found after status transition: ${input.inquiryId}`,
-        );
-      }
+      const lockInqRaw = batchResults[1];
+      const lockInqRows = Array.isArray(lockInqRaw)
+        ? lockInqRaw
+        : (lockInqRaw as { rows?: unknown[] })?.rows ?? [];
+      const lockedRow = lockInqRows[0] as Record<string, unknown> | undefined;
 
       const updateResult = batchResults[2];
       const rows = Array.isArray(updateResult)
         ? updateResult
         : (updateResult as { rows?: unknown[] })?.rows ?? [];
-      const didUpdate = rows.length > 0;
+      const updatedRow = rows[0] as Record<string, unknown> | undefined;
 
-      return {
-        ...updatedRow,
-        alreadyAtTarget: !didUpdate,
-      };
+      if (updatedRow) {
+        return {
+          ...mapInquiryRow(updatedRow),
+          alreadyAtTarget: false,
+        };
+      }
+
+      if (lockedRow && lockedRow.status === "closed") {
+        return {
+          ...mapInquiryRow(lockedRow),
+          alreadyAtTarget: true,
+        };
+      }
+
+      throw new RabetDataError(
+        "NOT_FOUND",
+        `Inquiry not found after status transition: ${input.inquiryId}`,
+      );
     } else if (targetStatus === "resolved") {
       const resolveUpdate = toBatchable(
         db,
@@ -1459,7 +1548,7 @@ export async function transitionInquiryStatus(
               updated_at = now()
           WHERE id = ${input.inquiryId}::uuid
             AND status IN ('open', 'waiting_on_customer')
-          RETURNING id, status, updated_at
+          RETURNING *
         `,
       );
 
@@ -1483,29 +1572,36 @@ export async function transitionInquiryStatus(
         assertionQuery,
       ]);
 
-      const [updatedRow] = await db
-        .select()
-        .from(inquiry)
-        .where(eq(inquiry.id, input.inquiryId))
-        .limit(1);
-
-      if (!updatedRow) {
-        throw new RabetDataError(
-          "NOT_FOUND",
-          `Inquiry not found after status transition: ${input.inquiryId}`,
-        );
-      }
+      const lockInqRaw = batchResults[1];
+      const lockInqRows = Array.isArray(lockInqRaw)
+        ? lockInqRaw
+        : (lockInqRaw as { rows?: unknown[] })?.rows ?? [];
+      const lockedRow = lockInqRows[0] as Record<string, unknown> | undefined;
 
       const updateResult = batchResults[2];
       const rows = Array.isArray(updateResult)
         ? updateResult
         : (updateResult as { rows?: unknown[] })?.rows ?? [];
-      const didUpdate = rows.length > 0;
+      const updatedRow = rows[0] as Record<string, unknown> | undefined;
 
-      return {
-        ...updatedRow,
-        alreadyAtTarget: !didUpdate,
-      };
+      if (updatedRow) {
+        return {
+          ...mapInquiryRow(updatedRow),
+          alreadyAtTarget: false,
+        };
+      }
+
+      if (lockedRow && lockedRow.status === "resolved") {
+        return {
+          ...mapInquiryRow(lockedRow),
+          alreadyAtTarget: true,
+        };
+      }
+
+      throw new RabetDataError(
+        "NOT_FOUND",
+        `Inquiry not found after status transition: ${input.inquiryId}`,
+      );
     }
 
     throw new RabetDataError(

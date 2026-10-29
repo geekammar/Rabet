@@ -14,6 +14,12 @@ interface BoundOperation {
   status?: "pending" | "failed" | "unconfirmed";
 }
 
+interface UnresolvedOperation {
+  id: string;
+  body: string;
+  status: "pending" | "unconfirmed";
+}
+
 interface ReplyComposerProps {
   inquiryId: string;
   reference: string;
@@ -34,6 +40,7 @@ export function ReplyComposer({
 
   const storageKey = `rabet_draft_inquiry_${inquiryId}`;
   const boundOpKey = `rabet_bound_op_${inquiryId}`;
+  const unresolvedOpKey = `rabet_unresolved_op_${inquiryId}`;
 
   const [body, setBody] = useState<string>(() => {
     if (typeof window === "undefined") return "";
@@ -54,12 +61,33 @@ export function ReplyComposer({
     }
   });
 
+  const [unresolvedOp, setUnresolvedOp] = useState<UnresolvedOperation | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = sessionStorage.getItem(`rabet_unresolved_op_${inquiryId}`);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const boundOpRef = useRef<BoundOperation | null>(boundOp);
+  useEffect(() => {
+    boundOpRef.current = boundOp;
+  }, [boundOp]);
+
+  const unresolvedOpRef = useRef<UnresolvedOperation | null>(unresolvedOp);
+  useEffect(() => {
+    unresolvedOpRef.current = unresolvedOp;
+  }, [unresolvedOp]);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [warningMessage, setWarningMessage] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
+  const [duplicationRiskAcknowledged, setDuplicationRiskAcknowledged] = useState(false);
 
   // Listen for retry events from the message history to reconcile composer state
   useEffect(() => {
@@ -71,34 +99,50 @@ export function ReplyComposer({
       }>;
       if (customEvent.detail?.inquiryId !== inquiryId) return;
 
+      const sourceMsgId = customEvent.detail?.sourceMessageId;
       const retriedBody = customEvent.detail?.retriedBody;
 
-      // Reconcile bound operation and draft:
-      setBoundOp(() => {
-        try {
-          sessionStorage.removeItem(boundOpKey);
-        } catch {
-          // ignore
-        }
-
-        // If composer draft matches the retried message, clear draft as it has now succeeded
-        setBody((currentBody) => {
-          if (
-            retriedBody &&
-            currentBody.trim() === retriedBody.trim()
-          ) {
-            try {
-              sessionStorage.removeItem(storageKey);
-            } catch {
-              // ignore
-            }
-            return "";
+      // Reconcile bound / unresolved operation ONLY if sourceMessageId matches:
+      setBoundOp((cur) => {
+        if (cur && cur.id === sourceMsgId) {
+          try {
+            sessionStorage.removeItem(boundOpKey);
+          } catch {
+            // ignore
           }
-          // Preserve newer edits if user edited the draft in the meantime
-          return currentBody;
-        });
+          return null;
+        }
+        return cur;
+      });
 
-        return null;
+      setUnresolvedOp((cur) => {
+        if (cur && cur.id === sourceMsgId) {
+          try {
+            sessionStorage.removeItem(unresolvedOpKey);
+          } catch {
+            // ignore
+          }
+          return null;
+        }
+        return cur;
+      });
+
+      // Reconcile draft ONLY if current body matches retriedBody EXACTLY (exact equality, not trimmed!)
+      setBody((currentBody) => {
+        if (
+          boundOpRef.current?.id === sourceMsgId &&
+          typeof retriedBody === "string" &&
+          currentBody === retriedBody
+        ) {
+          try {
+            sessionStorage.removeItem(storageKey);
+          } catch {
+            // ignore
+          }
+          return "";
+        }
+        // Preserve newer edits (including whitespace-only changes)
+        return currentBody;
       });
 
       setErrorMessage(null);
@@ -109,17 +153,16 @@ export function ReplyComposer({
     return () => {
       window.removeEventListener("rabet:reply_retried", handleMessageRetried);
     };
-  }, [inquiryId, storageKey, boundOpKey]);
+  }, [inquiryId, storageKey, boundOpKey, unresolvedOpKey]);
 
   // Persist draft on edit and manage operation binding
   function handleBodyChange(text: string) {
     setBody(text);
     setErrorMessage(null);
-    setWarningMessage(null);
     setSuccessNotice(null);
 
     // If text was edited so it no longer matches the bound operation, detach the bound operation ID
-    // (A genuinely new reply receives a new operation ID)
+    // but retain any unresolved uncertain operation identity separately
     if (boundOp && boundOp.body !== text) {
       setBoundOp(null);
       try {
@@ -127,6 +170,15 @@ export function ReplyComposer({
       } catch {
         // ignore
       }
+    }
+
+    // Keep visible warning if there is an unresolved operation
+    if (unresolvedOp && unresolvedOp.status === "unconfirmed") {
+      setWarningMessage(
+        "An earlier delivery attempt is unconfirmed and may have reached the customer. Sending an edited reply requires acknowledging the duplication risk.",
+      );
+    } else {
+      setWarningMessage(null);
     }
 
     try {
@@ -188,25 +240,29 @@ export function ReplyComposer({
       }
     }
 
+    // If text was edited while an unresolved uncertain operation exists, require explicit duplication-risk decision
+    if (
+      unresolvedOp &&
+      unresolvedOp.status === "unconfirmed" &&
+      currentBody !== unresolvedOp.body &&
+      !duplicationRiskAcknowledged
+    ) {
+      setWarningMessage(
+        "An earlier delivery attempt is unconfirmed and may have reached the customer. Confirm duplication risk below to send this edited message.",
+      );
+      return;
+    }
+
     // Determine operation ID:
     // If repeating unchanged pending submission, reuse its operation ID.
     // Otherwise, generate a fresh stable UUID.
     let opId: string;
     if (boundOp && boundOp.body === currentBody && boundOp.status === "pending") {
       opId = boundOp.id;
+    } else if (unresolvedOp && unresolvedOp.body === currentBody && unresolvedOp.status === "pending") {
+      opId = unresolvedOp.id;
     } else {
       opId = crypto.randomUUID();
-      const newBound: BoundOperation = {
-        id: opId,
-        body: currentBody,
-        status: "pending",
-      };
-      setBoundOp(newBound);
-      try {
-        sessionStorage.setItem(boundOpKey, JSON.stringify(newBound));
-      } catch {
-        // ignore
-      }
     }
 
     isSubmittingRef.current = true;
@@ -222,6 +278,21 @@ export function ReplyComposer({
       // Always trigger message history reconciliation even on delivery failure
       onReplySuccess?.();
 
+      if (result.reserved === false) {
+        // Pre-reservation failure (e.g. invalid input, missing bot configuration):
+        // NO reservation was created in the database. Draft remains editable and NOT bound to a failed operation.
+        setBoundOp(null);
+        try {
+          sessionStorage.removeItem(boundOpKey);
+        } catch {
+          // ignore
+        }
+        setErrorMessage(
+          result.message || "Failed to process reply before reservation.",
+        );
+        return;
+      }
+
       if (result.outcome === "confirmed_sent") {
         // Confirmed sent: clear draft from sessionStorage and composer state
         setBody((cur) => {
@@ -229,15 +300,18 @@ export function ReplyComposer({
             try {
               sessionStorage.removeItem(storageKey);
               sessionStorage.removeItem(boundOpKey);
+              sessionStorage.removeItem(unresolvedOpKey);
             } catch {
               // ignore
             }
             setBoundOp(null);
+            setUnresolvedOp(null);
             return "";
           }
           return cur;
         });
 
+        setDuplicationRiskAcknowledged(false);
         setSuccessNotice(result.message || "Reply sent successfully.");
       } else if (result.outcome === "recorded_pending") {
         // Recorded/pending: keep draft and update bound operation
@@ -247,8 +321,14 @@ export function ReplyComposer({
           status: "pending",
         };
         setBoundOp(pendingBound);
+        setUnresolvedOp({
+          id: opId,
+          body: currentBody,
+          status: "pending",
+        });
         try {
           sessionStorage.setItem(boundOpKey, JSON.stringify(pendingBound));
+          sessionStorage.setItem(unresolvedOpKey, JSON.stringify(pendingBound));
         } catch {
           // ignore
         }
@@ -263,8 +343,14 @@ export function ReplyComposer({
           status: "unconfirmed",
         };
         setBoundOp(unconfirmedBound);
+        setUnresolvedOp({
+          id: opId,
+          body: currentBody,
+          status: "unconfirmed",
+        });
         try {
           sessionStorage.setItem(boundOpKey, JSON.stringify(unconfirmedBound));
+          sessionStorage.setItem(unresolvedOpKey, JSON.stringify(unconfirmedBound));
         } catch {
           // ignore
         }
@@ -280,8 +366,11 @@ export function ReplyComposer({
           status: "failed",
         };
         setBoundOp(failedBound);
+        // Confirmed failure means it did not deliver, so clear unresolved uncertainty
+        setUnresolvedOp(null);
         try {
           sessionStorage.setItem(boundOpKey, JSON.stringify(failedBound));
+          sessionStorage.removeItem(unresolvedOpKey);
         } catch {
           // ignore
         }
@@ -291,6 +380,24 @@ export function ReplyComposer({
         );
       }
     } catch {
+      // Server outcome unknown: preserve stable operation identity
+      const uncertainBound: BoundOperation = {
+        id: opId,
+        body: currentBody,
+        status: "unconfirmed",
+      };
+      setBoundOp(uncertainBound);
+      setUnresolvedOp({
+        id: opId,
+        body: currentBody,
+        status: "unconfirmed",
+      });
+      try {
+        sessionStorage.setItem(boundOpKey, JSON.stringify(uncertainBound));
+        sessionStorage.setItem(unresolvedOpKey, JSON.stringify(uncertainBound));
+      } catch {
+        // ignore
+      }
       setErrorMessage(
         "A network error occurred while communicating with the server. Your draft has been preserved.",
       );
@@ -335,6 +442,30 @@ export function ReplyComposer({
         >
           <AlertTriangle className="mt-0.5 size-4 shrink-0" />
           <span className="flex-1 break-words">{warningMessage}</span>
+        </div>
+      ) : null}
+
+      {unresolvedOp &&
+      unresolvedOp.status === "unconfirmed" &&
+      body !== unresolvedOp.body ? (
+        <div
+          data-testid="duplication-risk-banner"
+          className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-300"
+        >
+          <input
+            type="checkbox"
+            id="confirm-duplication-risk"
+            data-testid="confirm-duplication-risk"
+            checked={duplicationRiskAcknowledged}
+            onChange={(e) => setDuplicationRiskAcknowledged(e.target.checked)}
+            className="size-4 rounded border-amber-500 text-primary focus:ring-primary shrink-0"
+          />
+          <label
+            htmlFor="confirm-duplication-risk"
+            className="cursor-pointer select-none leading-tight"
+          >
+            I understand an earlier message may have arrived and acknowledge the duplication risk for this edited reply.
+          </label>
         </div>
       ) : null}
 
