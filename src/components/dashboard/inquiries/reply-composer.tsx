@@ -96,6 +96,7 @@ export function ReplyComposer({
   const storageKey = `rabet_draft_inquiry_${inquiryId}`;
   const boundOpKey = `rabet_bound_op_${inquiryId}`;
   const unresolvedOpKey = `rabet_unresolved_op_${inquiryId}`;
+  const rememberedOpKey = `rabet_remembered_op_${inquiryId}`;
 
   const isStorageAvailable = typeof window !== "undefined" && checkStorageAvailability();
 
@@ -134,7 +135,26 @@ export function ReplyComposer({
   }, [unresolvedOp]);
 
   const inFlightOpRef = useRef<{ id: string; body: string } | null>(null);
+  const rememberedOpRef = useRef<BoundOperation | null>(null);
   const reconciliationEpochRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (boundOp) {
+      rememberedOpRef.current = boundOp;
+      safeSessionStorageSet(rememberedOpKey, JSON.stringify(boundOp));
+    }
+  }, [boundOp, rememberedOpKey]);
+
+  useEffect(() => {
+    if (!rememberedOpRef.current) {
+      const raw = safeSessionStorageGet(rememberedOpKey);
+      if (raw) {
+        try {
+          rememberedOpRef.current = JSON.parse(raw);
+        } catch {}
+      }
+    }
+  }, [rememberedOpKey]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
@@ -178,6 +198,8 @@ export function ReplyComposer({
             if (unresolvedOpRef.current?.id === targetOpId) setUnresolvedOp(null);
             if (verifyStorageOperationMatches(boundOpKey, targetOpId)) {
               safeSessionStorageRemove(boundOpKey);
+              safeSessionStorageRemove(rememberedOpKey);
+              rememberedOpRef.current = null;
             }
             if (verifyStorageOperationMatches(unresolvedOpKey, targetOpId)) {
               safeSessionStorageRemove(unresolvedOpKey);
@@ -260,7 +282,7 @@ export function ReplyComposer({
     return () => {
       cancelled = true;
     };
-  }, [inquiryId, boundOpKey, unresolvedOpKey, storageKey, onReplySuccess]);
+  }, [inquiryId, boundOpKey, unresolvedOpKey, rememberedOpKey, storageKey, onReplySuccess]);
 
   // Listen for retry events from the message history to reconcile composer state
   useEffect(() => {
@@ -280,6 +302,8 @@ export function ReplyComposer({
         if (cur && cur.id === sourceMsgId) {
           if (verifyStorageOperationMatches(boundOpKey, sourceMsgId)) {
             safeSessionStorageRemove(boundOpKey);
+            safeSessionStorageRemove(rememberedOpKey);
+            rememberedOpRef.current = null;
           }
           return null;
         }
@@ -318,7 +342,7 @@ export function ReplyComposer({
     return () => {
       window.removeEventListener("rabet:reply_retried", handleMessageRetried);
     };
-  }, [inquiryId, storageKey, boundOpKey, unresolvedOpKey]);
+  }, [inquiryId, storageKey, boundOpKey, unresolvedOpKey, rememberedOpKey]);
 
   // Persist draft on edit and manage operation binding
   function handleBodyChange(text: string) {
@@ -326,12 +350,20 @@ export function ReplyComposer({
     setErrorMessage(null);
     setSuccessNotice(null);
 
-    // If text was reverted back to match unresolvedOp.body, reconnect boundOp so submission reuses unresolvedOp.id!
+    // If text was reverted back to match unresolvedOp.body or rememberedOp.body, reconnect boundOp!
     if (unresolvedOp && text === unresolvedOp.body) {
       const reconnected: BoundOperation = {
         id: unresolvedOp.id,
         body: unresolvedOp.body,
         status: unresolvedOp.status,
+      };
+      setBoundOp(reconnected);
+      safeSessionStorageSet(boundOpKey, JSON.stringify(reconnected));
+    } else if (rememberedOpRef.current && text === rememberedOpRef.current.body) {
+      const reconnected: BoundOperation = {
+        id: rememberedOpRef.current.id,
+        body: rememberedOpRef.current.body,
+        status: rememberedOpRef.current.status,
       };
       setBoundOp(reconnected);
       safeSessionStorageSet(boundOpKey, JSON.stringify(reconnected));
@@ -609,6 +641,8 @@ export function ReplyComposer({
             safeSessionStorageRemove(storageKey);
             safeSessionStorageRemove(boundOpKey);
             safeSessionStorageRemove(unresolvedOpKey);
+            safeSessionStorageRemove(rememberedOpKey);
+            rememberedOpRef.current = null;
             setBoundOp(null);
             setUnresolvedOp(null);
             inFlightOpRef.current = null;
