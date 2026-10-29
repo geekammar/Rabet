@@ -95,10 +95,12 @@ The reply composer (`ReplyComposer`) implements robust end-to-end operation iden
    Browser storage availability is actively verified. If `sessionStorage` is disabled or inaccessible, the composer continues safely in memory and renders a non-blocking informational notice explaining that draft persistence and reload recovery are disabled in that session.
 3. **Read-Only Operation Reconciliation (`reconcileSellerOperationAction`):**
    An authorized server action allows the client to inspect the durable server state of an unresolved operation without modifying database state or initiating Telegram calls:
+   - **Payload Security:** Rejects null, non-object, or array payloads before accessing fields (`INVALID_INPUT`).
    - **`confirmed_sent`:** Clears matching drafts from storage and state; preserves newer edited text if the draft diverged.
    - **`confirmed_failed`:** Marks bound operation as `failed` and instructs seller to use the Retry button in conversation history or edit draft to send a new message.
    - **`unconfirmed_outcome` / `recorded_pending`:** Retains operation identity and displays visible duplication warning.
-   - **`found: false`:** Server has no record of the reservation; clears uncertainty while allowing deliberate submission with the stable ID.
+   - **`found: false`:** Server has no record of the reservation (e.g. dropped before reservation). The composer retains the exact operation ID and authored body as `pending`, displays: `"No record was found yet. Retrying will use the same submission ID."`, and allows deliberate resubmission with the unchanged stable ID without generating a fresh UUID. Atomic database reservation idempotency ensures duplicate messages or transport calls cannot occur if a delayed request arrives concurrently.
+   - **Operation-Scoped Isolation & Generation Epochs:** Each reconciliation is tagged with an incremental epoch (`reconciliationEpochRef`). A delayed response for operation A cannot clear, overwrite, or mutate operation B's active draft, ID, or `sessionStorage`.
    - **Read errors:** Network/server errors during reconciliation do not assume absence; identity is retained safely.
 4. **Correct Generic Response Classification:**
    - Responses with `reserved: false` indicate known pre-reservation failures (e.g., missing bot configuration). The composer detaches bindings, leaving drafts editable and resubmittable.
@@ -202,8 +204,10 @@ Executed against local Next.js production build (`next start`), headless Chromiu
     - **10A:** Submit failing draft → edit text → submit new reply without `CONFLICT` (detached bound operation generates fresh UUID and succeeds).
     - **10B:** Submit unconfirmed outcome → composer displays visible unconfirmed warning, preserves draft text, and resubmitting unchanged draft produces zero duplicate transport calls.
     - **10C:** Editing after unconfirmed delivery retains warning and requires explicit duplication-risk acknowledgement (`confirm-duplication-risk` checkbox) before sending new reply.
-    - **10D:** Operation identity persistence before dispatch: synchronous storage binding confirmed upon submit; reload retains operation ID without generating duplicates.
-    - **10E:** Edit and revert: editing draft away detaches bound operation; reverting back to original text reconnects to stable operation ID without rotating UUID.
+    - **10D:** Actual in-flight reload: Telegram dispatch held for 3500ms via proxy, proves operation ID is persisted before response completion, reloads page while request is in flight, verifies draft preservation and status reconciliation to `confirmed_sent`, proving unchanged resubmission retains stable ID, and verifying exactly 1 database row and 1 transport call.
+    - **10E:** Actual edit and revert across reload: failed draft preserved across page reload, editing away detaches bound operation, reverting back reconnects to stable failed operation ID, and submitting unchanged failed draft is blocked with zero extra transport calls.
+    - **10F:** `found:false` reconciliation and unchanged resubmission: unconfirmed draft absent from server displays visible notice `"No record was found yet. Retrying will use the same submission ID."`, submitting unchanged text reuses original operation ID, and delivers successfully with 1 message row and 1 transport call.
+    - **10G:** Operation-scoped reconciliation isolation: verifies that stale reconciliation responses for operation A cannot clear, overwrite, or mutate operation B's active draft, ID, or `sessionStorage`.
 
 ---
 

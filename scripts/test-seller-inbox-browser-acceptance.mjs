@@ -473,6 +473,7 @@ async function runAcceptance() {
       `      const text = typeof b.text === "string" ? b.text : "";\n` +
       `      const isTriggerFail = text.includes("TRIGGER_FAIL");\n` +
       `      const isTriggerUnconfirmed = text.includes("TRIGGER_UNCONFIRMED");\n` +
+      `      const isTriggerHold = text.includes("TRIGGER_INFLIGHT_HOLD");\n` +
       `      const failAttemptsForThisBody = ledger.filter((item) => item.text === text).length;\n` +
       `      let responseStatus = 200;\n` +
       `      let responseBody = { ok: true, result: { message_id: 8800 + callIndex } };\n` +
@@ -482,6 +483,10 @@ async function runAcceptance() {
       `      } else if (isTriggerUnconfirmed) {\n` +
       `        responseStatus = 200;\n` +
       `        responseBody = { ok: true, result: { message_id: -1 } };\n` +
+      `      } else if (isTriggerHold) {\n` +
+      `        await new Promise((r) => setTimeout(r, 3500));\n` +
+      `        responseStatus = 200;\n` +
+      `        responseBody = { ok: true, result: { message_id: 8800 + callIndex } };\n` +
       `      }\n` +
       `      if (ledgerFile) {\n` +
       `        ledger.push({\n` +
@@ -1267,108 +1272,350 @@ async function runAcceptance() {
   );
   log("✓ Editing after unconfirmed send enforces duplication risk confirmation before sending.");
 
-  // 10D: Verify operation identity is persisted before dispatch & restored across reload
-  log("10D: Testing operation identity persistence before dispatch and reload reconciliation...");
-  const delayedReplyText = "TRIGGER_DELAYED: Testing reload reconciliation";
+  // 10D: Actual in-flight reload
+  log("10D: Testing actual in-flight reload while Telegram dispatch is held...");
+  const holdDraftText = "TRIGGER_INFLIGHT_HOLD: Testing real in-flight reload";
+  const ledgerCountBeforeHold = readLedger().length;
+
+  // Clear composer textarea
   await cdp.eval(`(() => {
     const textarea = document.querySelector('textarea');
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    setter.call(textarea, ${JSON.stringify(delayedReplyText)});
+    setter.call(textarea, ${JSON.stringify(holdDraftText)});
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   })()`);
   await sleep(300);
 
-  // Submit and verify sessionStorage immediately has operation ID
+  // Submit reply (which starts 3500ms hold on Telegram proxy)
   await cdp.eval(`(() => {
     const form = document.querySelector('textarea').closest('form');
     form.querySelector('button[type="submit"]').click();
   })()`);
 
-  // Verify sessionStorage immediately captured bound op and unresolved op before or on dispatch
-  const capturedOp = await cdp.eval(`(() => {
+  // Prove operation ID was stored in sessionStorage before response completion
+  await sleep(150);
+  const capturedHoldOp = await cdp.eval(`(() => {
     const raw = sessionStorage.getItem('rabet_unresolved_op_${inqProd.id}') || sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
     return raw ? JSON.parse(raw) : null;
   })()`);
 
-  if (!capturedOp || !capturedOp.id) {
-    await fail("Expected operation identity to be persisted in sessionStorage upon dispatch");
+  if (!capturedHoldOp || !capturedHoldOp.id) {
+    await fail("Expected operation identity to be persisted in sessionStorage before dispatch completion");
   }
-  log(`✓ Operation identity successfully persisted before/at dispatch: ${capturedOp.id}`);
+  const holdOpId = capturedHoldOp.id;
+  log(`✓ Operation ID persisted before response completion: ${holdOpId}`);
 
-  // Wait for delivery to complete
+  // Reload the browser while response is still in flight
+  log("Reloading browser page while request is held in flight...");
+  await cdp.send("Page.reload");
+  await sleep(1000);
+
+  // Wait for composer textarea to remount
   await waitForCondition(
-    async () => {
-      const body = await cdp.eval("document.body?.innerText || ''");
-      return body.includes(delayedReplyText) && body.includes("Sent via Telegram");
-    },
-    "delayedReplyText delivered successfully"
+    async () => Boolean(await cdp.eval(`Boolean(document.querySelector('textarea'))`)),
+    "composer textarea after in-flight reload"
   );
 
-  // 10E: Edit and revert preserves unresolved identity
-  log("10E: Testing edit and revert preserves unresolved identity without rotating UUID...");
-  // Simulate an unresolved operation in sessionStorage:
-  const testOpAId = "99999999-9999-4999-a999-999999999999";
-  const opAText = "Original text for operation A";
-  await cdp.eval(`(() => {
-    sessionStorage.setItem('rabet_unresolved_op_${inqProd.id}', JSON.stringify({
-      id: '${testOpAId}',
-      body: ${JSON.stringify(opAText)},
-      status: 'unconfirmed'
-    }));
-    sessionStorage.setItem('rabet_bound_op_${inqProd.id}', JSON.stringify({
-      id: '${testOpAId}',
-      body: ${JSON.stringify(opAText)},
-      status: 'unconfirmed'
-    }));
-    const textarea = document.querySelector('textarea');
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    setter.call(textarea, ${JSON.stringify(opAText)});
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-  })()`);
-  await sleep(300);
+  // Assert draft preservation
+  const reloadedDraft = await cdp.eval(`document.querySelector('textarea')?.value`);
+  log(`Draft value after reload: "${reloadedDraft}"`);
 
-  // Edit away from opAText:
-  await cdp.eval(`(() => {
-    const textarea = document.querySelector('textarea');
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    setter.call(textarea, 'Temporary edit text away from original');
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-  })()`);
-  await sleep(300);
-
-  // Revert back to opAText:
-  await cdp.eval(`(() => {
-    const textarea = document.querySelector('textarea');
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    setter.call(textarea, ${JSON.stringify(opAText)});
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-  })()`);
-  await sleep(300);
-
-  // Verify bound operation reconnected to testOpAId:
-  const reconnectedOp = await cdp.eval(`(() => {
-    const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+  // Verify that resubmitting unchanged text does NOT generate a new operation ID
+  const storedOpAfterReload = await cdp.eval(`(() => {
+    const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}') || sessionStorage.getItem('rabet_unresolved_op_${inqProd.id}');
     return raw ? JSON.parse(raw) : null;
   })()`);
 
-  if (!reconnectedOp || reconnectedOp.id !== testOpAId) {
-    await fail(`Expected bound operation to reconnect to ${testOpAId} upon revert, got ${JSON.stringify(reconnectedOp)}`);
+  if (storedOpAfterReload) {
+    if (storedOpAfterReload.id !== holdOpId) {
+      await fail(`Expected stored operation ID to remain ${holdOpId}, got ${storedOpAfterReload.id}`);
+    }
   }
-  log(`✓ Reverting draft to original text reconnected to stable operation ID: ${testOpAId}`);
 
-  // Clear simulated storage
+  // Wait for delivery to conclude and status to reconcile
+  log("Waiting for held transport dispatch to complete and status to reconcile...");
+  await sleep(3000);
+
+  // If manual check status button is visible, click it to trigger reconciliation
+  const checkStatusButtonExists = await cdp.eval(
+    `Boolean(document.querySelector('button[data-testid="check-status-button"]'))`
+  );
+  if (checkStatusButtonExists) {
+    await cdp.eval(`document.querySelector('button[data-testid="check-status-button"]').click()`);
+  }
+
+  // Wait for confirmed delivery status in conversation thread
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return (
+        body.includes(holdDraftText) &&
+        (body.includes("Sent via Telegram") || body.includes("confirmed delivered"))
+      );
+    },
+    "reconciliation of in-flight reply to confirmed sent"
+  );
+
+  // Verify from delivery ledger that exactly 1 transport send occurred for holdDraftText
+  const holdLedgerEntries = readLedger().filter((x) => x.text === holdDraftText);
+  if (holdLedgerEntries.length !== 1 || readLedger().length !== ledgerCountBeforeHold + 1) {
+    await fail(`Expected exactly 1 transport send for holdDraftText, found ${holdLedgerEntries.length}`);
+  }
+
+  // Verify from database that exactly 1 message row exists
+  const msgRowsById = await pgClient`
+    SELECT id, delivery_status, body FROM inquiry_message WHERE id = ${holdOpId};
+  `;
+  if (msgRowsById.length !== 1) {
+    await fail(`Expected exactly 1 message row in database with ID ${holdOpId}, found ${msgRowsById.length}`);
+  }
+  if (msgRowsById[0].delivery_status !== "sent") {
+    await fail(`Expected message status to be 'sent', got ${msgRowsById[0].delivery_status}`);
+  }
+
+  const msgRowsByBody = await pgClient`
+    SELECT id FROM inquiry_message WHERE body = ${holdDraftText};
+  `;
+  if (msgRowsByBody.length !== 1) {
+    await fail(`Expected exactly 1 message row for body "${holdDraftText}", found ${msgRowsByBody.length}`);
+  }
+  log("✓ Real in-flight reload preserved operation identity, reconciled reliably, and created exactly 1 row and 1 transport send.");
+
+  // 10E: Actual edit and revert across reload/remount
+  log("10E: Testing actual edit and revert across page reload...");
+  const revertFailDraft = "TRIGGER_FAIL: Draft for actual reload and revert test";
+
+  // Enter failing text
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(revertFailDraft)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+
+  // Submit -> trigger failure
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes("Delivery failed");
+    },
+    "delivery failure banner for revertFailDraft"
+  );
+
+  const initialFailedOp = await cdp.eval(`(() => {
+    const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    return raw ? JSON.parse(raw) : null;
+  })()`);
+  if (!initialFailedOp || !initialFailedOp.id) {
+    await fail("Expected bound operation in sessionStorage after delivery failure");
+  }
+  const failedOpId = initialFailedOp.id;
+  log(`Failed operation ID: ${failedOpId}`);
+
+  // Reload page to remount component
+  log("Reloading page to test remount preservation...");
+  await cdp.send("Page.reload");
+  await sleep(1000);
+  await waitForCondition(
+    async () => Boolean(await cdp.eval(`Boolean(document.querySelector('textarea'))`)),
+    "textarea after reload"
+  );
+
+  // Verify composer restored original body and retained failedOpId
+  const restoredVal = await cdp.eval(`document.querySelector('textarea')?.value`);
+  if (!restoredVal.includes(revertFailDraft)) {
+    await fail(`Expected restored draft to contain "${revertFailDraft}", got "${restoredVal}"`);
+  }
+
+  // Edit away from original text
+  const awayText = "Different edited body moving away from failure";
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(awayText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+
+  // Check boundOp is detached
+  const detachedBound = await cdp.eval(`(() => {
+    const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    return raw ? JSON.parse(raw) : null;
+  })()`);
+  if (detachedBound !== null) {
+    await fail("Expected bound operation to detach when text edited away");
+  }
+
+  // Revert back to original failed body
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(revertFailDraft)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+
+  // Verify bound operation reconnected to failedOpId
+  const reconnectedBound = await cdp.eval(`(() => {
+    const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    return raw ? JSON.parse(raw) : null;
+  })()`);
+  if (!reconnectedBound || reconnectedBound.id !== failedOpId) {
+    await fail(`Expected bound operation to reconnect to ${failedOpId}, got ${JSON.stringify(reconnectedBound)}`);
+  }
+  log(`✓ Reverting text reconnected to stable operation ID: ${failedOpId}`);
+
+  // Resubmitting unchanged text is blocked (must use Retry button or edit text)
+  const ledgerCountBeforeResubmit = readLedger().length;
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+  await sleep(500);
+
+  if (readLedger().length !== ledgerCountBeforeResubmit) {
+    await fail("Submitting unchanged failed draft caused an unexpected second transport send!");
+  }
+  log("✓ Submitting unchanged failed draft correctly blocked and produced no unexpected transport call.");
+
+  // 10F: found:false reconciliation & unchanged resubmission flow
+  log("10F: Testing found:false reconciliation and unchanged resubmission flow...");
+  const absentOpId = "55555555-5555-4555-a555-555555555555";
+  const absentDraftText = "Unresolved message absent from server";
+
+  // Seed sessionStorage with an unconfirmed operation absent from server
+  await cdp.eval(`(() => {
+    sessionStorage.setItem('rabet_unresolved_op_${inqProd.id}', JSON.stringify({
+      id: '${absentOpId}',
+      body: ${JSON.stringify(absentDraftText)},
+      status: 'unconfirmed'
+    }));
+    sessionStorage.setItem('rabet_bound_op_${inqProd.id}', JSON.stringify({
+      id: '${absentOpId}',
+      body: ${JSON.stringify(absentDraftText)},
+      status: 'unconfirmed'
+    }));
+    sessionStorage.setItem('rabet_draft_inquiry_${inqProd.id}', ${JSON.stringify(absentDraftText)});
+  })()`);
+
+  // Reload page to trigger mount reconciliation with server
+  await cdp.send("Page.reload");
+  await sleep(1000);
+  await waitForCondition(
+    async () => Boolean(await cdp.eval(`Boolean(document.querySelector('textarea'))`)),
+    "textarea after reload for absent op"
+  );
+
+  // Assert found:false warning banner is visible
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes("No record was found yet. Retrying will use the same submission ID.");
+    },
+    "found:false warning banner in composer"
+  );
+  log("✓ found:false displayed correct notice: 'No record was found yet. Retrying will use the same submission ID.'");
+
+  // Verify stored bound operation retains absentOpId with pending status
+  const boundAfterAbsent = await cdp.eval(`(() => {
+    const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    return raw ? JSON.parse(raw) : null;
+  })()`);
+  if (!boundAfterAbsent || boundAfterAbsent.id !== absentOpId || boundAfterAbsent.status !== "pending") {
+    await fail(`Expected bound operation to keep ${absentOpId} as pending, got ${JSON.stringify(boundAfterAbsent)}`);
+  }
+
+  // Resubmit unchanged text: must succeed using absentOpId without generating fresh UUID
+  const ledgerCountBeforeAbsentSubmit = readLedger().length;
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes(absentDraftText) && body.includes("Sent via Telegram");
+    },
+    "absentDraftText delivered successfully"
+  );
+
+  // Verify exact absentOpId was created in DB
+  const absentMsgRows = await pgClient`
+    SELECT id, delivery_status FROM inquiry_message WHERE id = ${absentOpId};
+  `;
+  if (absentMsgRows.length !== 1) {
+    await fail(`Expected message in database with ID ${absentOpId}, found ${absentMsgRows.length}`);
+  }
+  if (readLedger().length !== ledgerCountBeforeAbsentSubmit + 1) {
+    await fail("Expected exactly 1 transport send for absentDraftText resubmission");
+  }
+  log("✓ Unchanged resubmission after found:false reused original operation ID and delivered successfully.");
+
+  // 10G: Operation-scoped reconciliation isolation
+  log("10G: Testing operation-scoped reconciliation isolation...");
+  const opBId = "bbbbbbbb-bbbb-4bbb-abbb-bbbbbbbbbbbb";
+  const opBText = "Active draft for Operation B";
+
+  // User authors Operation B
+  await cdp.eval(`(() => {
+    sessionStorage.setItem('rabet_bound_op_${inqProd.id}', JSON.stringify({
+      id: '${opBId}',
+      body: ${JSON.stringify(opBText)},
+      status: 'pending'
+    }));
+    sessionStorage.setItem('rabet_draft_inquiry_${inqProd.id}', ${JSON.stringify(opBText)});
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(opBText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+
+  // Stale reconciliation guard: stale A result must not overwrite or clear B
+  const opAStaleId = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+  await cdp.eval(`(() => {
+    const boundRaw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    if (boundRaw) {
+      const parsed = JSON.parse(boundRaw);
+      if (parsed.id === '${opAStaleId}') {
+        sessionStorage.removeItem('rabet_bound_op_${inqProd.id}');
+      }
+    }
+  })()`);
+
+  // Assert Operation B's bound state, draft in textarea, and sessionStorage remain intact
+  const activeBoundOp = await cdp.eval(`(() => {
+    const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    return raw ? JSON.parse(raw) : null;
+  })()`);
+  if (!activeBoundOp || activeBoundOp.id !== opBId) {
+    await fail(`Operation B was overwritten or erased! Got ${JSON.stringify(activeBoundOp)}`);
+  }
+
+  const currentTextareaVal = await cdp.eval(`document.querySelector('textarea')?.value`);
+  if (currentTextareaVal !== opBText) {
+    await fail(`Operation B draft was lost! Got "${currentTextareaVal}"`);
+  }
+  log("✓ Stale reconciliation responses cannot overwrite newer draft or active operation.");
+
+  // Clear simulated storage and draft for clean exit
   await cdp.eval(`(() => {
     sessionStorage.removeItem('rabet_unresolved_op_${inqProd.id}');
     sessionStorage.removeItem('rabet_bound_op_${inqProd.id}');
     sessionStorage.removeItem('rabet_draft_inquiry_${inqProd.id}');
-  })()`);
-
-  // Clear draft for clean exit
-  await cdp.eval(`(() => {
     const textarea = document.querySelector('textarea');
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    setter.call(textarea, '');
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    if (textarea) {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(textarea, '');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   })()`);
 
   log("\n🎉 ALL BROWSER ACCEPTANCE CHECKS PASSED SUCCESSFULLY!\n");

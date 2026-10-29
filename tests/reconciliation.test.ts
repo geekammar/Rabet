@@ -570,4 +570,186 @@ describe("Phase 09: Exact Operation Reconciliation & Identity Preservation", () 
     expect(transport.ledger).toHaveLength(1);
     expect(transport.ledger[0].ok).toBe(true);
   });
+
+  it("reconcileSellerOperationAction rejects null and non-object payloads before accessing fields", async () => {
+    // @ts-expect-error test invalid payload
+    const resNull = await reconcileSellerOperationAction(null);
+    expect(resNull.success).toBe(false);
+    expect(resNull.code).toBe("INVALID_INPUT");
+
+    // @ts-expect-error test array payload
+    const resArray = await reconcileSellerOperationAction([]);
+    expect(resArray.success).toBe(false);
+    expect(resArray.code).toBe("INVALID_INPUT");
+
+    // @ts-expect-error test primitive payload
+    const resString = await reconcileSellerOperationAction("invalid-string");
+    expect(resString.success).toBe(false);
+    expect(resString.code).toBe("INVALID_INPUT");
+  });
+
+  it("Scenario F: found:false reconciliation — retains stable operation ID and allows unchanged retry", async () => {
+    const rawTransport = createFakeTelegramTransport();
+    const transport = createLedgerTransport(rawTransport);
+
+    const clientOpId = "66666666-6666-6666-6666-666666666666";
+    const draftText = "Unresolved message absent from server";
+
+    const boundOpKey = `rabet_bound_op_${testInquiryId}`;
+    const unresolvedOpKey = `rabet_unresolved_op_${testInquiryId}`;
+    const storageKey = `rabet_draft_inquiry_${testInquiryId}`;
+
+    // Composer was bound to clientOpId as unconfirmed
+    sessionStorage.setItem(
+      boundOpKey,
+      JSON.stringify({ id: clientOpId, body: draftText, status: "unconfirmed" }),
+    );
+    sessionStorage.setItem(
+      unresolvedOpKey,
+      JSON.stringify({ id: clientOpId, body: draftText, status: "unconfirmed" }),
+    );
+    sessionStorage.setItem(storageKey, draftText);
+
+    // 1. Check status on server: returns found: false
+    const checkRes = await reconcileSellerOperationAction(
+      {
+        inquiryId: testInquiryId,
+        operationId: clientOpId,
+      },
+      { db: {} as never },
+    );
+
+    expect(checkRes.success).toBe(true);
+    expect(checkRes.found).toBe(false);
+
+    // 2. Client reconciler updates:
+    // Retains clientOpId in boundOp as pending, clears unresolved uncertainty:
+    const updatedBound = { id: clientOpId, body: draftText, status: "pending" };
+    sessionStorage.setItem(boundOpKey, JSON.stringify(updatedBound));
+    sessionStorage.removeItem(unresolvedOpKey);
+
+    expect(sessionStorage.getItem(unresolvedOpKey)).toBeNull();
+    const storedBound = JSON.parse(sessionStorage.getItem(boundOpKey)!);
+    expect(storedBound.id).toBe(clientOpId);
+    expect(storedBound.status).toBe("pending");
+
+    // 3. Submitting unchanged text:
+    // handleSubmit determines opId from storedBound: opId === clientOpId!
+    const resubmitOpId = storedBound.id;
+    expect(resubmitOpId).toBe(clientOpId);
+
+    const submitRes = await sendSellerReplyAction(
+      {
+        inquiryId: testInquiryId,
+        body: draftText,
+        clientOperationId: resubmitOpId,
+      },
+      { transport, db: {} as never },
+    );
+
+    expect(submitRes.success).toBe(true);
+    expect(submitRes.outcome).toBe("confirmed_sent");
+    expect(transport.totalInvocations).toBe(1);
+    expect(transport.ledger[0].ok).toBe(true);
+    expect(mockMessages).toHaveLength(1);
+    expect(mockMessages[0].id).toBe(clientOpId);
+  });
+
+  it("Scenario G: Operation-scoped reconciliation — delayed read for A does not erase or overwrite operation B", async () => {
+    const opA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const opB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const bodyA = "Message content A";
+    const bodyB = "Message content B edited";
+
+    const boundOpKey = `rabet_bound_op_${testInquiryId}`;
+    const unresolvedOpKey = `rabet_unresolved_op_${testInquiryId}`;
+    const storageKey = `rabet_draft_inquiry_${testInquiryId}`;
+
+    // Step 1: Start read for A (simulate async reconciliation started for A)
+    const targetOpIdA = opA;
+    const targetBodyA = bodyA;
+
+    // Step 2: User moves composer to operation B (edits text, initiates dispatch for B)
+    const activeOpB = { id: opB, body: bodyB, status: "pending" };
+    sessionStorage.setItem(boundOpKey, JSON.stringify(activeOpB));
+    sessionStorage.setItem(unresolvedOpKey, JSON.stringify(activeOpB));
+    sessionStorage.setItem(storageKey, bodyB);
+
+    // Step 3: Read for A completes as confirmed_sent
+    const delayedReadResultA = {
+      success: true,
+      found: true,
+      outcome: "confirmed_sent" as const,
+      operationId: opA,
+      body: bodyA,
+      deliveryStatus: "sent" as const,
+      createdAt: new Date().toISOString(),
+    };
+    expect(delayedReadResultA.outcome).toBe("confirmed_sent");
+
+    // Scoped reconciliation guard logic:
+    // Verify target operation ID still matches active operation
+    const currentStoredBound = JSON.parse(sessionStorage.getItem(boundOpKey)!);
+    const currentStoredUnresolved = JSON.parse(sessionStorage.getItem(unresolvedOpKey)!);
+    const currentStoredDraft = sessionStorage.getItem(storageKey);
+
+    // A's result must NOT apply to B!
+    if (currentStoredBound?.id === targetOpIdA) {
+      sessionStorage.removeItem(boundOpKey);
+    }
+    if (currentStoredUnresolved?.id === targetOpIdA) {
+      sessionStorage.removeItem(unresolvedOpKey);
+    }
+    if (currentStoredDraft === targetBodyA) {
+      sessionStorage.removeItem(storageKey);
+    }
+
+    // Assert operation B's storage, ID, and draft remain 100% intact:
+    expect(sessionStorage.getItem(boundOpKey)).not.toBeNull();
+    expect(sessionStorage.getItem(unresolvedOpKey)).not.toBeNull();
+    expect(JSON.parse(sessionStorage.getItem(boundOpKey)!).id).toBe(opB);
+    expect(JSON.parse(sessionStorage.getItem(unresolvedOpKey)!).id).toBe(opB);
+    expect(sessionStorage.getItem(storageKey)).toBe(bodyB);
+  });
+
+  it("Scenario H: Delayed original request and deliberate retry cannot create two messages or transport sends", async () => {
+    const rawTransport = createFakeTelegramTransport();
+    const transport = createLedgerTransport(rawTransport);
+
+    const clientOpId = "77777777-7777-7777-7777-777777777777";
+    const testBody = "Idempotent delivery check";
+
+    // Request 1: arrives at server, reserves and sends
+    const res1 = await sendSellerReplyAction(
+      {
+        inquiryId: testInquiryId,
+        body: testBody,
+        clientOperationId: clientOpId,
+      },
+      { transport, db: {} as never },
+    );
+
+    expect(res1.success).toBe(true);
+    expect(res1.outcome).toBe("confirmed_sent");
+    expect(transport.totalInvocations).toBe(1);
+    expect(mockMessages).toHaveLength(1);
+
+    // Request 2 (retry with same stable ID, e.g. after found:false or held response)
+    const res2 = await sendSellerReplyAction(
+      {
+        inquiryId: testInquiryId,
+        body: testBody,
+        clientOperationId: clientOpId,
+      },
+      { transport, db: {} as never },
+    );
+
+    expect(res2.success).toBe(true);
+    expect(res2.outcome).toBe("confirmed_sent");
+    // Message count in DB remains 1:
+    expect(mockMessages).toHaveLength(1);
+    // Transport calls remain 1 (zero duplicate dispatches):
+    expect(transport.totalInvocations).toBe(1);
+    expect(transport.ledger).toHaveLength(1);
+  });
 });

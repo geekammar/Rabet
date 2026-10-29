@@ -52,6 +52,17 @@ function checkStorageAvailability(): boolean {
   }
 }
 
+function verifyStorageOperationMatches(key: string, expectedId: string): boolean {
+  const raw = safeSessionStorageGet(key);
+  if (!raw) return true;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed.id === expectedId;
+  } catch {
+    return false;
+  }
+}
+
 interface BoundOperation {
   id: string;
   body: string;
@@ -123,6 +134,7 @@ export function ReplyComposer({
   }, [unresolvedOp]);
 
   const inFlightOpRef = useRef<{ id: string; body: string } | null>(null);
+  const reconciliationEpochRef = useRef<number>(0);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
@@ -137,42 +149,70 @@ export function ReplyComposer({
   useEffect(() => {
     const targetUnresolved = unresolvedOpRef.current;
     if (!targetUnresolved) return;
-    const op = targetUnresolved;
+    const targetInquiryId = inquiryId;
+    const targetOpId = targetUnresolved.id;
+    const targetOpBody = targetUnresolved.body;
+    const epoch = ++reconciliationEpochRef.current;
 
     let cancelled = false;
     async function reconcileOnMount() {
       try {
         const res = await reconcileSellerOperationAction({
-          inquiryId,
-          operationId: op.id,
+          inquiryId: targetInquiryId,
+          operationId: targetOpId,
         });
         if (cancelled) return;
+        // Verify this result still belongs to the active reconciliation target
+        if (reconciliationEpochRef.current !== epoch) return;
+        if (inquiryId !== targetInquiryId) return;
+        if (
+          boundOpRef.current?.id !== targetOpId &&
+          unresolvedOpRef.current?.id !== targetOpId
+        ) {
+          return;
+        }
 
         if (res.success && res.found) {
           if (res.outcome === "confirmed_sent") {
-            setBoundOp(null);
-            setUnresolvedOp(null);
-            safeSessionStorageRemove(boundOpKey);
-            safeSessionStorageRemove(unresolvedOpKey);
+            if (boundOpRef.current?.id === targetOpId) setBoundOp(null);
+            if (unresolvedOpRef.current?.id === targetOpId) setUnresolvedOp(null);
+            if (verifyStorageOperationMatches(boundOpKey, targetOpId)) {
+              safeSessionStorageRemove(boundOpKey);
+            }
+            if (verifyStorageOperationMatches(unresolvedOpKey, targetOpId)) {
+              safeSessionStorageRemove(unresolvedOpKey);
+            }
             setBody((cur) => {
-              if (cur === op.body) {
-                safeSessionStorageRemove(storageKey);
+              if (cur === targetOpBody) {
+                if (safeSessionStorageGet(storageKey) === targetOpBody) {
+                  safeSessionStorageRemove(storageKey);
+                }
                 return "";
               }
               return cur;
             });
+            setWarningMessage(null);
             setSuccessNotice("Earlier reply was confirmed delivered to the customer.");
             onReplySuccess?.();
           } else if (res.outcome === "confirmed_failed") {
             const failedBound: BoundOperation = {
-              id: op.id,
-              body: op.body,
+              id: targetOpId,
+              body: targetOpBody,
               status: "failed",
             };
-            setBoundOp(failedBound);
-            setUnresolvedOp(null);
-            safeSessionStorageSet(boundOpKey, JSON.stringify(failedBound));
-            safeSessionStorageRemove(unresolvedOpKey);
+            if (boundOpRef.current?.id === targetOpId || !boundOpRef.current) {
+              setBoundOp(failedBound);
+              if (verifyStorageOperationMatches(boundOpKey, targetOpId)) {
+                safeSessionStorageSet(boundOpKey, JSON.stringify(failedBound));
+              }
+            }
+            if (unresolvedOpRef.current?.id === targetOpId) {
+              setUnresolvedOp(null);
+              if (verifyStorageOperationMatches(unresolvedOpKey, targetOpId)) {
+                safeSessionStorageRemove(unresolvedOpKey);
+              }
+            }
+            setWarningMessage(null);
             setErrorMessage(
               "Previous reply delivery failed. Use the Retry button in conversation history, or edit your draft to send a new reply.",
             );
@@ -184,10 +224,29 @@ export function ReplyComposer({
             );
           }
         } else if (res.success && !res.found) {
-          // Absent from server: reservation never completed.
-          // Allow deliberate submission with the stable identity.
-          setUnresolvedOp(null);
-          safeSessionStorageRemove(unresolvedOpKey);
+          // Absent from server: reservation never completed yet.
+          // Keep exact operation ID and authored body.
+          // Allow explicit retry of unchanged text using that same ID without generating a fresh UUID.
+          const retryableBound: BoundOperation = {
+            id: targetOpId,
+            body: targetOpBody,
+            status: "pending",
+          };
+          if (boundOpRef.current?.id === targetOpId || !boundOpRef.current) {
+            setBoundOp(retryableBound);
+            if (verifyStorageOperationMatches(boundOpKey, targetOpId)) {
+              safeSessionStorageSet(boundOpKey, JSON.stringify(retryableBound));
+            }
+          }
+          if (unresolvedOpRef.current?.id === targetOpId) {
+            setUnresolvedOp(null);
+            if (verifyStorageOperationMatches(unresolvedOpKey, targetOpId)) {
+              safeSessionStorageRemove(unresolvedOpKey);
+            }
+          }
+          setWarningMessage(
+            "No record was found yet. Retrying will use the same submission ID.",
+          );
         }
       } catch {
         // Read error does not prove absence; retain identity and warn safely.
@@ -219,7 +278,9 @@ export function ReplyComposer({
       // Reconcile bound / unresolved operation ONLY if sourceMessageId matches:
       setBoundOp((cur) => {
         if (cur && cur.id === sourceMsgId) {
-          safeSessionStorageRemove(boundOpKey);
+          if (verifyStorageOperationMatches(boundOpKey, sourceMsgId)) {
+            safeSessionStorageRemove(boundOpKey);
+          }
           return null;
         }
         return cur;
@@ -227,7 +288,9 @@ export function ReplyComposer({
 
       setUnresolvedOp((cur) => {
         if (cur && cur.id === sourceMsgId) {
-          safeSessionStorageRemove(unresolvedOpKey);
+          if (verifyStorageOperationMatches(unresolvedOpKey, sourceMsgId)) {
+            safeSessionStorageRemove(unresolvedOpKey);
+          }
           return null;
         }
         return cur;
@@ -301,23 +364,43 @@ export function ReplyComposer({
   async function handleManualReconcile() {
     const targetOp = unresolvedOpRef.current;
     if (!targetOp || isCheckingStatus) return;
+    const targetInquiryId = inquiryId;
+    const targetOpId = targetOp.id;
+    const targetOpBody = targetOp.body;
+    const epoch = ++reconciliationEpochRef.current;
 
     setIsCheckingStatus(true);
     try {
       const res = await reconcileSellerOperationAction({
-        inquiryId,
-        operationId: targetOp.id,
+        inquiryId: targetInquiryId,
+        operationId: targetOpId,
       });
+
+      // Verify this result still belongs to the active reconciliation target
+      if (reconciliationEpochRef.current !== epoch) return;
+      if (inquiryId !== targetInquiryId) return;
+      if (
+        boundOpRef.current?.id !== targetOpId &&
+        unresolvedOpRef.current?.id !== targetOpId
+      ) {
+        return;
+      }
 
       if (res.success && res.found) {
         if (res.outcome === "confirmed_sent") {
-          setBoundOp(null);
-          setUnresolvedOp(null);
-          safeSessionStorageRemove(boundOpKey);
-          safeSessionStorageRemove(unresolvedOpKey);
+          if (boundOpRef.current?.id === targetOpId) setBoundOp(null);
+          if (unresolvedOpRef.current?.id === targetOpId) setUnresolvedOp(null);
+          if (verifyStorageOperationMatches(boundOpKey, targetOpId)) {
+            safeSessionStorageRemove(boundOpKey);
+          }
+          if (verifyStorageOperationMatches(unresolvedOpKey, targetOpId)) {
+            safeSessionStorageRemove(unresolvedOpKey);
+          }
           setBody((cur) => {
-            if (cur === targetOp.body) {
-              safeSessionStorageRemove(storageKey);
+            if (cur === targetOpBody) {
+              if (safeSessionStorageGet(storageKey) === targetOpBody) {
+                safeSessionStorageRemove(storageKey);
+              }
               return "";
             }
             return cur;
@@ -327,14 +410,22 @@ export function ReplyComposer({
           onReplySuccess?.();
         } else if (res.outcome === "confirmed_failed") {
           const failedBound: BoundOperation = {
-            id: targetOp.id,
-            body: targetOp.body,
+            id: targetOpId,
+            body: targetOpBody,
             status: "failed",
           };
-          setBoundOp(failedBound);
-          setUnresolvedOp(null);
-          safeSessionStorageSet(boundOpKey, JSON.stringify(failedBound));
-          safeSessionStorageRemove(unresolvedOpKey);
+          if (boundOpRef.current?.id === targetOpId || !boundOpRef.current) {
+            setBoundOp(failedBound);
+            if (verifyStorageOperationMatches(boundOpKey, targetOpId)) {
+              safeSessionStorageSet(boundOpKey, JSON.stringify(failedBound));
+            }
+          }
+          if (unresolvedOpRef.current?.id === targetOpId) {
+            setUnresolvedOp(null);
+            if (verifyStorageOperationMatches(unresolvedOpKey, targetOpId)) {
+              safeSessionStorageRemove(unresolvedOpKey);
+            }
+          }
           setWarningMessage(null);
           setErrorMessage(
             "Previous reply delivery failed. Use the Retry button in conversation history, or edit your draft to send a new reply.",
@@ -346,10 +437,26 @@ export function ReplyComposer({
           );
         }
       } else if (res.success && !res.found) {
-        setUnresolvedOp(null);
-        safeSessionStorageRemove(unresolvedOpKey);
+        // Absent from server: keep exact operation ID and allow deliberate resend using original ID
+        const retryableBound: BoundOperation = {
+          id: targetOpId,
+          body: targetOpBody,
+          status: "pending",
+        };
+        if (boundOpRef.current?.id === targetOpId || !boundOpRef.current) {
+          setBoundOp(retryableBound);
+          if (verifyStorageOperationMatches(boundOpKey, targetOpId)) {
+            safeSessionStorageSet(boundOpKey, JSON.stringify(retryableBound));
+          }
+        }
+        if (unresolvedOpRef.current?.id === targetOpId) {
+          setUnresolvedOp(null);
+          if (verifyStorageOperationMatches(unresolvedOpKey, targetOpId)) {
+            safeSessionStorageRemove(unresolvedOpKey);
+          }
+        }
         setWarningMessage(
-          "No record of this submission was found on the server. You can safely send your message.",
+          "No record was found yet. Retrying will use the same submission ID.",
         );
       } else {
         setWarningMessage(
@@ -401,8 +508,8 @@ export function ReplyComposer({
         return;
       }
 
-      // 2. If the bound operation is unconfirmed, show duplication warning and require explicit seller action
-      if (boundOp.status === "unconfirmed") {
+      // 2. If the bound operation is unconfirmed AND unresolvedOp is still bound to it, require explicit decision
+      if (boundOp.status === "unconfirmed" && unresolvedOp && unresolvedOp.id === boundOp.id) {
         setWarningMessage(
           "A previous delivery attempt with this exact text is unconfirmed and may have reached the customer. Sending again may cause duplicate messages. Edit your message to send as a new reply.",
         );
@@ -426,6 +533,7 @@ export function ReplyComposer({
 
     // Determine operation ID:
     // If repeating unchanged pending or unconfirmed submission, reuse its operation ID.
+    // If text matches unresolvedOp.body, reuse unresolvedOp.id.
     // Otherwise, generate a fresh stable UUID.
     let opId: string;
     if (
@@ -439,6 +547,9 @@ export function ReplyComposer({
     } else {
       opId = crypto.randomUUID();
     }
+
+    // Invalidate any in-flight asynchronous reconciliation checks from previous operations
+    reconciliationEpochRef.current++;
 
     // PERSIST OPERATION IDENTITY BEFORE DISPATCH
     // Synchronously bind and persist operation identity so page reloads or crashes preserve it
@@ -654,6 +765,7 @@ export function ReplyComposer({
                 type="button"
                 variant="outline"
                 size="sm"
+                data-testid="check-status-button"
                 disabled={isCheckingStatus || isSubmitting}
                 onClick={handleManualReconcile}
                 className="h-7 text-xs px-2.5"

@@ -461,6 +461,14 @@ export async function reconcileSellerOperationAction(
     };
   }
 
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Payload must be a non-null object.",
+    };
+  }
+
   const payload = input as unknown as Record<string, unknown>;
   const rawInquiryId = payload.inquiryId;
   if (typeof rawInquiryId !== "string" || !UUID_REGEX.test(rawInquiryId.trim())) {
