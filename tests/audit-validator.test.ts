@@ -91,4 +91,27 @@ describe("validateAuditReport", () => {
     expect(result.classification).toBe("collection_failed");
     expect(result.error).toContain("empty or missing");
   });
+
+  it("rejects when npm exit code is non-zero despite 0 vulnerabilities", () => {
+    const cleanJson = JSON.stringify({
+      auditReportVersion: 2,
+      vulnerabilities: {},
+      metadata: {
+        vulnerabilities: {
+          info: 0,
+          low: 0,
+          moderate: 0,
+          high: 0,
+          critical: 0,
+          total: 0,
+        },
+        dependencies: { prod: 110, total: 915 },
+      },
+    });
+
+    const result = validateAuditReport(cleanJson, 1);
+    expect(result.valid).toBe(false);
+    expect(result.classification).toBe("collection_failed");
+    expect(result.error).toContain("non-zero exit code");
+  });
 });

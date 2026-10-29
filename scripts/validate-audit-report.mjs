@@ -86,12 +86,25 @@ export function validateAuditReport(rawContent, commandExitCode) {
     total,
   };
 
+  const exitCode = Number(commandExitCode ?? 0);
+
+  // If npm reported an error exit code but claim 0 vulnerabilities, it is a collection anomaly
+  if (exitCode !== 0 && total === 0) {
+    return {
+      valid: false,
+      error: `npm exited with non-zero exit code (${exitCode}) despite reporting 0 vulnerabilities.`,
+      classification: "collection_failed",
+      exitCode,
+    };
+  }
+
   if (total === 0) {
     return {
       valid: true,
       classification: "clean",
       total: 0,
       counts,
+      exitCode,
       metadata: data.metadata,
       vulnerabilities: data.vulnerabilities,
     };
@@ -102,6 +115,7 @@ export function validateAuditReport(rawContent, commandExitCode) {
     classification: "findings",
     total,
     counts,
+    exitCode,
     metadata: data.metadata,
     vulnerabilities: data.vulnerabilities,
   };
