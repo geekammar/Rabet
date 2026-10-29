@@ -577,8 +577,14 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
         }),
       ]);
 
-      expect(retry1.success).toBe(true);
-      expect(retry2.success).toBe(true);
+      // Exactly one was the sender, the other was alreadyReserved
+      const sends = [retry1, retry2].filter((r) => !r.alreadyReserved);
+      const cached = [retry1, retry2].filter((r) => r.alreadyReserved);
+      expect(sends).toHaveLength(1);
+      expect(cached).toHaveLength(1);
+      expect(sends[0].success).toBe(true);
+      expect(sends[0].outcome).toBe("confirmed_sent");
+      expect(["confirmed_sent", "recorded_pending"]).toContain(cached[0].outcome);
 
       // Verify stable retry operation UUID
       const expectedRetryOpId = deriveRetryOperationId(failedMsgId);
