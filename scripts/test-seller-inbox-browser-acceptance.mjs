@@ -1773,10 +1773,22 @@ async function runAcceptance() {
   // 11. Wait for Operation B to complete delivery
   await waitForCondition(
     async () => {
-      const body = await cdp.eval("document.body?.innerText || ''");
-      return body.includes("Sent via Telegram") || body.includes("Reply sent to customer");
+      const bRows = await pgClient`
+        SELECT id, delivery_status FROM inquiry_message WHERE id = ${opBId};
+      `;
+      return bRows.length === 1 && bRows[0].delivery_status === "sent";
     },
-    "Operation B delivery completion",
+    "Operation B delivery status sent in database",
+    10000,
+    200
+  );
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes("Reply sent to customer") || body.includes(opBText);
+    },
+    "Operation B delivery completion in UI",
     10000,
     200
   );
