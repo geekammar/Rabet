@@ -1,6 +1,6 @@
 # Phase 09 Handoff: Seller Inbox, Reliable Replies & Conversation Lifecycle
 
-**Status:** In Review (PR #19 on branch `feat/phase-09-seller-inbox`)
+**Status:** Merged into `main` via PR #19 (`77fc463e088bb62224c396563c4831dd8aa21683`). Live production cutover and interactive device verification pending Phase 10.
 
 ---
 

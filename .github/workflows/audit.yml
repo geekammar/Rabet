@@ -1,0 +1,155 @@
+name: Dependency Audit
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Run npm audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run audit validator self-test
+        run: |
+          node - <<'NODE'
+          import assert from "node:assert";
+          import { validateAuditReport } from "./scripts/validate-audit-report.mjs";
+
+          console.log("Testing audit validator logic on hosted runner...");
+
+          // 1. Clean report
+          const cleanReport = JSON.stringify({
+            auditReportVersion: 2,
+            vulnerabilities: {},
+            metadata: {
+              vulnerabilities: { total: 0, info: 0, low: 0, moderate: 0, high: 0, critical: 0 },
+              dependencies: { prod: 110, total: 915 }
+            }
+          });
+          const cleanRes = validateAuditReport(cleanReport, 0);
+          assert.strictEqual(cleanRes.valid, true, "Clean report must be valid");
+          assert.strictEqual(cleanRes.classification, "clean", "Clean report must classify as clean");
+          assert.strictEqual(cleanRes.total, 0);
+
+          // 2. Findings report
+          const findingsReport = JSON.stringify({
+            auditReportVersion: 2,
+            vulnerabilities: { deepmerge: { severity: "high" } },
+            metadata: {
+              vulnerabilities: { total: 16, info: 0, low: 1, moderate: 9, high: 6, critical: 0 },
+              dependencies: { prod: 110, total: 915 }
+            }
+          });
+          const findingsRes = validateAuditReport(findingsReport, 1);
+          assert.strictEqual(findingsRes.valid, true, "Findings report must be valid");
+          assert.strictEqual(findingsRes.classification, "findings", "Findings report must classify as findings");
+          assert.strictEqual(findingsRes.total, 16);
+
+          // 3. Error payload (collection failure)
+          const errorPayload = JSON.stringify({
+            error: { code: "ENOTFOUND", summary: "registry lookup failed" }
+          });
+          const errRes = validateAuditReport(errorPayload, 1);
+          assert.strictEqual(errRes.valid, false, "Error payload must not be valid");
+          assert.strictEqual(errRes.classification, "collection_failed");
+
+          // 4. Malformed JSON
+          const malformedRes = validateAuditReport("{ not json", 1);
+          assert.strictEqual(malformedRes.valid, false, "Malformed JSON must not be valid");
+          assert.strictEqual(malformedRes.classification, "collection_failed");
+
+          console.log("✓ Audit validator self-test passed cleanly.");
+          NODE
+
+      - name: Collect npm audit (production dependencies --omit=dev)
+        id: audit-prod
+        run: |
+          set +e
+          npm audit --omit=dev --json > audit-prod.json 2>&1
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "PROD_EXIT=$EXIT_CODE" >> "$GITHUB_ENV"
+          echo "npm audit (--omit=dev) completed with exit code: $EXIT_CODE"
+
+      - name: Collect npm audit (all dependencies)
+        id: audit-all
+        run: |
+          set +e
+          npm audit --json > audit-all.json 2>&1
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "ALL_EXIT=$EXIT_CODE" >> "$GITHUB_ENV"
+          echo "npm audit (all) completed with exit code: $EXIT_CODE"
+
+      - name: Validate production audit report
+        run: |
+          node scripts/validate-audit-report.mjs audit-prod.json "${{ env.PROD_EXIT }}" prod
+
+      - name: Validate full-tree audit report
+        run: |
+          node scripts/validate-audit-report.mjs audit-all.json "${{ env.ALL_EXIT }}" all
+
+      - name: Generate audit summary artifact
+        if: always()
+        run: |
+          node - <<'NODE'
+          import fs from "node:fs";
+
+          let summary = "======================================================\n";
+          summary += "DEPENDENCY AUDIT EVIDENCE SUMMARY\n";
+          summary += `Generated: ${new Date().toISOString()}\n`;
+          summary += "======================================================\n\n";
+
+          function appendReport(file, label) {
+            summary += `--- ${label} (${file}) ---\n`;
+            if (!fs.existsSync(file)) {
+              summary += `File missing: ${file}\n\n`;
+              return;
+            }
+            try {
+              const data = JSON.parse(fs.readFileSync(file, "utf8"));
+              if (data.metadata?.vulnerabilities) {
+                summary += `Vulnerabilities: ${JSON.stringify(data.metadata.vulnerabilities, null, 2)}\n`;
+              }
+              if (data.metadata?.dependencies) {
+                summary += `Dependencies: ${JSON.stringify(data.metadata.dependencies, null, 2)}\n`;
+              }
+              if (data.vulnerabilities) {
+                summary += `Packages with advisories: ${Object.keys(data.vulnerabilities).join(", ")}\n`;
+              }
+            } catch (err) {
+              summary += `Failed to parse ${file}: ${err.message}\n`;
+            }
+            summary += "\n";
+          }
+
+          appendReport("audit-prod.json", "PRODUCTION DEPENDENCIES (--omit=dev)");
+          appendReport("audit-all.json", "ALL DEPENDENCIES (INCLUDING DEV)");
+
+          fs.writeFileSync("audit-summary.txt", summary, "utf8");
+          console.log("Saved audit-summary.txt");
+          NODE
+
+      - name: Upload sanitized audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-reports
+          path: |
+            audit-all.json
+            audit-prod.json
+            audit-summary.txt
+          if-no-files-found: error
