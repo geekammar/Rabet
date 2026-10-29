@@ -197,7 +197,7 @@ Executed against local Next.js production build (`next start`), headless Chromiu
 
 ## 8. Remaining Limitations & Reviewer Handoff
 
-Phase 09 remains **IN REVIEW** on PR #19 (`feat/phase-09-seller-inbox`). It must not be marked merged or deployed to production until independent review is complete and the GitHub Actions runner billing blocker is cleared by the repository owner.
+Phase 09 remains **IN REVIEW** on PR #19 (`feat/phase-09-seller-inbox`). It must not be marked merged or deployed to production until independent review is complete and the GitHub Actions suite passes with clean evidence.
 
 ### Explicit Non-Scope / Phase 10 Boundaries:
 1. **Payments, Orders & Checkout:** Out of scope for Phase 09.
