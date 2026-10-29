@@ -483,10 +483,6 @@ async function runAcceptance() {
       `      } else if (isTriggerUnconfirmed) {\n` +
       `        responseStatus = 200;\n` +
       `        responseBody = { ok: true, result: { message_id: -1 } };\n` +
-      `      } else if (isTriggerHold) {\n` +
-      `        await new Promise((r) => setTimeout(r, 2000));\n` +
-      `        responseStatus = 200;\n` +
-      `        responseBody = { ok: true, result: { message_id: 8800 + callIndex } };\n` +
       `      }\n` +
       `      if (ledgerFile) {\n` +
       `        ledger.push({\n` +
@@ -498,6 +494,9 @@ async function runAcceptance() {
       `          response: responseBody,\n` +
       `        });\n` +
       `        fs.writeFileSync(ledgerFile, JSON.stringify(ledger, null, 2), "utf8");\n` +
+      `      }\n` +
+      `      if (isTriggerHold) {\n` +
+      `        await new Promise((r) => setTimeout(r, 3000));\n` +
       `      }\n` +
       `      return new Response(JSON.stringify(responseBody), {\n` +
       `        status: responseStatus,\n` +
@@ -1305,7 +1304,16 @@ async function runAcceptance() {
   const holdOpId = capturedHoldOp.id;
   log(`✓ Operation ID persisted before response completion: ${holdOpId}`);
 
-  // Reload the browser while response is still in flight
+  // Confirm that server action committed reservation and reached the Telegram proxy hold
+  await waitForCondition(
+    async () => readLedger().some((x) => x.text === holdDraftText),
+    "dispatch reached Telegram proxy hold",
+    5000,
+    100
+  );
+  log("✓ Confirmed server action committed reservation and reached Telegram dispatch hold.");
+
+  // Reload the browser while response is still in flight (during the 3000ms delay)
   log("Reloading browser page while request is held in flight...");
   await cdp.send("Page.reload");
   await sleep(1000);
