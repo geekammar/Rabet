@@ -1,6 +1,6 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 09 — Complete the Seller Inbox, Reliable Replies & Conversation Lifecycle (implemented, in review)**
+Current phase: **Phase 10A — Establish the Verified Launch Baseline & Prepare the First MVP Cutover (in review)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
@@ -14,6 +14,7 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 [PHASE_06B_HANDOFF.md](./PHASE_06B_HANDOFF.md) for Non-Conversation Product Action Runtime handoff,
 [PHASE_07_HANDOFF.md](./PHASE_07_HANDOFF.md) for Unified Customer Inquiries, Support & Inbound Messages handoff,
 [PHASE_09_HANDOFF.md](./PHASE_09_HANDOFF.md) for Seller Inbox, Reliable Replies & Lifecycle handoff,
+[PHASE_10A_LAUNCH_READINESS.md](./PHASE_10A_LAUNCH_READINESS.md) for Launch Baseline & Cutover Preparation,
 [NEON_DEV_SETUP.md](./NEON_DEV_SETUP.md) for the one-command development
 database setup wizard.
 
@@ -25,17 +26,19 @@ database setup wizard.
 > the **Phase 06-A** Telegram Catalog Journey pass,
 > the **Phase 06-B** Non-Conversation Product Action Runtime pass,
 > the **Phase 07** Customer Inquiries & Inbound Messages pass,
-> and the **Phase 09** Seller Inbox, Reliable Replies & Conversation Lifecycle pass.
-> Phases 01, 02, 03A, 03B, 03B-B, 03B-C, 03C-A, 04-A, 04-B, 05-A, 05-B1, 05-B2, 06-A, 06-B, and 07 are merged into `main`:
+> the **Phase 09** Seller Inbox, Reliable Replies & Conversation Lifecycle pass,
+> and the **Phase 10A** Launch Readiness & Cutover Preparation pass.
+> Phases 01, 02, 03A, 03B, 03B-B, 03B-C, 03C-A, 04-A, 04-B, 05-A, 05-B1, 05-B2, 06-A, 06-B, 07, and 09 are merged into `main`:
 > Phase 04-A was merged into `main` via PR #10, Phase 04-B was merged into `main`
 > via PR #12 (`fd91ccdb6802ac06cfdc041a570990547ef50a37`), Phase 05-A was merged into `main`
 > via PR #13 (`b9c1883bd3f608d736d89cf31971c7d62f16d132`), Phase 05-B1 was merged into `main`
 > via PR #14 (`c88430db2fb2b834d841cdbce85de64de0f35ae0`), Phase 05-B2 was merged into `main`
 > via PR #15 (`ecee24546ce67795fc091a7392447dec88ad9a59`), Phase 06-A was merged into `main`
 > via PR #16 (`0d4e2f1ae66217c5eb32c610ebd70318a4f3f67d`), Phase 06-B was merged into `main`
-> via PR #17 (`571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`), and Phase 07 was merged into `main`
-> via PR #18 (`cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`). Phase 09 is implemented
-> on `feat/phase-09-seller-inbox` awaiting review.
+> via PR #17 (`571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`), Phase 07 was merged into `main`
+> via PR #18 (`cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`), and Phase 09 was merged into `main`
+> via PR #19 (`77fc463e088bb62224c396563c4831dd8aa21683`). Phase 10A is prepared and in review
+> on `feat/phase-10a-launch-readiness`.
 > Note that tree maintenance (reparenting, reordering, deletion) remains deferred from the launch-critical path, and launch hardening belongs to Phase 10.
 
 ---
@@ -61,8 +64,8 @@ database setup wizard.
 | **Phase 06-B** | Complete Non-Conversation Product Action Runtime | ✅ **Merged into `main`** ([PR #17](https://github.com/geekammar/Rabet/pull/17), `571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`) — Runtime execution for `SEND_TEMPLATE_MESSAGE` (real placeholder context, sequential chunk preservation, navigation on final chunk), `OPEN_URL` (intermediate tap check, WHATWG HTTPS validation, dedicated URL button without callback_data), `NAVIGATE_CATALOG` (hierarchy and ancestry checks, destination category page 1 / product card rendering with single acknowledgement), and deferred `START_INQUIRY` / `OPEN_SUPPORT` safeguards |
 | **Phase 07** | Unified Customer Inquiries, Support & Inbound Messages | ✅ **Merged into `main`** ([PR #18](https://github.com/geekammar/Rabet/pull/18), `cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`) — Customer side complete: `START_INQUIRY` (creates/resumes active product inquiry with frozen localized snapshot and option ancestry), `OPEN_SUPPORT` (creates/resumes general or category support), inbound text message routing (`/start`, `/reply <REF> <msg>`, single active routing, multiple active disambiguation, 0 active auto-general-support), durable receipts bound to `telegram_update.payload.receipt`, atomic serialization, and retry idempotency |
 | **Phase 08** | Payment integration (**deferred** — Telegram Stars, future) | Deferred — see ADR-013 |
-| **Phase 09** | Complete the Seller Inbox, Reliable Replies & Conversation Lifecycle | 🟦 **Implemented on `feat/phase-09-seller-inbox` (in review)** — Seller side complete: unified inbox (`/inquiries`) with status & type filters and exact reference search, thread view (`/inquiries/[id]`) with frozen product context & message history, durable plain-text seller replies with prefix `[INQ-XXXXXX]\n\n`, atomic Neon batch reservation, deduplicated transport delivery via stable operation UUID, explicit retry of failed/stale deliveries, honest diagnostics, and strict conversation lifecycle transitions (`open`, `waiting_on_customer`, `resolved`, `closed`, `reopen` with active duplicate conflict checks) |
-| **Phase 10** | Testing, security & release hardening | Not started |
+| **Phase 09** | Complete the Seller Inbox, Reliable Replies & Conversation Lifecycle | ✅ **Merged into `main`** ([PR #19](https://github.com/geekammar/Rabet/pull/19), `77fc463e088bb62224c396563c4831dd8aa21683`) — Seller side complete: unified inbox (`/inquiries`) with status & type filters and exact reference search, thread view (`/inquiries/[id]`) with frozen product context & message history, durable plain-text seller replies with prefix `[INQ-XXXXXX]\n\n`, atomic Neon batch reservation, deduplicated transport delivery via stable operation UUID, explicit retry of failed/stale deliveries, honest diagnostics, and strict conversation lifecycle transitions (`open`, `waiting_on_customer`, `resolved`, `closed`, `reopen` with active duplicate conflict checks). Live production acceptance and physical device verification pending Phase 10. |
+| **Phase 10** | Testing, security & release hardening | 🟦 **Phase 10A in review** ([docs/PHASE_10A_LAUNCH_READINESS.md](./PHASE_10A_LAUNCH_READINESS.md)) — Verified baseline established, evidence-backed readiness matrix, launch blockers identified (Vercel edge SSO interception, production DB unprovisioned, login rate limiting), cutover runbook and physical Android acceptance checklist documented. Live production cutover and physical device acceptance pending Phase 10B. |
 
 The base Vercel deployment and the GitHub integration were configured during
 Phase 01, but release hardening (Phase 10) is **not** complete.
@@ -994,3 +997,17 @@ passing:
 
 No service worker is registered, so the installed app still requires a network
 connection — this is intentional for an admin application in this phase.
+
+---
+
+## What was done in Phase 10A
+
+Phase 10A established the actual, evidence-backed production baseline following the merge of Phase 09 (PR #19, commit `77fc463e088bb62224c396563c4831dd8aa21683`). Full details are recorded in [docs/PHASE_10A_LAUNCH_READINESS.md](./PHASE_10A_LAUNCH_READINESS.md).
+
+Key verified findings:
+1. **Repository & CI Baseline:** Commit `77fc463` is the merge commit on `main`. GitHub Actions CI run `40956004778` passed all jobs cleanly (lint, typecheck, build, auth, migrations, DB integration, and CDP headless Chromium acceptance).
+2. **Vercel Production State:** Automatic deployment `7424358926` is `READY` at `https://rabet-figy1ipn9-ammarj1.vercel.app` and `https://rabet-ammarj1.vercel.app`.
+3. **Edge Interception Blocker:** Direct HTTP inspection verified that Vercel Deployment Protection (SSO) is active on the Production environment, returning `HTTP/2 302` to `https://vercel.com/sso-api` for all requests, including `POST /api/telegram/webhook`. This blocks Telegram from delivering updates.
+4. **Database Readiness Blocker:** No independent `Rabet_prod` database or migration runner exists. Migration workflows in the repo are strictly pinned to `Rabet_dev`.
+5. **Login Abuse Protection:** Argon2id password hashing is active, but no request throttling exists on authentication endpoints.
+6. **Audits & Deliverables:** Added `.github/workflows/audit.yml` for non-invasive audit evidence on GitHub runners; documented the complete Cutover & Rollback Runbook and the 10-point Physical Android Acceptance Checklist. Prepared bounded scope for Phase 10B.

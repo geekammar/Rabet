@@ -3,10 +3,7 @@ name: Dependency Audit
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - 'package.json'
-      - 'package-lock.json'
-      - '.github/workflows/audit.yml'
+    branches: [main]
 
 permissions:
   contents: read
