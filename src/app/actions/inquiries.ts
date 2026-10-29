@@ -11,6 +11,7 @@ import {
   sendSellerReply,
   transitionInquiryStatus,
   type InquiryLifecycleTargetStatus,
+  type SellerDeliveryOutcome,
 } from "@/lib/data/seller-inbox";
 import { createFetchTelegramTransport } from "@/lib/telegram/transport";
 import type { TelegramTransport } from "@/lib/telegram/types";
@@ -20,6 +21,7 @@ const UUID_REGEX =
 
 export interface InquiryActionResult<T = unknown> {
   success: boolean;
+  outcome?: SellerDeliveryOutcome;
   message?: string;
   code?: string;
   errors?: Record<string, string>;
@@ -29,7 +31,7 @@ export interface InquiryActionResult<T = unknown> {
 export interface SendReplyActionInput {
   inquiryId: string;
   body: string;
-  clientOperationId?: string;
+  clientOperationId: string;
 }
 
 export interface RetryReplyActionInput {
@@ -66,10 +68,11 @@ function resolveTransport(override?: TelegramTransport): TelegramTransport {
  *
  * Enforces:
  * 1. requireAdmin() called first before DB or network operations.
- * 2. Server-side UUID and body validation.
- * 3. Atomic DB reservation before Telegram send.
- * 4. Idempotent submission via stable operation UUID.
- * 5. Honest delivery tracking and safe diagnostics.
+ * 2. Server-side UUID, payload shape, and body validation.
+ * 3. Client operation ID is required and must be a valid UUID.
+ * 4. Atomic DB reservation before Telegram send.
+ * 5. Idempotent submission via stable operation UUID.
+ * 6. Honest delivery tracking distinguishing confirmed sent, failed, pending, and unconfirmed.
  */
 export async function sendSellerReplyAction(
   input: SendReplyActionInput,
@@ -77,16 +80,26 @@ export async function sendSellerReplyAction(
 ): Promise<InquiryActionResult> {
   await requireAdmin();
 
-  const inquiryId = input.inquiryId?.trim();
-  if (!inquiryId || !UUID_REGEX.test(inquiryId)) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Payload must be a non-null object.",
+    };
+  }
+
+  const payload = input as unknown as Record<string, unknown>;
+  const rawInquiryId = payload.inquiryId;
+  if (typeof rawInquiryId !== "string" || !UUID_REGEX.test(rawInquiryId.trim())) {
     return {
       success: false,
       code: "INVALID_INPUT",
       message: "Valid inquiry ID is required.",
     };
   }
+  const inquiryId = rawInquiryId.trim();
 
-  const rawBody = input.body;
+  const rawBody = payload.body;
   if (typeof rawBody !== "string" || rawBody.trim().length === 0) {
     return {
       success: false,
@@ -95,18 +108,15 @@ export async function sendSellerReplyAction(
     };
   }
 
-  let operationId: string | undefined;
-  if (input.clientOperationId) {
-    const trimmedOpId = input.clientOperationId.trim();
-    if (!UUID_REGEX.test(trimmedOpId)) {
-      return {
-        success: false,
-        code: "INVALID_INPUT",
-        message: "Client operation ID must be a valid UUID.",
-      };
-    }
-    operationId = trimmedOpId;
+  const rawOpId = payload.clientOperationId;
+  if (typeof rawOpId !== "string" || !UUID_REGEX.test(rawOpId.trim())) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Client operation ID is required and must be a valid UUID.",
+    };
   }
+  const operationId = rawOpId.trim();
 
   try {
     const db = overrides?.db ?? getDb();
@@ -121,20 +131,42 @@ export async function sendSellerReplyAction(
     revalidatePath("/inquiries");
     revalidatePath(`/inquiries/${inquiryId}`);
 
-    if (!result.success) {
+    if (result.outcome === "confirmed_sent") {
+      return {
+        success: true,
+        outcome: "confirmed_sent",
+        message: result.alreadyReserved
+          ? "Reply was already sent successfully."
+          : "Reply sent successfully.",
+        data: result.message,
+      };
+    }
+
+    if (result.outcome === "recorded_pending") {
       return {
         success: false,
-        code: "DELIVERY_FAILED",
-        message: `Reply was recorded but delivery failed (${result.error ?? "Telegram error"}). You may retry sending.`,
+        outcome: "recorded_pending",
+        code: "DELIVERY_PENDING",
+        message: "Reply is already recorded and pending delivery.",
+        data: result.message,
+      };
+    }
+
+    if (result.outcome === "unconfirmed_outcome") {
+      return {
+        success: false,
+        outcome: "unconfirmed_outcome",
+        code: "DELIVERY_UNCONFIRMED",
+        message: `Delivery status is unconfirmed (${result.error}). The message may have reached the customer.`,
         data: result.message,
       };
     }
 
     return {
-      success: true,
-      message: result.alreadyReserved
-        ? "Reply was already processed."
-        : "Reply sent successfully.",
+      success: false,
+      outcome: "confirmed_failed",
+      code: "DELIVERY_FAILED",
+      message: `Reply was recorded but delivery failed (${result.error ?? "Telegram error"}). You may retry sending.`,
       data: result.message,
     };
   } catch (error) {
@@ -161,6 +193,7 @@ export async function sendSellerReplyAction(
  * 2. Deterministic retry ID derivation.
  * 3. Source message validation.
  * 4. Active conversation status.
+ * 5. Honest outcome reporting (distinguishing sent, pending, failed, unconfirmed).
  */
 export async function retrySellerReplyAction(
   input: RetryReplyActionInput,
@@ -168,24 +201,37 @@ export async function retrySellerReplyAction(
 ): Promise<InquiryActionResult> {
   await requireAdmin();
 
-  const inquiryId = input.inquiryId?.trim();
-  const sourceMessageId = input.sourceMessageId?.trim();
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Payload must be a non-null object.",
+    };
+  }
 
-  if (!inquiryId || !UUID_REGEX.test(inquiryId)) {
+  const payload = input as unknown as Record<string, unknown>;
+  const rawInquiryId = payload.inquiryId;
+  if (typeof rawInquiryId !== "string" || !UUID_REGEX.test(rawInquiryId.trim())) {
     return {
       success: false,
       code: "INVALID_INPUT",
       message: "Valid inquiry ID is required.",
     };
   }
+  const inquiryId = rawInquiryId.trim();
 
-  if (!sourceMessageId || !UUID_REGEX.test(sourceMessageId)) {
+  const rawSourceMsgId = payload.sourceMessageId;
+  if (
+    typeof rawSourceMsgId !== "string" ||
+    !UUID_REGEX.test(rawSourceMsgId.trim())
+  ) {
     return {
       success: false,
       code: "INVALID_INPUT",
       message: "Valid source message ID is required.",
     };
   }
+  const sourceMessageId = rawSourceMsgId.trim();
 
   try {
     const db = overrides?.db ?? getDb();
@@ -199,20 +245,42 @@ export async function retrySellerReplyAction(
     revalidatePath("/inquiries");
     revalidatePath(`/inquiries/${inquiryId}`);
 
-    if (!result.success) {
+    if (result.outcome === "confirmed_sent") {
+      return {
+        success: true,
+        outcome: "confirmed_sent",
+        message: result.alreadyReserved
+          ? "Retry was already sent successfully."
+          : "Reply retried successfully.",
+        data: result.message,
+      };
+    }
+
+    if (result.outcome === "recorded_pending") {
       return {
         success: false,
-        code: "DELIVERY_FAILED",
-        message: `Retry was recorded but delivery failed (${result.error ?? "Telegram error"}).`,
+        outcome: "recorded_pending",
+        code: "DELIVERY_PENDING",
+        message: "Retry is already in progress and pending delivery.",
+        data: result.message,
+      };
+    }
+
+    if (result.outcome === "unconfirmed_outcome") {
+      return {
+        success: false,
+        outcome: "unconfirmed_outcome",
+        code: "DELIVERY_UNCONFIRMED",
+        message: `Delivery status is unconfirmed (${result.error}). The message may have reached the customer.`,
         data: result.message,
       };
     }
 
     return {
-      success: true,
-      message: result.alreadyReserved
-        ? "Retry was already sent."
-        : "Reply retried successfully.",
+      success: false,
+      outcome: "confirmed_failed",
+      code: "DELIVERY_FAILED",
+      message: `Retry was recorded but delivery failed (${result.error ?? "Telegram error"}).`,
       data: result.message,
     };
   } catch (error) {
@@ -237,7 +305,8 @@ export async function retrySellerReplyAction(
  * Enforces:
  * 1. requireAdmin() called first.
  * 2. Strict transition allowlist.
- * 3. Reopen conflict checks under lock.
+ * 3. Authoritative concurrency protection under locks.
+ * 4. Explicit distinction between actual transition and already-at-target requests.
  */
 export async function transitionInquiryStatusAction(
   input: TransitionStatusActionInput,
@@ -245,14 +314,24 @@ export async function transitionInquiryStatusAction(
 ): Promise<InquiryActionResult> {
   await requireAdmin();
 
-  const inquiryId = input.inquiryId?.trim();
-  if (!inquiryId || !UUID_REGEX.test(inquiryId)) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Payload must be a non-null object.",
+    };
+  }
+
+  const payload = input as unknown as Record<string, unknown>;
+  const rawInquiryId = payload.inquiryId;
+  if (typeof rawInquiryId !== "string" || !UUID_REGEX.test(rawInquiryId.trim())) {
     return {
       success: false,
       code: "INVALID_INPUT",
       message: "Valid inquiry ID is required.",
     };
   }
+  const inquiryId = rawInquiryId.trim();
 
   const validStatuses: InquiryLifecycleTargetStatus[] = [
     "open",
@@ -263,7 +342,7 @@ export async function transitionInquiryStatusAction(
     return {
       success: false,
       code: "INVALID_INPUT",
-      message: `Invalid target status "${input.targetStatus}".`,
+      message: `Invalid target status "${String(input.targetStatus)}".`,
     };
   }
 
@@ -287,7 +366,9 @@ export async function transitionInquiryStatusAction(
 
     return {
       success: true,
-      message: `Inquiry successfully ${label}.`,
+      message: updated.alreadyAtTarget
+        ? `Inquiry is already ${label}.`
+        : `Inquiry successfully ${label}.`,
       data: updated,
     };
   } catch (error) {

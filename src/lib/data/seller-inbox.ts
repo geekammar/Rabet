@@ -26,7 +26,22 @@ export type SellerInquiryFilterStatus =
   | "resolved"
   | "closed";
 
+export const VALID_SELLER_FILTER_STATUSES: ReadonlySet<string> = new Set([
+  "active",
+  "all",
+  "open",
+  "waiting_on_customer",
+  "resolved",
+  "closed",
+]);
+
 export type SellerInquiryFilterType = "all" | "product" | "support";
+
+export const VALID_SELLER_FILTER_TYPES: ReadonlySet<string> = new Set([
+  "all",
+  "product",
+  "support",
+]);
 
 export interface ListSellerInquiriesParams {
   status?: SellerInquiryFilterStatus;
@@ -120,7 +135,57 @@ export async function listSellerInquiries(
   params?: ListSellerInquiriesParams,
 ): Promise<ListSellerInquiriesResult> {
   try {
-    const page = Math.max(1, params?.page ?? 1);
+    if (params?.status !== undefined) {
+      if (
+        typeof params.status !== "string" ||
+        !VALID_SELLER_FILTER_STATUSES.has(params.status)
+      ) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          `Invalid status filter: "${String(params.status)}".`,
+        );
+      }
+    }
+
+    if (params?.type !== undefined) {
+      if (
+        typeof params.type !== "string" ||
+        !VALID_SELLER_FILTER_TYPES.has(params.type)
+      ) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          `Invalid type filter: "${String(params.type)}".`,
+        );
+      }
+    }
+
+    if (params?.page !== undefined) {
+      if (
+        typeof params.page !== "number" ||
+        !Number.isSafeInteger(params.page) ||
+        params.page < 1
+      ) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "Page must be a positive safe integer.",
+        );
+      }
+    }
+
+    if (params?.pageSize !== undefined) {
+      if (
+        typeof params.pageSize !== "number" ||
+        !Number.isSafeInteger(params.pageSize) ||
+        params.pageSize < 1
+      ) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "PageSize must be a positive safe integer.",
+        );
+      }
+    }
+
+    const page = Math.min(params?.page ?? 1, 10_000);
     const pageSize = Math.min(100, Math.max(1, params?.pageSize ?? 20));
     const offset = (page - 1) * pageSize;
 
@@ -350,7 +415,33 @@ export async function listInquiryMessagesPaged(
   params?: { page?: number; pageSize?: number },
 ): Promise<ListInquiryMessagesPagedResult> {
   try {
-    const page = Math.max(1, params?.page ?? 1);
+    if (params?.page !== undefined) {
+      if (
+        typeof params.page !== "number" ||
+        !Number.isSafeInteger(params.page) ||
+        params.page < 1
+      ) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "Page must be a positive safe integer.",
+        );
+      }
+    }
+
+    if (params?.pageSize !== undefined) {
+      if (
+        typeof params.pageSize !== "number" ||
+        !Number.isSafeInteger(params.pageSize) ||
+        params.pageSize < 1
+      ) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "PageSize must be a positive safe integer.",
+        );
+      }
+    }
+
+    const page = Math.min(params?.page ?? 1, 10_000);
     const pageSize = Math.min(100, Math.max(1, params?.pageSize ?? 50));
     const offset = (page - 1) * pageSize;
 
@@ -640,6 +731,12 @@ export async function reserveSellerReply(
   }
 }
 
+export type SellerDeliveryOutcome =
+  | "confirmed_sent"
+  | "confirmed_failed"
+  | "recorded_pending"
+  | "unconfirmed_outcome";
+
 export interface CompleteDeliveryParams {
   messageId: string;
   inquiryReference: string;
@@ -651,11 +748,19 @@ export interface CompleteDeliveryParams {
 export type CompleteDeliveryResult =
   | {
       success: true;
+      outcome: "confirmed_sent";
       messageId: string;
-      telegramMessageId?: number;
+      telegramMessageId: number;
     }
   | {
       success: false;
+      outcome: "confirmed_failed";
+      messageId: string;
+      error: string;
+    }
+  | {
+      success: false;
+      outcome: "unconfirmed_outcome";
       messageId: string;
       error: string;
     };
@@ -664,10 +769,12 @@ export type CompleteDeliveryResult =
  * Delivers a reserved seller reply through Telegram and persists honest delivery results.
  *
  * Guarantees:
- * - Updates only message delivery metadata.
- * - Never overwrites inquiry status (e.g. if customer replied concurrently or admin closed thread).
- * - Classifies errors safely.
- * - Flags customer.isBlocked only on explicit blocked-user responses.
+ * - Obtains transport outcome separately from persistence outcome.
+ * - Persistence failure after Telegram acceptance never claims Telegram rejected delivery.
+ * - Validates positive integer Telegram message ID before confirming sent.
+ * - Checks affected rows / RETURNING on completion update rather than assuming success.
+ * - Preserves existing terminal sent state; late/repeated errors cannot downgrade it.
+ * - Never changes inquiry lifecycle status during delivery completion.
  */
 export async function completeSellerReplyDelivery(
   db: Database,
@@ -679,67 +786,195 @@ export async function completeSellerReplyDelivery(
     params.body,
   );
 
+  // 1. Obtain transport outcome separately
+  let sendRes: import("@/lib/telegram/types").TelegramSendResult;
+  let transportException: unknown = null;
+
   try {
-    const sendRes = await transport.sendMessage({
+    sendRes = await transport.sendMessage({
       chatId: params.telegramChatId,
       text: outgoingText,
     });
+  } catch (err) {
+    transportException = err;
+    sendRes = {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      errorKind: "network_error",
+    };
+  }
 
-    if (sendRes.ok) {
-      await db
-        .update(inquiryMessage)
-        .set({
-          deliveryStatus: "sent",
-          telegramMessageId: sendRes.messageId ?? null,
-          deliveredAt: new Date(),
-          deliveryError: null,
-        })
-        .where(eq(inquiryMessage.id, params.messageId));
-
+  // 2. Separate persistence outcome based on transport result
+  if (sendRes.ok) {
+    // Validate that a successful send result includes the required valid Telegram message ID
+    if (
+      typeof sendRes.messageId !== "number" ||
+      !Number.isInteger(sendRes.messageId) ||
+      sendRes.messageId <= 0
+    ) {
       return {
-        success: true,
+        success: false,
+        outcome: "unconfirmed_outcome",
         messageId: params.messageId,
-        telegramMessageId: sendRes.messageId,
+        error:
+          "Telegram acknowledged delivery but did not return a valid message ID.",
       };
     }
 
-    // Handled failure
-    const safeDiag = formatSafeDiagnostic({
-      category: sendRes.errorKind ?? "api_error",
-      httpStatus: sendRes.httpStatus,
-      retryAfterSeconds: sendRes.retryAfterSeconds,
-    });
+    const validTelegramMessageId = sendRes.messageId;
 
-    if (sendRes.isBlocked || sendRes.errorKind === "blocked") {
-      await setCustomerBlockedStatus(db, params.customerId, true);
+    try {
+      // 4. Completion checks affected rows/RETURNING rather than assuming an UPDATE succeeded.
+      // 6. Only transition pending -> sent, preventing regression of terminal states.
+      const [updated] = await db
+        .update(inquiryMessage)
+        .set({
+          deliveryStatus: "sent",
+          telegramMessageId: validTelegramMessageId,
+          deliveredAt: new Date(),
+          deliveryError: null,
+        })
+        .where(
+          and(
+            eq(inquiryMessage.id, params.messageId),
+            eq(inquiryMessage.deliveryStatus, "pending"),
+          ),
+        )
+        .returning();
+
+      if (!updated) {
+        // Zero rows affected: inspect authoritative database state
+        const [current] = await db
+          .select({
+            id: inquiryMessage.id,
+            deliveryStatus: inquiryMessage.deliveryStatus,
+            telegramMessageId: inquiryMessage.telegramMessageId,
+          })
+          .from(inquiryMessage)
+          .where(eq(inquiryMessage.id, params.messageId))
+          .limit(1);
+
+        if (current?.deliveryStatus === "sent") {
+          // Terminal sent state already preserved
+          return {
+            success: true,
+            outcome: "confirmed_sent",
+            messageId: params.messageId,
+            telegramMessageId:
+              current.telegramMessageId ?? validTelegramMessageId,
+          };
+        }
+
+        // Missing or suppressed completion update does not return confirmed sent
+        return {
+          success: false,
+          outcome: "unconfirmed_outcome",
+          messageId: params.messageId,
+          error:
+            "Telegram accepted delivery, but updating delivery status affected 0 rows.",
+        };
+      }
+
+      return {
+        success: true,
+        outcome: "confirmed_sent",
+        messageId: params.messageId,
+        telegramMessageId: validTelegramMessageId,
+      };
+    } catch {
+      // 3. A persistence exception after Telegram acceptance never becomes a claim that Telegram rejected delivery
+      // Keep operation unconfirmed
+      return {
+        success: false,
+        outcome: "unconfirmed_outcome",
+        messageId: params.messageId,
+        error:
+          "Message was accepted by Telegram, but delivery confirmation failed to persist.",
+      };
     }
+  }
 
-    await db
+  // Handled Telegram failure or transport exception
+  const safeDiag = transportException
+    ? formatSafeDiagnostic(classifyErrorToSafeDiagnostic(transportException))
+    : formatSafeDiagnostic({
+        category: sendRes.errorKind ?? "api_error",
+        httpStatus: sendRes.httpStatus,
+        retryAfterSeconds: sendRes.retryAfterSeconds,
+      });
+
+  if (sendRes.isBlocked || sendRes.errorKind === "blocked") {
+    try {
+      await setCustomerBlockedStatus(db, params.customerId, true);
+    } catch {
+      // Non-fatal if customer status update fails
+    }
+  }
+
+  try {
+    // Only update pending -> failed so an existing sent record is not downgraded by a later error path
+    const [updated] = await db
       .update(inquiryMessage)
       .set({
         deliveryStatus: "failed",
         deliveryError: safeDiag,
       })
-      .where(eq(inquiryMessage.id, params.messageId));
+      .where(
+        and(
+          eq(inquiryMessage.id, params.messageId),
+          eq(inquiryMessage.deliveryStatus, "pending"),
+        ),
+      )
+      .returning();
+
+    if (!updated) {
+      const [current] = await db
+        .select({
+          id: inquiryMessage.id,
+          deliveryStatus: inquiryMessage.deliveryStatus,
+          telegramMessageId: inquiryMessage.telegramMessageId,
+        })
+        .from(inquiryMessage)
+        .where(eq(inquiryMessage.id, params.messageId))
+        .limit(1);
+
+      if (current?.deliveryStatus === "sent") {
+        // Preserved terminal sent state
+        return {
+          success: true,
+          outcome: "confirmed_sent",
+          messageId: params.messageId,
+          telegramMessageId: current.telegramMessageId ?? 0,
+        };
+      }
+
+      if (current?.deliveryStatus === "failed") {
+        return {
+          success: false,
+          outcome: "confirmed_failed",
+          messageId: params.messageId,
+          error: safeDiag,
+        };
+      }
+
+      return {
+        success: false,
+        outcome: "unconfirmed_outcome",
+        messageId: params.messageId,
+        error: safeDiag,
+      };
+    }
 
     return {
       success: false,
+      outcome: "confirmed_failed",
       messageId: params.messageId,
       error: safeDiag,
     };
-  } catch (err) {
-    const safeDiag = formatSafeDiagnostic(classifyErrorToSafeDiagnostic(err));
-
-    await db
-      .update(inquiryMessage)
-      .set({
-        deliveryStatus: "failed",
-        deliveryError: safeDiag,
-      })
-      .where(eq(inquiryMessage.id, params.messageId));
-
+  } catch {
     return {
       success: false,
+      outcome: "unconfirmed_outcome",
       messageId: params.messageId,
       error: safeDiag,
     };
@@ -755,11 +990,26 @@ export interface SendSellerReplyInput {
 export type SendSellerReplyResult =
   | {
       success: true;
+      outcome: "confirmed_sent";
       message: typeof inquiryMessage.$inferSelect;
       alreadyReserved?: boolean;
     }
   | {
       success: false;
+      outcome: "confirmed_failed";
+      message: typeof inquiryMessage.$inferSelect;
+      error: string;
+      alreadyReserved?: boolean;
+    }
+  | {
+      success: false;
+      outcome: "recorded_pending";
+      message: typeof inquiryMessage.$inferSelect;
+      alreadyReserved?: boolean;
+    }
+  | {
+      success: false;
+      outcome: "unconfirmed_outcome";
       message: typeof inquiryMessage.$inferSelect;
       error: string;
       alreadyReserved?: boolean;
@@ -779,16 +1029,28 @@ export async function sendSellerReply(
   const reservation = await reserveSellerReply(db, input);
 
   if (!reservation.shouldSend) {
-    if (reservation.message.deliveryStatus === "failed") {
+    if (reservation.message.deliveryStatus === "sent") {
       return {
-        success: false,
+        success: true,
+        outcome: "confirmed_sent",
         message: reservation.message,
-        error: reservation.message.deliveryError ?? "Previous delivery attempt failed",
         alreadyReserved: true,
       };
     }
+    if (reservation.message.deliveryStatus === "failed") {
+      return {
+        success: false,
+        outcome: "confirmed_failed",
+        message: reservation.message,
+        error:
+          reservation.message.deliveryError ?? "Previous delivery attempt failed",
+        alreadyReserved: true,
+      };
+    }
+    // deliveryStatus === "pending": return recorded_pending (honest, not false success)
     return {
-      success: true,
+      success: false,
+      outcome: "recorded_pending",
       message: reservation.message,
       alreadyReserved: true,
     };
@@ -810,15 +1072,26 @@ export async function sendSellerReply(
 
   const returnedMsg = finalMessage ?? reservation.message;
 
-  if (delivery.success) {
+  if (delivery.outcome === "confirmed_sent") {
     return {
       success: true,
+      outcome: "confirmed_sent",
       message: returnedMsg,
+    };
+  }
+
+  if (delivery.outcome === "confirmed_failed") {
+    return {
+      success: false,
+      outcome: "confirmed_failed",
+      message: returnedMsg,
+      error: delivery.error,
     };
   }
 
   return {
     success: false,
+    outcome: "unconfirmed_outcome",
     message: returnedMsg,
     error: delivery.error,
   };
@@ -893,16 +1166,26 @@ export async function retrySellerReply(
     .limit(1);
 
   if (existingRetry) {
+    if (existingRetry.deliveryStatus === "sent") {
+      return {
+        success: true,
+        outcome: "confirmed_sent",
+        message: existingRetry,
+        alreadyReserved: true,
+      };
+    }
     if (existingRetry.deliveryStatus === "failed") {
       return {
         success: false,
+        outcome: "confirmed_failed",
         message: existingRetry,
         error: existingRetry.deliveryError ?? "Previous retry attempt failed",
         alreadyReserved: true,
       };
     }
     return {
-      success: true,
+      success: false,
+      outcome: "recorded_pending",
       message: existingRetry,
       alreadyReserved: true,
     };
@@ -923,6 +1206,10 @@ export interface TransitionInquiryStatusInput {
   targetStatus: InquiryLifecycleTargetStatus;
 }
 
+export type TransitionInquiryStatusResult = typeof inquiry.$inferSelect & {
+  alreadyAtTarget: boolean;
+};
+
 /**
  * Transitions an inquiry's lifecycle status following strict allowed transitions:
  * - open -> resolved
@@ -932,58 +1219,90 @@ export interface TransitionInquiryStatusInput {
  * - resolved -> closed
  * - closed -> open (explicit seller reopen)
  *
- * Reopen enforces conflict checks:
- * - Product inquiry: reject if another active inquiry exists for customer & product.
- * - Support inquiry: reject if another active support conversation exists for customer & category.
+ * Guarantees under customer & inquiry locks:
+ * - Enforces customer then inquiry pessimistic lock order.
+ * - Detects concurrent races and zero-row updates.
+ * - Distinguishes actual transitions from idempotent already-at-target requests without rewriting timestamps.
+ * - Prevents losing race from claiming false transition success (returns CONFLICT).
+ * - Enforces reopen conflict checks under locks for both product and support inquiries.
  */
 export async function transitionInquiryStatus(
   db: Database,
   input: TransitionInquiryStatusInput,
-): Promise<typeof inquiry.$inferSelect> {
-  const thread = await getSellerInquiryThread(db, input.inquiryId);
-  const currentStatus = thread.inquiry.status;
-  const targetStatus = input.targetStatus;
+): Promise<TransitionInquiryStatusResult> {
+  const [inquiryLookup] = await db
+    .select({
+      id: inquiry.id,
+      customerId: inquiry.customerId,
+      status: inquiry.status,
+      productId: inquiry.productId,
+      category: inquiry.category,
+      productSnapshot: inquiry.productSnapshot,
+      closedAt: inquiry.closedAt,
+      updatedAt: inquiry.updatedAt,
+    })
+    .from(inquiry)
+    .where(eq(inquiry.id, input.inquiryId))
+    .limit(1);
 
-  if (currentStatus === targetStatus) {
-    return thread.inquiry;
+  if (!inquiryLookup) {
+    throw new RabetDataError("NOT_FOUND", `Inquiry not found: ${input.inquiryId}`);
   }
 
-  // Allowed transitions
+  const targetStatus = input.targetStatus;
+  const isSupport = isInquirySupport(inquiryLookup.productSnapshot);
+
+  if (
+    targetStatus !== "open" &&
+    targetStatus !== "resolved" &&
+    targetStatus !== "closed"
+  ) {
+    throw new RabetDataError(
+      "INVALID_INPUT",
+      `Invalid target status "${String(targetStatus)}".`,
+    );
+  }
+
+  // Validate allowed transitions based on authoritative lookup
   const allowed =
-    (currentStatus === "open" && targetStatus === "resolved") ||
-    (currentStatus === "waiting_on_customer" && targetStatus === "resolved") ||
-    (currentStatus === "open" && targetStatus === "closed") ||
-    (currentStatus === "waiting_on_customer" && targetStatus === "closed") ||
-    (currentStatus === "resolved" && targetStatus === "closed") ||
-    (currentStatus === "closed" && targetStatus === "open");
+    inquiryLookup.status === targetStatus ||
+    (inquiryLookup.status === "open" && targetStatus === "resolved") ||
+    (inquiryLookup.status === "waiting_on_customer" && targetStatus === "resolved") ||
+    (inquiryLookup.status === "open" && targetStatus === "closed") ||
+    (inquiryLookup.status === "waiting_on_customer" && targetStatus === "closed") ||
+    (inquiryLookup.status === "resolved" && targetStatus === "closed") ||
+    (inquiryLookup.status === "closed" && targetStatus === "open");
 
   if (!allowed) {
     throw new RabetDataError(
       "INVALID_INPUT",
-      `Invalid status transition from "${currentStatus}" to "${targetStatus}".`,
+      `Invalid status transition from "${inquiryLookup.status}" to "${targetStatus}".`,
     );
   }
 
   try {
-    // Lock customer row first
+    // 1. Lock customer row first
     const lockCustomerQuery = toBatchable(
       db,
-      sql`SELECT id FROM ${customer} WHERE id = ${thread.customer.id}::uuid FOR UPDATE`,
+      sql`SELECT id FROM ${customer} WHERE id = ${inquiryLookup.customerId}::uuid FOR UPDATE`,
     );
 
-    // If reopening: conflict checks under lock
-    if (targetStatus === "open") {
-      const isSupport = thread.isSupport;
+    // 2. Lock inquiry row second (consistent lock order)
+    const lockInquiryQuery = toBatchable(
+      db,
+      sql`SELECT id, status, closed_at, updated_at FROM ${inquiry} WHERE id = ${input.inquiryId}::uuid FOR UPDATE`,
+    );
 
-      if (!isSupport && thread.inquiry.productId) {
-        // Product conflict check
-        const conflictQuery = toBatchable(
+    if (targetStatus === "open") {
+      let conflictQuery;
+      if (!isSupport && inquiryLookup.productId) {
+        conflictQuery = toBatchable(
           db,
           sql`
             WITH conflict_check AS (
               SELECT count(*) AS cnt, max(reference) AS ref FROM ${inquiry}
-              WHERE customer_id = ${thread.customer.id}::uuid
-                AND product_id = ${thread.inquiry.productId}::uuid
+              WHERE customer_id = ${inquiryLookup.customerId}::uuid
+                AND product_id = ${inquiryLookup.productId}::uuid
                 AND id != ${input.inquiryId}::uuid
                 AND status IN ('open', 'waiting_on_customer')
             )
@@ -993,37 +1312,17 @@ export async function transitionInquiryStatus(
             END AS conflict_assertion;
           `,
         );
-
-        const reopenUpdate = toBatchable(
-          db,
-          sql`
-            UPDATE ${inquiry}
-            SET status = 'open',
-                closed_at = NULL,
-                updated_at = now()
-            WHERE id = ${input.inquiryId}::uuid
-              AND status = 'closed'
-            RETURNING id, status, closed_at, updated_at
-          `,
-        );
-
-        await executeAtomicBatch(db, [
-          lockCustomerQuery,
-          conflictQuery,
-          reopenUpdate,
-        ]);
       } else {
-        // Support conflict check
-        const categorySql = thread.inquiry.category
-          ? sql`${thread.inquiry.category}::text`
+        const categorySql = inquiryLookup.category
+          ? sql`${inquiryLookup.category}::text`
           : sql`NULL::text`;
 
-        const conflictQuery = toBatchable(
+        conflictQuery = toBatchable(
           db,
           sql`
             WITH conflict_check AS (
               SELECT count(*) AS cnt, max(reference) AS ref FROM ${inquiry}
-              WHERE customer_id = ${thread.customer.id}::uuid
+              WHERE customer_id = ${inquiryLookup.customerId}::uuid
                 AND product_id IS NULL
                 AND (category IS NOT DISTINCT FROM ${categorySql})
                 AND id != ${input.inquiryId}::uuid
@@ -1035,26 +1334,65 @@ export async function transitionInquiryStatus(
             END AS conflict_assertion;
           `,
         );
-
-        const reopenUpdate = toBatchable(
-          db,
-          sql`
-            UPDATE ${inquiry}
-            SET status = 'open',
-                closed_at = NULL,
-                updated_at = now()
-            WHERE id = ${input.inquiryId}::uuid
-              AND status = 'closed'
-            RETURNING id, status, closed_at, updated_at
-          `,
-        );
-
-        await executeAtomicBatch(db, [
-          lockCustomerQuery,
-          conflictQuery,
-          reopenUpdate,
-        ]);
       }
+
+      const reopenUpdate = toBatchable(
+        db,
+        sql`
+          UPDATE ${inquiry}
+          SET status = 'open',
+              closed_at = NULL,
+              updated_at = now()
+          WHERE id = ${input.inquiryId}::uuid
+            AND status = 'closed'
+          RETURNING id, status, closed_at, updated_at
+        `,
+      );
+
+      const assertionQuery = toBatchable(
+        db,
+        sql`
+          WITH current_inq AS (
+            SELECT status FROM ${inquiry} WHERE id = ${input.inquiryId}::uuid
+          )
+          SELECT CASE
+            WHEN (SELECT status FROM current_inq) = 'open' THEN 'ok'
+            ELSE CAST('ASSERTION_FAILED_TRANSITION_CONFLICT_' || (SELECT status FROM current_inq) AS date)::text
+          END AS transition_assertion;
+        `,
+      );
+
+      const batchResults = await executeAtomicBatch(db, [
+        lockCustomerQuery,
+        lockInquiryQuery,
+        conflictQuery,
+        reopenUpdate,
+        assertionQuery,
+      ]);
+
+      const [updatedRow] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, input.inquiryId))
+        .limit(1);
+
+      if (!updatedRow) {
+        throw new RabetDataError(
+          "NOT_FOUND",
+          `Inquiry not found after status transition: ${input.inquiryId}`,
+        );
+      }
+
+      const updateResult = batchResults[3];
+      const rows = Array.isArray(updateResult)
+        ? updateResult
+        : (updateResult as { rows?: unknown[] })?.rows ?? [];
+      const didUpdate = rows.length > 0;
+
+      return {
+        ...updatedRow,
+        alreadyAtTarget: !didUpdate,
+      };
     } else if (targetStatus === "closed") {
       const closeUpdate = toBatchable(
         db,
@@ -1069,7 +1407,49 @@ export async function transitionInquiryStatus(
         `,
       );
 
-      await executeAtomicBatch(db, [lockCustomerQuery, closeUpdate]);
+      const assertionQuery = toBatchable(
+        db,
+        sql`
+          WITH current_inq AS (
+            SELECT status FROM ${inquiry} WHERE id = ${input.inquiryId}::uuid
+          )
+          SELECT CASE
+            WHEN (SELECT status FROM current_inq) = 'closed' THEN 'ok'
+            ELSE CAST('ASSERTION_FAILED_TRANSITION_CONFLICT_' || (SELECT status FROM current_inq) AS date)::text
+          END AS transition_assertion;
+        `,
+      );
+
+      const batchResults = await executeAtomicBatch(db, [
+        lockCustomerQuery,
+        lockInquiryQuery,
+        closeUpdate,
+        assertionQuery,
+      ]);
+
+      const [updatedRow] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, input.inquiryId))
+        .limit(1);
+
+      if (!updatedRow) {
+        throw new RabetDataError(
+          "NOT_FOUND",
+          `Inquiry not found after status transition: ${input.inquiryId}`,
+        );
+      }
+
+      const updateResult = batchResults[2];
+      const rows = Array.isArray(updateResult)
+        ? updateResult
+        : (updateResult as { rows?: unknown[] })?.rows ?? [];
+      const didUpdate = rows.length > 0;
+
+      return {
+        ...updatedRow,
+        alreadyAtTarget: !didUpdate,
+      };
     } else if (targetStatus === "resolved") {
       const resolveUpdate = toBatchable(
         db,
@@ -1083,23 +1463,55 @@ export async function transitionInquiryStatus(
         `,
       );
 
-      await executeAtomicBatch(db, [lockCustomerQuery, resolveUpdate]);
-    }
-
-    const [updatedRow] = await db
-      .select()
-      .from(inquiry)
-      .where(eq(inquiry.id, input.inquiryId))
-      .limit(1);
-
-    if (!updatedRow) {
-      throw new RabetDataError(
-        "NOT_FOUND",
-        `Inquiry not found after status transition: ${input.inquiryId}`,
+      const assertionQuery = toBatchable(
+        db,
+        sql`
+          WITH current_inq AS (
+            SELECT status FROM ${inquiry} WHERE id = ${input.inquiryId}::uuid
+          )
+          SELECT CASE
+            WHEN (SELECT status FROM current_inq) = 'resolved' THEN 'ok'
+            ELSE CAST('ASSERTION_FAILED_TRANSITION_CONFLICT_' || (SELECT status FROM current_inq) AS date)::text
+          END AS transition_assertion;
+        `,
       );
+
+      const batchResults = await executeAtomicBatch(db, [
+        lockCustomerQuery,
+        lockInquiryQuery,
+        resolveUpdate,
+        assertionQuery,
+      ]);
+
+      const [updatedRow] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, input.inquiryId))
+        .limit(1);
+
+      if (!updatedRow) {
+        throw new RabetDataError(
+          "NOT_FOUND",
+          `Inquiry not found after status transition: ${input.inquiryId}`,
+        );
+      }
+
+      const updateResult = batchResults[2];
+      const rows = Array.isArray(updateResult)
+        ? updateResult
+        : (updateResult as { rows?: unknown[] })?.rows ?? [];
+      const didUpdate = rows.length > 0;
+
+      return {
+        ...updatedRow,
+        alreadyAtTarget: !didUpdate,
+      };
     }
 
-    return updatedRow;
+    throw new RabetDataError(
+      "INVALID_INPUT",
+      `Invalid target status "${targetStatus}".`,
+    );
   } catch (error) {
     const errText =
       (error instanceof Error ? error.message : "") +
@@ -1116,6 +1528,18 @@ export async function transitionInquiryStatus(
         `Cannot reopen: Another active conversation already exists (${conflictRef}). Close or resolve it first.`,
       );
     }
+
+    if (errText.includes("ASSERTION_FAILED_TRANSITION_CONFLICT_")) {
+      const match = errText.match(
+        /ASSERTION_FAILED_TRANSITION_CONFLICT_([A-Za-z0-9_]+)/,
+      );
+      const currentSt = match ? match[1] : "modified";
+      throw new RabetDataError(
+        "CONFLICT",
+        `Cannot transition to "${targetStatus}": conversation status was concurrently changed to "${currentSt}".`,
+      );
+    }
+
     if (error instanceof RabetDataError) throw error;
     throw mapDatabaseError(error);
   }

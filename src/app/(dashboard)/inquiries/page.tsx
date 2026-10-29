@@ -3,8 +3,11 @@ import { AlertCircle } from "lucide-react";
 
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
+import { RabetDataError } from "@/lib/data/errors";
 import {
   listSellerInquiries,
+  VALID_SELLER_FILTER_STATUSES,
+  VALID_SELLER_FILTER_TYPES,
   type SellerInquiryFilterStatus,
   type SellerInquiryFilterType,
 } from "@/lib/data/seller-inbox";
@@ -31,10 +34,29 @@ export default async function InquiriesPage({ searchParams }: InquiriesPageProps
   await requireAdmin();
 
   const resolvedParams = searchParams ? await searchParams : {};
-  const status = (resolvedParams.status as SellerInquiryFilterStatus) || "active";
-  const type = (resolvedParams.type as SellerInquiryFilterType) || "all";
+  const rawStatus = resolvedParams.status;
+  const rawType = resolvedParams.type;
+
+  let page = 1;
+  if (resolvedParams.page) {
+    const parsed = Number(resolvedParams.page);
+    if (Number.isSafeInteger(parsed) && parsed >= 1) {
+      page = Math.min(parsed, 10_000);
+    }
+  }
+
+  // Validate filter allowlists (do not silently treat invalid filters as "all")
+  let status: SellerInquiryFilterStatus = "active";
+  if (rawStatus !== undefined && rawStatus.trim().length > 0) {
+    status = rawStatus as SellerInquiryFilterStatus;
+  }
+
+  let type: SellerInquiryFilterType = "all";
+  if (rawType !== undefined && rawType.trim().length > 0) {
+    type = rawType as SellerInquiryFilterType;
+  }
+
   const reference = resolvedParams.reference || "";
-  const page = Math.max(1, parseInt(resolvedParams.page || "1", 10) || 1);
 
   let data;
   let dbError: string | null = null;
@@ -49,8 +71,11 @@ export default async function InquiriesPage({ searchParams }: InquiriesPageProps
       pageSize: 20,
     });
   } catch (error) {
-    dbError =
-      error instanceof Error ? error.message : "Database is unavailable or unconfigured.";
+    if (error instanceof RabetDataError && error.code === "INVALID_INPUT") {
+      dbError = error.message;
+    } else {
+      dbError = "Could not connect to the database to load customer conversations. Please ensure the database is running.";
+    }
   }
 
   return (
@@ -64,7 +89,7 @@ export default async function InquiriesPage({ searchParams }: InquiriesPageProps
         <EmptyState
           icon={AlertCircle}
           title="Inquiries unavailable"
-          description="Could not connect to the database to load customer conversations. Please ensure the database is running."
+          description={dbError}
           className="border-destructive/20 bg-destructive/5 text-destructive"
         />
       ) : data ? (
@@ -74,8 +99,8 @@ export default async function InquiriesPage({ searchParams }: InquiriesPageProps
           page={data.page}
           pageSize={data.pageSize}
           totalPages={data.totalPages}
-          currentStatus={status}
-          currentType={type}
+          currentStatus={VALID_SELLER_FILTER_STATUSES.has(status) ? status : "active"}
+          currentType={VALID_SELLER_FILTER_TYPES.has(type) ? type : "all"}
           currentReference={reference}
         />
       ) : null}

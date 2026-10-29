@@ -8,7 +8,8 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import crypto from "node:crypto";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { hash } from "@node-rs/argon2";
@@ -33,6 +34,35 @@ let isCleaningUp = false;
 
 function log(msg) {
   process.stdout.write(`[inbox-browser-acceptance] ${msg}\n`);
+}
+
+function deriveRetryOperationId(sourceMessageId) {
+  const hash = crypto
+    .createHash("sha256")
+    .update(`rabet:seller-reply-retry:${sourceMessageId}`)
+    .digest("hex");
+  return [
+    hash.substring(0, 8),
+    hash.substring(8, 12),
+    `5${hash.substring(13, 16)}`,
+    `a${hash.substring(17, 20)}`,
+    hash.substring(20, 32),
+  ].join("-");
+}
+
+async function waitForCondition(evalFn, description, timeoutMs = 15000, intervalMs = 200) {
+  const start = Date.now();
+  let lastErr = null;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await evalFn();
+      if (res) return res;
+    } catch (err) {
+      lastErr = err;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(`Timeout after ${timeoutMs}ms waiting for: ${description}${lastErr ? ` (last error: ${lastErr.message})` : ""}`);
 }
 
 async function cleanup() {
@@ -322,11 +352,23 @@ async function runAcceptance() {
   log("Seed data ready.");
 
   // Prepare Next.js environment & fetch interceptor bootstrap
+  const ledgerFilePath = path.join(ownedTempDir, "telegram-ledger.json");
+  writeFileSync(ledgerFilePath, JSON.stringify([]), { mode: 0o600 });
+  const readLedger = () => {
+    if (!existsSync(ledgerFilePath)) return [];
+    try {
+      return JSON.parse(readFileSync(ledgerFilePath, "utf8"));
+    } catch {
+      return [];
+    }
+  };
+
   const postgresModuleUrl = import.meta.resolve("postgres");
   const bootstrapFile = path.join(ownedTempDir, "neon-and-telegram-proxy.mjs");
   writeFileSync(
     bootstrapFile,
     `import postgres from "${postgresModuleUrl}";\n` +
+      `import fs from "node:fs";\n` +
       `const originalFetch = globalThis.fetch;\n` +
       `let pg = null;\n` +
       `globalThis.fetch = async (input, init) => {\n` +
@@ -398,16 +440,40 @@ async function runAcceptance() {
       `  }\n` +
       `  if (url && url.includes("api.telegram.org")) {\n` +
       `    if (url.includes("sendMessage")) {\n` +
-      `      const b = typeof init.body === "string" ? JSON.parse(init.body) : {};\n` +
-      `      if (b.text && b.text.includes("TRIGGER_FAIL")) {\n` +
-      `        return new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: message send failed" }), {\n` +
-      `          status: 400,\n` +
-      `          headers: { "content-type": "application/json" }\n` +
-      `        });\n` +
+      `      const b = typeof init?.body === "string" ? JSON.parse(init.body) : {};\n` +
+      `      const ledgerFile = process.env.TEST_TELEGRAM_LEDGER_FILE;\n` +
+      `      let ledger = [];\n` +
+      `      if (ledgerFile && fs.existsSync(ledgerFile)) {\n` +
+      `        try { ledger = JSON.parse(fs.readFileSync(ledgerFile, "utf8")); } catch {}\n` +
       `      }\n` +
-      `      return new Response(JSON.stringify({ ok: true, result: { message_id: 8801 } }), {\n` +
-      `        status: 200,\n` +
-      `        headers: { "content-type": "application/json" }\n` +
+      `      const callIndex = ledger.length + 1;\n` +
+      `      const text = typeof b.text === "string" ? b.text : "";\n` +
+      `      const isTriggerFail = text.includes("TRIGGER_FAIL");\n` +
+      `      const isTriggerUnconfirmed = text.includes("TRIGGER_UNCONFIRMED");\n` +
+      `      const failAttemptsForThisBody = ledger.filter((item) => item.text === text).length;\n` +
+      `      let responseStatus = 200;\n` +
+      `      let responseBody = { ok: true, result: { message_id: 8800 + callIndex } };\n` +
+      `      if (isTriggerFail && failAttemptsForThisBody === 0) {\n` +
+      `        responseStatus = 400;\n` +
+      `        responseBody = { ok: false, error_code: 400, description: "Bad Request: message send failed" };\n` +
+      `      } else if (isTriggerUnconfirmed) {\n` +
+      `        responseStatus = 200;\n` +
+      `        responseBody = { ok: true, result: { message_id: -1 } };\n` +
+      `      }\n` +
+      `      if (ledgerFile) {\n` +
+      `        ledger.push({\n` +
+      `          callIndex,\n` +
+      `          timestamp: Date.now(),\n` +
+      `          chat_id: b.chat_id,\n` +
+      `          text: b.text,\n` +
+      `          status: responseStatus,\n` +
+      `          response: responseBody,\n` +
+      `        });\n` +
+      `        fs.writeFileSync(ledgerFile, JSON.stringify(ledger, null, 2), "utf8");\n` +
+      `      }\n` +
+      `      return new Response(JSON.stringify(responseBody), {\n` +
+      `        status: responseStatus,\n` +
+      `        headers: { "content-type": "application/json" },\n` +
       `      });\n` +
       `    }\n` +
       `  }\n` +
@@ -436,6 +502,7 @@ async function runAcceptance() {
     [
       `export DATABASE_URL='${testSyntheticNeonUrl}'`,
       `export TEST_REAL_PG_URL='${pgUrl}'`,
+      `export TEST_TELEGRAM_LEDGER_FILE='${ledgerFilePath}'`,
       `export TELEGRAM_BOT_TOKEN='123456789:TEST_INBOX_TOKEN'`,
       `export AUTH_SECRET='${authSecret}'`,
       `export ADMIN_EMAIL='${TEST_EMAIL}'`,
@@ -725,10 +792,11 @@ async function runAcceptance() {
   await sleep(300);
 
   // =========================================================================
-  // Scenario 7: Failed delivery and explicit retry
+  // Scenario 7: Failed delivery, explicit retry, ledger tracking & idempotency
   // =========================================================================
-  log("Scenario 7: Simulating delivery failure and explicit retry...");
+  log("Scenario 7: Simulating delivery failure and explicit retry with ledger assertions...");
   const failText = "TRIGGER_FAIL: Testing delivery error handling";
+
   await cdp.eval(`(() => {
     const textarea = document.querySelector('textarea');
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
@@ -736,19 +804,55 @@ async function runAcceptance() {
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   })()`);
   await sleep(300);
+
+  // Submit failing reply
   await cdp.eval(`(() => {
     const textarea = document.querySelector('textarea');
     const form = textarea.closest('form');
     const btn = form.querySelector('button[type="submit"]');
     btn.click();
   })()`);
-  await sleep(2500);
 
-  const failedStateText = await cdp.eval("document.body.innerText");
-  if (!failedStateText.includes("Delivery failed")) {
-    await fail("Failed delivery error state was not rendered");
-  }
+  // Wait for observable delivery failure condition
+  await waitForCondition(
+    async () => {
+      const text = await cdp.eval("document.body.innerText");
+      return text.includes("Delivery failed");
+    },
+    "delivery failure error state rendered in message list"
+  );
   log("✓ Delivery failure state rendered honestly.");
+
+  // Fail if the intended Retry button is absent
+  const hasRetryBtn = await cdp.eval(`(() => {
+    const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Retry'));
+    return Boolean(btn);
+  })()`);
+  if (!hasRetryBtn) {
+    await fail("Expected Retry button was absent after delivery failure!");
+  }
+
+  // Authoritative DB verification for failed message
+  const failedRows = await pgClient`
+    SELECT id, delivery_status, delivery_error, telegram_message_id
+    FROM inquiry_message
+    WHERE inquiry_id = ${inqProd.id} AND body = ${failText} AND delivery_status = 'failed'
+    ORDER BY created_at DESC
+    LIMIT 1;
+  `;
+  if (failedRows.length === 0) {
+    await fail("Original failed message row not found in database with delivery_status='failed'");
+  }
+  const failedMessage = failedRows[0];
+  const expectedRetryId = deriveRetryOperationId(failedMessage.id);
+  log(`Found failed message ID ${failedMessage.id}, expected retry UUID: ${expectedRetryId}`);
+
+  // Ledger check: exactly 1 transport attempt so far for this body (which failed with 400)
+  const ledgerAfterFirstSend = readLedger();
+  const failCalls = ledgerAfterFirstSend.filter(item => item.text && item.text.includes(failText));
+  if (failCalls.length !== 1 || failCalls[0].status !== 400) {
+    await fail(`Expected 1 failed transport call in ledger for failText, got: ${JSON.stringify(failCalls)}`);
+  }
 
   // Click explicit retry button
   log("Clicking explicit retry button...");
@@ -756,73 +860,349 @@ async function runAcceptance() {
     const retryBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Retry'));
     if (retryBtn) retryBtn.click();
   })()`);
-  await sleep(2500);
-  log("✓ Explicit retry executed.");
+
+  // Wait for observable successful delivery of retry
+  await waitForCondition(
+    async () => {
+      const text = await cdp.eval("document.body.innerText");
+      const sentMatches = (text.match(/Sent via Telegram/g) || []).length;
+      return sentMatches >= 2;
+    },
+    "retry message delivered with 'Sent via Telegram'"
+  );
+  log("✓ Explicit retry delivered and visible in conversation.");
+
+  // Verify database state: original remains failed, retry row is deterministic and sent
+  const [persistedFailed] = await pgClient`
+    SELECT delivery_status FROM inquiry_message WHERE id = ${failedMessage.id}
+  `;
+  if (persistedFailed?.delivery_status !== "failed") {
+    await fail(`Original failed message was corrupted or downgraded! Status: ${persistedFailed?.delivery_status}`);
+  }
+
+  const [persistedRetry] = await pgClient`
+    SELECT id, delivery_status, telegram_message_id
+    FROM inquiry_message
+    WHERE id = ${expectedRetryId}
+  `;
+  if (!persistedRetry) {
+    await fail(`Deterministic retry row ${expectedRetryId} was not found in database!`);
+  }
+  if (persistedRetry.delivery_status !== "sent") {
+    await fail(`Retry row status is ${persistedRetry.delivery_status}, expected 'sent'`);
+  }
+  const tgMsgIdNum = Number(persistedRetry.telegram_message_id);
+  if (!Number.isInteger(tgMsgIdNum) || tgMsgIdNum <= 0) {
+    await fail(`Retry row telegram_message_id is invalid: ${persistedRetry.telegram_message_id}`);
+  }
+  log(`✓ Verified database integrity: 1 original failed row and 1 deterministic retry row (${expectedRetryId}) with telegram_message_id=${persistedRetry.telegram_message_id}.`);
+
+  // Ledger check: exactly 2 transport calls occurred for failText (attempt 1 failed, attempt 2 succeeded)
+  const ledgerAfterRetry = readLedger();
+  const retryCalls = ledgerAfterRetry.filter(item => item.text && item.text.includes(failText));
+  if (retryCalls.length !== 2) {
+    await fail(`Expected exactly 2 transport calls for retry scenario, found ${retryCalls.length}`);
+  }
+  if (retryCalls[1].status !== 200 || retryCalls[1].response?.ok !== true) {
+    await fail(`Retry transport call was not recorded as successful: ${JSON.stringify(retryCalls[1])}`);
+  }
+  log("✓ Transport ledger verified: exactly 1 failure and 1 successful retry occurred.");
+
+  // Reload page to verify persistence of the successful retry
+  log("Reloading thread page to verify successful retry persistence...");
+  await cdp.send("Page.reload");
+  await waitForCondition(
+    async () => {
+      const text = await cdp.eval("document.body.innerText");
+      return (text.match(/Sent via Telegram/g) || []).length >= 2;
+    },
+    "successful retry persists across page reload"
+  );
+  log("✓ Successful retry persisted across page reload.");
+
+  // Test duplicate retry idempotency: clicking Retry again on original source must NOT resend
+  log("Testing duplicate retry: clicking Retry again on original source must not resend...");
+  const ledgerCountBeforeDupRetry = readLedger().length;
+  await cdp.eval(`(() => {
+    const retryBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Retry'));
+    if (retryBtn) retryBtn.click();
+  })()`);
+  await sleep(1500);
+
+  const ledgerCountAfterDupRetry = readLedger().length;
+  if (ledgerCountAfterDupRetry !== ledgerCountBeforeDupRetry) {
+    await fail(`Clicking Retry again on original source created a new transport call! Expected ${ledgerCountBeforeDupRetry}, got ${ledgerCountAfterDupRetry}`);
+  }
+  log("✓ Duplicate retry on original source is idempotent and does not send again.");
 
   // =========================================================================
   // Scenario 8: Lifecycle operations (Resolve -> Close -> Reopen)
   // =========================================================================
-  log("Scenario 8: Testing lifecycle operations (Resolve -> Close -> Reopen)...");
+  log("Scenario 8: Testing lifecycle operations with authoritative status elements...");
 
   // 1. Resolve
   await cdp.eval(`(() => {
-    const resolveBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Resolve'));
-    if (resolveBtn) resolveBtn.click();
+    const resolveBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === 'Resolve');
+    if (!resolveBtn) throw new Error("Resolve button not found");
+    resolveBtn.click();
   })()`);
-  await sleep(2000);
-  let statusText = await cdp.eval("document.body.innerText");
-  if (!statusText.includes("Resolved")) {
-    await fail("Inquiry did not transition to Resolved status");
+
+  await waitForCondition(
+    async () => {
+      const status = await cdp.eval(`document.querySelector('[data-testid="inquiry-status-badge"]')?.getAttribute('data-status')`);
+      return status === "resolved";
+    },
+    "status badge data-status='resolved'"
+  );
+  const [resolvedDb] = await pgClient`SELECT status FROM inquiry WHERE id = ${inqProd.id}`;
+  if (resolvedDb?.status !== "resolved") {
+    await fail(`Inquiry status in DB is ${resolvedDb?.status}, expected 'resolved'`);
   }
-  log("✓ Transitioned to Resolved.");
+  log("✓ Transitioned to Resolved verified via authoritative status badge and DB.");
 
   // 2. Close
   await cdp.eval(`(() => {
-    const closeBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Close'));
-    if (closeBtn) closeBtn.click();
+    const closeBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === 'Close');
+    if (!closeBtn) throw new Error("Close button not found");
+    closeBtn.click();
   })()`);
-  await sleep(2000);
-  statusText = await cdp.eval("document.body.innerText");
-  if (!statusText.includes("Closed")) {
-    await fail("Inquiry did not transition to Closed status");
+
+  await waitForCondition(
+    async () => {
+      const status = await cdp.eval(`document.querySelector('[data-testid="inquiry-status-badge"]')?.getAttribute('data-status')`);
+      return status === "closed";
+    },
+    "status badge data-status='closed'"
+  );
+  const [closedDb] = await pgClient`SELECT status, closed_at FROM inquiry WHERE id = ${inqProd.id}`;
+  if (closedDb?.status !== "closed" || !closedDb?.closed_at) {
+    await fail("Inquiry status in DB is not closed or closed_at is null");
   }
-  if (!statusText.includes("Reopen the thread to send replies")) {
-    await fail("Reply composer was not disabled on closed thread");
-  }
-  log("✓ Transitioned to Closed and composer disabled.");
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body.innerText");
+      return body.includes("Reopen the thread to send replies");
+    },
+    "reply composer disabled on closed thread"
+  );
+  log("✓ Transitioned to Closed verified via status badge, DB closed_at, and disabled composer.");
 
   // 3. Reopen
   await cdp.eval(`(() => {
-    const reopenBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.includes('Reopen Thread'));
-    if (reopenBtn) reopenBtn.click();
+    const reopenBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === 'Reopen Thread');
+    if (!reopenBtn) throw new Error("Reopen Thread button not found");
+    reopenBtn.click();
   })()`);
-  await sleep(2000);
-  statusText = await cdp.eval("document.body.innerText");
-  if (!statusText.includes("Open")) {
-    await fail("Inquiry did not transition to Open status on Reopen");
+
+  await waitForCondition(
+    async () => {
+      const status = await cdp.eval(`document.querySelector('[data-testid="inquiry-status-badge"]')?.getAttribute('data-status')`);
+      return status === "open";
+    },
+    "status badge data-status='open'"
+  );
+  const [openDb] = await pgClient`SELECT status, closed_at FROM inquiry WHERE id = ${inqProd.id}`;
+  if (openDb?.status !== "open" || openDb?.closed_at !== null) {
+    await fail("Inquiry status in DB is not open or closed_at is not null");
   }
-  log("✓ Transitioned to Open via Reopen Thread.");
+  log("✓ Transitioned to Open verified via authoritative status badge and DB.");
 
   // =========================================================================
-  // Scenario 9: Mobile viewport layout at 360px & Arabic rendering
+  // Scenario 9: Stale pending uncertainty warning on mobile viewport (360x740)
   // =========================================================================
-  log("Scenario 9: Emulating mobile viewport (360x740) and verifying layout...");
+  log("Scenario 9: Stale pending uncertainty warning on mobile viewport (360x740)...");
+  // Seed a stale pending message (> 2 minutes old) into inqSupp
+  const staleMessageBody = "Stale pending reply awaiting external confirmation";
+  const staleMsgId = "00000000-0000-0000-0000-000000000099";
+  await pgClient`
+    INSERT INTO inquiry_message (id, inquiry_id, author, body, delivery_status, created_at)
+    VALUES (${staleMsgId}, ${inqSupp.id}, 'admin', ${staleMessageBody}, 'pending', now() - interval '3 minutes')
+    ON CONFLICT (id) DO NOTHING;
+  `;
+
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 360,
     height: 740,
     deviceScaleFactor: 2,
     mobile: true,
   });
-  await sleep(1000);
+
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/inquiries/${inqSupp.id}` });
+  await sleep(1500);
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return (
+        body.includes("Delivery unconfirmed") &&
+        body.includes("The earlier message may have already reached the customer")
+      );
+    },
+    "stale pending uncertainty banner visible in DOM"
+  );
+
+  // Verify warning is visible in DOM flow rather than hidden in a tooltip
+  const isVisibleBanner = await cdp.eval(`(() => {
+    const divs = Array.from(document.querySelectorAll('div'));
+    const banner = divs.find(d => d.innerText.includes("Delivery unconfirmed"));
+    return Boolean(banner && banner.offsetParent !== null);
+  })()`);
+  if (!isVisibleBanner) {
+    await fail("Uncertainty warning is not visibly rendered in the DOM flow");
+  }
 
   const scrollWidth = await cdp.eval("document.documentElement.scrollWidth");
   const clientWidth = await cdp.eval("document.documentElement.clientWidth");
-  log(`Mobile layout check: scrollWidth=${scrollWidth}, clientWidth=${clientWidth}`);
-
+  log(`Mobile layout check at 360px: scrollWidth=${scrollWidth}, clientWidth=${clientWidth}`);
   if (scrollWidth > clientWidth + 2) {
     await fail(`Page-level horizontal overflow detected at 360px: scrollWidth (${scrollWidth}) > clientWidth (${clientWidth})`);
   }
-  log("✓ 360px viewport has zero page-level horizontal overflow.");
+  log("✓ Stale pending uncertainty warning rendered visibly on mobile viewport with zero horizontal overflow.");
+
+  // =========================================================================
+  // Scenario 10: Repaired draft & operation lifecycle (A & B)
+  // =========================================================================
+  log("Scenario 10: Verifying draft recovery, editing, and unconfirmed outcome contracts...");
+
+  // Reset viewport to desktop
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/inquiries/${inqProd.id}` });
+  await sleep(1500);
+  await waitForCondition(
+    async () => {
+      return await cdp.eval(`Boolean(document.querySelector('textarea'))`);
+    },
+    "composer textarea on active thread"
+  );
+
+  // 10A: Submit failing reply -> edit text -> submit new reply without operation ID conflict
+  log("10A: Testing submit -> confirmed failure -> edit text -> send new reply without CONFLICT...");
+  const failDraftText = "TRIGGER_FAIL: Draft to be edited after failure";
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(failDraftText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(400);
+
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes("Delivery failed");
+    },
+    "delivery failure banner for failDraftText"
+  );
+
+  // Verify draft text is still available in composer textarea
+  const preservedDraftBeforeEdit = await cdp.eval(`document.querySelector('textarea')?.value`);
+  if (!preservedDraftBeforeEdit.includes(failDraftText)) {
+    await fail(`Failed draft text was lost from composer. Value: "${preservedDraftBeforeEdit}"`);
+  }
+
+  // Edit draft text to genuinely new content
+  const newEditedText = "Fresh reply content after editing failed draft";
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(newEditedText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(400);
+
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes(newEditedText) && body.includes("Sent via Telegram");
+    },
+    "edited reply delivered successfully without operation ID conflict"
+  );
+
+  // Verify composer textarea is cleared after confirmed delivery
+  const clearedTextarea = await cdp.eval(`document.querySelector('textarea')?.value`);
+  if (clearedTextarea !== "") {
+    await fail(`Expected composer textarea to be cleared after confirmed sent, got: "${clearedTextarea}"`);
+  }
+  log("✓ Editing failed draft detached bound operation and successfully sent new reply without CONFLICT.");
+
+  // 10B: Submit -> ambiguous outcome -> visible warning -> no second automatic send
+  log("10B: Testing unconfirmed outcome and duplicate request behavior...");
+  const unconfirmedText = "TRIGGER_UNCONFIRMED: Ambiguous outcome message";
+  const ledgerCountBeforeUnconfirmed = readLedger().length;
+
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(unconfirmedText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(400);
+
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return (
+        body.includes("Delivery status is unconfirmed") ||
+        body.includes("unconfirmed")
+      );
+    },
+    "unconfirmed delivery outcome warning in composer"
+  );
+
+  // Verify draft text is NOT cleared
+  const unconfirmedDraftVal = await cdp.eval(`document.querySelector('textarea')?.value`);
+  if (unconfirmedDraftVal !== unconfirmedText) {
+    await fail(`Draft was unexpectedly cleared after unconfirmed delivery. Expected "${unconfirmedText}", got "${unconfirmedDraftVal}"`);
+  }
+
+  // Exactly 1 transport call was made
+  const ledgerCountAfterFirstSend = readLedger().length;
+  if (ledgerCountAfterFirstSend !== ledgerCountBeforeUnconfirmed + 1) {
+    await fail(`Expected exactly 1 transport call for unconfirmed attempt, got ${ledgerCountAfterFirstSend - ledgerCountBeforeUnconfirmed}`);
+  }
+
+  // Resubmit unchanged draft: must NOT make a second transport call
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+  await sleep(1500);
+
+  const ledgerCountAfterSecondSend = readLedger().length;
+  if (ledgerCountAfterSecondSend !== ledgerCountAfterFirstSend) {
+    await fail(`Resubmitting unchanged unresolved draft created a duplicate transport call!`);
+  }
+  log("✓ Unconfirmed delivery preserves draft, renders visible warning, and prevents duplicate transport call.");
+
+  // Clear draft for clean exit
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, '');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
 
   log("\n🎉 ALL BROWSER ACCEPTANCE CHECKS PASSED SUCCESSFULLY!\n");
   await cleanup();

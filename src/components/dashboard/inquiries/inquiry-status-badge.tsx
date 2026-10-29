@@ -14,6 +14,8 @@ export function InquiryStatusBadge({
     case "open":
       return (
         <Badge
+          data-testid="inquiry-status-badge"
+          data-status="open"
           variant="outline"
           className={cn(
             "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
@@ -26,6 +28,8 @@ export function InquiryStatusBadge({
     case "waiting_on_customer":
       return (
         <Badge
+          data-testid="inquiry-status-badge"
+          data-status="waiting_on_customer"
           variant="outline"
           className={cn(
             "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
@@ -38,6 +42,8 @@ export function InquiryStatusBadge({
     case "resolved":
       return (
         <Badge
+          data-testid="inquiry-status-badge"
+          data-status="resolved"
           variant="outline"
           className={cn(
             "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-400",
@@ -50,6 +56,8 @@ export function InquiryStatusBadge({
     case "closed":
       return (
         <Badge
+          data-testid="inquiry-status-badge"
+          data-status="closed"
           variant="outline"
           className={cn(
             "border-zinc-500/30 bg-zinc-500/10 text-zinc-600 dark:text-zinc-400",

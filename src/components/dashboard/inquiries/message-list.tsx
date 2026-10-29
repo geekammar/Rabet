@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -41,6 +41,7 @@ export function MessageList({
   onMessageRetried,
 }: MessageListProps) {
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const retryingIdsRef = useRef<Set<string>>(new Set());
   const [retryError, setRetryError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(0);
 
@@ -56,10 +57,16 @@ export function MessageList({
   }, []);
 
   async function handleRetry(sourceMessageId: string) {
-    if (retryingId || !isActive) return;
+    // Synchronous guard against concurrent / rapid clicks on the same retry
+    if (retryingIdsRef.current.has(sourceMessageId) || retryingId || !isActive) {
+      return;
+    }
 
+    retryingIdsRef.current.add(sourceMessageId);
     setRetryingId(sourceMessageId);
     setRetryError(null);
+
+    const sourceMsg = messages.find((m) => m.id === sourceMessageId);
 
     try {
       const res = await retrySellerReplyAction({
@@ -70,11 +77,24 @@ export function MessageList({
       if (!res.success) {
         setRetryError(res.message || "Retry failed. You may try again.");
       } else {
+        // Broadcast successful retry event so the composer can reconcile its draft state
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("rabet:reply_retried", {
+              detail: {
+                inquiryId,
+                sourceMessageId,
+                retriedBody: sourceMsg?.body,
+              },
+            }),
+          );
+        }
         onMessageRetried?.();
       }
     } catch {
       setRetryError("A network error occurred while attempting retry.");
     } finally {
+      retryingIdsRef.current.delete(sourceMessageId);
       setRetryingId(null);
     }
   }
@@ -154,7 +174,7 @@ export function MessageList({
 
               {/* Delivery Metadata for Admin Messages */}
               {isAdmin ? (
-                <div className="flex flex-wrap items-center gap-2 px-1 text-xs">
+                <div className="flex flex-col gap-1 px-1 text-xs">
                   {msg.deliveryStatus === "sent" ? (
                     <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                       <Check className="size-3" />
@@ -184,27 +204,31 @@ export function MessageList({
                       ) : null}
                     </div>
                   ) : isStalePending ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
-                        <AlertTriangle className="size-3" />
-                        Unconfirmed send (pending &gt;2m)
-                      </span>
+                    <div className="flex flex-col gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-300">
+                      <div className="flex items-center gap-1.5 font-medium">
+                        <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                        <span>Delivery unconfirmed (pending &gt;2m)</span>
+                      </div>
+                      <p className="text-[11px] leading-tight text-amber-700/90 dark:text-amber-400/90">
+                        Delivery could not be confirmed. The earlier message may have already reached the customer. Resending requires explicit seller action and may deliver a duplicate message.
+                      </p>
                       {isActive ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleRetry(msg.id)}
-                          disabled={Boolean(retryingId)}
-                          className="h-7 min-h-[32px] px-2 text-xs gap-1 border-amber-500/40 text-amber-700 dark:text-amber-400 hover:bg-amber-500/10 touch-manipulation"
-                          title="Message delivery could not be confirmed. Earlier attempt may have arrived."
-                        >
-                          {retryingId === msg.id ? (
-                            <Loader2 className="size-3 animate-spin" />
-                          ) : (
-                            <RefreshCw className="size-3" />
-                          )}
-                          Resend
-                        </Button>
+                        <div className="pt-0.5">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleRetry(msg.id)}
+                            disabled={Boolean(retryingId)}
+                            className="h-7 min-h-[32px] px-2.5 text-xs gap-1 border-amber-600/40 text-amber-800 dark:text-amber-300 hover:bg-amber-500/20 touch-manipulation"
+                          >
+                            {retryingId === msg.id ? (
+                              <Loader2 className="size-3 animate-spin" />
+                            ) : (
+                              <RefreshCw className="size-3" />
+                            )}
+                            Resend message
+                          </Button>
+                        </div>
                       ) : null}
                     </div>
                   ) : (

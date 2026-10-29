@@ -5,6 +5,7 @@ import { ArrowLeft, User, ShieldAlert } from "lucide-react";
 
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
+import { RabetDataError } from "@/lib/data/errors";
 import {
   getSellerInquiryThread,
   listInquiryMessagesPaged,
@@ -14,11 +15,15 @@ import { InquiryContextCard } from "@/components/dashboard/inquiries/inquiry-con
 import { LifecycleActions } from "@/components/dashboard/inquiries/lifecycle-actions";
 import { MessageList } from "@/components/dashboard/inquiries/message-list";
 import { ReplyComposer } from "@/components/dashboard/inquiries/reply-composer";
+import { EmptyState } from "@/components/empty-state";
 
 export const metadata: Metadata = {
   title: "Inquiry Thread",
   description: "View and reply to customer inquiry thread.",
 };
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface ThreadPageProps {
   params: Promise<{ id: string }>;
@@ -32,11 +37,23 @@ export default async function ThreadPage({
   await requireAdmin();
 
   const { id } = await params;
+
+  if (!id || !UUID_REGEX.test(id)) {
+    notFound();
+  }
+
   const resolvedSearchParams = searchParams ? await searchParams : {};
-  const page = Math.max(1, parseInt(resolvedSearchParams.page || "1", 10) || 1);
+  let page = 1;
+  if (resolvedSearchParams.page) {
+    const parsed = Number(resolvedSearchParams.page);
+    if (Number.isSafeInteger(parsed) && parsed >= 1) {
+      page = Math.min(parsed, 10_000);
+    }
+  }
 
   let thread;
   let messagesResult;
+  let dbError: string | null = null;
 
   try {
     const db = getDb();
@@ -45,8 +62,34 @@ export default async function ThreadPage({
       page,
       pageSize: 50,
     });
-  } catch {
-    notFound();
+  } catch (err) {
+    if (err instanceof RabetDataError && err.code === "NOT_FOUND") {
+      notFound();
+    }
+    dbError =
+      "Could not load this conversation due to a database connectivity error. Please ensure the database is running.";
+  }
+
+  if (dbError || !thread || !messagesResult) {
+    return (
+      <div className="space-y-6 max-w-4xl min-w-0 w-full overflow-x-hidden">
+        <div>
+          <Link
+            href="/inquiries"
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors min-h-[36px] py-1"
+          >
+            <ArrowLeft className="size-3.5" />
+            Back to Inquiries
+          </Link>
+        </div>
+        <EmptyState
+          icon={ShieldAlert}
+          title="Inquiry unavailable"
+          description={dbError ?? "Database is unavailable or unconfigured."}
+          className="border-destructive/20 bg-destructive/5 text-destructive"
+        />
+      </div>
+    );
   }
 
   const { inquiry, customer, isSupport } = thread;

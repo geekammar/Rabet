@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 
@@ -21,15 +21,18 @@ import {
   type TestDatabase,
 } from "./helpers";
 import {
+  completeSellerReplyDelivery,
   deriveRetryOperationId,
   getSellerInquiryThread,
   isInquirySupport,
   listInquiryMessagesPaged,
   listSellerInquiries,
+  reserveSellerReply,
   retrySellerReply,
   sendSellerReply,
   transitionInquiryStatus,
 } from "@/lib/data/seller-inbox";
+import { executeAtomicBatch, toBatchable } from "@/lib/data/catalog";
 import {
   upsertCustomer,
 } from "@/lib/data/customer";
@@ -361,14 +364,14 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
         }),
       ]);
 
-      expect(results[0].success).toBe(true);
-      expect(results[1].success).toBe(true);
-
       // Exactly one was the sender, the other was alreadyReserved
       const sends = results.filter((r) => !r.alreadyReserved);
       const cached = results.filter((r) => r.alreadyReserved);
       expect(sends).toHaveLength(1);
       expect(cached).toHaveLength(1);
+      expect(sends[0].success).toBe(true);
+      expect(sends[0].outcome).toBe("confirmed_sent");
+      expect(["confirmed_sent", "recorded_pending"]).toContain(cached[0].outcome);
 
       // Only one transport call
       expect(fakeTransport.sentMessages).toHaveLength(1);
@@ -928,5 +931,404 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
     const pagedMsgs = await listInquiryMessagesPaged(db, pInq.id, { page: 1, pageSize: 10 });
     expect(pagedMsgs.totalCount).toBe(1);
     expect(pagedMsgs.items[0].body).toBe("Need help with cloud hosting");
+  });
+
+  it("M: Fault-injection: Telegram accepts, but saving sent throws -> operation remains pending unconfirmed, never claims failed", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10013, firstName: "Marcus" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST13",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    // 1. Reserve pending reply
+    const reservation = await reserveSellerReply(db, {
+      inquiryId: inq.id,
+      body: "Pending message that accepts on telegram but fails persistence",
+    });
+    expect(reservation.status).toBe("reserved");
+    expect(reservation.message.deliveryStatus).toBe("pending");
+
+    // 2. Mock a Database proxy where update throws on inquiryMessage
+    const failingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "update") {
+          return () => {
+            throw new Error("Simulated database connection crash during sent update");
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const fakeTransport = createFakeTelegramTransport();
+
+    // 3. Complete delivery using failingDb
+    const result = await completeSellerReplyDelivery(failingDb as unknown as import("@/db/client").Database, fakeTransport, {
+      messageId: reservation.message.id,
+      inquiryReference: inq.reference,
+      body: reservation.message.body,
+      customerId: cust.id,
+      telegramChatId: cust.telegramId,
+    });
+
+    // 4. Must return unconfirmed_outcome (NOT confirmed_sent, and NOT confirmed_failed!)
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe("unconfirmed_outcome");
+    expect(result.error).toContain("delivery confirmation failed to persist");
+
+    // 5. Query authoritative DB: row is STILL 'pending', and delivery_error has NOT been set to 'failed'
+    const [msgRow] = await db
+      .select()
+      .from(inquiryMessage)
+      .where(eq(inquiryMessage.id, reservation.message.id));
+
+    expect(msgRow.deliveryStatus).toBe("pending");
+    expect(msgRow.deliveryError).toBeNull();
+  });
+
+  it("N: Fault-injection: Telegram accepts, but completion UPDATE affects zero rows -> returns unconfirmed_outcome", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10014, firstName: "Nadia" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST14",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    const reservation = await reserveSellerReply(db, {
+      inquiryId: inq.id,
+      body: "Zero rows test",
+    });
+
+    // Simulate missing row or race where row delivery_status is no longer 'pending'
+    await db
+      .update(inquiryMessage)
+      .set({ deliveryStatus: "failed", deliveryError: "external_error" })
+      .where(eq(inquiryMessage.id, reservation.message.id));
+
+    const fakeTransport = createFakeTelegramTransport();
+    const result = await completeSellerReplyDelivery(db, fakeTransport, {
+      messageId: reservation.message.id,
+      inquiryReference: inq.reference,
+      body: reservation.message.body,
+      customerId: cust.id,
+      telegramChatId: cust.telegramId,
+    });
+
+    // Updating deliveryStatus affected 0 rows because delivery_status was not 'pending'
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe("unconfirmed_outcome");
+    expect(result.error).toContain("affected 0 rows");
+  });
+
+  it("O: Existing sent record is not downgraded by a later error path", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10015, firstName: "Oscar" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST15",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    // Insert an already-sent message
+    const [sentMsg] = await db
+      .insert(inquiryMessage)
+      .values({
+        inquiryId: inq.id,
+        author: "admin",
+        body: "Already delivered message",
+        deliveryStatus: "sent",
+        telegramMessageId: 7712,
+        deliveredAt: new Date(),
+      })
+      .returning();
+
+    // Call completeSellerReplyDelivery with a failing transport
+    const failingTransport = createFakeTelegramTransport();
+    failingTransport.failSendWith = "Late network timeout";
+    failingTransport.failSendKind = "timeout";
+
+    const result = await completeSellerReplyDelivery(db, failingTransport, {
+      messageId: sentMsg.id,
+      inquiryReference: inq.reference,
+      body: sentMsg.body,
+      customerId: cust.id,
+      telegramChatId: cust.telegramId,
+    });
+
+    // Preserved terminal sent state
+    expect(result.success).toBe(true);
+    expect(result.outcome).toBe("confirmed_sent");
+    expect(result.telegramMessageId).toBe(7712);
+
+    const [checkedMsg] = await db
+      .select()
+      .from(inquiryMessage)
+      .where(eq(inquiryMessage.id, sentMsg.id));
+
+    expect(checkedMsg.deliveryStatus).toBe("sent");
+    expect(checkedMsg.telegramMessageId).toBe(7712);
+  });
+
+  it("P: Deduplication: pending duplicate responses never claim sent, and trigger zero extra transport calls", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10016, firstName: "Paula" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST16",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    const opId = crypto.randomUUID();
+
+    // 1. First reserve only
+    await reserveSellerReply(db, {
+      inquiryId: inq.id,
+      body: "Duplication check body",
+      operationId: opId,
+    });
+
+    // 2. Call sendSellerReply on this already-reserved pending operation
+    let transportCalls = 0;
+    const trackingTransport = createFakeTelegramTransport();
+    const origSend = trackingTransport.sendMessage.bind(trackingTransport);
+    trackingTransport.sendMessage = async (params) => {
+      transportCalls++;
+      return origSend(params);
+    };
+
+    const duplicateRes = await sendSellerReply(db, trackingTransport, {
+      inquiryId: inq.id,
+      body: "Duplication check body",
+      operationId: opId,
+    });
+
+    // Must be recorded_pending, success: false (does NOT claim sent!)
+    expect(duplicateRes.success).toBe(false);
+    expect(duplicateRes.outcome).toBe("recorded_pending");
+    expect(duplicateRes.alreadyReserved).toBe(true);
+
+    // ZERO transport calls were made
+    expect(transportCalls).toBe(0);
+  });
+
+  it("Q: Controlled concurrent resolve versus close using independent connections", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10017, firstName: "Quinn" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST17",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    const conn1 = postgres(testDb!.url);
+    const conn2 = postgres(testDb!.url);
+
+    try {
+      const db1 = asAppDb(drizzle(conn1));
+      const db2 = asAppDb(drizzle(conn2));
+
+      // Racer 1 closes inquiry; Racer 2 attempts to resolve inquiry
+      // Under locks, one will win and one will lose
+      const [res1, res2] = await Promise.allSettled([
+        transitionInquiryStatus(db1, {
+          inquiryId: inq.id,
+          targetStatus: "closed",
+        }),
+        transitionInquiryStatus(db2, {
+          inquiryId: inq.id,
+          targetStatus: "resolved",
+        }),
+      ]);
+
+      // Exactly one succeeds, or if close wins, resolve gets a safe CONFLICT error
+      if (res1.status === "fulfilled") {
+        expect(res1.value.status).toBe("closed");
+        // res2 should have failed with conflict or invalid transition from closed
+        expect(res2.status).toBe("rejected");
+        if (res2.status === "rejected") {
+          expect(String(res2.reason)).toMatch(
+            /Cannot transition to "resolved"|Invalid status transition from "closed" to "resolved"/,
+          );
+        }
+      } else {
+        expect(res2.status).toBe("fulfilled");
+        expect(res1.status).toBe("rejected");
+      }
+
+      // Assert final DB status matches the winning operation
+      const [finalInq] = await db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.id, inq.id));
+
+      expect(["closed", "resolved"]).toContain(finalInq.status);
+    } finally {
+      await conn1.end();
+      await conn2.end();
+    }
+  });
+
+  it("R: Suppressed lifecycle UPDATE produces no false success and timestamps remain stable", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10018, firstName: "Rachel" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST18",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    // Transition open -> resolved
+    const firstResolved = await transitionInquiryStatus(db, {
+      inquiryId: inq.id,
+      targetStatus: "resolved",
+    });
+    expect(firstResolved.status).toBe("resolved");
+    expect(firstResolved.alreadyAtTarget).toBe(false);
+
+    const [recordedBefore] = await db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.id, inq.id));
+
+    // Duplicate call with targetStatus = "resolved"
+    const secondResolved = await transitionInquiryStatus(db, {
+      inquiryId: inq.id,
+      targetStatus: "resolved",
+    });
+
+    expect(secondResolved.status).toBe("resolved");
+    expect(secondResolved.alreadyAtTarget).toBe(true);
+
+    const [recordedAfter] = await db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.id, inq.id));
+
+    // Timestamp must be completely stable (not rewritten)
+    expect(recordedAfter.updatedAt.getTime()).toBe(recordedBefore.updatedAt.getTime());
+  });
+
+  it("S: Reservation rollback after a controlled post-write failure", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10019, firstName: "Sam" });
+
+    const [inq] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST19",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    const opId = crypto.randomUUID();
+
+    // Construct an atomic batch that locks, writes the message row, updates the inquiry,
+    // but triggers an assertion failure on statement 5 (post-write failure)
+    const lockCust = toBatchable(
+      db,
+      sql`SELECT id FROM ${customer} WHERE id = ${cust.id}::uuid FOR UPDATE`,
+    );
+    const lockInq = toBatchable(
+      db,
+      sql`SELECT id FROM ${inquiry} WHERE id = ${inq.id}::uuid FOR UPDATE`,
+    );
+    const insertMsg = toBatchable(
+      db,
+      sql`
+        INSERT INTO ${inquiryMessage} (id, inquiry_id, author, body, delivery_status, created_at)
+        VALUES (${opId}::uuid, ${inq.id}::uuid, 'admin', 'Controlled rollback test', 'pending', now())
+        RETURNING id
+      `,
+    );
+    const updateInq = toBatchable(
+      db,
+      sql`
+        UPDATE ${inquiry}
+        SET status = 'waiting_on_customer', updated_at = now()
+        WHERE id = ${inq.id}::uuid
+        RETURNING id
+      `,
+    );
+    // Controlled post-write assertion failure
+    const failingAssertion = toBatchable(
+      db,
+      sql`SELECT CAST('ASSERTION_FAILED_CONTROLLED_POST_WRITE_TEST' AS date)::text`,
+    );
+
+    // Execute atomic batch; must fail on assertion
+    await expect(
+      executeAtomicBatch(db, [lockCust, lockInq, insertMsg, updateInq, failingAssertion]),
+    ).rejects.toThrow();
+
+    // Assert complete transactional rollback:
+    // 1. inquiry_message row was rolled back and does NOT exist
+    const [msgRow] = await db
+      .select()
+      .from(inquiryMessage)
+      .where(eq(inquiryMessage.id, opId));
+    expect(msgRow).toBeUndefined();
+
+    // 2. inquiry status was NOT updated to 'waiting_on_customer' (remains 'open')
+    const [inqRow] = await db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.id, inq.id));
+    expect(inqRow.status).toBe("open");
   });
 });
