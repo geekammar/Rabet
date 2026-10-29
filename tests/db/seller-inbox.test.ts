@@ -1544,12 +1544,13 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
     const db = asAppDb(testDb!.db);
     const { prodId } = await seedBaseStore(db);
 
-    const cust = await upsertCustomer(db, { telegramId: 10021, firstName: "Ursula" });
+    const cust1 = await upsertCustomer(db, { telegramId: 10021, firstName: "Ursula1" });
+    const cust2 = await upsertCustomer(db, { telegramId: 10022, firstName: "Ursula2" });
 
     const [inq1] = await db
       .insert(inquiry)
       .values({
-        customerId: cust.id,
+        customerId: cust1.id,
         productId: prodId,
         reference: "INQ-TEST-U1",
         status: "open",
@@ -1560,7 +1561,7 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
     const [inq2] = await db
       .insert(inquiry)
       .values({
-        customerId: cust.id,
+        customerId: cust2.id,
         productId: prodId,
         reference: "INQ-TEST-U2",
         status: "open",

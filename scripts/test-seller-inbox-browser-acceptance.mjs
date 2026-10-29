@@ -232,6 +232,10 @@ async function runAcceptance() {
   }
   log(`Found Chromium binary at: ${chromePath}`);
 
+  // Temporary workspace directory for test fixtures and proxies
+  ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-inbox-acceptance-"));
+  chmodSync(ownedTempDir, 0o700);
+
   // Start or connect to disposable PostgreSQL
   let pgUrl = "";
   if (process.env.RABET_TEST_PG_URL) {
@@ -245,9 +249,6 @@ async function runAcceptance() {
     pgUrl = parsed.toString();
     log(`Using designated PostgreSQL service with database: ${createdDbName}`);
   } else {
-    ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-inbox-acceptance-"));
-    chmodSync(ownedTempDir, 0o700);
-
     const stateFilePath = path.join(ownedTempDir, "pg-state.json");
     const pgStartOutput = spawnSync(
       "node",
