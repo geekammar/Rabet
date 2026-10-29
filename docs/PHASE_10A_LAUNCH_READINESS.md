@@ -4,238 +4,358 @@
 **Date:** 2026-10-29  
 **Branch:** `feat/phase-10a-launch-readiness`  
 **Starting HEAD:** `77fc463e088bb62224c396563c4831dd8aa21683` (Merge commit of PR #19)  
-**Target Branch:** `main`
+**Target Branch:** `main`  
+**PR:** https://github.com/geekammar/Rabet/pull/20
 
 ---
 
 ## 1. Executive Summary
 
-Phase 10A establishes the actual, evidence-backed baseline of the Rabet project following the merge of Phase 09 ([PR #19](https://github.com/geekammar/Rabet/pull/19)). 
+Phase 10A establishes an evidence-backed baseline of the Rabet project following the merge of Phase 09 ([PR #19](https://github.com/geekammar/Rabet/pull/19), commit `77fc463e088bb62224c396563c4831dd8aa21683`).
 
-The repository code is clean, all automated tests pass, and Vercel automatically completed a `READY` production deployment for commit `77fc463e088bb62224c396563c4831dd8aa21683`. However, **the application is NOT ready for live customer traffic or public launch**.
+The repository code is clean, local and CI suites pass, and Vercel automatically completed a `READY` production deployment for commit `77fc463e088bb62224c396563c4831dd8aa21683`. However, **the application is NOT ready for live customer cutover or public launch**.
 
-Through read-only HTTP and GitHub metadata inspections, three critical blockers were discovered:
-1. **Vercel Deployment Protection is active on the Production environment**, redirecting all requests—including incoming Telegram webhooks (`POST /api/telegram/webhook`)—to Vercel SSO (`HTTP 302`), which breaks live bot communication completely.
-2. **No independent Production Neon database is provisioned or migrated.** All migration workflows and secrets are strictly pinned to `Rabet_dev`.
-3. **No login rate limiting exists on authentication endpoints**, leaving the Argon2id credential verification surface exposed to brute-force attacks if opened directly to the public internet.
+This assessment synthesizes personally executed inspections (HTTP probes, Git history, and GitHub Actions workflow evidence) and reviewer-supplied connected platform metadata (inspected on 2026-10-29):
 
-This document provides the verified baseline, comprehensive readiness matrix, evidence citations, ranked blockers, preferred remediation paths, executable cutover runbooks, physical Android acceptance criteria, and the bounded Phase 10B proposal.
+1. **Reviewer-Supplied Vercel Metadata (`prj_7JvXLmI0SzqEwNtHXmSqsoSvRZMp`, Team `team_5KLLRkUhqwAgewTcysr1mY6r`):**
+   - Environment variable listing for Production returned: `AUTH_SECRET`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD_HASH`.
+   - `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_WEBHOOK_SECRET` were **not present** in the returned project environment variable listing.
+   - Protection policy metadata: SSO protection is enabled; `deploymentType: all_except_custom_domains`; Password protection and Trusted IPs are disabled.
+2. **Reviewer-Supplied Neon Metadata:**
+   - The connected Neon account listing showed `Rabet_dev`.
+   - No independent `Rabet_prod` project appeared in the accessible listing. (Note: A branch named `production` inside `Rabet_dev` is not proof of an approved independent production environment).
+3. **Personally Executed HTTP Edge Probe:**
+   - Probing the Vercel-generated hostname `https://rabet-ammarj1.vercel.app/api/telegram/webhook` confirmed that SSO protection returns `HTTP/2 302` redirecting to `https://vercel.com/sso-api`. Because the current deployment relies on `*.vercel.app` hostnames and has no verified custom domain attached, Telegram Bot API webhook delivery is intercepted at the edge.
+4. **Login Abuse Protection Gap:**
+   - The login Server Action (`/login`) and the Auth.js callback (`/api/auth/callback/credentials`) invoke Argon2id password hashing, which is computationally expensive but provides no request throttling against automated credential stuffing.
+
+This document classifies evidence truthfully, avoids unverified assertions of hosted state, provides an actionable Vercel WAF rate-limiting proposal, defines an approval-controlled cutover runbook with in-process secret handling, and structures the remaining Phase 10 trajectory into bounded slices (10A, 10B, 10C, 10D).
 
 ---
 
 ## 2. Verified Baseline
 
-| Dimension | Verified State | Supporting Evidence |
-| :--- | :--- | :--- |
-| **Repository & Branch** | `geekammar/Rabet`, `main` at `77fc463e088bb62224c396563c4831dd8aa21683` | Git log & GitHub API |
-| **PR #19 Status** | Merged into `main` by Ammar Jaber on 2026-10-29T23:13:54+02:00 | [PR #19](https://github.com/geekammar/Rabet/pull/19) |
-| **CI Status (main)** | **Green (All 3 jobs passed)** in 1m 47s (Run ID `40956004778`) | GitHub Actions CI run on `77fc463e088bb62224c396563c4831dd8aa21683` |
-| **Vercel Deployment** | **READY / Success** for `77fc463e088bb62224c396563c4831dd8aa21683` (Deployment ID `7424358926`) | GitHub Deployments API / Vercel Bot |
-| **Production Target URL** | `https://rabet-figy1ipn9-ammarj1.vercel.app` & `https://rabet-ammarj1.vercel.app` | Vercel Deployment status & DNS |
-| **Vercel Edge Protection** | **Active (SSO Redirect)**: `HTTP/2 302` to `https://vercel.com/sso-api?url=...` | Direct HTTP probe on 2026-10-29T21:30:12Z |
-| **Webhook Interception** | `POST /api/telegram/webhook` returns `HTTP/2 302` to `sso-api` | Direct HTTP probe on 2026-10-29T21:30:22Z |
-| **Migration Chain** | 2 applied migrations (`0000_initial_schema`, `0001_tree_and_snapshot_integrity`) | `drizzle/meta/_journal.json` |
-| **Dev Database Host** | Pinned: `ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech` (`neondb`) | `scripts/neon-dev-actions.mjs` L93-L104 |
-| **Production Database** | **Unprovisioned / No Actions secret** (Only `NEON_DEV_DATABASE_URL` exists) | `gh secret list` & Environment inspection |
-| **Production Bot Webhook**| **Unregistered / Inactive**; zero live Telegram traffic sent | Architecture policy & source inspection |
+| Dimension | Baseline State | Evidence Source | What It Proves | What It Does Not Prove |
+| :--- | :--- | :--- | :--- | :--- |
+| **Repository Baseline** | `geekammar/Rabet`, `main` at `77fc463e088bb62224c396563c4831dd8aa21683` | Git log & GitHub API | PR #19 was merged into `main` | Does not prove future commits won't advance `main` |
+| **CI Suite on `main`** | Passed (Run ID `40956004778`) | GitHub Actions | Lint, typecheck, build, auth, migrations, and CDP inbox test passed on runner | Does not prove hosted production database or Telegram connectivity |
+| **Production Deployment Identity** | GitHub Deployment `7424358926`, Status `20947615056` (`state: success`); Vercel Deployment `DcDwNYek7HBgXPtVNU2ebf1qV7D7` | GitHub Deployments API & Vercel | Vercel built and deployed commit `77fc463` to Production environment | Does not prove database is reachable or that all required env vars are populated |
+| **Vercel Project & Protection Policy** | Project `prj_7JvXLmI0SzqEwNtHXmSqsoSvRZMp`, Team `team_5KLLRkUhqwAgewTcysr1mY6r`. SSO enabled; `deploymentType: all_except_custom_domains`. | Reviewer-supplied platform metadata (2026-10-29) | Project configuration policy in Vercel | Does not prove behavior of unconfigured custom domains |
+| **Edge Webhook Response** | `POST https://rabet-ammarj1.vercel.app/api/telegram/webhook` returns `HTTP/2 302` to `https://vercel.com/sso-api` | Direct HTTP probe (2026-10-29) | Current `*.vercel.app` hostname is intercepted by SSO | Does not prove behavior on an independently configured custom domain |
+| **Production Env Variables** | `AUTH_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH` present; `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` absent. | Reviewer-supplied platform metadata (2026-10-29) | Metadata listing in Vercel Project Settings | Does not prove value validity or runtime decryption success |
+| **Neon Project Listing** | Connected account lists `Rabet_dev`; no `Rabet_prod` project visible. | Reviewer-supplied platform metadata (2026-10-29) | Project listing in reviewer's accessible Neon account | Does not prove absence in separate accounts or unlisted projects |
+| **Committed Migration Chain** | 2 migrations (`0000_initial_schema`, `0001_tree_and_snapshot_integrity`) | `drizzle/meta/_journal.json` | Committed migration files and checksums in repository | Does not prove applied migration status on any hosted database |
+| **Live Telegram Webhook** | **UNKNOWN** (no `getWebhookInfo` executed) | Repository & process constraints | Webhook state on Telegram servers has not been read | Does not prove whether bot is registered, unregistered, or has pending updates |
 
 ---
 
 ## 3. Evidence-Backed Readiness Matrix
 
-Each item is categorized as **VERIFIED READY**, **VERIFIED BLOCKER**, **UNKNOWN**, or **DEFERRED**.
+Each item is classified as **VERIFIED READY**, **VERIFIED BLOCKER**, or **UNKNOWN**.
 
 | Area | Component / Check | Status | Evidence Reference | What Evidence Proves | What Evidence Does Not Prove | Next Concrete Action |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **A. Deployment** | Production Deployment State | **VERIFIED READY** | GitHub Deployment `7424358926`, status `20947615056` | Commit `77fc463` built and deployed to Vercel without error | Does not prove database is reachable or that env vars are populated | None (Deploy pipeline works) |
-| **A. Deployment** | Production Hostname Resolution | **VERIFIED READY** | `curl -sI https://rabet-ammarj1.vercel.app` | Host resolves to Vercel edge infrastructure | Does not prove custom domains are configured | Verify if custom domain (e.g. `rabet.com`) is required |
-| **A. Deployment** | Environment Separation | **VERIFIED READY** | `scripts/neon-dev-actions.mjs#L89-L105` | Dev migration tooling refuses production hosts and pools | Does not prove Vercel dashboard environment scopes | Inspect Vercel env variable scopes in dashboard |
-| **A. Deployment** | Edge Protection Policy | **VERIFIED BLOCKER** | HTTP 302 to `vercel.com/sso-api` on `/api/telegram/webhook` | Vercel Deployment Protection intercepts external webhooks | N/A | Disable Deployment Protection for Production or configure Automation Bypass |
-| **B. Database** | Committed Migration Chain | **VERIFIED READY** | `drizzle/` & `drizzle/meta/_journal.json#L1-L20` | Migration chain is clean, idempotent, and passing `db:check` | Does not prove migrations are applied to production | Apply migration chain to `Rabet_prod` |
-| **B. Database** | Production DB Secret in Repo | **VERIFIED BLOCKER** | `gh secret list` & `gh api /environments/Production/secrets` | GitHub Actions has no production DB secret | N/A | Add `NEON_PROD_DATABASE_URL` to GitHub `Production` environment |
-| **B. Database** | Production Database Target | **UNKNOWN** | Vercel CLI logged out on VPS | Cannot inspect Vercel Production `DATABASE_URL` variable | Does not prove whether DB exists on Neon | Owner inspects Vercel env vars & Neon console |
-| **B. Database** | Production Schema Migration | **VERIFIED BLOCKER** | `.github/workflows/neon-dev-migrate.yml` | No production migration runner exists in repo | N/A | Create `neon-prod-actions.mjs` and GitHub workflow in Phase 10B |
-| **C. Auth** | Authoritative Admin Check | **VERIFIED READY** | `src/app/actions/*.ts` (`requireAdmin` in all 6 files) | All mutations require authenticated session | Does not prevent unauthenticated credential stuffing | None |
-| **C. Auth** | Argon2id Verification | **VERIFIED READY** | `src/lib/auth/credentials.ts#L1-L79` | Memory-hard password verification, uniform error message | Does not rate limit inbound HTTP requests | None |
-| **C. Auth** | Login Abuse / Rate Limiting | **VERIFIED BLOCKER** | Source inspection of `src/app/actions/auth.ts` & `src/auth.ts` | Zero request throttling on `/login` or Auth.js route | N/A | Configure Vercel WAF or implement DB rate limiter in Phase 10B |
-| **D. Login** | Test Browser Acceptance | **VERIFIED READY** | CI Run `40956004778` (CDP inbox suite passed) | Auth.js credentials flow works in browser environment | Does not prove deployed production login form works | None |
-| **D. Login** | Historical 500 Report | **VERIFIED READY** | `src/app/actions/auth.ts#L34-L74` | Next.js Server Actions require framework headers; raw POST fails | Proves report was synthetic request artifact, not broken code | Await real device browser acceptance |
-| **D. Login** | Deployed Browser Acceptance | **UNKNOWN** | Blocked by Vercel SSO & Prod DB | Deployed login has not been executed by a real browser | N/A | Run Android Acceptance Checklist post-cutover |
-| **E. Audit** | Runtime Dependency Advisories | **VERIFIED READY** | `npm audit --omit=dev` & `docs/SECURITY_NEXTJS_PATCH_HANDOFF.md` | Zero vulnerabilities in production dependencies | DevDependencies still contain moderate advisories | Maintain dev dependency triage |
-| **F. Bot** | Webhook Auth & Deduplication | **VERIFIED READY** | `src/lib/telegram/webhook.ts#L44-L55`, `L417-L446` | Constant-time token check, atomic DB claim, lease fencing | Does not prove Telegram can reach edge (blocked by SSO) | Unblock edge, then register webhook |
-| **F. Bot** | Bot Environment Separation | **UNKNOWN** | Vercel CLI logged out | Cannot inspect `TELEGRAM_BOT_TOKEN` in Vercel Production | Does not prove distinct bot is provisioned | Owner verifies separate test vs prod bot tokens |
-| **F. Bot** | Live Webhook Registration | **UNKNOWN** | Zero live Telegram API calls performed | Webhook is not registered on live Telegram API | N/A | Run `getWebhookInfo` before registration |
-| **G. Mobile** | PWA Foundation & Safe Insets | **VERIFIED READY** | `src/app/manifest.ts`, `src/app/(auth)/login/page.tsx#L69` | Manifest, icons, touch targets (>=44px), safe-area insets | Does not prove physical device rendering | Run Android Acceptance Checklist |
-| **G. Mobile** | Physical Android Verification | **UNKNOWN** | VPS has no display/device | Interactive touch, autofill, Arabic IME not tested on Android | N/A | Execute physical Android checklist |
+| **A. Deployment** | Production Build & Deploy | **VERIFIED READY** | GitHub Deployment `7424358926`, Vercel Deployment `DcDwNYek7HBgXPtVNU2ebf1qV7D7` | Commit `77fc463` built cleanly and deployment is READY | Does not prove runtime database or bot functionality | None (Deploy pipeline is functional) |
+| **A. Deployment** | Edge Webhook Accessibility | **VERIFIED BLOCKER** | Direct HTTP probe (`HTTP 302` to `sso-api`) & Reviewer Vercel metadata (`deploymentType: all_except_custom_domains`) | Incoming webhook requests on `rabet-ammarj1.vercel.app` are redirected to Vercel SSO | Does not prove behavior of a future custom domain | Configure intended production domain or adjust deployment protection scope |
+| **B. Database** | Committed Migration Chain | **VERIFIED READY** | `drizzle/meta/_journal.json#L1-L20` | Migration chain (`0000`, `0001`) is committed, syntactically valid, and passes `db:check` | Does not prove status in hosted production database | Review and approve production migration procedure |
+| **B. Database** | Production Database Target | **VERIFIED BLOCKER** | Reviewer Neon metadata (`Rabet_dev` only) & Reviewer Vercel env metadata (`DATABASE_URL` absent) | No independent `Rabet_prod` project exists in connected account; Vercel Production lacks `DATABASE_URL` | Does not prove whether a production database exists under another account | Owner provisions dedicated `Rabet_prod` database and configures Vercel env |
+| **B. Database** | Production Applied Migrations | **UNKNOWN** | Target database identity not established | Production database target has not been inspected | Does not prove schema state | Run inspected migration runner in Phase 10B once target is provisioned |
+| **C. Auth** | Authoritative Admin Check | **VERIFIED READY** | `src/app/actions/*.ts` (`requireAdmin` in all 6 files) | All server actions enforce server-side admin session check | Does not rate limit unauthenticated login attempts | None |
+| **C. Auth** | Admin Credential Configuration | **VERIFIED READY** | Reviewer Vercel metadata (`AUTH_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH` present) | Admin authentication environment variables exist in Vercel Production | Does not prove credential correctness or password validity | Verify admin sign-in once edge access is unblocked |
+| **C. Auth** | Login Abuse / Rate Limiting | **VERIFIED BLOCKER** | Source inspection of `src/app/actions/auth.ts` & `src/auth.ts` | Password verification uses Argon2id with zero request throttling on `/login` or `/api/auth/*` | Does not mean credentials can be decrypted | Configure Vercel WAF Rate Limiting rule (Phase 10B) |
+| **D. Login** | Historical HTTP 500 Report | **UNKNOWN / INCONCLUSIVE** | Historical developer report & `src/app/actions/auth.ts#L34-L74` | Synthetic POST without Next.js action headers returns 500 in App Router | Does not prove historical production root cause or browser behavior | Execute physical browser login against deployed target |
+| **D. Login** | Deployed Browser Acceptance | **UNKNOWN** | Access blocked by edge SSO and missing database | Deployed login has not been executed by an interactive browser | Does not prove form submission failure | Run Android Acceptance Checklist post-cutover |
+| **E. Audit** | Production Dependencies | **VERIFIED READY** | `scripts/validate-audit-report.mjs` run on GitHub Actions (`npm audit --omit=dev`) | Exit code `0`, exactly `0` vulnerabilities across 110 production packages | Does not mean devDependencies are free of advisories | Maintain dev dependency triage |
+| **E. Audit** | Development Dependencies | **VERIFIED READY** | `scripts/validate-audit-report.mjs` run on GitHub Actions (`npm audit`) | Exit code `1`, 16 advisories (6 high, 9 moderate, 1 low) confined strictly to dev tooling (`shadcn`, `drizzle-kit`, `vitest`) | Does not affect production bundle | Maintain isolated dev tooling without `audit fix --force` |
+| **F. Bot** | Webhook Auth & Deduplication | **VERIFIED READY** | `src/lib/telegram/webhook.ts#L44-L55`, `L417-L446` | Code implements constant-time secret token check, atomic DB claim, lease fencing | Does not prove Telegram can reach edge | Unblock edge, then register webhook |
+| **F. Bot** | Production Bot Configuration | **VERIFIED BLOCKER** | Reviewer Vercel metadata (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` absent) | Bot credentials are not configured in Vercel Production environment | Does not prove whether bot tokens exist in BotFather | Configure distinct production bot token and secret in Vercel |
+| **F. Bot** | Live Webhook Registration | **UNKNOWN** | No live Telegram API calls performed | Webhook registration state on Telegram Bot API is uninspected | Does not prove whether bot is active or inactive | Perform safe in-process `getWebhookInfo` check |
+| **G. Mobile** | PWA Foundation & Safe Insets | **VERIFIED READY** | `src/app/manifest.ts`, `src/app/(auth)/login/page.tsx#L69` | PWA manifest, viewport configuration, touch targets >= 44px | Does not prove physical hardware ergonomics | Execute Android Acceptance Checklist |
+| **G. Mobile** | Physical Android Verification | **UNKNOWN** | VPS has no physical hardware | Real Android keyboard, RTL Arabic typing, and PWA standalone launch untested | Does not prove mobile defect | Execute physical Android checklist |
 
 ---
 
-## 4. Ranked Launch Blockers
+## 4. Ranked Launch Blockers & Preferred Remediation Paths
 
-### Blocker 1 (Critical): Vercel Deployment Protection Intercepts Telegram Webhook
-- **Observation:** `curl -sI -X POST https://rabet-ammarj1.vercel.app/api/telegram/webhook` returns `HTTP/2 302` redirecting to `https://vercel.com/sso-api`.
-- **Impact:** Telegram Bot API cannot follow SSO authentication redirects. All incoming updates will fail immediately, causing Telegram to disable the webhook.
-- **Root Cause:** Vercel "Deployment Protection" (Standard Vercel Authentication / SSO) is turned on globally for the project without an exception for the Production environment or webhook path.
+### Blocker 1 (Critical): Edge Interception of Telegram Webhook
+- **Observation:** `POST https://rabet-ammarj1.vercel.app/api/telegram/webhook` returns `HTTP/2 302` redirecting to `https://vercel.com/sso-api`.
+- **Reviewer Metadata:** Vercel deployment protection is set to SSO with `deploymentType: all_except_custom_domains`.
+- **Impact:** Telegram Bot API cannot follow SSO authentication redirects. According to official Telegram documentation ([Telegram Bot API - setWebhook](https://core.telegram.org/bots/api#setwebhook)):
+  > "If a webhook returns an error (non-2xx HTTP status), Telegram will attempt to deliver the update again. After several failed attempts over multiple days, webhook delivery is temporarily suspended."
+  If activated under current protection, incoming updates will fail and Telegram will abandon delivery.
+- **Preferred Remediation:**
+  - If using a Custom Domain (e.g., `api.rabet.com` or `rabet.com`): Attach and verify the custom domain in Vercel. Because policy is `all_except_custom_domains`, requests to the custom domain bypass SSO automatically.
+  - If using the `*.vercel.app` domain: Adjust Vercel Project Settings -> Deployment Protection to disable SSO for the **Production** environment specifically, while preserving protection on Preview deployments.
+  - *Security Note:* Application-level webhook authentication (`X-Telegram-Bot-Api-Secret-Token` via constant-time comparison) and admin route authentication (`requireAdmin()`) provide authoritative protection.
 
-### Blocker 2 (Critical): Production Database Unprovisioned & Unmigrated
-- **Observation:** The repository only contains secrets and tooling for `Rabet_dev` (`EXPECTED_DEV_HOST = ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech`). GitHub environment `Production` has 0 secrets.
-- **Impact:** If launched, the application either throws `DATABASE_URL is not set` or risks connecting to `Rabet_dev`, corrupting development data and violating environment separation rules.
+### Blocker 2 (Critical): Production Database Target Missing & Unmigrated
+- **Observation:** Reviewer platform metadata confirmed no `Rabet_prod` project exists in the connected Neon account, and `DATABASE_URL` is absent from Vercel Production environment variables.
+- **Impact:** The application runtime cannot store store settings, catalog entities, customer records, or inquiry messages. Pointing Production at `Rabet_dev` is strictly prohibited by project safety rules.
+- **Preferred Remediation:**
+  1. Owner provisions a dedicated `Rabet_prod` project in the Neon console.
+  2. Owner sets `NEON_PROD_DATABASE_URL` in the GitHub `Production` environment (with review protections).
+  3. In Phase 10B, add `scripts/neon-prod-actions.mjs` and `.github/workflows/neon-prod-migrate.yml` with pinned `EXPECTED_PROD_HOST`, `EXPECTED_PROD_DB_NAME`, and required typed confirmation `MIGRATE_RABET_PROD`.
+  4. Execute the migration workflow on a GitHub-hosted runner to apply migrations `0000` and `0001` and verify the applied schema.
+  5. Add `DATABASE_URL` (direct/pooled connection string with `sslmode=require`) to Vercel Production environment variables.
 
-### Blocker 3 (High): Production Environment Variables Unverified
-- **Observation:** The VPS cannot read Vercel Production environment variables.
-- **Impact:** Missing `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH` triggers fail-closed "Sign-in is unavailable". Missing `AUTH_SECRET` causes Auth.js crash. Missing `TELEGRAM_BOT_TOKEN` / `TELEGRAM_WEBHOOK_SECRET` returns HTTP 503.
+### Blocker 3 (High): Production Bot Credentials Missing in Vercel
+- **Observation:** Reviewer platform metadata confirmed `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` are not set in Vercel Production.
+- **Impact:** `/api/telegram/webhook` returns `HTTP 503` ("Telegram webhook is not configured.") and fails closed.
+- **Preferred Remediation:**
+  1. Owner provisions a dedicated production bot with @BotFather (never sharing the development/test bot token).
+  2. Owner generates a high-entropy secret token (`openssl rand -hex 32`).
+  3. Configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` in Vercel Production environment variables.
+  4. Note: Existing working secrets (`AUTH_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`) are already present in Vercel Production and **must not be regenerated or overwritten**.
 
-### Blocker 4 (High): Login Endpoint Exposed to Unlimited Brute Force
-- **Observation:** Credential verification in `src/lib/auth/credentials.ts` uses Argon2id, which consumes CPU/memory per check but has no rate-limiting barrier.
-- **Impact:** If Deployment Protection is disabled to allow public bot/customer access, an attacker can flood `/login` or `/api/auth/callback/credentials` with thousands of attempts, exhausting serverless execution limits or brute-forcing the single admin password.
-
-### Blocker 5 (Medium): Physical Android Device Acceptance Not Yet Performed
-- **Observation:** CI verifies headless CDP Chromium at 360px, but physical device ergonomics, virtual keyboard behaviors, and RTL Arabic IME typing remain unverified on hardware.
-
----
-
-## 5. One Preferred Remediation Path per Blocker
-
-### Remediation 1 (Edge Protection):
-- **Action:** In Vercel Project Settings -> **Deployment Protection**:
-  - Keep Deployment Protection **ENABLED for Preview Deployments**.
-  - Set Deployment Protection to **DISABLED for Production** (or configure a Custom Domain that bypasses protection).
-  - Webhook security is strictly maintained by application-level validation: constant-time `X-Telegram-Bot-Api-Secret-Token` verification (`src/lib/telegram/webhook.ts#L44-L55`). Admin routes remain protected by `requireAdmin()`.
-
-### Remediation 2 (Production Database):
-- **Action:**
-  1. Owner provisions a dedicated project `Rabet_prod` in the Neon console.
-  2. Owner sets `NEON_PROD_DATABASE_URL` in GitHub `Production` environment.
-  3. In Phase 10B, add `scripts/neon-prod-actions.mjs` and `.github/workflows/neon-prod-migrate.yml` with pinned `EXPECTED_PROD_HOST`, `EXPECTED_PROD_DB_NAME`, and required confirmation `MIGRATE_RABET_PROD`.
-  4. Run the GitHub Action to apply migrations `0000` and `0001` with zero local VPS database execution.
-  5. Set `DATABASE_URL` in Vercel Production environment variables.
-
-### Remediation 3 (Environment Configuration):
-- **Action:** Owner inspects Vercel Dashboard -> Settings -> Environment Variables and ensures all 7 required variables are populated for the **Production** environment:
-  - `NEXT_PUBLIC_APP_URL` (`https://rabet-ammarj1.vercel.app` or custom domain)
-  - `AUTH_SECRET` (generated via `openssl rand -base64 32`)
-  - `ADMIN_EMAIL` (merchant email)
-  - `ADMIN_PASSWORD_HASH` (generated via `node scripts/generate-admin-hash.mjs`)
-  - `DATABASE_URL` (direct/pooled Neon connection string with `sslmode=require`)
-  - `TELEGRAM_BOT_TOKEN` (production bot token from @BotFather)
-  - `TELEGRAM_WEBHOOK_SECRET` (random high-entropy secret)
-
-### Remediation 4 (Login Abuse Protection):
-- **Evaluation:**
-  - *Option A: Vercel WAF / Rate Limiting:* Requires Vercel Pro plan ($20/mo). Provides edge-level IP throttling before hitting serverless functions.
-  - *Option B: DB-Backed Atomic Rate Limiter (Preferred for self-contained MVP):*
-    Add a lightweight `login_attempt` table or query existing atomic batch primitives in PostgreSQL to track failed attempts by IP/account with a 5-attempt / 15-minute lockout window.
-- **Preferred Path:** If owner has Vercel Pro, configure Vercel WAF Rate Limit rule: 5 requests/minute on `/api/auth/*`. If owner is on Vercel Hobby, implement the minimal DB-backed rate limiter in Phase 10B.
-
-### Remediation 5 (Android Acceptance):
-- **Action:** Execute the manual 10-step Android checklist below on a physical phone connected to cellular data.
+### Blocker 4 (High): Login Endpoints Lack Request Throttling
+- **Observation:** Authentication entry points execute Argon2id password hashing but have no request rate limiting.
+- **Impact:** An attacker can flood credential endpoints with requests, causing compute resource exhaustion or brute-force exposure.
+- **Preferred Remediation:** Deploy one minimal Vercel WAF Rate Limiting rule (detailed in §5).
 
 ---
 
-## 6. Unknowns & Exact Missing Evidence
+## 5. Login Abuse Protection: Minimal Vercel WAF Rule Proposal
 
-| Unknown Item | Why Unknown | Exact Missing Evidence | Action to Resolve |
-| :--- | :--- | :--- | :--- |
-| **Vercel Prod Env Vars** | Vercel CLI logged out on VPS | Output of `vercel env ls` or Vercel dashboard screenshot | Owner checks Vercel Dashboard -> Environment Variables |
-| **Neon Prod Project Existence** | No production secret in repo | Neon dashboard project listing | Owner checks Neon Console for `Rabet_prod` |
-| **Telegram Bot Webhook State** | No bot token provided on VPS | JSON response from `getWebhookInfo` | Owner runs sanitized `getWebhookInfo` check |
-| **Vercel Plan Tier (Hobby vs Pro)** | Billing metadata not in repo | Vercel team billing settings | Owner confirms whether team is Hobby or Pro |
+### Architectural Context & Entry Point Analysis
+Inspection of the application code reveals exactly two entry points that reach password verification:
+1. **Login Server Action (`POST /login`):** Submitted by `LoginForm` (`src/components/auth/login-form.tsx`) to the `/login` route handler with `Next-Action` headers.
+2. **Auth.js Credentials Callback (`POST /api/auth/callback/credentials`):** Direct credential submission handled by Auth.js (`src/app/api/auth/[...nextauth]/route.ts`).
+
+Both entry points call `verifyAdminCredentials` (`src/lib/auth/credentials.ts`), which runs Argon2id verification.
+
+### Official Vercel WAF Documentation Findings
+Review of current official documentation ([Vercel WAF Rate Limiting](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting)) confirms:
+- WAF Rate Limiting is available on **all plan tiers**, including **one free custom rule on Hobby plans**.
+- Multi-rule rate limiting and advanced keys are available on Pro and Enterprise.
+- Therefore, rate limiting can be implemented via platform configuration without requiring a Pro subscription or an external Redis service.
+
+### Proposed Minimal Rate Limiting Rule Specification
+
+```yaml
+Rule Name: protect-admin-login
+Description: Rate limit credential submission on Server Action and Auth.js callback
+Action: Rate Limit
+Condition:
+  - Request Method equals: POST
+  - AND Path matches regex: ^/(login|api/auth/callback/credentials)$
+Rate Limit Settings:
+  - Key: Client IP Address
+  - Threshold: 5 requests
+  - Window: 60 seconds (1 minute)
+  - Action on Exceed: Return HTTP 429 (Too Many Requests)
+```
+
+### Technical Tradeoffs & Boundary Characteristics
+- **Single-Rule Coverage:** By combining both paths in a single regular expression (`^/(login|api/auth/callback/credentials)$`) conditioned on HTTP `POST`, both entry points are protected under a single rule allocation (Hobby-compatible).
+- **Justification for Threshold:** The application has exactly one administrator. A human entering a password will attempt 1 to 3 times in a minute. A limit of 5 requests/minute accommodates accidental typos while capping an automated brute-force attack to 5 attempts/minute (300/hour) instead of thousands/minute.
+- **Per-Region Edge Counter Behavior:** Vercel edge rate limits are tracked per edge Point of Presence (PoP). While an attacker routing across disparate global regions could theoretically achieve a small multiple of the threshold, the barrier is sufficient to neutralize naive volumetric brute force.
+- **Shared Network (NAT) Tradeoff:** If the admin is on a mobile carrier network sharing an IP, 5 attempts per minute remains generous for a single user.
+- **Exclusion of Telegram Webhook:** The Telegram webhook is located at `POST /api/telegram/webhook`. Because the rule strictly matches `^/(login|api/auth/callback/credentials)$`, webhook traffic is completely exempt from rate limiting.
+- **Normal Operations Usability:** 
+  - Loading `/login` (HTTP `GET`) is unaffected.
+  - Logging out (`signOut()` or `logout()` Server Action) does not post credentials.
+  - Authenticated navigation throughout the dashboard (`/overview`, `/inquiries`, `/catalog`) uses session cookies and does not hit credential endpoints.
+- **Owner Lockout Recovery:** If the owner triggers a 429 lockout by mistyping the password 5 times, access is automatically restored when the 60-second sliding window expires.
+
+---
+
+## 6. Dependency Advisory Triage & Execution Evidence
+
+Fresh audit evidence was collected on GitHub-hosted runners using `scripts/validate-audit-report.mjs` via `.github/workflows/audit.yml` (Run ID `40958988519` and PR checks on PR #20):
+
+### Summary Table
+
+| Scope | Exit Code | Findings Count | Severity Breakdown | Runtime Exposure | Decision |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Production Dependencies** (`--omit=dev`) | `0` | **0** | None (Clean) | None (0 vulnerable packages shipped) | **Ready for Launch** |
+| **Full Dependency Tree** (including dev) | `1` | **16** | 6 High, 9 Moderate, 1 Low | Confined strictly to dev/build tooling | **Non-blocking / Triage Only** |
+
+### Detailed Breakdown of Full-Tree Advisories
+1. **`deepmerge` / `@shadcn/registry` / `ip-address` (via `shadcn` CLI devDependency):**
+   - Severity: High & Moderate.
+   - Execution Context: Developer CLI tool used during code authoring to generate UI component scaffolding. Never included in the Next.js runtime bundle or serverless functions.
+2. **`esbuild` / `@esbuild-kit/*` (via `drizzle-kit` devDependency):**
+   - Severity: Moderate.
+   - Execution Context: Drizzle CLI used for migration generation and schema checking. Runtime database access uses `@neondatabase/serverless` and `drizzle-orm` directly.
+3. **`@vitest/mocker` (via `vitest` devDependency):**
+   - Severity: Moderate.
+   - Execution Context: Test runner executing locally and in CI.
+
+**Conclusion:** Zero production dependencies are affected. Exploit reachability in the deployed application is 0. Running `npm audit fix --force` is prohibited as it causes breaking downgrades of development tooling. Launch is **unblocked** from a dependency advisory perspective.
 
 ---
 
 ## 7. Ordered, Executable Cutover & Rollback Runbook
 
 > [!CAUTION]
-> Do NOT execute this runbook until Blockers 1, 2, and 3 are resolved. Never execute seeds against Production.
+> This runbook is a future, approval-controlled operational sequence. Do NOT execute live activations or database writes during Phase 10A.
 
-### Phase 1: Pre-Cutover Verification
-1. Confirm GitHub CI run for `main` is green.
-2. Confirm Vercel Production deployment is `READY`.
-3. Verify Production database schema: Run `neon-prod-migrate.yml` in `inspect` mode on GitHub Actions. Verify 14 tables and 2 applied migrations.
-4. Verify edge accessibility:
-   ```bash
-   curl -sI https://<PROD_DOMAIN>/api/telegram/webhook
-   ```
-   Must return `HTTP 503` (if unconfigured) or `HTTP 401` (Unauthorized), **NOT HTTP 302** to `sso-api`.
+### Step 1: Confirm Code & Deployment Identity
+1. Verify `main` commit matches the approved merge commit (`77fc463e088bb62224c396563c4831dd8aa21683`).
+2. Verify Vercel Production deployment state is `READY` (Deployment `DcDwNYek7HBgXPtVNU2ebf1qV7D7`).
 
-### Phase 2: Webhook State Inspection (Safe Read-Only)
-Query the current webhook status using the bot token (do not print token in shell history):
+### Step 2: Establish Independent Production Database & Backup Prerequisites
+1. Confirm `Rabet_prod` project is provisioned on Neon with dedicated endpoint (e.g. `ep-prod-xyz.aws.neon.tech`).
+2. Record base backup point: Neon Free tier provides 24-hour Point-in-Time Restore (PITR); Pro provides up to 30 days. Verify backup retention setting before running migrations.
+3. Configure `NEON_PROD_DATABASE_URL` in GitHub `Production` environment.
+
+### Step 3: Apply & Inspect Reviewed Migrations
+1. Trigger the production migration workflow (`neon-prod-migrate.yml`) in `inspect` mode on GitHub Actions. Verify target identity.
+2. Trigger the production migration workflow in `migrate` mode with typed confirmation `MIGRATE_RABET_PROD`.
+3. Confirm migrations `0000_initial_schema` and `0001_tree_and_snapshot_integrity` apply cleanly.
+4. Verify table count (14 tables) and schema consistency via `db:check`.
+
+### Step 4: Configure & Verify Production Variables
+In Vercel Dashboard -> Project Settings -> Environment Variables, verify Production scope:
+- `AUTH_SECRET`: Existing value verified present.
+- `ADMIN_EMAIL`: Existing value verified present.
+- `ADMIN_PASSWORD_HASH`: Existing value verified present.
+- `DATABASE_URL`: Set to `Rabet_prod` connection string (`sslmode=require`).
+- `TELEGRAM_BOT_TOKEN`: Set to dedicated production bot token.
+- `TELEGRAM_WEBHOOK_SECRET`: Set to high-entropy secret token.
+
+### Step 5: Establish Login Abuse Protection
+In Vercel Dashboard -> Project Settings -> Security -> Firewall / WAF:
+1. Create the `protect-admin-login` rate limiting rule (§5) covering `POST` requests to `^/(login|api/auth/callback/credentials)$`.
+2. Verify rule is active.
+
+### Step 6: Configure Intended Hostname & Edge Routing
+1. If using Custom Domain: Verify DNS records and ensure SSO protection policy (`all_except_custom_domains`) permits public traffic to the domain.
+2. If using `*.vercel.app`: Ensure Deployment Protection is disabled for Production. Keep Preview protected.
+
+### Step 7: Probe Application Webhook Endpoint
+Execute an HTTP `POST` probe without secret token or payload to verify edge routing without following redirects:
 ```bash
-read -s -p "Enter Bot Token: " BOT_TOKEN
-curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo" | jq '{url: .result.url, pending_count: .result.pending_update_count, last_error: .result.last_error_message}'
+curl -sS -o /dev/null -w "%{http_code}\n" -X POST "https://<PROD_HOST>/api/telegram/webhook"
 ```
-Record whether `pending_update_count > 0` and whether a previous URL was registered.
+**Interpretation:**
+- `302`: **STOP.** Edge SSO is still intercepting requests. Telegram cannot deliver updates.
+- `503`: Reaching application, but environment variables (`TELEGRAM_BOT_TOKEN`/`SECRET`) are missing.
+- `401`: **SUCCESS.** Request reached the application and was rejected due to missing secret token. Edge is open and ready.
+- `200` / `400`: Unexpected for an empty request.
 
-### Phase 3: Activation Decision on Pending Updates
-- If the bot is fresh with 0 pending updates: Proceed with standard registration (`drop_pending_updates: false`).
-- If stale test updates exist on the bot: Make a deliberate owner decision whether to process or set `drop_pending_updates: true`. Never drop updates silently.
+### Step 8: Safe Read-Only Webhook Inspection
+Run an in-process Python script to inspect existing Telegram webhook configuration without printing secrets or URLs:
+```python
+import getpass, json, urllib.request
 
-### Phase 4: Webhook Registration
-Register the production webhook endpoint with Telegram:
-```bash
-read -s -p "Enter Bot Token: " BOT_TOKEN
-read -s -p "Enter Webhook Secret: " WEBHOOK_SECRET
-PROD_URL="https://<PROD_DOMAIN>/api/telegram/webhook"
+token = getpass.getpass("Enter Telegram Bot Token: ").strip()
+url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
 
-curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "'"${PROD_URL}"'",
-    "secret_token": "'"${WEBHOOK_SECRET}"'",
-    "allowed_updates": ["message", "callback_query"],
-    "drop_pending_updates": false
-  }' | jq .
+req = urllib.request.Request(url)
+with urllib.request.urlopen(req) as resp:
+    data = json.loads(resp.read().decode("utf-8"))
+    res = data.get("result", {})
+    print("--- Webhook Status ---")
+    print(f"Current URL: {res.get('url') or '(None)'}")
+    print(f"Has Custom Certificate: {res.get('has_custom_certificate')}")
+    print(f"Pending Update Count: {res.get('pending_update_count')}")
+    print(f"Last Error Date: {res.get('last_error_date') or '(None)'}")
+    print(f"Last Error Message: {res.get('last_error_message') or '(None)'}")
 ```
-Verify the response returns `{"ok": true, "result": true, "description": "Webhook was set"}`.
 
-### Phase 5: Verification Smoke Test
-1. Re-run `getWebhookInfo`. Confirm `url` matches `PROD_URL`, `has_custom_certificate` is `false`, and `last_error_date` is absent.
-2. Open Telegram as a test customer and send `/start` to the production bot.
-3. Confirm bot sends the welcome message and language selection buttons.
-4. Navigate catalog to a product and tap "Ask a Question".
-5. Open Seller Inbox (`https://<PROD_DOMAIN>/inquiries`), log in as admin, verify incoming inquiry appears.
-6. Reply to inquiry in Arabic: `مرحباً، تم استلام استفسارك بنجاح.`
-7. Verify Telegram customer receives the prefixed reply `[INQ-XXXXXX]\n\n...`.
+### Step 9: Approve Activation & Pending Updates Policy
+- **Policy Rule:** Default to `drop_pending_updates: false`.
+- If `pending_update_count > 0` on an existing bot: Review whether messages are legitimate customer inquiries or old tests. Only set `drop_pending_updates: true` with explicit owner written approval.
 
-### Phase 6: Rollback Procedure (Emergency De-activation)
-If unexpected errors occur:
-1. Immediately remove webhook to stop Telegram from sending traffic:
-   ```bash
-   read -s -p "Enter Bot Token: " BOT_TOKEN
-   curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook" | jq .
+### Step 10: Register Webhook & Execute Live Smoke Test
+1. Register webhook using an in-process operator script:
+   ```python
+   import getpass, json, urllib.request
+
+   token = getpass.getpass("Enter Bot Token: ").strip()
+   secret = getpass.getpass("Enter Webhook Secret: ").strip()
+   prod_url = input("Enter Production Webhook URL: ").strip()
+
+   payload = json.dumps({
+       "url": prod_url,
+       "secret_token": secret,
+       "allowed_updates": ["message", "callback_query"],
+       "drop_pending_updates": False
+   }).encode("utf-8")
+
+   req = urllib.request.Request(
+       f"https://api.telegram.org/bot{token}/setWebhook",
+       data=payload,
+       headers={"Content-Type": "application/json"}
+   )
+
+   with urllib.request.urlopen(req) as resp:
+       result = json.loads(resp.read().decode("utf-8"))
+       print(f"Registration result: {result.get('description')}")
    ```
-2. Verify `getWebhookInfo` returns empty `url`.
-3. If application code caused regression: Use Vercel Dashboard -> Deployments -> Rollback to previous deployment.
-4. *Note on Database Rollback:* Database schema changes are additive and backward-compatible. Application rollback does NOT require rolling back database tables.
+2. Verification:
+   - Check `getWebhookInfo`: Confirm `pending_update_count` is tracking and `url` is set.
+   - Send `/start` from a personal Telegram account. Verify welcome message and catalog menu appear.
+   - Submit a test inquiry. Log into `/inquiries` as admin and reply in Arabic (`مرحباً`). Verify customer receives reply.
+
+---
+
+### Emergency Rollback Procedures
+
+#### Scenario A: Webhook Delivery Failure or Bot Abuse
+1. Immediately pause webhook traffic via in-process script executing `deleteWebhook`:
+   ```python
+   import getpass, json, urllib.request
+   token = getpass.getpass("Enter Bot Token: ").strip()
+   req = urllib.request.Request(
+       f"https://api.telegram.org/bot{token}/deleteWebhook",
+       data=json.dumps({"drop_pending_updates": False}).encode("utf-8"),
+       headers={"Content-Type": "application/json"}
+   )
+   with urllib.request.urlopen(req) as resp:
+       print("Webhook removed successfully.")
+   ```
+2. Telegram will hold pending updates in queue for up to 24 hours while issues are addressed.
+
+#### Scenario B: Application Rollback
+1. If application defect occurs: In Vercel Dashboard -> Deployments, execute **Instant Rollback** to the prior deployment.
+2. *Important Vercel Instant Rollback Note:* According to official documentation ([Vercel Instant Rollback](https://vercel.com/docs/instant-rollback)), executing an Instant Rollback disables automatic production domain assignment from Git pushes until explicitly unpinned. To restore normal Git CI/CD, the operator must re-promote the latest Git deployment in the dashboard once fixed.
+3. *Database Independence:* Current migrations (`0000`, `0001`) are additive. Application rollback does NOT roll back PostgreSQL database schema.
 
 ---
 
 ## 8. Physical Android Acceptance Checklist
 
-To be completed on a physical Android smartphone using Google Chrome or Samsung Internet:
+To be completed on a physical Android smartphone using Google Chrome or Samsung Internet over mobile data:
 
-- [ ] **1. Sign-in Form Ergonomics:** Navigate to `/login`. Verify viewport fits screen without horizontal panning. Tap email input: verify email keyboard layout opens (`@` key accessible). Tap password input: test show/hide toggle.
-- [ ] **2. Credential Rejection:** Enter wrong password. Tap "Sign in". Verify clean error banner ("Incorrect email or password") appears without leaking admin existence.
-- [ ] **3. Successful Authentication:** Enter valid admin credentials. Verify seamless redirect to `/overview`.
-- [ ] **4. Session Persistence & Back Button:** Tap back button on Android navigation bar. Verify application stays on `/overview` and does not revert to `/login`.
-- [ ] **5. Logout Enforcement:** Open menu, tap "Sign out". Verify redirect to `/login`. Tap browser forward/back buttons; verify dashboard content cannot be viewed.
-- [ ] **6. Catalog & Settings Navigation:** Log back in. Open `/catalog` and `/settings`. Verify touch targets are at least 44×44 CSS px. Verify numbers and prices display in clean decimal format.
-- [ ] **7. Inbox & RTL Arabic Reply:** Open `/inquiries`. Select an active inquiry. Verify customer info card and frozen product details render cleanly. Type a multi-line Arabic reply in the composer. Verify text direction is RTL and remaining character counter updates accurately.
-- [ ] **8. Draft Recovery:** Type a half-finished message. Navigate to `/overview`, then return to `/inquiries/[id]`. Verify draft text is restored from `sessionStorage`.
-- [ ] **9. Delivery Presentation:** Tap "Send Reply". Verify button disables during transport and shows "Sending...". Verify status transitions to "Sent" with honest timestamps.
-- [ ] **10. PWA Installation:** Open Chrome menu -> "Install app" / "Add to Home screen". Verify app icon and title "Rabet" appear. Launch from home screen: verify standalone display mode without browser address bar, with safe-area padding at top and bottom.
+- [ ] **1. Form Fit & Viewport:** Navigate to `/login`. Verify viewport fits screen without horizontal scroll. Verify safe-area margins at top and bottom.
+- [ ] **2. Mobile Input Mode:** Tap Email field: verify virtual keyboard opens with `@` and email-optimized layout (`inputMode="email"`).
+- [ ] **3. Password Toggle & Autofill:** Tap password field: toggle show/hide eye icon. Test password manager autofill integration.
+- [ ] **4. Error Presentation:** Submit incorrect password. Verify generic error banner ("Incorrect email or password") appears without layout shift.
+- [ ] **5. Successful Authentication:** Enter valid credentials. Verify redirect lands on `/overview`.
+- [ ] **6. Logout & Back-Button Protection:** Sign out from header menu. Tap Android system Back button. Verify application stays on `/login` and does not reveal cached dashboard content.
+- [ ] **7. Touch Target Sizing:** Navigate to `/catalog` and `/settings`. Verify all buttons, inputs, and toggles present touch targets >= 44×44 CSS px.
+- [ ] **8. Arabic RTL Reply:** Open active inquiry on `/inquiries/[id]`. Type a multi-line Arabic message in the composer. Verify right-to-left alignment, proper Arabic character shaping, and real-time remaining capacity counter updates.
+- [ ] **9. Draft Recovery:** Enter an unsubmitted reply draft. Navigate away to `/catalog`, then return to the inquiry. Verify draft text is restored from `sessionStorage`.
+- [ ] **10. Standalone PWA Launch:** Open browser menu -> "Add to Home screen" / "Install app". Install Rabet. Launch from home screen: verify standalone window mode without browser URL bar, with white status bar matching brand theme.
 
 ---
 
-## 9. Smallest Proposed Phase 10B Scope
+## 9. Smallest Proposed Phase 10 Trajectory
 
-Phase 10B should be bounded strictly to resolving the identified release blockers without expanding product scope:
+To maintain rigor and isolate operational risk, Phase 10 is structured into four bounded sub-phases:
 
-1. **Production Database Tooling (`neon-prod-migrate`):**
-   - Implement `scripts/neon-prod-actions.mjs` and `.github/workflows/neon-prod-migrate.yml` mirroring the dev migration safety model: pinned production endpoint host, pinned database name, `MIGRATE_RABET_PROD` confirmation, reading secret from `Production` environment.
-2. **Login Abuse Protection Implementation:**
-   - Implement the selected rate limiter (Vercel WAF rule documentation or lightweight DB-backed failure counter in `src/lib/auth/credentials.ts`).
-3. **Admin Health & Readiness Overview:**
-   - Add a read-only health indicator in the dashboard overview that displays database connectivity and webhook configuration status to the signed-in seller.
-4. **Execution of Cutover Runbook & Android Acceptance:**
-   - Assist owner with controlled webhook registration, live smoke testing, and Android device sign-off.
+```
+Phase 10A (Current PR #20)
+  └─ Establish verified baseline, matrix, WAF rate limit proposal, audit hardening & cutover runbook.
+       ↓
+Phase 10B (Next Step - Preparation)
+  └─ Production database provisioning, pinned neon-prod-migrate workflow, and Vercel WAF rule setup.
+       ↓
+Phase 10C (Live Activation & Verification)
+  └─ Approval-controlled webhook registration, live Telegram journey, and physical Android device acceptance.
+       ↓
+Phase 10D (Operational Sign-Off)
+  └─ Verification of logging, backup retention, and owner limited-launch decision.
+```
+
+### Proposed Phase 10B Scope (Strictly Bounded)
+1. **Production Database Tooling:**
+   - Create `scripts/neon-prod-actions.mjs` and `.github/workflows/neon-prod-migrate.yml` mirroring the development migration runner's security gates: pinned `EXPECTED_PROD_HOST`, pinned `EXPECTED_PROD_DB_NAME`, and required typed confirmation `MIGRATE_RABET_PROD`.
+2. **Vercel WAF Rate Limiting Activation:**
+   - Configure and verify the proposed `protect-admin-login` rule in the Vercel dashboard.
+3. **Environment Variable Configuration Assistance:**
+   - Assist owner with populating `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_WEBHOOK_SECRET` in Vercel Production.
+
+*(Note: In accordance with reviewer guidance, creating a dashboard health indicator, `login_attempt` table, or new queues/workers is excluded from Phase 10B).*

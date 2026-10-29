@@ -1002,12 +1002,17 @@ connection — this is intentional for an admin application in this phase.
 
 ## What was done in Phase 10A
 
-Phase 10A established the actual, evidence-backed production baseline following the merge of Phase 09 (PR #19, commit `77fc463e088bb62224c396563c4831dd8aa21683`). Full details are recorded in [docs/PHASE_10A_LAUNCH_READINESS.md](./PHASE_10A_LAUNCH_READINESS.md).
+Phase 10A established the evidence-backed baseline of the Rabet project following the merge of Phase 09 (PR #19, commit `77fc463e088bb62224c396563c4831dd8aa21683`). Full details are recorded in [docs/PHASE_10A_LAUNCH_READINESS.md](./PHASE_10A_LAUNCH_READINESS.md).
 
-Key verified findings:
+Key verified findings & incorporated platform evidence:
 1. **Repository & CI Baseline:** Commit `77fc463` is the merge commit on `main`. GitHub Actions CI run `40956004778` passed all jobs cleanly (lint, typecheck, build, auth, migrations, DB integration, and CDP headless Chromium acceptance).
-2. **Vercel Production State:** Automatic deployment `7424358926` is `READY` at `https://rabet-figy1ipn9-ammarj1.vercel.app` and `https://rabet-ammarj1.vercel.app`.
-3. **Edge Interception Blocker:** Direct HTTP inspection verified that Vercel Deployment Protection (SSO) is active on the Production environment, returning `HTTP/2 302` to `https://vercel.com/sso-api` for all requests, including `POST /api/telegram/webhook`. This blocks Telegram from delivering updates.
-4. **Database Readiness Blocker:** No independent `Rabet_prod` database or migration runner exists. Migration workflows in the repo are strictly pinned to `Rabet_dev`.
-5. **Login Abuse Protection:** Argon2id password hashing is active, but no request throttling exists on authentication endpoints.
-6. **Audits & Deliverables:** Added `.github/workflows/audit.yml` for non-invasive audit evidence on GitHub runners; documented the complete Cutover & Rollback Runbook and the 10-point Physical Android Acceptance Checklist. Prepared bounded scope for Phase 10B.
+2. **Vercel Production State:** Automatic deployment `7424358926` is `READY` (Deployment ID `DcDwNYek7HBgXPtVNU2ebf1qV7D7`).
+3. **Reviewer-Supplied Platform Metadata (2026-10-29):**
+   - Vercel project `prj_7JvXLmI0SzqEwNtHXmSqsoSvRZMp`, Team `team_5KLLRkUhqwAgewTcysr1mY6r`.
+   - Production environment variables: `AUTH_SECRET`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD_HASH` are present. `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_WEBHOOK_SECRET` were absent from the listing.
+   - Vercel Protection metadata: SSO enabled with `deploymentType: all_except_custom_domains`.
+   - Neon metadata: Connected account lists `Rabet_dev`; no independent `Rabet_prod` project visible.
+4. **Edge Interception Blocker:** Direct HTTP probe verified that `POST https://rabet-ammarj1.vercel.app/api/telegram/webhook` returns `HTTP/2 302` redirecting to `https://vercel.com/sso-api`. Webhook traffic is intercepted at the edge.
+5. **Login Abuse Protection Proposal:** Documented a single-rule Vercel WAF Rate Limiting proposal covering `POST` requests to `^/(login|api/auth/callback/credentials)$` (5 req/min per IP), compatible with all Vercel plans including Hobby.
+6. **Hardened Dependency Audit Workflow:** Added `.github/workflows/audit.yml` and `scripts/validate-audit-report.mjs` with automated validator self-testing, exit-code capture, and distinguishing valid reports from collection failures. Production dependencies confirmed completely clean (0 vulnerabilities).
+7. **Approval-Controlled Runbook & Android Checklist:** Provided the 10-step cutover sequence with in-process secret handling (`getpass` + `urllib`) and the 10-point physical device verification checklist. Bounded the remaining release roadmap into Phase 10B (DB & WAF preparation), Phase 10C (activation & physical acceptance), and Phase 10D (operational sign-off).
