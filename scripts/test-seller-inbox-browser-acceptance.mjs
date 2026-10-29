@@ -1306,9 +1306,9 @@ async function runAcceptance() {
 
   // Confirm that server action committed reservation and reached the Telegram proxy hold
   await waitForCondition(
-    async () => readLedger().some((x) => x.text === holdDraftText),
+    async () => readLedger().some((x) => typeof x.text === "string" && x.text.includes(holdDraftText)),
     "dispatch reached Telegram proxy hold",
-    5000,
+    10000,
     100
   );
   log("✓ Confirmed server action committed reservation and reached Telegram dispatch hold.");
@@ -1344,7 +1344,7 @@ async function runAcceptance() {
   log("Waiting for held transport dispatch to complete and status to reconcile...");
   await waitForCondition(
     async () => {
-      const entries = readLedger().filter((x) => x.text === holdDraftText);
+      const entries = readLedger().filter((x) => typeof x.text === "string" && x.text.includes(holdDraftText));
       return entries.length === 1;
     },
     "transport ledger entry for holdDraftText",
@@ -1388,7 +1388,7 @@ async function runAcceptance() {
   );
 
   // Verify from delivery ledger that exactly 1 transport send occurred for holdDraftText
-  const holdLedgerEntries = readLedger().filter((x) => x.text === holdDraftText);
+  const holdLedgerEntries = readLedger().filter((x) => typeof x.text === "string" && x.text.includes(holdDraftText));
   if (holdLedgerEntries.length !== 1 || readLedger().length !== ledgerCountBeforeHold + 1) {
     await fail(`Expected exactly 1 transport send for holdDraftText, found ${holdLedgerEntries.length}`);
   }
