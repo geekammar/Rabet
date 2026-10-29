@@ -1281,6 +1281,95 @@ export async function retrySellerReply(
   });
 }
 
+export interface SellerOperationStatus {
+  found: boolean;
+  operationId: string;
+  inquiryId: string;
+  outcome?: SellerDeliveryOutcome;
+  message?: {
+    id: string;
+    inquiryId: string;
+    author: string;
+    body: string;
+    deliveryStatus: "pending" | "sent" | "failed";
+    deliveryError: string | null;
+    telegramMessageId: number | null;
+    createdAt: Date;
+  };
+}
+
+/**
+ * Read-only lookup of an existing seller reply operation's durable state.
+ *
+ * Guarantees:
+ * 1. Zero database writes.
+ * 2. Zero Telegram transport calls.
+ * 3. Never accepts browser-supplied chat ID or status.
+ * 4. Verifies operation belongs to inquiry and author is admin.
+ * 5. Accurately maps deliveryStatus and deliveryError to SellerDeliveryOutcome.
+ */
+export async function getSellerOperationStatus(
+  db: Database,
+  inquiryId: string,
+  operationId: string,
+): Promise<SellerOperationStatus> {
+  const [msg] = await db
+    .select({
+      id: inquiryMessage.id,
+      inquiryId: inquiryMessage.inquiryId,
+      author: inquiryMessage.author,
+      body: inquiryMessage.body,
+      deliveryStatus: inquiryMessage.deliveryStatus,
+      deliveryError: inquiryMessage.deliveryError,
+      telegramMessageId: inquiryMessage.telegramMessageId,
+      createdAt: inquiryMessage.createdAt,
+    })
+    .from(inquiryMessage)
+    .where(
+      and(
+        eq(inquiryMessage.id, operationId),
+        eq(inquiryMessage.inquiryId, inquiryId),
+      ),
+    )
+    .limit(1);
+
+  if (!msg || msg.author !== "admin") {
+    return {
+      found: false,
+      operationId,
+      inquiryId,
+    };
+  }
+
+  let outcome: SellerDeliveryOutcome;
+  if (msg.deliveryStatus === "sent") {
+    outcome = "confirmed_sent";
+  } else if (msg.deliveryStatus === "failed") {
+    outcome = "confirmed_failed";
+  } else if (msg.deliveryError) {
+    outcome = "unconfirmed_outcome";
+  } else {
+    outcome = "recorded_pending";
+  }
+
+  return {
+    found: true,
+    operationId,
+    inquiryId,
+    outcome,
+    message: {
+      id: msg.id,
+      inquiryId: msg.inquiryId,
+      author: msg.author,
+      body: msg.body,
+      deliveryStatus: msg.deliveryStatus,
+      deliveryError: msg.deliveryError,
+      telegramMessageId: msg.telegramMessageId,
+      createdAt: msg.createdAt,
+    },
+  };
+}
+
 export type InquiryLifecycleTargetStatus = "open" | "resolved" | "closed";
 
 export interface TransitionInquiryStatusInput {

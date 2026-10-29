@@ -7,6 +7,7 @@ import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import { RabetDataError, toSafeErrorMessage } from "@/lib/data/errors";
 import {
+  getSellerOperationStatus,
   retrySellerReply,
   sendSellerReply,
   transitionInquiryStatus,
@@ -393,6 +394,115 @@ export async function transitionInquiryStatusAction(
         ? `Inquiry is already ${label}.`
         : `Inquiry successfully ${label}.`,
       data: updated,
+    };
+  } catch (error) {
+    if (error instanceof RabetDataError) {
+      return {
+        success: false,
+        code: error.code,
+        message: error.message,
+      };
+    }
+    return {
+      success: false,
+      code: "INTERNAL_ERROR",
+      message: toSafeErrorMessage(error),
+    };
+  }
+}
+
+export interface ReconcileSellerOperationInput {
+  inquiryId: string;
+  operationId: string;
+}
+
+export type ReconcileSellerOperationResult =
+  | {
+      success: true;
+      found: true;
+      outcome: SellerDeliveryOutcome;
+      operationId: string;
+      body: string;
+      deliveryStatus: "pending" | "sent" | "failed";
+      deliveryError?: string | null;
+      createdAt: string;
+    }
+  | {
+      success: true;
+      found: false;
+      operationId: string;
+    }
+  | {
+      success: false;
+      code: string;
+      message: string;
+    };
+
+/**
+ * Read-only authorized reconciliation of a client-tracked seller reply operation.
+ *
+ * Guarantees:
+ * 1. requireAdmin() called first before any database access.
+ * 2. Strict UUID format validation on inquiryId and operationId.
+ * 3. Never accepts browser-supplied chat ID or delivery status.
+ * 4. Zero DB mutations and zero external transport dispatches.
+ * 5. Returns safe error messages on failure without exposing internals.
+ */
+export async function reconcileSellerOperationAction(
+  input: ReconcileSellerOperationInput,
+  overrides?: { db?: Database },
+): Promise<ReconcileSellerOperationResult> {
+  const session = await requireAdmin();
+  if (!session) {
+    return {
+      success: false,
+      code: "UNAUTHORIZED",
+      message: "Admin authorization required.",
+    };
+  }
+
+  const payload = input as unknown as Record<string, unknown>;
+  const rawInquiryId = payload.inquiryId;
+  if (typeof rawInquiryId !== "string" || !UUID_REGEX.test(rawInquiryId.trim())) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Valid inquiry ID is required.",
+    };
+  }
+  const inquiryId = rawInquiryId.trim();
+
+  const rawOpId = payload.operationId;
+  if (typeof rawOpId !== "string" || !UUID_REGEX.test(rawOpId.trim())) {
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Valid operation ID is required.",
+    };
+  }
+  const operationId = rawOpId.trim();
+
+  try {
+    const db = overrides?.db ?? getDb();
+    const status = await getSellerOperationStatus(db, inquiryId, operationId);
+
+    if (!status.found || !status.message) {
+      return {
+        success: true,
+        found: false,
+        operationId,
+      };
+    }
+
+    return {
+      success: true,
+      found: true,
+      outcome: status.outcome ?? "recorded_pending",
+      operationId: status.operationId,
+      body: status.message.body,
+      deliveryStatus: status.message.deliveryStatus,
+      deliveryError: status.message.deliveryError,
+      createdAt: status.message.createdAt.toISOString(),
     };
   } catch (error) {
     if (error instanceof RabetDataError) {

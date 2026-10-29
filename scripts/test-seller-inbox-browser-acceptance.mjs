@@ -30,6 +30,7 @@ let chromeProcess = null;
 let pgClient = null;
 let ownedTempDir = null;
 let ownedPgFixture = null;
+let createdDbName = null;
 let isCleaningUp = false;
 
 function log(msg) {
@@ -94,6 +95,15 @@ async function cleanup() {
   if (ownedPgFixture) {
     verifyAndStopOwnedFixture(ownedPgFixture, "scripts/db-test-postgres.mjs");
     ownedPgFixture = null;
+  }
+
+  if (createdDbName && process.env.RABET_TEST_PG_URL) {
+    try {
+      const cleanupSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+      await cleanupSql.unsafe(`DROP DATABASE IF EXISTS ${createdDbName}`);
+      await cleanupSql.end();
+    } catch {}
+    createdDbName = null;
   }
 
   if (ownedTempDir && existsSync(ownedTempDir)) {
@@ -222,40 +232,52 @@ async function runAcceptance() {
   }
   log(`Found Chromium binary at: ${chromePath}`);
 
-  // Start disposable PostgreSQL
-  ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-inbox-acceptance-"));
-  chmodSync(ownedTempDir, 0o700);
-
-  const stateFilePath = path.join(ownedTempDir, "pg-state.json");
-  const pgStartOutput = spawnSync(
-    "node",
-    ["scripts/db-test-postgres.mjs", "start"],
-    {
-      env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
-      encoding: "utf8",
-    }
-  );
-
-  if (pgStartOutput.status !== 0) {
-    await fail(`Failed to start disposable PostgreSQL: ${pgStartOutput.stderr || pgStartOutput.stdout}`);
-  }
-
+  // Start or connect to disposable PostgreSQL
   let pgUrl = "";
-  for (const line of (pgStartOutput.stdout || "").split("\n")) {
-    if (line.startsWith("postgresql://")) {
-      pgUrl = line.trim();
-      break;
-    }
-  }
-  if (!pgUrl) {
-    const savedState = readPgState(stateFilePath);
-    if (savedState?.port) {
-      pgUrl = `postgresql://rabet@127.0.0.1:${savedState.port}/postgres`;
-    }
-  }
+  if (process.env.RABET_TEST_PG_URL) {
+    createdDbName = `rabet_inbox_browser_${Date.now()}`;
+    const adminSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+    await adminSql.unsafe(`CREATE DATABASE ${createdDbName}`);
+    await adminSql.end();
 
-  ownedPgFixture = readPgState(stateFilePath);
-  log(`Disposable PostgreSQL started at: ${pgUrl}`);
+    const parsed = new URL(process.env.RABET_TEST_PG_URL);
+    parsed.pathname = `/${createdDbName}`;
+    pgUrl = parsed.toString();
+    log(`Using designated PostgreSQL service with database: ${createdDbName}`);
+  } else {
+    ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-inbox-acceptance-"));
+    chmodSync(ownedTempDir, 0o700);
+
+    const stateFilePath = path.join(ownedTempDir, "pg-state.json");
+    const pgStartOutput = spawnSync(
+      "node",
+      ["scripts/db-test-postgres.mjs", "start"],
+      {
+        env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
+        encoding: "utf8",
+      }
+    );
+
+    if (pgStartOutput.status !== 0) {
+      await fail(`Failed to start disposable PostgreSQL: ${pgStartOutput.stderr || pgStartOutput.stdout}`);
+    }
+
+    for (const line of (pgStartOutput.stdout || "").split("\n")) {
+      if (line.startsWith("postgresql://")) {
+        pgUrl = line.trim();
+        break;
+      }
+    }
+    if (!pgUrl) {
+      const savedState = readPgState(stateFilePath);
+      if (savedState?.port) {
+        pgUrl = `postgresql://rabet@127.0.0.1:${savedState.port}/postgres`;
+      }
+    }
+
+    ownedPgFixture = readPgState(stateFilePath);
+    log(`Disposable PostgreSQL started at: ${pgUrl}`);
+  }
 
   // Run migrations
   log("Applying database migrations...");
@@ -1243,6 +1265,102 @@ async function runAcceptance() {
     "edited reply after duplication confirmation delivered successfully"
   );
   log("✓ Editing after unconfirmed send enforces duplication risk confirmation before sending.");
+
+  // 10D: Verify operation identity is persisted before dispatch & restored across reload
+  log("10D: Testing operation identity persistence before dispatch and reload reconciliation...");
+  const delayedReplyText = "TRIGGER_DELAYED: Testing reload reconciliation";
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(delayedReplyText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+
+  // Submit and verify sessionStorage immediately has operation ID
+  await cdp.eval(`(() => {
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+
+  // Verify sessionStorage immediately captured bound op and unresolved op before or on dispatch
+  const capturedOp = await cdp.eval(`(() => {
+    const raw = sessionStorage.getItem('rabet_unresolved_op_${inqProd.id}') || sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    return raw ? JSON.parse(raw) : null;
+  })()`);
+
+  if (!capturedOp || !capturedOp.id) {
+    await fail("Expected operation identity to be persisted in sessionStorage upon dispatch");
+  }
+  log(`✓ Operation identity successfully persisted before/at dispatch: ${capturedOp.id}`);
+
+  // Wait for delivery to complete
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes(delayedReplyText) && body.includes("Sent via Telegram");
+    },
+    "delayedReplyText delivered successfully"
+  );
+
+  // 10E: Edit and revert preserves unresolved identity
+  log("10E: Testing edit and revert preserves unresolved identity without rotating UUID...");
+  // Simulate an unresolved operation in sessionStorage:
+  const testOpAId = "99999999-9999-4999-a999-999999999999";
+  const opAText = "Original text for operation A";
+  await cdp.eval(`(() => {
+    sessionStorage.setItem('rabet_unresolved_op_${inqProd.id}', JSON.stringify({
+      id: '${testOpAId}',
+      body: ${JSON.stringify(opAText)},
+      status: 'unconfirmed'
+    }));
+    sessionStorage.setItem('rabet_bound_op_${inqProd.id}', JSON.stringify({
+      id: '${testOpAId}',
+      body: ${JSON.stringify(opAText)},
+      status: 'unconfirmed'
+    }));
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(opAText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+
+  // Edit away from opAText:
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, 'Temporary edit text away from original');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+
+  // Revert back to opAText:
+  await cdp.eval(`(() => {
+    const textarea = document.querySelector('textarea');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(textarea, ${JSON.stringify(opAText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+
+  // Verify bound operation reconnected to testOpAId:
+  const reconnectedOp = await cdp.eval(`(() => {
+    const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    return raw ? JSON.parse(raw) : null;
+  })()`);
+
+  if (!reconnectedOp || reconnectedOp.id !== testOpAId) {
+    await fail(`Expected bound operation to reconnect to ${testOpAId} upon revert, got ${JSON.stringify(reconnectedOp)}`);
+  }
+  log(`✓ Reverting draft to original text reconnected to stable operation ID: ${testOpAId}`);
+
+  // Clear simulated storage
+  await cdp.eval(`(() => {
+    sessionStorage.removeItem('rabet_unresolved_op_${inqProd.id}');
+    sessionStorage.removeItem('rabet_bound_op_${inqProd.id}');
+    sessionStorage.removeItem('rabet_draft_inquiry_${inqProd.id}');
+  })()`);
 
   // Clear draft for clean exit
   await cdp.eval(`(() => {

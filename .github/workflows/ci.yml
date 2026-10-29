@@ -211,3 +211,87 @@ jobs:
           echo "      wizard flows:  first setup, replacement-VPS reconnect,"
           echo "                     read-only --check, one pending migration"
           echo "No production or Neon database was contacted."
+
+  browser:
+    name: Browser acceptance — seller inbox CDP test suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: rabet
+          POSTGRES_PASSWORD: rabet
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rabet -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Confirm no Neon or Vercel credentials are required
+        run: |
+          node - <<'NODE'
+            const keys = Object.keys(process.env)
+              .filter((key) => /^(NEON|VERCEL)_/i.test(key));
+
+            if (keys.length > 0) {
+              console.error(
+                `Refusing to run: a Neon or Vercel credential is configured (${keys.join(", ")}). ` +
+                  "CI uses a throwaway PostgreSQL container only.",
+              );
+              process.exit(1);
+            }
+
+            if (/neon\.tech/i.test(process.env.DATABASE_URL ?? "")) {
+              console.error("Refusing to run: DATABASE_URL points at a Neon endpoint.");
+              process.exit(1);
+            }
+
+            console.log("No Neon or Vercel credential is configured. CI needs none.");
+          NODE
+
+      - name: Generate test-only AUTH_SECRET
+        id: auth-secret
+        run: echo "value=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the PostgreSQL service
+        run: |
+          for attempt in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U rabet -d postgres -t 2 >/dev/null 2>&1; then
+              echo "PostgreSQL is accepting connections."
+              exit 0
+            fi
+            echo "Waiting for PostgreSQL… ($attempt)"
+            sleep 2
+          done
+          echo "PostgreSQL never became ready." >&2
+          exit 1
+
+      - name: Build Next.js application
+        env:
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
+        run: npm run build
+
+      - name: Run Seller Inbox browser acceptance suite
+        env:
+          RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
+          TELEGRAM_BOT_TOKEN: test-bot-token-synthetic-browser
+        run: npm run test:browser:inbox
+

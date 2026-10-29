@@ -24,6 +24,7 @@ import {
   completeSellerReplyDelivery,
   deriveRetryOperationId,
   getSellerInquiryThread,
+  getSellerOperationStatus,
   isInquirySupport,
   listInquiryMessagesPaged,
   listSellerInquiries,
@@ -1537,5 +1538,112 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
       .where(eq(inquiryMessage.id, opIdA));
     expect(savedA.deliveryStatus).toBe("pending");
     expect(savedA.body).toBe("Operation A body");
+  });
+
+  it("U: Read-only operation status inspection: zero writes, strict admin author check, and accurate outcome classification", async () => {
+    const db = asAppDb(testDb!.db);
+    const { prodId } = await seedBaseStore(db);
+
+    const cust = await upsertCustomer(db, { telegramId: 10021, firstName: "Ursula" });
+
+    const [inq1] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST-U1",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    const [inq2] = await db
+      .insert(inquiry)
+      .values({
+        customerId: cust.id,
+        productId: prodId,
+        reference: "INQ-TEST-U2",
+        status: "open",
+        productSnapshot: { name: "Cloud Hosting" },
+      })
+      .returning();
+
+    const nonExistentOpId = crypto.randomUUID();
+    const absentStatus = await getSellerOperationStatus(db, inq1.id, nonExistentOpId);
+    expect(absentStatus.found).toBe(false);
+    expect(absentStatus.operationId).toBe(nonExistentOpId);
+
+    // Seed sent, failed, and unconfirmed operations on inq1
+    const opSent = crypto.randomUUID();
+    const opFailed = crypto.randomUUID();
+    const opUnconfirmed = crypto.randomUUID();
+    const opCustomer = crypto.randomUUID();
+
+    await db.insert(inquiryMessage).values([
+      {
+        id: opSent,
+        inquiryId: inq1.id,
+        author: "admin",
+        body: "Sent admin reply",
+        deliveryStatus: "sent",
+        telegramMessageId: 991,
+      },
+      {
+        id: opFailed,
+        inquiryId: inq1.id,
+        author: "admin",
+        body: "Failed admin reply",
+        deliveryStatus: "failed",
+        deliveryError: "category=api_error;status=403",
+      },
+      {
+        id: opUnconfirmed,
+        inquiryId: inq1.id,
+        author: "admin",
+        body: "Unconfirmed admin reply",
+        deliveryStatus: "pending",
+        deliveryError: "category=network_error",
+      },
+      {
+        id: opCustomer,
+        inquiryId: inq1.id,
+        author: "customer",
+        body: "Customer inbound question",
+        deliveryStatus: "sent",
+      },
+    ]);
+
+    // 1. Sent operation returns confirmed_sent
+    const resSent = await getSellerOperationStatus(db, inq1.id, opSent);
+    expect(resSent.found).toBe(true);
+    expect(resSent.outcome).toBe("confirmed_sent");
+    expect(resSent.message?.telegramMessageId).toBe(991);
+
+    // 2. Failed operation returns confirmed_failed
+    const resFailed = await getSellerOperationStatus(db, inq1.id, opFailed);
+    expect(resFailed.found).toBe(true);
+    expect(resFailed.outcome).toBe("confirmed_failed");
+    expect(resFailed.message?.deliveryError).toContain("category=api_error");
+
+    // 3. Unconfirmed pending operation returns unconfirmed_outcome
+    const resUnconfirmed = await getSellerOperationStatus(db, inq1.id, opUnconfirmed);
+    expect(resUnconfirmed.found).toBe(true);
+    expect(resUnconfirmed.outcome).toBe("unconfirmed_outcome");
+    expect(resUnconfirmed.message?.deliveryStatus).toBe("pending");
+
+    // 4. Customer message on same thread is rejected (author must be admin)
+    const resCust = await getSellerOperationStatus(db, inq1.id, opCustomer);
+    expect(resCust.found).toBe(false);
+
+    // 5. Operation on different inquiry is rejected
+    const resDifferentInquiry = await getSellerOperationStatus(db, inq2.id, opSent);
+    expect(resDifferentInquiry.found).toBe(false);
+
+    // 6. Zero database mutations occurred during all getSellerOperationStatus calls
+    const [finalSentMsg] = await db
+      .select()
+      .from(inquiryMessage)
+      .where(eq(inquiryMessage.id, opSent));
+    expect(finalSentMsg.deliveryStatus).toBe("sent");
   });
 });

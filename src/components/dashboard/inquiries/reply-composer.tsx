@@ -4,9 +4,53 @@ import { useEffect, useRef, useState } from "react";
 import { AlertCircle, AlertTriangle, Loader2, Send } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { sendSellerReplyAction } from "@/app/actions/inquiries";
+import {
+  reconcileSellerOperationAction,
+  sendSellerReplyAction,
+} from "@/app/actions/inquiries";
 
 const MAX_TELEGRAM_MESSAGE_CHARS = 4096;
+
+function safeSessionStorageGet(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSessionStorageSet(key: string, value: string): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    sessionStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeSessionStorageRemove(key: string): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    sessionStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function checkStorageAvailability(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const test = "__rabet_storage_test__";
+    sessionStorage.setItem(test, "1");
+    sessionStorage.removeItem(test);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 interface BoundOperation {
   id: string;
@@ -42,30 +86,27 @@ export function ReplyComposer({
   const boundOpKey = `rabet_bound_op_${inquiryId}`;
   const unresolvedOpKey = `rabet_unresolved_op_${inquiryId}`;
 
+  const isStorageAvailable = typeof window !== "undefined" && checkStorageAvailability();
+
   const [body, setBody] = useState<string>(() => {
-    if (typeof window === "undefined") return "";
-    try {
-      return sessionStorage.getItem(`rabet_draft_inquiry_${inquiryId}`) ?? "";
-    } catch {
-      return "";
-    }
+    return safeSessionStorageGet(`rabet_draft_inquiry_${inquiryId}`) ?? "";
   });
 
   const [boundOp, setBoundOp] = useState<BoundOperation | null>(() => {
-    if (typeof window === "undefined") return null;
+    const raw = safeSessionStorageGet(`rabet_bound_op_${inquiryId}`);
+    if (!raw) return null;
     try {
-      const raw = sessionStorage.getItem(`rabet_bound_op_${inquiryId}`);
-      return raw ? JSON.parse(raw) : null;
+      return JSON.parse(raw);
     } catch {
       return null;
     }
   });
 
   const [unresolvedOp, setUnresolvedOp] = useState<UnresolvedOperation | null>(() => {
-    if (typeof window === "undefined") return null;
+    const raw = safeSessionStorageGet(`rabet_unresolved_op_${inquiryId}`);
+    if (!raw) return null;
     try {
-      const raw = sessionStorage.getItem(`rabet_unresolved_op_${inquiryId}`);
-      return raw ? JSON.parse(raw) : null;
+      return JSON.parse(raw);
     } catch {
       return null;
     }
@@ -81,13 +122,86 @@ export function ReplyComposer({
     unresolvedOpRef.current = unresolvedOp;
   }, [unresolvedOp]);
 
+  const inFlightOpRef = useRef<{ id: string; body: string } | null>(null);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isSubmittingRef = useRef(false);
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [warningMessage, setWarningMessage] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
   const [duplicationRiskAcknowledged, setDuplicationRiskAcknowledged] = useState(false);
+
+  // Mount effect: Reconcile unresolved operation if restored from browser storage
+  useEffect(() => {
+    const targetUnresolved = unresolvedOpRef.current;
+    if (!targetUnresolved) return;
+    const op = targetUnresolved;
+
+    let cancelled = false;
+    async function reconcileOnMount() {
+      try {
+        const res = await reconcileSellerOperationAction({
+          inquiryId,
+          operationId: op.id,
+        });
+        if (cancelled) return;
+
+        if (res.success && res.found) {
+          if (res.outcome === "confirmed_sent") {
+            setBoundOp(null);
+            setUnresolvedOp(null);
+            safeSessionStorageRemove(boundOpKey);
+            safeSessionStorageRemove(unresolvedOpKey);
+            setBody((cur) => {
+              if (cur === op.body) {
+                safeSessionStorageRemove(storageKey);
+                return "";
+              }
+              return cur;
+            });
+            setSuccessNotice("Earlier reply was confirmed delivered to the customer.");
+            onReplySuccess?.();
+          } else if (res.outcome === "confirmed_failed") {
+            const failedBound: BoundOperation = {
+              id: op.id,
+              body: op.body,
+              status: "failed",
+            };
+            setBoundOp(failedBound);
+            setUnresolvedOp(null);
+            safeSessionStorageSet(boundOpKey, JSON.stringify(failedBound));
+            safeSessionStorageRemove(unresolvedOpKey);
+            setErrorMessage(
+              "Previous reply delivery failed. Use the Retry button in conversation history, or edit your draft to send a new reply.",
+            );
+            onReplySuccess?.();
+          } else {
+            // "unconfirmed_outcome" or "recorded_pending"
+            setWarningMessage(
+              "An earlier delivery attempt is unconfirmed and may have reached the customer. Sending an edited reply requires acknowledging the duplication risk.",
+            );
+          }
+        } else if (res.success && !res.found) {
+          // Absent from server: reservation never completed.
+          // Allow deliberate submission with the stable identity.
+          setUnresolvedOp(null);
+          safeSessionStorageRemove(unresolvedOpKey);
+        }
+      } catch {
+        // Read error does not prove absence; retain identity and warn safely.
+        setWarningMessage(
+          "Could not check status of the earlier delivery attempt. Draft and operation identity are preserved.",
+        );
+      }
+    }
+
+    reconcileOnMount();
+    return () => {
+      cancelled = true;
+    };
+  }, [inquiryId, boundOpKey, unresolvedOpKey, storageKey, onReplySuccess]);
 
   // Listen for retry events from the message history to reconcile composer state
   useEffect(() => {
@@ -105,11 +219,7 @@ export function ReplyComposer({
       // Reconcile bound / unresolved operation ONLY if sourceMessageId matches:
       setBoundOp((cur) => {
         if (cur && cur.id === sourceMsgId) {
-          try {
-            sessionStorage.removeItem(boundOpKey);
-          } catch {
-            // ignore
-          }
+          safeSessionStorageRemove(boundOpKey);
           return null;
         }
         return cur;
@@ -117,11 +227,7 @@ export function ReplyComposer({
 
       setUnresolvedOp((cur) => {
         if (cur && cur.id === sourceMsgId) {
-          try {
-            sessionStorage.removeItem(unresolvedOpKey);
-          } catch {
-            // ignore
-          }
+          safeSessionStorageRemove(unresolvedOpKey);
           return null;
         }
         return cur;
@@ -134,11 +240,7 @@ export function ReplyComposer({
           typeof retriedBody === "string" &&
           currentBody === retriedBody
         ) {
-          try {
-            sessionStorage.removeItem(storageKey);
-          } catch {
-            // ignore
-          }
+          safeSessionStorageRemove(storageKey);
           return "";
         }
         // Preserve newer edits (including whitespace-only changes)
@@ -161,19 +263,24 @@ export function ReplyComposer({
     setErrorMessage(null);
     setSuccessNotice(null);
 
-    // If text was edited so it no longer matches the bound operation, detach the bound operation ID
-    // but retain any unresolved uncertain operation identity separately
-    if (boundOp && boundOp.body !== text) {
+    // If text was reverted back to match unresolvedOp.body, reconnect boundOp so submission reuses unresolvedOp.id!
+    if (unresolvedOp && text === unresolvedOp.body) {
+      const reconnected: BoundOperation = {
+        id: unresolvedOp.id,
+        body: unresolvedOp.body,
+        status: unresolvedOp.status,
+      };
+      setBoundOp(reconnected);
+      safeSessionStorageSet(boundOpKey, JSON.stringify(reconnected));
+    } else if (boundOp && boundOp.body !== text) {
+      // If text was edited so it no longer matches the bound operation, detach the bound operation ID
+      // but retain any unresolved uncertain operation identity separately
       setBoundOp(null);
-      try {
-        sessionStorage.removeItem(boundOpKey);
-      } catch {
-        // ignore
-      }
+      safeSessionStorageRemove(boundOpKey);
     }
 
     // Keep visible warning if there is an unresolved operation
-    if (unresolvedOp && unresolvedOp.status === "unconfirmed") {
+    if (unresolvedOp && (unresolvedOp.status === "unconfirmed" || unresolvedOp.status === "pending")) {
       setWarningMessage(
         "An earlier delivery attempt is unconfirmed and may have reached the customer. Sending an edited reply requires acknowledging the duplication risk.",
       );
@@ -181,16 +288,80 @@ export function ReplyComposer({
       setWarningMessage(null);
     }
 
+    if (text.length === 0) {
+      safeSessionStorageRemove(storageKey);
+      safeSessionStorageRemove(boundOpKey);
+      setBoundOp(null);
+    } else {
+      safeSessionStorageSet(storageKey, text);
+    }
+  }
+
+  // Manual reconciliation handler
+  async function handleManualReconcile() {
+    const targetOp = unresolvedOpRef.current;
+    if (!targetOp || isCheckingStatus) return;
+
+    setIsCheckingStatus(true);
     try {
-      if (text.length === 0) {
-        sessionStorage.removeItem(storageKey);
-        sessionStorage.removeItem(boundOpKey);
-        setBoundOp(null);
+      const res = await reconcileSellerOperationAction({
+        inquiryId,
+        operationId: targetOp.id,
+      });
+
+      if (res.success && res.found) {
+        if (res.outcome === "confirmed_sent") {
+          setBoundOp(null);
+          setUnresolvedOp(null);
+          safeSessionStorageRemove(boundOpKey);
+          safeSessionStorageRemove(unresolvedOpKey);
+          setBody((cur) => {
+            if (cur === targetOp.body) {
+              safeSessionStorageRemove(storageKey);
+              return "";
+            }
+            return cur;
+          });
+          setWarningMessage(null);
+          setSuccessNotice("Earlier reply was confirmed delivered to the customer.");
+          onReplySuccess?.();
+        } else if (res.outcome === "confirmed_failed") {
+          const failedBound: BoundOperation = {
+            id: targetOp.id,
+            body: targetOp.body,
+            status: "failed",
+          };
+          setBoundOp(failedBound);
+          setUnresolvedOp(null);
+          safeSessionStorageSet(boundOpKey, JSON.stringify(failedBound));
+          safeSessionStorageRemove(unresolvedOpKey);
+          setWarningMessage(null);
+          setErrorMessage(
+            "Previous reply delivery failed. Use the Retry button in conversation history, or edit your draft to send a new reply.",
+          );
+          onReplySuccess?.();
+        } else {
+          setWarningMessage(
+            "Delivery status is still unconfirmed or in flight. The message may have reached the customer.",
+          );
+        }
+      } else if (res.success && !res.found) {
+        setUnresolvedOp(null);
+        safeSessionStorageRemove(unresolvedOpKey);
+        setWarningMessage(
+          "No record of this submission was found on the server. You can safely send your message.",
+        );
       } else {
-        sessionStorage.setItem(storageKey, text);
+        setWarningMessage(
+          "Could not check status due to a server error. Your draft and operation identity are preserved.",
+        );
       }
     } catch {
-      // ignore
+      setWarningMessage(
+        "Could not check status due to a network error. Your draft and operation identity are preserved.",
+      );
+    } finally {
+      setIsCheckingStatus(false);
     }
   }
 
@@ -243,7 +414,7 @@ export function ReplyComposer({
     // If text was edited while an unresolved uncertain operation exists, require explicit duplication-risk decision
     if (
       unresolvedOp &&
-      unresolvedOp.status === "unconfirmed" &&
+      (unresolvedOp.status === "unconfirmed" || unresolvedOp.status === "pending") &&
       currentBody !== unresolvedOp.body &&
       !duplicationRiskAcknowledged
     ) {
@@ -254,16 +425,44 @@ export function ReplyComposer({
     }
 
     // Determine operation ID:
-    // If repeating unchanged pending submission, reuse its operation ID.
+    // If repeating unchanged pending or unconfirmed submission, reuse its operation ID.
     // Otherwise, generate a fresh stable UUID.
     let opId: string;
-    if (boundOp && boundOp.body === currentBody && boundOp.status === "pending") {
+    if (
+      boundOp &&
+      boundOp.body === currentBody &&
+      (boundOp.status === "pending" || boundOp.status === "unconfirmed")
+    ) {
       opId = boundOp.id;
-    } else if (unresolvedOp && unresolvedOp.body === currentBody && unresolvedOp.status === "pending") {
+    } else if (unresolvedOp && unresolvedOp.body === currentBody) {
       opId = unresolvedOp.id;
     } else {
       opId = crypto.randomUUID();
     }
+
+    // PERSIST OPERATION IDENTITY BEFORE DISPATCH
+    // Synchronously bind and persist operation identity so page reloads or crashes preserve it
+    const preDispatchBound: BoundOperation = {
+      id: opId,
+      body: currentBody,
+      status: "pending",
+    };
+    const preDispatchUnresolved: UnresolvedOperation = {
+      id: opId,
+      body: currentBody,
+      status: "pending",
+    };
+
+    boundOpRef.current = preDispatchBound;
+    unresolvedOpRef.current = preDispatchUnresolved;
+    inFlightOpRef.current = { id: opId, body: currentBody };
+
+    setBoundOp(preDispatchBound);
+    setUnresolvedOp(preDispatchUnresolved);
+
+    safeSessionStorageSet(storageKey, currentBody);
+    safeSessionStorageSet(boundOpKey, JSON.stringify(preDispatchBound));
+    safeSessionStorageSet(unresolvedOpKey, JSON.stringify(preDispatchUnresolved));
 
     isSubmittingRef.current = true;
     setIsSubmitting(true);
@@ -282,11 +481,10 @@ export function ReplyComposer({
         // Pre-reservation failure (e.g. invalid input, missing bot configuration):
         // NO reservation was created in the database. Draft remains editable and NOT bound to a failed operation.
         setBoundOp(null);
-        try {
-          sessionStorage.removeItem(boundOpKey);
-        } catch {
-          // ignore
-        }
+        setUnresolvedOp(null);
+        inFlightOpRef.current = null;
+        safeSessionStorageRemove(boundOpKey);
+        safeSessionStorageRemove(unresolvedOpKey);
         setErrorMessage(
           result.message || "Failed to process reply before reservation.",
         );
@@ -297,15 +495,12 @@ export function ReplyComposer({
         // Confirmed sent: clear draft from sessionStorage and composer state
         setBody((cur) => {
           if (cur === currentBody) {
-            try {
-              sessionStorage.removeItem(storageKey);
-              sessionStorage.removeItem(boundOpKey);
-              sessionStorage.removeItem(unresolvedOpKey);
-            } catch {
-              // ignore
-            }
+            safeSessionStorageRemove(storageKey);
+            safeSessionStorageRemove(boundOpKey);
+            safeSessionStorageRemove(unresolvedOpKey);
             setBoundOp(null);
             setUnresolvedOp(null);
+            inFlightOpRef.current = null;
             return "";
           }
           return cur;
@@ -314,7 +509,6 @@ export function ReplyComposer({
         setDuplicationRiskAcknowledged(false);
         setSuccessNotice(result.message || "Reply sent successfully.");
       } else if (result.outcome === "recorded_pending") {
-        // Recorded/pending: keep draft and update bound operation
         const pendingBound: BoundOperation = {
           id: opId,
           body: currentBody,
@@ -326,17 +520,12 @@ export function ReplyComposer({
           body: currentBody,
           status: "pending",
         });
-        try {
-          sessionStorage.setItem(boundOpKey, JSON.stringify(pendingBound));
-          sessionStorage.setItem(unresolvedOpKey, JSON.stringify(pendingBound));
-        } catch {
-          // ignore
-        }
+        safeSessionStorageSet(boundOpKey, JSON.stringify(pendingBound));
+        safeSessionStorageSet(unresolvedOpKey, JSON.stringify(pendingBound));
         setSuccessNotice(
           result.message || "Reply is in flight. Waiting for delivery confirmation.",
         );
       } else if (result.outcome === "unconfirmed_outcome") {
-        // Unconfirmed outcome: preserve draft and show duplication risk warning
         const unconfirmedBound: BoundOperation = {
           id: opId,
           body: currentBody,
@@ -348,58 +537,64 @@ export function ReplyComposer({
           body: currentBody,
           status: "unconfirmed",
         });
-        try {
-          sessionStorage.setItem(boundOpKey, JSON.stringify(unconfirmedBound));
-          sessionStorage.setItem(unresolvedOpKey, JSON.stringify(unconfirmedBound));
-        } catch {
-          // ignore
-        }
+        safeSessionStorageSet(boundOpKey, JSON.stringify(unconfirmedBound));
+        safeSessionStorageSet(unresolvedOpKey, JSON.stringify(unconfirmedBound));
         setWarningMessage(
           result.message ||
             "Delivery outcome could not be confirmed. The message may have reached the customer.",
         );
-      } else {
-        // Confirmed delivery rejection/failure: preserve draft and update bound operation as failed
+      } else if (result.outcome === "confirmed_failed") {
+        // Explicit confirmed failure: preserve draft and mark bound operation as failed
         const failedBound: BoundOperation = {
           id: opId,
           body: currentBody,
           status: "failed",
         };
         setBoundOp(failedBound);
-        // Confirmed failure means it did not deliver, so clear unresolved uncertainty
         setUnresolvedOp(null);
-        try {
-          sessionStorage.setItem(boundOpKey, JSON.stringify(failedBound));
-          sessionStorage.removeItem(unresolvedOpKey);
-        } catch {
-          // ignore
-        }
+        safeSessionStorageSet(boundOpKey, JSON.stringify(failedBound));
+        safeSessionStorageRemove(unresolvedOpKey);
         setErrorMessage(
           result.message ||
             "Reply was recorded but delivery failed. Use the Retry button in conversation history to retry, or edit your draft to send a new reply.",
         );
+      } else {
+        // Generic unknown outcome: retain stable identity as unconfirmed; do NOT mark saved failed
+        const genericUncertainBound: BoundOperation = {
+          id: opId,
+          body: currentBody,
+          status: "unconfirmed",
+        };
+        setBoundOp(genericUncertainBound);
+        setUnresolvedOp({
+          id: opId,
+          body: currentBody,
+          status: "unconfirmed",
+        });
+        safeSessionStorageSet(boundOpKey, JSON.stringify(genericUncertainBound));
+        safeSessionStorageSet(unresolvedOpKey, JSON.stringify(genericUncertainBound));
+        setWarningMessage(
+          result.message ||
+            "Submission outcome could not be verified. Your draft and operation identity are preserved. Check status before resending.",
+        );
       }
     } catch {
-      // Server outcome unknown: preserve stable operation identity
-      const uncertainBound: BoundOperation = {
+      // Server outcome unknown: preserve stable operation identity as unconfirmed
+      const networkUncertainBound: BoundOperation = {
         id: opId,
         body: currentBody,
         status: "unconfirmed",
       };
-      setBoundOp(uncertainBound);
+      setBoundOp(networkUncertainBound);
       setUnresolvedOp({
         id: opId,
         body: currentBody,
         status: "unconfirmed",
       });
-      try {
-        sessionStorage.setItem(boundOpKey, JSON.stringify(uncertainBound));
-        sessionStorage.setItem(unresolvedOpKey, JSON.stringify(uncertainBound));
-      } catch {
-        // ignore
-      }
-      setErrorMessage(
-        "A network error occurred while communicating with the server. Your draft has been preserved.",
+      safeSessionStorageSet(boundOpKey, JSON.stringify(networkUncertainBound));
+      safeSessionStorageSet(unresolvedOpKey, JSON.stringify(networkUncertainBound));
+      setWarningMessage(
+        "A network error occurred while communicating with the server. Your draft and operation identity are preserved. Check status before resending.",
       );
     } finally {
       isSubmittingRef.current = false;
@@ -425,6 +620,15 @@ export function ReplyComposer({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-3">
+      {!isStorageAvailable ? (
+        <div
+          data-testid="storage-unavailable-notice"
+          className="rounded-lg border border-muted bg-muted/20 px-3 py-1.5 text-[11px] text-muted-foreground"
+        >
+          Browser storage is unavailable. Draft saving and reload recovery are disabled in this session.
+        </div>
+      ) : null}
+
       {errorMessage ? (
         <div
           role="alert"
@@ -438,15 +642,38 @@ export function ReplyComposer({
       {warningMessage ? (
         <div
           role="alert"
-          className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400"
+          className="flex flex-col gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400"
         >
-          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-          <span className="flex-1 break-words">{warningMessage}</span>
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            <span className="flex-1 break-words">{warningMessage}</span>
+          </div>
+          {unresolvedOp ? (
+            <div className="flex items-center gap-2 pl-6">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isCheckingStatus || isSubmitting}
+                onClick={handleManualReconcile}
+                className="h-7 text-xs px-2.5"
+              >
+                {isCheckingStatus ? (
+                  <>
+                    <Loader2 className="mr-1 size-3 animate-spin" />
+                    Checking...
+                  </>
+                ) : (
+                  "Check status"
+                )}
+              </Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
       {unresolvedOp &&
-      unresolvedOp.status === "unconfirmed" &&
+      (unresolvedOp.status === "unconfirmed" || unresolvedOp.status === "pending") &&
       body !== unresolvedOp.body ? (
         <div
           data-testid="duplication-risk-banner"

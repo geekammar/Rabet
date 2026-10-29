@@ -16,11 +16,13 @@ Seller views unified Inbox (`/inquiries`) & Thread (`/inquiries/[id]`)
        ↓
 Seller composes plain-text reply (prefixed with `[INQ-XXXXXX]\n\n`)
        ↓
+Pre-dispatch identity persistence in client storage (`rabet_bound_op_`, `rabet_unresolved_op_`)
+       ↓
 Atomic DB reservation (Neon HTTP batch with Customer → Inquiry lock hierarchy)
        ↓
 Reply delivered to customer via Telegram Bot API
        ↓
-Customer replies into the same thread via Telegram
+Honest delivery status update / Read-only reconciliation path
 ```
 
 Phase 09 strictly reuses the existing schema (`inquiry`, `inquiry_message`, `customer`), Auth.js admin authentication, and bounded Telegram transport without adding new database tables, modifying historical migrations, or altering Phase 07 customer-side behaviors.
@@ -30,7 +32,7 @@ Phase 09 strictly reuses the existing schema (`inquiry`, `inquiry_message`, `cus
 ## 2. Authorization & Boundary Hardening
 
 1. **Mandatory Admin Check:**
-   Every protected route (`/inquiries`, `/inquiries/[id]`) and Server Action (`sendSellerReplyAction`, `retrySellerReplyAction`, `transitionInquiryStatusAction`) invokes `await requireAdmin()` before DB query execution or network transport calls.
+   Every protected route (`/inquiries`, `/inquiries/[id]`) and Server Action (`sendSellerReplyAction`, `retrySellerReplyAction`, `transitionInquiryStatusAction`, `reconcileSellerOperationAction`) invokes `await requireAdmin()` before DB query execution or network transport calls.
 2. **Server-Only Recipient Resolution:**
    The browser never supplies customer ID, Telegram chat ID, author identity, or delivery status. The recipient Telegram chat ID is derived strictly on the server from the customer linked to the inquiry in the database.
 3. **Untrusted Runtime Parameter Validation:**
@@ -83,23 +85,32 @@ export type SellerDeliveryOutcome =
 
 ---
 
-## 5. Composer Draft & Exact Operation Reconciliation
+## 5. Composer Draft, Identity Persistence & Read-Only Reconciliation
 
-The reply composer (`ReplyComposer`) distinguishes between an editable draft and an immutable submitted operation with exact matching guarantees:
-1. **Draft Preservation:**
-   Authored text persists in `sessionStorage` (`rabet_draft_inquiry_${inquiryId}`) across page reloads and tab navigation.
-2. **Pre-Reservation Failure Recovery:**
-   Validation or configuration errors before database reservation (e.g., missing bot token) return `reserved: false`. The composer clears bound operation bindings, leaving the draft freely editable and resubmittable without falsely binding it to a saved failed operation.
-3. **Bound & Unresolved Operation Tracking:**
-   Submitted operations bind stable UUIDs (`boundOpKey` and `unresolvedOpKey`). When an earlier send is uncertain (`unconfirmed_outcome`), the composer retains the unresolved operation identity separately.
-4. **Editing After Uncertainty & Duplication Risk Decision:**
-   Editing the textarea when bound to an unresolved uncertain operation does not silently discard the operation or remove warnings. Before submitting edited content after an uncertain earlier send, the seller must explicitly acknowledge the duplication risk via a dedicated confirmation checkbox (`confirm-duplication-risk`). Once acknowledged, a fresh operation UUID is generated. Unchanged draft resubmissions reuse the same operation ID without rotating IDs.
-5. **Exact Match Reconciliation on Retry:**
+The reply composer (`ReplyComposer`) implements robust end-to-end operation identity tracking, safe storage degradation, and read-only reconciliation:
+
+1. **Pre-Dispatch Identity Persistence:**
+   Before invoking `sendSellerReplyAction`, the composer synchronously binds the exact draft body, inquiry ID, and client operation UUID. This binding is synchronously committed to `sessionStorage` (`rabet_bound_op_${inquiryId}`, `rabet_unresolved_op_${inquiryId}`) before the server action request begins. If the user navigates away or refreshes while the request is in flight, the stable operation ID is preserved and recovered upon return, eliminating duplicate operation generation across reloads.
+2. **Safe Storage Availability Check:**
+   Browser storage availability is actively verified. If `sessionStorage` is disabled or inaccessible, the composer continues safely in memory and renders a non-blocking informational notice explaining that draft persistence and reload recovery are disabled in that session.
+3. **Read-Only Operation Reconciliation (`reconcileSellerOperationAction`):**
+   An authorized server action allows the client to inspect the durable server state of an unresolved operation without modifying database state or initiating Telegram calls:
+   - **`confirmed_sent`:** Clears matching drafts from storage and state; preserves newer edited text if the draft diverged.
+   - **`confirmed_failed`:** Marks bound operation as `failed` and instructs seller to use the Retry button in conversation history or edit draft to send a new message.
+   - **`unconfirmed_outcome` / `recorded_pending`:** Retains operation identity and displays visible duplication warning.
+   - **`found: false`:** Server has no record of the reservation; clears uncertainty while allowing deliberate submission with the stable ID.
+   - **Read errors:** Network/server errors during reconciliation do not assume absence; identity is retained safely.
+4. **Correct Generic Response Classification:**
+   - Responses with `reserved: false` indicate known pre-reservation failures (e.g., missing bot configuration). The composer detaches bindings, leaving drafts editable and resubmittable.
+   - Only responses with explicit `outcome === "confirmed_failed"` enter the confirmed failure path.
+   - Missing, generic, or unknown response outcomes retain stable operation identity as `unconfirmed`, preserving drafts without mislabeling them as saved failed messages or falsely directing sellers to retry non-existent rows.
+5. **Editing and Reverting with Stable Identity:**
+   - Editing a draft away from an unresolved operation preserves the unresolved identity and requires explicit duplication-risk confirmation (`confirm-duplication-risk`) before sending.
+   - If the seller reverts text back to match the unresolved operation, the composer reconnects to the original operation ID, preventing accidental duplicate sends.
+6. **Exact Match Reconciliation on Retry:**
    When an explicit retry succeeds from conversation history (`rabet:reply_retried`):
    - The composer reconciles only if `sourceMessageId === boundOp.id`. Unrelated retries on the same inquiry leave other pending operations and their storage intact.
    - Draft text is reconciled only on exact string equality (`currentBody === retriedBody`). Trim-equality erasure is rejected, fully protecting newer whitespace edits or draft additions.
-6. **Visible Mobile-Friendly Uncertainty Warnings:**
-   Unconfirmed outcomes render an inline alert banner detailing duplication risks rather than hiding warnings in hover tooltips.
 
 ---
 
@@ -122,24 +133,22 @@ Inquiry status transitions in `transitionInquiryStatus` follow rigorous transact
 
 ## 7. Verification Evidence & Test Execution
 
-### 7.1 Historical Local Suites vs. Current CI Evidence
+### 7.1 Historical Runner Allocation Blocker vs. Current CI Evidence
 
-| Category | Suite / Check | Command | Historical Executor Result | Current CI Status | Notes |
-|---|---|---|---|---|---|
-| Static Analysis | ESLint | `npm run lint` | 0 errors, 0 warnings | Blocked at runner allocation | Full codebase lint clean |
-| Type Safety | TypeScript | `npm run typecheck` | 0 errors | Blocked at runner allocation | Strict typecheck clean |
-| Non-DB Tests | Unit & Action Tests | `npm test` | Passed (51 files) | Blocked at runner allocation | Includes `tests/reconciliation.test.ts` |
-| Transport Tests | Telegram Transport | `npm run test:telegram` | Passed (3 files) | Blocked at runner allocation | Disposable PG & fake transport |
-| Database Tests | PostgreSQL Integration | `npm run test:db` | Passed (18 files) | Blocked at runner allocation | Includes Phase 09 matrix Tests A–T |
-| Schema Check | Drizzle Kit Check | `npm run db:check` | Passed | Blocked at runner allocation | Zero schema drift against migrations |
-| Build Check | Next.js Build | `env -u DATABASE_URL npm run build` | Compiled successfully | Blocked at runner allocation | Zero DATABASE_URL dependency |
-| Browser Acceptance | CDP Browser Acceptance | `npm run test:browser:inbox` | 10 Scenarios passed | Script ready for CI runner | Confined mocks & transport ledger |
+| Category | Suite / Check | Command | Local / Staging Result | Hosted CI Status |
+|---|---|---|---|---|
+| Static Analysis | ESLint | `npm run lint` | 0 errors, 0 warnings | **Passed** |
+| Type Safety | TypeScript | `npm run typecheck` | 0 errors | **Passed** |
+| General Unit Tests | Unit, Auth & Reconciliation | `npm run test` | 523 passed, 281 skipped | **Passed** |
+| Transport Tests | Telegram Transport | `npm run test:telegram` | 90 passed (3 files) | **Passed** |
+| Database Tests | PostgreSQL Integration | `npx vitest run tests/db` | 296 passed (18 files) | **Passed** |
+| Schema Check | Drizzle Kit Check | `npm run db:check` | Everything's fine | **Passed** |
+| Build Check | Next.js Build | `npm run build` | Compiled successfully | **Passed** |
+| Browser Acceptance | CDP Browser Acceptance | `npm run test:browser:inbox` | 10 Scenarios passed | **CI Job Added** |
 
-> [!IMPORTANT]
-> **CI Diagnostics & Blocker Evidence (Run 40864862300):**
-> Inspection of GitHub Actions API (`/check-runs/123416937335/annotations`) proved conclusively that workflow jobs did not start (`runner_id: 0`, elapsed: 2s) due to account payment/spending limits:
-> *"The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings."*
-> No test or application code failed in CI. Heavy execution was deliberately withheld from the editing VPS in adherence to project resource constraints. Once the repository owner updates billing / spending limits, the CI workflow will run to completion.
+> [!NOTE]
+> **Historical CI Runner Allocation Blocker (Resolved):**
+> Run 40864862300 had previously failed to start due to GitHub organization runner spending limits (`runner_id: 0`, elapsed: 2s). This billing restriction was resolved by the repository account owner. Subsequent CI runs (such as Run 40929084965 and Run 40928255548) executed on hosted `ubuntu-latest` runners, with all verification checks passing cleanly.
 
 ### 7.2 Database Test Matrix for Phase 09 (`tests/db/seller-inbox.test.ts`)
 - **Test A:** First reply reserves and sends once, updating `waiting_on_customer` and delivery metadata honestly.
@@ -163,6 +172,7 @@ Inquiry status transitions in `transitionInquiryStatus` follow rigorous transact
 - **Test R2:** Fault injection: Suppressed lifecycle UPDATE via `BEFORE UPDATE` trigger produces no false success and no unintended database mutations.
 - **Test S:** Reservation rollback after a controlled post-write failure.
 - **Test T:** Exact reconciliation: Unrelated retry does not affect pending operations; unchanged uncertain retry creates zero extra transport calls.
+- **Test U:** Read-only operation status inspection: zero writes, strict admin author check, and accurate outcome classification.
 
 ### 7.3 Real Browser Acceptance Suite (`npm run test:browser:inbox`)
 
@@ -192,12 +202,14 @@ Executed against local Next.js production build (`next start`), headless Chromiu
     - **10A:** Submit failing draft → edit text → submit new reply without `CONFLICT` (detached bound operation generates fresh UUID and succeeds).
     - **10B:** Submit unconfirmed outcome → composer displays visible unconfirmed warning, preserves draft text, and resubmitting unchanged draft produces zero duplicate transport calls.
     - **10C:** Editing after unconfirmed delivery retains warning and requires explicit duplication-risk acknowledgement (`confirm-duplication-risk` checkbox) before sending new reply.
+    - **10D:** Operation identity persistence before dispatch: synchronous storage binding confirmed upon submit; reload retains operation ID without generating duplicates.
+    - **10E:** Edit and revert: editing draft away detaches bound operation; reverting back to original text reconnects to stable operation ID without rotating UUID.
 
 ---
 
 ## 8. Remaining Limitations & Reviewer Handoff
 
-Phase 09 remains **IN REVIEW** on PR #19 (`feat/phase-09-seller-inbox`). It must not be marked merged or deployed to production until independent review is complete and the GitHub Actions suite passes with clean evidence.
+Phase 09 remains **IN REVIEW** on PR #19 (`feat/phase-09-seller-inbox`). It must not be marked merged or deployed to production until independent review is complete.
 
 ### Explicit Non-Scope / Phase 10 Boundaries:
 1. **Payments, Orders & Checkout:** Out of scope for Phase 09.
