@@ -484,7 +484,7 @@ async function runAcceptance() {
       `        responseStatus = 200;\n` +
       `        responseBody = { ok: true, result: { message_id: -1 } };\n` +
       `      } else if (isTriggerHold) {\n` +
-      `        await new Promise((r) => setTimeout(r, 3500));\n` +
+      `        await new Promise((r) => setTimeout(r, 2000));\n` +
       `        responseStatus = 200;\n` +
       `        responseBody = { ok: true, result: { message_id: 8800 + callIndex } };\n` +
       `      }\n` +
@@ -1334,7 +1334,27 @@ async function runAcceptance() {
 
   // Wait for delivery to conclude and status to reconcile
   log("Waiting for held transport dispatch to complete and status to reconcile...");
-  await sleep(3000);
+  await waitForCondition(
+    async () => {
+      const entries = readLedger().filter((x) => x.text === holdDraftText);
+      return entries.length === 1;
+    },
+    "transport ledger entry for holdDraftText",
+    10000,
+    300
+  );
+
+  await waitForCondition(
+    async () => {
+      const dbRows = await pgClient`
+        SELECT id, delivery_status FROM inquiry_message WHERE id = ${holdOpId};
+      `;
+      return dbRows.length === 1 && dbRows[0].delivery_status === "sent";
+    },
+    "db delivery status sent for holdOpId",
+    10000,
+    300
+  );
 
   // If manual check status button is visible, click it to trigger reconciliation
   const checkStatusButtonExists = await cdp.eval(
@@ -1344,16 +1364,19 @@ async function runAcceptance() {
     await cdp.eval(`document.querySelector('button[data-testid="check-status-button"]').click()`);
   }
 
-  // Wait for confirmed delivery status in conversation thread
+  // Wait for confirmed delivery status or composer textarea to clear
   await waitForCondition(
     async () => {
       const body = await cdp.eval("document.body?.innerText || ''");
+      const textareaVal = await cdp.eval("document.querySelector('textarea')?.value");
       return (
-        body.includes(holdDraftText) &&
-        (body.includes("Sent via Telegram") || body.includes("confirmed delivered"))
+        body.includes("Earlier reply was confirmed delivered") ||
+        (body.includes(holdDraftText) && body.includes("Sent via Telegram") && textareaVal === "")
       );
     },
-    "reconciliation of in-flight reply to confirmed sent"
+    "reconciliation of in-flight reply to confirmed sent",
+    10000,
+    300
   );
 
   // Verify from delivery ledger that exactly 1 transport send occurred for holdDraftText
