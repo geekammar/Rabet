@@ -1,0 +1,109 @@
+name: Dependency Audit
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Run npm audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run npm audit (all dependencies)
+        id: audit-all
+        run: |
+          set +e
+          npm audit --json > audit-all.json
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "npm audit (all) exit code: $EXIT_CODE"
+          exit 0
+
+      - name: Run npm audit (production dependencies --omit=dev)
+        id: audit-prod
+        run: |
+          set +e
+          npm audit --omit=dev --json > audit-prod.json
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "npm audit (--omit=dev) exit code: $EXIT_CODE"
+          exit 0
+
+      - name: Summarize audit findings
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+
+          function summarize(filePath, label) {
+            console.log(`\n======================================================`);
+            console.log(`AUDIT SUMMARY: ${label}`);
+            console.log(`======================================================`);
+            try {
+              if (!fs.existsSync(filePath)) {
+                console.log(`File not found: ${filePath}`);
+                return;
+              }
+              const raw = fs.readFileSync(filePath, 'utf8');
+              const data = JSON.parse(raw);
+              if (data.metadata) {
+                console.log("Vulnerabilities count:", JSON.stringify(data.metadata.vulnerabilities, null, 2));
+                console.log("Dependencies count:", JSON.stringify(data.metadata.dependencies, null, 2));
+              }
+              if (data.vulnerabilities) {
+                const keys = Object.keys(data.vulnerabilities);
+                console.log(`\nAffected packages (${keys.length}): ${keys.join(', ')}`);
+                for (const key of keys) {
+                  const vuln = data.vulnerabilities[key];
+                  console.log(`\n- Package: ${key}`);
+                  console.log(`  Severity: ${vuln.severity}`);
+                  console.log(`  Range: ${vuln.range}`);
+                  console.log(`  Direct: ${vuln.isDirect}`);
+                  if (vuln.effects && vuln.effects.length > 0) {
+                    console.log(`  Effects: ${vuln.effects.join(', ')}`);
+                  }
+                  if (vuln.via && vuln.via.length > 0) {
+                    for (const v of vuln.via) {
+                      if (typeof v === 'string') {
+                        console.log(`  Via dependency: ${v}`);
+                      } else if (v && typeof v === 'object') {
+                        console.log(`  Title: ${v.title}`);
+                        console.log(`  URL: ${v.url}`);
+                        console.log(`  Severity: ${v.severity}`);
+                        console.log(`  Range: ${v.range}`);
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (err) {
+              console.error(`Error summarizing ${filePath}:`, err.message);
+            }
+          }
+
+          summarize('audit-all.json', 'ALL DEPENDENCIES (INCLUDING DEV)');
+          summarize('audit-prod.json', 'PRODUCTION ONLY (--omit=dev)');
+          NODE
+
+      - name: Upload sanitized audit reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-reports
+          path: |
+            audit-all.json
+            audit-prod.json
