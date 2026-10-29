@@ -544,10 +544,11 @@ describe.skipIf(!shouldRun)("Phase 09: Seller Inbox, Reliable Replies & Lifecycl
       })
       .returning();
 
-    // Initial failed send
+    // Initial confirmed failed send
     const failingTransport = createFakeTelegramTransport();
-    failingTransport.failSendWith = "API Network Error";
-    failingTransport.failSendKind = "network_error";
+    failingTransport.failSendWith = "Bad Request: chat not found";
+    failingTransport.failSendKind = "api_error";
+    failingTransport.failSendHttpStatus = 400;
 
     const initialRes = await sendSellerReply(db, failingTransport, {
       inquiryId: inq.id,

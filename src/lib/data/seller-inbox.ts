@@ -895,13 +895,20 @@ export async function completeSellerReplyDelivery(
   }
 
   // Handled Telegram failure or transport exception
-  const safeDiag = transportException
-    ? formatSafeDiagnostic(classifyErrorToSafeDiagnostic(transportException))
-    : formatSafeDiagnostic({
-        category: sendRes.errorKind ?? "api_error",
-        httpStatus: sendRes.httpStatus,
-        retryAfterSeconds: sendRes.retryAfterSeconds,
-      });
+  let safeDiag: string;
+  if (transportException) {
+    const diag = classifyErrorToSafeDiagnostic(transportException);
+    if (diag.category === "internal_error") {
+      diag.category = "network_error";
+    }
+    safeDiag = formatSafeDiagnostic(diag);
+  } else {
+    safeDiag = formatSafeDiagnostic({
+      category: sendRes.errorKind ?? "api_error",
+      httpStatus: sendRes.httpStatus,
+      retryAfterSeconds: sendRes.retryAfterSeconds,
+    });
+  }
 
   // Explicit Telegram rejection vs uncertain transport outcome:
   // - Explicit rejection: Telegram responded rejecting delivery (403 blocked, 4xx client errors, 429 rate limit)
@@ -914,7 +921,7 @@ export async function completeSellerReplyDelivery(
 
   if (isUncertainTransportOutcome) {
     try {
-      await db
+      const [updated] = await db
         .update(inquiryMessage)
         .set({
           deliveryError: safeDiag,
@@ -924,7 +931,29 @@ export async function completeSellerReplyDelivery(
             eq(inquiryMessage.id, params.messageId),
             eq(inquiryMessage.deliveryStatus, "pending"),
           ),
-        );
+        )
+        .returning();
+
+      if (!updated) {
+        const [current] = await db
+          .select({
+            id: inquiryMessage.id,
+            deliveryStatus: inquiryMessage.deliveryStatus,
+            telegramMessageId: inquiryMessage.telegramMessageId,
+          })
+          .from(inquiryMessage)
+          .where(eq(inquiryMessage.id, params.messageId))
+          .limit(1);
+
+        if (current?.deliveryStatus === "sent") {
+          return {
+            success: true,
+            outcome: "confirmed_sent",
+            messageId: params.messageId,
+            telegramMessageId: current.telegramMessageId ?? 0,
+          };
+        }
+      }
     } catch {
       // Non-fatal if diagnostic persistence fails
     }
