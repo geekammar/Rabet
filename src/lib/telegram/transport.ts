@@ -152,6 +152,16 @@ export function classifyHttpError(
     };
   }
 
+  if (status === 403) {
+    const isBlocked =
+      desc.includes("bot was blocked by the user") ||
+      desc.includes("user is deactivated") ||
+      desc.includes("bot can't initiate conversation");
+    if (isBlocked) {
+      return { errorKind: "blocked" };
+    }
+  }
+
   if (desc.includes("message is not modified")) {
     return { errorKind: "not_modified" };
   }
@@ -291,7 +301,9 @@ export function createFetchTelegramTransport(
           ok: false,
           error: res.error,
           errorKind: res.errorKind,
+          httpStatus: res.httpStatus,
           retryAfterSeconds: res.retryAfterSeconds,
+          isBlocked: res.errorKind === "blocked",
         };
       }
 
@@ -380,7 +392,9 @@ export interface FakeTelegramTransport extends TelegramTransport {
   deadline?: ExecutionDeadline;
   failSendWith?: string;
   failSendKind?: TelegramErrorKind;
+  failSendHttpStatus?: number;
   failSendRetryAfter?: number;
+  failSendIsBlocked?: boolean;
   failEditWith?: string;
   failEditKind?: TelegramErrorKind;
   failEditRetryAfter?: number;
@@ -460,7 +474,9 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
           ok: false,
           error: transport.failSendWith,
           errorKind: transport.failSendKind ?? "api_error",
+          httpStatus: transport.failSendHttpStatus,
           retryAfterSeconds: transport.failSendRetryAfter,
+          isBlocked: transport.failSendIsBlocked ?? (transport.failSendKind === "blocked"),
         };
       }
       const check = validatePayloadLimits(text, replyMarkup);

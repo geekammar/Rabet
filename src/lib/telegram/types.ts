@@ -62,6 +62,7 @@ export type TelegramErrorKind =
   | "timeout"
   | "network_error"
   | "callback_expired"
+  | "blocked"
   | "api_error";
 
 export interface TelegramSendResult {
@@ -69,7 +70,9 @@ export interface TelegramSendResult {
   messageId?: number;
   error?: string;
   errorKind?: TelegramErrorKind;
+  httpStatus?: number;
   retryAfterSeconds?: number;
+  isBlocked?: boolean;
 }
 
 export interface TelegramAnswerResult {
@@ -148,6 +151,7 @@ export type SafeDiagnosticCategory =
   | "not_editable"
   | "not_modified"
   | "callback_expired"
+  | "blocked"
   | "api_error"
   | "db_error"
   | "budget_exceeded"

@@ -1,6 +1,6 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 07 — Customer Inquiries, Support & Inbound Messaging (implemented, in review)**
+Current phase: **Phase 09 — Complete the Seller Inbox, Reliable Replies & Conversation Lifecycle (implemented, in review)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
@@ -13,6 +13,7 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 [PHASE_06A_HANDOFF.md](./PHASE_06A_HANDOFF.md) for Secure Telegram Webhook & First Catalog Journey handoff,
 [PHASE_06B_HANDOFF.md](./PHASE_06B_HANDOFF.md) for Non-Conversation Product Action Runtime handoff,
 [PHASE_07_HANDOFF.md](./PHASE_07_HANDOFF.md) for Unified Customer Inquiries, Support & Inbound Messages handoff,
+[PHASE_09_HANDOFF.md](./PHASE_09_HANDOFF.md) for Seller Inbox, Reliable Replies & Lifecycle handoff,
 [NEON_DEV_SETUP.md](./NEON_DEV_SETUP.md) for the one-command development
 database setup wizard.
 
@@ -23,17 +24,19 @@ database setup wizard.
 > the **Phase 05-B1** Product Action Editor pass, the **Phase 05-B2** Action Types pass,
 > the **Phase 06-A** Telegram Catalog Journey pass,
 > the **Phase 06-B** Non-Conversation Product Action Runtime pass,
-> and the **Phase 07** Customer Inquiries & Inbound Messages pass.
-> Phases 01, 02, 03A, 03B, 03B-B, 03B-C, 03C-A, 04-A, 04-B, 05-A, 05-B1, 05-B2, 06-A, and 06-B are merged into `main`:
+> the **Phase 07** Customer Inquiries & Inbound Messages pass,
+> and the **Phase 09** Seller Inbox, Reliable Replies & Conversation Lifecycle pass.
+> Phases 01, 02, 03A, 03B, 03B-B, 03B-C, 03C-A, 04-A, 04-B, 05-A, 05-B1, 05-B2, 06-A, 06-B, and 07 are merged into `main`:
 > Phase 04-A was merged into `main` via PR #10, Phase 04-B was merged into `main`
 > via PR #12 (`fd91ccdb6802ac06cfdc041a570990547ef50a37`), Phase 05-A was merged into `main`
 > via PR #13 (`b9c1883bd3f608d736d89cf31971c7d62f16d132`), Phase 05-B1 was merged into `main`
 > via PR #14 (`c88430db2fb2b834d841cdbce85de64de0f35ae0`), Phase 05-B2 was merged into `main`
 > via PR #15 (`ecee24546ce67795fc091a7392447dec88ad9a59`), Phase 06-A was merged into `main`
-> via PR #16 (`0d4e2f1ae66217c5eb32c610ebd70318a4f3f67d`), and Phase 06-B was merged into `main`
-> via PR #17 (`571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`). Phase 07 is implemented
-> on `feat/phase-07-customer-inquiries` awaiting review.
-> Note that full Phase 06 and the MVP remain incomplete: tree maintenance (reparenting, reordering, deletion) remains deferred from the launch-critical path, seller inbox belongs to Phase 09, and launch hardening belongs to Phase 10.
+> via PR #16 (`0d4e2f1ae66217c5eb32c610ebd70318a4f3f67d`), Phase 06-B was merged into `main`
+> via PR #17 (`571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`), and Phase 07 was merged into `main`
+> via PR #18 (`cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`). Phase 09 is implemented
+> on `feat/phase-09-seller-inbox` awaiting review.
+> Note that tree maintenance (reparenting, reordering, deletion) remains deferred from the launch-critical path, and launch hardening belongs to Phase 10.
 
 ---
 
@@ -56,14 +59,10 @@ database setup wizard.
 | **Phase 05-B3** | Action Tree Maintenance | Not started (deferred from launch-critical path) — reparenting/moving actions, manual reordering, and action archiving/deletion |
 | **Phase 06-A** | Secure Telegram Webhook & First Catalog Journey | ✅ **Merged into `main`** ([PR #16](https://github.com/geekammar/Rabet/pull/16), `0d4e2f1ae66217c5eb32c610ebd70318a4f3f67d`) — Node-runtime secure webhook route (`POST /api/telegram/webhook`), constant-time secret token validation, update deduplication on `telegram_update`, `/start` journey, language choice persistence, catalog hierarchy navigation, product card with exact decimal price, `OPEN_SUBMENU`, `SHOW_DETAILS`, Back/Home navigation, deterministic pagination, and truthful fallback for deferred runtime actions |
 | **Phase 06-B** | Complete Non-Conversation Product Action Runtime | ✅ **Merged into `main`** ([PR #17](https://github.com/geekammar/Rabet/pull/17), `571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`) — Runtime execution for `SEND_TEMPLATE_MESSAGE` (real placeholder context, sequential chunk preservation, navigation on final chunk), `OPEN_URL` (intermediate tap check, WHATWG HTTPS validation, dedicated URL button without callback_data), `NAVIGATE_CATALOG` (hierarchy and ancestry checks, destination category page 1 / product card rendering with single acknowledgement), and deferred `START_INQUIRY` / `OPEN_SUPPORT` safeguards |
-| **Phase 07** | Unified Customer Inquiries, Support & Inbound Messages | 🟦 **Implemented on `feat/phase-07-customer-inquiries` (in review)** — `START_INQUIRY` (creates/resumes active product inquiry with frozen localized snapshot and option ancestry), `OPEN_SUPPORT` (creates/resumes general or category support), inbound text message routing (`/start`, `/reply <REF> <msg>`, single active routing, multiple active disambiguation, 0 active auto-general-support), durable receipts bound to `telegram_update.payload.receipt`, atomic serialization, and retry idempotency |
-| Phase 08 | Payment integration (**deferred** — Telegram Stars, future) | Deferred — see ADR-013 |
-| Phase 09 | Inquiry operations & admin messaging | Not started |
-| Phase 10 | Testing, security & release hardening | Not started |
-| Phase 07 | Customer journey, inquiries & messaging | Not started |
-| Phase 08 | Payment integration (**deferred** — Telegram Stars, future) | Deferred — see ADR-013 |
-| Phase 09 | Inquiry operations & admin messaging | Not started |
-| Phase 10 | Testing, security & release hardening | Not started |
+| **Phase 07** | Unified Customer Inquiries, Support & Inbound Messages | ✅ **Merged into `main`** ([PR #18](https://github.com/geekammar/Rabet/pull/18), `cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`) — Customer side complete: `START_INQUIRY` (creates/resumes active product inquiry with frozen localized snapshot and option ancestry), `OPEN_SUPPORT` (creates/resumes general or category support), inbound text message routing (`/start`, `/reply <REF> <msg>`, single active routing, multiple active disambiguation, 0 active auto-general-support), durable receipts bound to `telegram_update.payload.receipt`, atomic serialization, and retry idempotency |
+| **Phase 08** | Payment integration (**deferred** — Telegram Stars, future) | Deferred — see ADR-013 |
+| **Phase 09** | Complete the Seller Inbox, Reliable Replies & Conversation Lifecycle | 🟦 **Implemented on `feat/phase-09-seller-inbox` (in review)** — Seller side complete: unified inbox (`/inquiries`) with status & type filters and exact reference search, thread view (`/inquiries/[id]`) with frozen product context & message history, durable plain-text seller replies with prefix `[INQ-XXXXXX]\n\n`, atomic Neon batch reservation, deduplicated transport delivery via stable operation UUID, explicit retry of failed/stale deliveries, honest diagnostics, and strict conversation lifecycle transitions (`open`, `waiting_on_customer`, `resolved`, `closed`, `reopen` with active duplicate conflict checks) |
+| **Phase 10** | Testing, security & release hardening | Not started |
 
 The base Vercel deployment and the GitHub integration were configured during
 Phase 01, but release hardening (Phase 10) is **not** complete.

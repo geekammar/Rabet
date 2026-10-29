@@ -34,6 +34,7 @@ export async function upsertCustomer(
       firstName: input.firstName ?? null,
       lastName: input.lastName ?? null,
       languageCode: input.languageCode ?? null,
+      isBlocked: false,
       updatedAt: new Date(),
     };
 
@@ -106,6 +107,27 @@ export async function setCustomerSelectedLanguage(
     }
 
     return row;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Sets the operational block status of a customer (e.g. when Telegram reports 403 bot blocked).
+ */
+export async function setCustomerBlockedStatus(
+  db: Database,
+  customerId: string,
+  isBlocked: boolean,
+): Promise<void> {
+  try {
+    await db
+      .update(customer)
+      .set({
+        isBlocked,
+        updatedAt: new Date(),
+      })
+      .where(eq(customer.id, customerId));
   } catch (error) {
     throw mapDatabaseError(error);
   }

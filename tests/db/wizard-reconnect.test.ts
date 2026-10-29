@@ -365,7 +365,7 @@ describe.skipIf(!shouldRun)("replacement-VPS reconnect on real PostgreSQL", () =
     } finally {
       await db.close();
     }
-  });
+  }, 30_000);
 
   it("applies only the one new pending migration and preserves existing data", async () => {
     const db = await createEmptyDatabase("pending");
@@ -451,5 +451,5 @@ describe.skipIf(!shouldRun)("replacement-VPS reconnect on real PostgreSQL", () =
     } finally {
       await db.close();
     }
-  });
+  }, 30_000);
 });
