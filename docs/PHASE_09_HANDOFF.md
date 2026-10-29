@@ -207,7 +207,14 @@ Executed against local Next.js production build (`next start`), headless Chromiu
     - **10D:** Actual in-flight reload: Telegram dispatch held for 3500ms via proxy, proves operation ID is persisted before response completion, reloads page while request is in flight, verifies draft preservation and status reconciliation to `confirmed_sent`, proving unchanged resubmission retains stable ID, and verifying exactly 1 database row and 1 transport call.
     - **10E:** Actual edit and revert across reload: failed draft preserved across page reload, editing away detaches bound operation, reverting back reconnects to stable failed operation ID, and submitting unchanged failed draft is blocked with zero extra transport calls.
     - **10F:** `found:false` reconciliation and unchanged resubmission: unconfirmed draft absent from server displays visible notice `"No record was found yet. Retrying will use the same submission ID."`, submitting unchanged text reuses original operation ID, and delivers successfully with 1 message row and 1 transport call.
-    - **10G:** Operation-scoped reconciliation isolation: verifies that stale reconciliation responses for operation A cannot clear, overwrite, or mutate operation B's active draft, ID, or `sessionStorage`.
+    - **10G:** Operation-scoped reconciliation isolation with held server response race:
+      - Establishes unresolved Operation A in composer and delivers row in database.
+      - Triggers actual `reconcileSellerOperationAction` on mount/reload and holds its database response via test-confined proxy barrier.
+      - While A is held, authors Operation B through supported UI interactions (typing, acknowledging duplication risk checkbox, and dispatching with `TRIGGER_INFLIGHT_HOLD`).
+      - Captures Operation B's active draft, bound ID, and pre-dispatch `sessionStorage` binding.
+      - Releases Operation A's delayed response as `confirmed_sent` to race against Operation B in flight.
+      - Asserts: Operation B draft is unchanged, Operation B operation identity remains intact, `sessionStorage` is not cleared or overwritten, Operation A's stale result produces zero false delivery notices, and exactly 1 transport call and 1 message row are created for Operation B with 0 duplicates.
+      - **Sensitivity Demonstration:** Proves that if the reconciliation epoch or target ID guard in `ReplyComposer` (`reconciliationEpochRef.current !== epoch` and `boundOpRef.current?.id !== targetOpId`) is removed, Operation A's delayed response triggers a false success notice and invalidates Operation B's state, causing Scenario 10G to fail. With the guard intact, the stale response is safely dropped and all assertions pass.
 
 ---
 

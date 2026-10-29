@@ -32,6 +32,9 @@ let ownedTempDir = null;
 let ownedPgFixture = null;
 let createdDbName = null;
 let isCleaningUp = false;
+let holdBarrierFile = null;
+let releaseBarrierFile = null;
+let notifyHeldFile = null;
 
 function log(msg) {
   process.stdout.write(`[inbox-browser-acceptance] ${msg}\n`);
@@ -104,6 +107,16 @@ async function cleanup() {
       await cleanupSql.end();
     } catch {}
     createdDbName = null;
+  }
+
+  if (holdBarrierFile && existsSync(holdBarrierFile)) {
+    try { rmSync(holdBarrierFile, { force: true }); } catch {}
+  }
+  if (releaseBarrierFile && existsSync(releaseBarrierFile)) {
+    try { rmSync(releaseBarrierFile, { force: true }); } catch {}
+  }
+  if (notifyHeldFile && existsSync(notifyHeldFile)) {
+    try { rmSync(notifyHeldFile, { force: true }); } catch {}
   }
 
   if (ownedTempDir && existsSync(ownedTempDir)) {
@@ -235,6 +248,10 @@ async function runAcceptance() {
   // Temporary workspace directory for test fixtures and proxies
   ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-inbox-acceptance-"));
   chmodSync(ownedTempDir, 0o700);
+
+  holdBarrierFile = path.join(ownedTempDir, "reconcile-hold-barrier.txt");
+  releaseBarrierFile = path.join(ownedTempDir, "reconcile-release-barrier.txt");
+  notifyHeldFile = path.join(ownedTempDir, "reconcile-notify-held.txt");
 
   // Start or connect to disposable PostgreSQL
   let pgUrl = "";
@@ -417,6 +434,27 @@ async function runAcceptance() {
       `        if (typeof v === "object" && !(v instanceof Date)) return JSON.stringify(v);\n` +
       `        return v;\n` +
       `      };\n` +
+      `      const checkAndApplyReconcileHold = async (parameters) => {\n` +
+      `        const holdFile = process.env.TEST_RECONCILE_HOLD_BARRIER_FILE;\n` +
+      `        const releaseFile = process.env.TEST_RECONCILE_RELEASE_BARRIER_FILE;\n` +
+      `        const notifyFile = process.env.TEST_NOTIFY_RECONCILE_HELD_FILE;\n` +
+      `        if (!holdFile || !fs.existsSync(holdFile)) return;\n` +
+      `        let holdOp = "";\n` +
+      `        try { holdOp = fs.readFileSync(holdFile, "utf8").trim(); } catch {}\n` +
+      `        if (!holdOp) return;\n` +
+      `        if ((parameters || []).includes(holdOp)) {\n` +
+      `          if (notifyFile && !fs.existsSync(notifyFile)) {\n` +
+      `            try { fs.writeFileSync(notifyFile, String(Date.now()), "utf8"); } catch {}\n` +
+      `          }\n` +
+      `          if (releaseFile) {\n` +
+      `            let waited = 0;\n` +
+      `            while (!fs.existsSync(releaseFile) && waited < 15000) {\n` +
+      `              await new Promise((r) => setTimeout(r, 50));\n` +
+      `              waited += 50;\n` +
+      `            }\n` +
+      `          }\n` +
+      `        }\n` +
+      `      };\n` +
       `      if (parsedBody.queries) {\n` +
       `        const results = [];\n` +
       `        await pg.begin(async (sql) => {\n` +
@@ -426,6 +464,7 @@ async function runAcceptance() {
       `              if (p === "false") return false;\n` +
       `              return p;\n` +
       `            });\n` +
+      `            await checkAndApplyReconcileHold(qParams);\n` +
       `            const rows = await sql.unsafe(q.query, qParams).values();\n` +
       `            const cols = rows.columns || [];\n` +
       `            const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
@@ -444,6 +483,7 @@ async function runAcceptance() {
       `          if (p === "false") return false;\n` +
       `          return p;\n` +
       `        });\n` +
+      `        await checkAndApplyReconcileHold(qParams);\n` +
       `        const rows = await pg.unsafe(query, qParams).values();\n` +
       `        const cols = rows.columns || [];\n` +
       `        const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
@@ -530,6 +570,9 @@ async function runAcceptance() {
       `export DATABASE_URL='${testSyntheticNeonUrl}'`,
       `export TEST_REAL_PG_URL='${pgUrl}'`,
       `export TEST_TELEGRAM_LEDGER_FILE='${ledgerFilePath}'`,
+      `export TEST_RECONCILE_HOLD_BARRIER_FILE='${holdBarrierFile}'`,
+      `export TEST_RECONCILE_RELEASE_BARRIER_FILE='${releaseBarrierFile}'`,
+      `export TEST_NOTIFY_RECONCILE_HELD_FILE='${notifyHeldFile}'`,
       `export TELEGRAM_BOT_TOKEN='123456789:TEST_INBOX_TOKEN'`,
       `export AUTH_SECRET='${authSecret}'`,
       `export ADMIN_EMAIL='${TEST_EMAIL}'`,
@@ -1589,52 +1632,175 @@ async function runAcceptance() {
   }
   log("✓ Unchanged resubmission after found:false reused original operation ID and delivered successfully.");
 
-  // 10G: Operation-scoped reconciliation isolation
-  log("10G: Testing operation-scoped reconciliation isolation...");
-  const opBId = "bbbbbbbb-bbbb-4bbb-abbb-bbbbbbbbbbbb";
-  const opBText = "Active draft for Operation B";
+  // 10G: Operation-scoped reconciliation isolation with held server response race
+  log("10G: Testing operation-scoped reconciliation isolation with held server response race...");
+  const opAId = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+  const opAText = "Operation A unresolved text awaiting reconciliation";
+  const opBText = "TRIGGER_INFLIGHT_HOLD: Fresh authored draft for Operation B";
 
-  // User authors Operation B
+  // 1. Establish Operation A as delivered in the database
+  await pgClient`
+    INSERT INTO inquiry_message (id, inquiry_id, author, body, delivery_status, delivered_at, created_at)
+    VALUES (${opAId}, ${inqProd.id}, 'admin', ${opAText}, 'sent', now() - interval '1 minute', now() - interval '1 minute');
+  `;
+
+  // 2. Set up proxy interception barrier for Operation A
+  if (existsSync(releaseBarrierFile)) rmSync(releaseBarrierFile, { force: true });
+  if (existsSync(notifyHeldFile)) rmSync(notifyHeldFile, { force: true });
+  writeFileSync(holdBarrierFile, opAId, "utf8");
+
+  // 3. Seed browser storage with unresolved Operation A
   await cdp.eval(`(() => {
-    sessionStorage.setItem('rabet_bound_op_${inqProd.id}', JSON.stringify({
-      id: '${opBId}',
-      body: ${JSON.stringify(opBText)},
-      status: 'pending'
+    sessionStorage.setItem('rabet_unresolved_op_${inqProd.id}', JSON.stringify({
+      id: '${opAId}',
+      body: ${JSON.stringify(opAText)},
+      status: 'unconfirmed'
     }));
-    sessionStorage.setItem('rabet_draft_inquiry_${inqProd.id}', ${JSON.stringify(opBText)});
+    sessionStorage.setItem('rabet_bound_op_${inqProd.id}', JSON.stringify({
+      id: '${opAId}',
+      body: ${JSON.stringify(opAText)},
+      status: 'unconfirmed'
+    }));
+    sessionStorage.setItem('rabet_draft_inquiry_${inqProd.id}', ${JSON.stringify(opAText)});
+  })()`);
+
+  // 4. Reload page to trigger actual mount reconciliation for Operation A
+  await cdp.send("Page.reload");
+  await sleep(1000);
+  await waitForCondition(
+    async () => Boolean(await cdp.eval(`Boolean(document.querySelector('textarea'))`)),
+    "textarea after reload for operation A"
+  );
+
+  // 5. Verify Operation A's reconciliation request reached the proxy barrier and is held
+  await waitForCondition(
+    async () => existsSync(notifyHeldFile),
+    "reconcileSellerOperationAction for operation A reached proxy barrier and is held",
+    10000,
+    100
+  );
+  log("✓ Reconcile request for Operation A is held in flight by proxy barrier.");
+
+  // 6. While A's response is held, author Operation B through supported UI interactions
+  await cdp.eval(`(() => {
     const textarea = document.querySelector('textarea');
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
     setter.call(textarea, ${JSON.stringify(opBText)});
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   })()`);
-  await sleep(300);
 
-  // Stale reconciliation guard: stale A result must not overwrite or clear B
-  const opAStaleId = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+  // Acknowledge duplication risk checkbox since unresolvedOp A exists
+  await waitForCondition(
+    async () => Boolean(await cdp.eval(`Boolean(document.querySelector('input[data-testid="duplication-risk-checkbox"]'))`)),
+    "duplication risk checkbox visible after editing draft away from unresolved A"
+  );
+  await cdp.eval(`document.querySelector('input[data-testid="duplication-risk-checkbox"]').click()`);
+
+  // Submit Operation B (starts dispatch and pre-binds operation identity)
+  const ledgerCountBeforeB = readLedger().length;
   await cdp.eval(`(() => {
-    const boundRaw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
-    if (boundRaw) {
-      const parsed = JSON.parse(boundRaw);
-      if (parsed.id === '${opAStaleId}') {
-        sessionStorage.removeItem('rabet_bound_op_${inqProd.id}');
-      }
-    }
+    const form = document.querySelector('textarea').closest('form');
+    form.querySelector('button[type="submit"]').click();
   })()`);
 
-  // Assert Operation B's bound state, draft in textarea, and sessionStorage remain intact
-  const activeBoundOp = await cdp.eval(`(() => {
+  // Wait for Operation B pre-dispatch identity to be established in sessionStorage
+  await waitForCondition(
+    async () => {
+      const raw = await cdp.eval(`sessionStorage.getItem('rabet_bound_op_${inqProd.id}')`);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return parsed.body === opBText && parsed.status === "pending" && parsed.id !== opAId;
+    },
+    "Operation B pre-dispatch binding in sessionStorage"
+  );
+
+  // 7. Capture Operation B's active draft, bound/unresolved operation IDs, and storage records
+  const capturedB = await cdp.eval(`(() => {
+    const rawBound = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
+    const rawUnresolved = sessionStorage.getItem('rabet_unresolved_op_${inqProd.id}');
+    const draft = sessionStorage.getItem('rabet_draft_inquiry_${inqProd.id}');
+    const textareaVal = document.querySelector('textarea')?.value;
+    return {
+      bound: rawBound ? JSON.parse(rawBound) : null,
+      unresolved: rawUnresolved ? JSON.parse(rawUnresolved) : null,
+      draft,
+      textareaVal,
+    };
+  })()`);
+
+  if (!capturedB.bound || !capturedB.bound.id || capturedB.bound.id === opAId) {
+    await fail(`Expected valid Operation B bound identity, got ${JSON.stringify(capturedB.bound)}`);
+  }
+  const opBId = capturedB.bound.id;
+  log(`✓ Captured active Operation B identity: ${opBId}`);
+
+  // 8. Release Operation A's actual response as confirmed_sent
+  writeFileSync(releaseBarrierFile, "release", "utf8");
+  log("✓ Released Operation A held response as confirmed_sent.");
+
+  // 9. Let the application process A's delayed response while B is in flight
+  await sleep(600);
+
+  // 10. Assert:
+  // - B's draft is unchanged
+  // - B's operation identity remains intact
+  // - B's storage is not cleared or overwritten
+  // - A's stale result does not produce a false delivery notice for B
+  const postA_textareaVal = await cdp.eval(`document.querySelector('textarea')?.value`);
+  if (postA_textareaVal !== opBText) {
+    await fail(`Operation B draft was altered by stale A response! Expected "${opBText}", got "${postA_textareaVal}"`);
+  }
+
+  const postA_bound = await cdp.eval(`(() => {
     const raw = sessionStorage.getItem('rabet_bound_op_${inqProd.id}');
     return raw ? JSON.parse(raw) : null;
   })()`);
-  if (!activeBoundOp || activeBoundOp.id !== opBId) {
-    await fail(`Operation B was overwritten or erased! Got ${JSON.stringify(activeBoundOp)}`);
+  if (!postA_bound || postA_bound.id !== opBId) {
+    await fail(`Operation B bound identity was corrupted or erased by stale A response! Got ${JSON.stringify(postA_bound)}`);
   }
 
-  const currentTextareaVal = await cdp.eval(`document.querySelector('textarea')?.value`);
-  if (currentTextareaVal !== opBText) {
-    await fail(`Operation B draft was lost! Got "${currentTextareaVal}"`);
+  const postA_draftStorage = await cdp.eval(`sessionStorage.getItem('rabet_draft_inquiry_${inqProd.id}')`);
+  if (postA_draftStorage !== opBText) {
+    await fail(`Operation B draft in storage was altered or erased! Expected "${opBText}", got "${postA_draftStorage}"`);
   }
-  log("✓ Stale reconciliation responses cannot overwrite newer draft or active operation.");
+
+  const postA_body = await cdp.eval("document.body?.innerText || ''");
+  if (postA_body.includes("Earlier reply was confirmed delivered to the customer.")) {
+    await fail("Stale Operation A reconciliation produced a false delivery notice for Operation B!");
+  }
+  log("✓ Stale Operation A response was correctly ignored by epoch and identity guards.");
+
+  // 11. Wait for Operation B to complete delivery
+  await waitForCondition(
+    async () => {
+      const body = await cdp.eval("document.body?.innerText || ''");
+      return body.includes("Sent via Telegram") || body.includes("Reply sent to customer");
+    },
+    "Operation B delivery completion",
+    10000,
+    200
+  );
+  log("✓ Operation B delivered successfully.");
+
+  // 12. Assert transport ledger and database rows
+  if (readLedger().length !== ledgerCountBeforeB + 1) {
+    await fail(`Expected exactly 1 transport send for Operation B, got ledger count ${readLedger().length} vs expected ${ledgerCountBeforeB + 1}`);
+  }
+
+  const bDbRows = await pgClient`
+    SELECT id, delivery_status FROM inquiry_message WHERE id = ${opBId};
+  `;
+  if (bDbRows.length !== 1 || bDbRows[0].delivery_status !== "sent") {
+    await fail(`Expected Operation B message row with status 'sent', found ${JSON.stringify(bDbRows)}`);
+  }
+
+  const aDbRows = await pgClient`
+    SELECT id, delivery_status FROM inquiry_message WHERE id = ${opAId};
+  `;
+  if (aDbRows.length !== 1) {
+    await fail(`Expected exactly 1 row for Operation A, found ${aDbRows.length}`);
+  }
+  log("✓ Real reconciliation race test verified: 0 duplicate sends, 0 duplicate rows, and B preserved throughout.");
 
   // Clear simulated storage and draft for clean exit
   await cdp.eval(`(() => {
