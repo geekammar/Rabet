@@ -150,7 +150,7 @@ Inquiry status transitions in `transitionInquiryStatus` follow rigorous transact
 
 > [!NOTE]
 > **Historical CI Runner Allocation Blocker (Resolved):**
-> Run 40864862300 had previously failed to start due to GitHub organization runner spending limits (`runner_id: 0`, elapsed: 2s). This billing restriction was resolved by the repository account owner. Subsequent CI runs (including latest successful Run 40939500700 on HEAD `7a88132`) executed on hosted `ubuntu-latest` runners, with all verification checks passing cleanly.
+> Run 40864862300 had previously failed to start due to GitHub organization runner spending limits (`runner_id: 0`, elapsed: 2s). This billing restriction was resolved by the repository account owner. Subsequent CI runs (including latest successful Run 40944665022 on HEAD `764c434`) executed on hosted `ubuntu-latest` runners, with all verification checks passing cleanly.
 
 ### 7.2 Database Test Matrix for Phase 09 (`tests/db/seller-inbox.test.ts`)
 - **Test A:** First reply reserves and sends once, updating `waiting_on_customer` and delivery metadata honestly.
