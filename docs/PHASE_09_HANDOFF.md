@@ -141,16 +141,16 @@ Inquiry status transitions in `transitionInquiryStatus` follow rigorous transact
 |---|---|---|---|---|
 | Static Analysis | ESLint | `npm run lint` | 0 errors, 0 warnings | **Passed** |
 | Type Safety | TypeScript | `npm run typecheck` | 0 errors | **Passed** |
-| General Unit Tests | Unit, Auth & Reconciliation | `npm run test` | 523 passed, 281 skipped | **Passed** |
+| General Unit Tests | Unit, Auth & Reconciliation | `npm run test` | 527 passed, 291 skipped | **Passed** |
 | Transport Tests | Telegram Transport | `npm run test:telegram` | 90 passed (3 files) | **Passed** |
-| Database Tests | PostgreSQL Integration | `npx vitest run tests/db` | 296 passed (18 files) | **Passed** |
+| Database Tests | PostgreSQL Integration | `npx vitest run tests/db` | 297 passed (18 files) | **Passed** |
 | Schema Check | Drizzle Kit Check | `npm run db:check` | Everything's fine | **Passed** |
 | Build Check | Next.js Build | `npm run build` | Compiled successfully | **Passed** |
-| Browser Acceptance | CDP Browser Acceptance | `npm run test:browser:inbox` | 10 Scenarios passed | **CI Job Added** |
+| Browser Acceptance | CDP Browser Acceptance | `npm run test:browser:inbox` | 10 Scenarios (10A–10G) passed | **Passed** |
 
 > [!NOTE]
 > **Historical CI Runner Allocation Blocker (Resolved):**
-> Run 40864862300 had previously failed to start due to GitHub organization runner spending limits (`runner_id: 0`, elapsed: 2s). This billing restriction was resolved by the repository account owner. Subsequent CI runs (such as Run 40929084965 and Run 40928255548) executed on hosted `ubuntu-latest` runners, with all verification checks passing cleanly.
+> Run 40864862300 had previously failed to start due to GitHub organization runner spending limits (`runner_id: 0`, elapsed: 2s). This billing restriction was resolved by the repository account owner. Subsequent CI runs (including latest successful Run 40939500700 on HEAD `7a88132`) executed on hosted `ubuntu-latest` runners, with all verification checks passing cleanly.
 
 ### 7.2 Database Test Matrix for Phase 09 (`tests/db/seller-inbox.test.ts`)
 - **Test A:** First reply reserves and sends once, updating `waiting_on_customer` and delivery metadata honestly.
