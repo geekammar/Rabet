@@ -1691,10 +1691,10 @@ async function runAcceptance() {
 
   // Acknowledge duplication risk checkbox since unresolvedOp A exists
   await waitForCondition(
-    async () => Boolean(await cdp.eval(`Boolean(document.querySelector('input[data-testid="duplication-risk-checkbox"]'))`)),
+    async () => Boolean(await cdp.eval(`Boolean(document.querySelector('input[data-testid="confirm-duplication-risk"]'))`)),
     "duplication risk checkbox visible after editing draft away from unresolved A"
   );
-  await cdp.eval(`document.querySelector('input[data-testid="duplication-risk-checkbox"]').click()`);
+  await cdp.eval(`document.querySelector('input[data-testid="confirm-duplication-risk"]').click()`);
 
   // Submit Operation B (starts dispatch and pre-binds operation identity)
   const ledgerCountBeforeB = readLedger().length;
