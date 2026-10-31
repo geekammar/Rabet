@@ -230,7 +230,8 @@ describe("validateAuditReport (Unit)", () => {
     });
 
     it("rejects missing individual severity counter", () => {
-      const { critical, ...missingCritical } = baseValidReport.metadata.vulnerabilities;
+      const missingCritical = { ...baseValidReport.metadata.vulnerabilities };
+      delete (missingCritical as Record<string, unknown>).critical;
       const report = {
         ...baseValidReport,
         metadata: { vulnerabilities: missingCritical },
@@ -542,11 +543,16 @@ describe("validateAuditReport CLI (Subprocess)", () => {
         stdio: ["ignore", "pipe", "pipe"],
       });
       return { status: 0, stdout, stderr: "" };
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const error = err as {
+        status?: number;
+        stdout?: Buffer | string;
+        stderr?: Buffer | string;
+      };
       return {
-        status: err.status ?? 1,
-        stdout: err.stdout?.toString() ?? "",
-        stderr: err.stderr?.toString() ?? "",
+        status: error.status ?? 1,
+        stdout: error.stdout?.toString() ?? "",
+        stderr: error.stderr?.toString() ?? "",
       };
     }
   }
