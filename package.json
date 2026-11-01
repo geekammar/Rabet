@@ -20,7 +20,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:check": "drizzle-kit check",
     "db:setup:dev": "node scripts/setup-neon-dev.mjs",
-    "db:dev:actions": "node scripts/neon-dev-actions.mjs"
+    "db:dev:actions": "node scripts/neon-dev-actions.mjs",
+    "db:prod:actions": "node scripts/neon-prod-actions.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",

@@ -1,6 +1,6 @@
 # Progress — Rabet (رابط)
 
-Current phase: **Phase 10A — Establish the Verified Launch Baseline & Prepare the First MVP Cutover (in review)**
+Current phase: **Phase 10B — Build the Production Migration Runner & Prepare Environment Setup (in review)**
 Project stage: **Discovery & Development** (not commercial production)
 
 Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
@@ -15,6 +15,7 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for decisions,
 [PHASE_07_HANDOFF.md](./PHASE_07_HANDOFF.md) for Unified Customer Inquiries, Support & Inbound Messages handoff,
 [PHASE_09_HANDOFF.md](./PHASE_09_HANDOFF.md) for Seller Inbox, Reliable Replies & Lifecycle handoff,
 [PHASE_10A_LAUNCH_READINESS.md](./PHASE_10A_LAUNCH_READINESS.md) for Launch Baseline & Cutover Preparation,
+[PHASE_10B_PRODUCTION_PREPARATION.md](./PHASE_10B_PRODUCTION_PREPARATION.md) for Production Database Runner & Operator Setup Packet,
 [NEON_DEV_SETUP.md](./NEON_DEV_SETUP.md) for the one-command development
 database setup wizard.
 
@@ -27,8 +28,9 @@ database setup wizard.
 > the **Phase 06-B** Non-Conversation Product Action Runtime pass,
 > the **Phase 07** Customer Inquiries & Inbound Messages pass,
 > the **Phase 09** Seller Inbox, Reliable Replies & Conversation Lifecycle pass,
-> and the **Phase 10A** Launch Readiness & Cutover Preparation pass.
-> Phases 01, 02, 03A, 03B, 03B-B, 03B-C, 03C-A, 04-A, 04-B, 05-A, 05-B1, 05-B2, 06-A, 06-B, 07, and 09 are merged into `main`:
+> the **Phase 10A** Launch Readiness & Cutover Preparation pass,
+> and the **Phase 10B** Production Database Runner & Preparation pass.
+> Phases 01, 02, 03A, 03B, 03B-B, 03B-C, 03C-A, 04-A, 04-B, 05-A, 05-B1, 05-B2, 06-A, 06-B, 07, 09, and 10A are merged into `main`:
 > Phase 04-A was merged into `main` via PR #10, Phase 04-B was merged into `main`
 > via PR #12 (`fd91ccdb6802ac06cfdc041a570990547ef50a37`), Phase 05-A was merged into `main`
 > via PR #13 (`b9c1883bd3f608d736d89cf31971c7d62f16d132`), Phase 05-B1 was merged into `main`
@@ -36,10 +38,14 @@ database setup wizard.
 > via PR #15 (`ecee24546ce67795fc091a7392447dec88ad9a59`), Phase 06-A was merged into `main`
 > via PR #16 (`0d4e2f1ae66217c5eb32c610ebd70318a4f3f67d`), Phase 06-B was merged into `main`
 > via PR #17 (`571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`), Phase 07 was merged into `main`
-> via PR #18 (`cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`), and Phase 09 was merged into `main`
-> via PR #19 (`77fc463e088bb62224c396563c4831dd8aa21683`). Phase 10A is prepared and in review
-> on `feat/phase-10a-launch-readiness`.
-> Note that tree maintenance (reparenting, reordering, deletion) remains deferred from the launch-critical path, and launch hardening belongs to Phase 10.
+> via PR #18 (`cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`), Phase 09 was merged into `main`
+> via PR #19 (`77fc463e088bb62224c396563c4831dd8aa21683`), and Phase 10A was merged into `main`
+> via PR #20 (`5b009085aa4e96e9607aa9a801be0034aadc4c40`).
+> The repository owner reset `ADMIN_EMAIL` and `ADMIN_PASSWORD_HASH` and confirmed successful
+> login on Production (`dpl_GtHpCjZk1hAN6ZGySTdMnd4XVXn3`). These credentials and `AUTH_SECRET`
+> are preserved. Phase 10B is prepared and in review on `feat/phase-10b-production-preparation`.
+> Actual Production database provisioning, hosted migrations, and WAF activation remain pending
+> independent review. Telegram activation and physical device acceptance belong to Phase 10C.
 
 ---
 
@@ -48,24 +54,27 @@ database setup wizard.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **Phase 01** | Project foundation & UI shell | ✅ **Merged into `main`** |
-| **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #5](https://github.com/geekammar/Rabet/pull/5), `f6a7738`) — code complete and Production-ready; the **manual interactive device checks and the durable rate limiter remain open** (see below), so Phase 02 is not marked *fully accepted* |
+| **Phase 02** | Admin authentication | ✅ **Merged into `main`** ([PR #5](https://github.com/geekammar/Rabet/pull/5), `f6a7738`) — code complete and Production-ready; owner confirmed successful login |
 | **Phase 03A** | Data model & recursive button architecture **design** | ✅ **Merged into `main`** ([PR #4](https://github.com/geekammar/Rabet/pull/4), `269cf7c`) — documentation only |
-| **Phase 03B** | Database schema, migrations & DB test foundation | ✅ **Merged into `main`** ([PR #6](https://github.com/geekammar/Rabet/pull/6)) — 14 tables, 2 migrations, server-only client, 53 DB tests; the dedicated Neon development database has the chain applied and inspected |
-| **Phase 03B-B** | Neon development setup wizard (`npm run db:setup:dev`) | ✅ **Merged into `main`** ([PR #7](https://github.com/geekammar/Rabet/pull/7)) — one command for the first VPS and every replacement VPS; verified against real PostgreSQL, including the reconnect scenario |
-| **Phase 03B-C** | Neon DEV GitHub Actions migration runner (`workflow_dispatch` only) | ✅ **Merged into `main`** ([PR #8](https://github.com/geekammar/Rabet/pull/8)) — manual inspect/migrate workflow on GitHub-hosted runners; a real DEV migration and a final read-only inspection have run successfully |
-| **Phase 03C-A** | Server-only settings & localization data access | ✅ **Merged into `main`** ([PR #9](https://github.com/geekammar/Rabet/pull/9), `bead4ed`) — typed data-access layer for `bot_setting`, `language`, `message_template` and `message_translation`, with the explicit initialization contract |
-| **Phase 04-A** | Store Settings & Onboarding UI | ✅ **Merged into `main`** ([PR #10](https://github.com/geekammar/Rabet/pull/10)) — mobile-first Settings page, welcoming first-time onboarding, existing settings edit mode, USD default selection with currency safeguards, English default with RTL Arabic enablement, editable support categories, and clean database availability state handling (States A, B, C, D) |
-| **Phase 04-B** | Bot Content & message templates UI | ✅ **Merged into `main`** ([PR #12](https://github.com/geekammar/Rabet/pull/12), `fd91ccdb6802ac06cfdc041a570990547ef50a37`) — focused, usable global bot content editor for the 7 canonical templates (`bot_welcome`, `support_welcome`, `support_received`, `inquiry_received`, `conversation_resolved`, `option_unavailable`, `empty_menu`), pure non-recursive placeholder interpolation, explicit per-template/per-language saves, draft preservation, RTL Arabic editing, mobile 360px support, and 0 writes on load |
-| **Phase 05-A** | First Usable Category & Product Editor | ✅ **Merged into `main`** ([PR #13](https://github.com/geekammar/Rabet/pull/13), `b9c1883bd3f608d736d89cf31971c7d62f16d132`) — first usable category & product slice: hierarchy tree with depth safeguard, inactive-ancestor visibility explanation, product creation/editing under non-deleted categories, exact decimal displayed price, atomic rollback persistence, truthful localization fallback, and mobile 360px support |
-| **Phase 05-B1** | First Recursive Product Action Editor | ✅ **Merged into `main`** ([PR #14](https://github.com/geekammar/Rabet/pull/14), `c88430db2fb2b834d841cdbce85de64de0f35ae0`) — recursive product action configuration slice: 3 approved action types (`OPEN_SUBMENU`, `SHOW_DETAILS`, `START_INQUIRY`), same-product hierarchy enforcement, submenu-only parenting, atomic Neon HTTP batch persistence, runtime safeguards (`ACTION_DEPTH_WARNING_THRESHOLD=8`, `MAX_ACTION_DEPTH=16`, `MAX_ACTIVE_CHILDREN=20`, `MAX_ACTION_DEPTH_SAFEGUARD=64`), draft preservation across languages, 0 writes on load, and 360px responsive UI with >=44px targets |
-| **Phase 05-B2** | Remaining Four Product Action Types | ✅ **Merged into `main`** ([PR #15](https://github.com/geekammar/Rabet/pull/15), `ecee24546ce67795fc091a7392447dec88ad9a59`) — configuration and persistence for all four remaining approved action types (`SEND_TEMPLATE_MESSAGE`, `OPEN_URL`, `OPEN_SUPPORT`, `NAVIGATE_CATALOG`), safe interpolation, atomic type transition rollback, draft preservation, and mobile 360px support |
+| **Phase 03B** | Database schema, migrations & DB test foundation | ✅ **Merged into `main`** ([PR #6](https://github.com/geekammar/Rabet/pull/6)) — 14 tables, 2 migrations, server-only client, 53 DB tests |
+| **Phase 03B-B** | Neon development setup wizard (`npm run db:setup:dev`) | ✅ **Merged into `main`** ([PR #7](https://github.com/geekammar/Rabet/pull/7)) — one command for the first VPS and every replacement VPS |
+| **Phase 03B-C** | Neon DEV GitHub Actions migration runner (`workflow_dispatch` only) | ✅ **Merged into `main`** ([PR #8](https://github.com/geekammar/Rabet/pull/8)) — manual inspect/migrate workflow on GitHub-hosted runners |
+| **Phase 03C-A** | Server-only settings & localization data access | ✅ **Merged into `main`** ([PR #9](https://github.com/geekammar/Rabet/pull/9), `bead4ed`) — typed data-access layer for `bot_setting`, `language`, `message_template` and `message_translation` |
+| **Phase 04-A** | Store Settings & Onboarding UI | ✅ **Merged into `main`** ([PR #10](https://github.com/geekammar/Rabet/pull/10)) — mobile-first Settings page, welcoming first-time onboarding, existing settings edit mode |
+| **Phase 04-B** | Bot Content & message templates UI | ✅ **Merged into `main`** ([PR #12](https://github.com/geekammar/Rabet/pull/12), `fd91ccdb6802ac06cfdc041a570990547ef50a37`) — global bot content editor for the 7 canonical templates |
+| **Phase 05-A** | First Usable Category & Product Editor | ✅ **Merged into `main`** ([PR #13](https://github.com/geekammar/Rabet/pull/13), `b9c1883bd3f608d736d89cf31971c7d62f16d132`) — hierarchy tree with depth safeguard, inactive-ancestor visibility explanation, product creation/editing |
+| **Phase 05-B1** | First Recursive Product Action Editor | ✅ **Merged into `main`** ([PR #14](https://github.com/geekammar/Rabet/pull/14), `c88430db2fb2b834d841cdbce85de64de0f35ae0`) — recursive product action configuration slice with 3 action types |
+| **Phase 05-B2** | Remaining Four Product Action Types | ✅ **Merged into `main`** ([PR #15](https://github.com/geekammar/Rabet/pull/15), `ecee24546ce67795fc091a7392447dec88ad9a59`) — configuration and persistence for all four remaining approved action types |
 | **Phase 05-B3** | Action Tree Maintenance | Not started (deferred from launch-critical path) — reparenting/moving actions, manual reordering, and action archiving/deletion |
-| **Phase 06-A** | Secure Telegram Webhook & First Catalog Journey | ✅ **Merged into `main`** ([PR #16](https://github.com/geekammar/Rabet/pull/16), `0d4e2f1ae66217c5eb32c610ebd70318a4f3f67d`) — Node-runtime secure webhook route (`POST /api/telegram/webhook`), constant-time secret token validation, update deduplication on `telegram_update`, `/start` journey, language choice persistence, catalog hierarchy navigation, product card with exact decimal price, `OPEN_SUBMENU`, `SHOW_DETAILS`, Back/Home navigation, deterministic pagination, and truthful fallback for deferred runtime actions |
-| **Phase 06-B** | Complete Non-Conversation Product Action Runtime | ✅ **Merged into `main`** ([PR #17](https://github.com/geekammar/Rabet/pull/17), `571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`) — Runtime execution for `SEND_TEMPLATE_MESSAGE` (real placeholder context, sequential chunk preservation, navigation on final chunk), `OPEN_URL` (intermediate tap check, WHATWG HTTPS validation, dedicated URL button without callback_data), `NAVIGATE_CATALOG` (hierarchy and ancestry checks, destination category page 1 / product card rendering with single acknowledgement), and deferred `START_INQUIRY` / `OPEN_SUPPORT` safeguards |
-| **Phase 07** | Unified Customer Inquiries, Support & Inbound Messages | ✅ **Merged into `main`** ([PR #18](https://github.com/geekammar/Rabet/pull/18), `cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`) — Customer side complete: `START_INQUIRY` (creates/resumes active product inquiry with frozen localized snapshot and option ancestry), `OPEN_SUPPORT` (creates/resumes general or category support), inbound text message routing (`/start`, `/reply <REF> <msg>`, single active routing, multiple active disambiguation, 0 active auto-general-support), durable receipts bound to `telegram_update.payload.receipt`, atomic serialization, and retry idempotency |
+| **Phase 06-A** | Secure Telegram Webhook & First Catalog Journey | ✅ **Merged into `main`** ([PR #16](https://github.com/geekammar/Rabet/pull/16), `0d4e2f1ae66217c5eb32c610ebd70318a4f3f67d`) — secure webhook route (`POST /api/telegram/webhook`), constant-time validation, `/start` journey |
+| **Phase 06-B** | Complete Non-Conversation Product Action Runtime | ✅ **Merged into `main`** ([PR #17](https://github.com/geekammar/Rabet/pull/17), `571a2a1c0e9e33eafa4d9bcc96e2f4a65d4745e8`) — runtime execution for non-conversation action types |
+| **Phase 07** | Unified Customer Inquiries, Support & Inbound Messages | ✅ **Merged into `main`** ([PR #18](https://github.com/geekammar/Rabet/pull/18), `cd89238525d2f4ba24bdfec6dc2b6b92aea2ce26`) — customer inquiries, support flows, inbound text routing, receipts & retry idempotency |
 | **Phase 08** | Payment integration (**deferred** — Telegram Stars, future) | Deferred — see ADR-013 |
-| **Phase 09** | Complete the Seller Inbox, Reliable Replies & Conversation Lifecycle | ✅ **Merged into `main`** ([PR #19](https://github.com/geekammar/Rabet/pull/19), `77fc463e088bb62224c396563c4831dd8aa21683`) — Seller side complete: unified inbox (`/inquiries`) with status & type filters and exact reference search, thread view (`/inquiries/[id]`) with frozen product context & message history, durable plain-text seller replies with prefix `[INQ-XXXXXX]\n\n`, atomic Neon batch reservation, deduplicated transport delivery via stable operation UUID, explicit retry of failed/stale deliveries, honest diagnostics, and strict conversation lifecycle transitions (`open`, `waiting_on_customer`, `resolved`, `closed`, `reopen` with active duplicate conflict checks). Live production acceptance and physical device verification pending Phase 10. |
-| **Phase 10** | Testing, security & release hardening | 🟦 **Phase 10A in review** ([docs/PHASE_10A_LAUNCH_READINESS.md](./PHASE_10A_LAUNCH_READINESS.md)) — Verified baseline established, evidence-backed readiness matrix, launch blockers identified (Vercel edge SSO interception, production DB unprovisioned, login rate limiting), cutover runbook and physical Android acceptance checklist documented. Live production cutover and physical device acceptance pending Phase 10C (with production preparation in Phase 10B). |
+| **Phase 09** | Complete the Seller Inbox, Reliable Replies & Conversation Lifecycle | ✅ **Merged into `main`** ([PR #19](https://github.com/geekammar/Rabet/pull/19), `77fc463e088bb62224c396563c4831dd8aa21683`) — seller inbox (`/inquiries`), thread view (`/inquiries/[id]`), plain-text replies, lifecycle management |
+| **Phase 10A** | Launch Readiness Audit & Cutover Baseline | ✅ **Merged into `main`** ([PR #20](https://github.com/geekammar/Rabet/pull/20), `5b009085aa4e96e9607aa9a801be0034aadc4c40`) — verified launch baseline, edge interception identification, credential recovery confirmation, and cutover preparation |
+| **Phase 10B** | Production Database Runner & Environment Setup Preparation | 🟦 **In review** (`feat/phase-10b-production-preparation`) — dedicated Production runner (`scripts/neon-prod-actions.mjs`, `.github/workflows/neon-prod-migrate.yml`), isolated mock & PostgreSQL test suites, and operator setup packet (`docs/PHASE_10B_PRODUCTION_PREPARATION.md`). Hosted database provisioning, migration execution, and WAF activation remain pending review |
+| **Phase 10C** | Explicit Telegram Activation & Live Acceptance | Pending Phase 10B acceptance — live webhook registration, physical device Android/iOS verification, and edge cutover |
+| **Phase 10D** | Operational Acceptance & Limited Launch Decision | Pending Phase 10C acceptance — operational sign-off and limited release |
 
 The base Vercel deployment and the GitHub integration were configured during
 Phase 01, but release hardening (Phase 10) is **not** complete.
@@ -1016,3 +1025,38 @@ Key verified findings & incorporated platform evidence:
 5. **Login Abuse Protection Proposal:** Documented a single-rule Vercel WAF Rate Limiting proposal covering `POST` requests to `^/(login|api/auth/callback/credentials)$` (5 req/min per IP), compatible with all Vercel plans including Hobby.
 6. **Hardened Dependency Audit Workflow:** Added `.github/workflows/audit.yml` and `scripts/validate-audit-report.mjs` with automated validator self-testing, exit-code capture, and distinguishing valid reports from collection failures. Production dependency audit is clean (0 findings across 110 packages) at commit `2317eae` ([Run 41249425002](https://github.com/geekammar/Rabet/actions/runs/41249425002), 2026-10-31 22:44 UTC); full-tree tooling findings recorded at 34 advisories (6 high, 27 moderate, 1 low, 0 critical, with earlier 16-finding baseline preserved historically).
 7. **Approval-Controlled Runbook & Android Checklist:** Provided the 10-step cutover sequence with in-process secret handling (`getpass` + `urllib`) and the 10-point physical device verification checklist. Bounded the remaining release roadmap into Phase 10B (DB & WAF preparation), Phase 10C (activation & physical acceptance), and Phase 10D (operational sign-off).
+
+---
+
+## What was done in Phase 10B
+
+Phase 10B delivered the dedicated manual Production database migration runner and the complete operator setup packet for environment variables and WAF configuration. Full instructions are recorded in [docs/PHASE_10B_PRODUCTION_PREPARATION.md](./PHASE_10B_PRODUCTION_PREPARATION.md).
+
+Key implementation deliverables:
+1. **Dedicated Production Runner (`scripts/neon-prod-actions.mjs`):**
+   - Implements manual `inspect` (read-only default) and `migrate` modes.
+   - Requires explicit target configuration: direct unpooled hostname (`NEON_PROD_EXPECTED_HOST`) and database name (`NEON_PROD_EXPECTED_DB_NAME`) configured in the `Production` GitHub Environment.
+   - Refuses to connect if target settings are missing (never derives identity from connection strings).
+   - Before connection: enforces TLS (`sslmode=require`), rejects pooled endpoints (`-pooler`), rejects loopback/test targets in CLI path, and explicitly rejects the known `Rabet_dev` host (`ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech`).
+   - Live server verification: queries `current_database()` live and fails closed on query failure (never falls back to URL).
+   - Distinguishes absent migration ledger explicitly from failed catalog queries; treats query errors as failures (never defaults to empty).
+   - Refuses schema drift and inconsistent migration histories.
+   - Re-inspects live database post-migration, verifies applied SHA-256 hashes byte-for-byte against committed files, and verifies real tables, indexes, constraints, and recursive tree foreign keys.
+   - Redacts credentials and connection strings from all outputs.
+2. **Manual Workflow (`.github/workflows/neon-prod-migrate.yml`):**
+   - Strictly `workflow_dispatch` only (no push, pull_request, or schedule trigger).
+   - Fixed GitHub Environment: `Production`.
+   - Restricts execution to `refs/heads/main` at workflow and script boundaries.
+   - Validates mode, ref, and exact confirmation phrase (`MIGRATE_RABET_PROD`) before materializing credentials.
+   - `concurrency` with `cancel-in-progress: false` to serialize runs and protect in-flight transactions.
+   - Finite job and connection/statement timeouts.
+   - Minimum permissions: `contents: read`.
+3. **Comprehensive Automated Test Coverage:**
+   - `tests/wizard/neon-prod-actions.test.ts`: 25 focused tests driving target gates, mode validation, GitHub context enforcement, live query fail-closed behavior, absent vs failed ledger reads, read-only empty inspection, clean migration execution, honest repeated no-ops, drift refusal, and subprocess redaction.
+   - `tests/db/neon-prod-actions.test.ts`: 11 real PostgreSQL tests running on disposable service containers, verifying live wire-protocol interaction, unpooled migration execution, live schema object creation, and fail-closed security.
+4. **Operator Setup Packet (`docs/PHASE_10B_PRODUCTION_PREPARATION.md`):**
+   - Mobile-friendly, step-by-step instructions for provisioning a dedicated `Rabet_prod` Neon project without copying development data.
+   - Exact GitHub Environment, secret (`NEON_PROD_DATABASE_URL`), and non-secret variable settings (`NEON_PROD_EXPECTED_HOST`, `NEON_PROD_EXPECTED_DB_NAME`).
+   - Vercel `DATABASE_URL` scoping to Production only (distinguishing pooled application driver from direct migration runner, preserving owner credentials).
+   - Minimal WAF Rate Limiting proposal protecting `/login` and `/api/auth/callback/credentials` while excluding `/api/telegram/webhook`.
+   - Clear confirmation that actual hosted state changes, migrations, and WAF activation remain pending owner review.
