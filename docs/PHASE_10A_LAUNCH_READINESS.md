@@ -66,7 +66,7 @@ Each item is classified as **VERIFIED READY**, **VERIFIED BLOCKER**, or **UNKNOW
 | **D. Login** | Historical HTTP 500 Report | **UNKNOWN / INCONCLUSIVE** | Historical developer report & `src/app/actions/auth.ts#L34-L74` | Synthetic POST without Next.js action headers returns 500 in App Router | Does not prove historical production root cause or browser behavior | Execute physical browser login against deployed target |
 | **D. Login** | Deployed Browser Acceptance | **UNKNOWN** | Access blocked by edge SSO and missing database | Deployed login has not been executed by an interactive browser | Does not prove form submission failure | Run Android Acceptance Checklist post-cutover |
 | **E. Audit** | Production Dependencies | **VERIFIED READY** | `scripts/validate-audit-report.mjs` run on GitHub Actions (`npm audit --omit=dev`) | Exit code `0`, 0 advisories reported by the production dependency audit at that commit/time | Does not mean devDependencies are free of advisories | Maintain dev dependency triage |
-| **E. Audit** | Development Dependencies | **VERIFIED READY** | `scripts/validate-audit-report.mjs` run on GitHub Actions (`npm audit`) | Exit code `1`, 16 advisories (6 high, 9 moderate, 1 low) present in tooling paths (`shadcn`, `drizzle-kit`, `vitest`); exploit reachability has not been demonstrated | Does not affect production bundle | Maintain isolated dev tooling without `audit fix --force` |
+| **E. Audit** | Development Dependencies | **VERIFIED READY** | `scripts/validate-audit-report.mjs` run on GitHub Actions (`npm audit`) | Exit code `1`, 34 advisories (6 high, 27 moderate, 1 low, 0 critical) recorded at commit `2317eae` (run `41249425002`); historical 16-finding baseline preserved; exploit reachability has not been demonstrated | Does not affect production bundle | Maintain isolated dev tooling without `audit fix --force` |
 | **F. Bot** | Webhook Auth & Deduplication | **VERIFIED READY** | `src/lib/telegram/webhook.ts#L44-L55`, `L417-L446` | Code implements constant-time secret token check, atomic DB claim, lease fencing | Does not prove Telegram can reach edge | Unblock edge, then register webhook |
 | **F. Bot** | Production Bot Configuration | **VERIFIED BLOCKER** | Reviewer Vercel metadata (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` absent) | Bot credentials are not configured in Vercel Production environment | Does not prove whether bot tokens exist in BotFather | Configure distinct production bot token and secret in Vercel |
 | **F. Bot** | Live Webhook Registration | **UNKNOWN** | No live Telegram API calls performed | Webhook registration state on Telegram Bot API is uninspected | Does not prove whether bot is active or inactive | Perform safe in-process `getWebhookInfo` check |
@@ -161,14 +161,16 @@ Rate Limit Settings:
 
 ## 6. Dependency Advisory Triage & Execution Evidence
 
-Fresh audit evidence was collected on GitHub-hosted runners using `scripts/validate-audit-report.mjs` via `.github/workflows/audit.yml`:
+Audit evidence was verified on GitHub-hosted runners using `scripts/validate-audit-report.mjs` via `.github/workflows/audit.yml` for commit `2317eae37f1a7c14de1da602f97d5caef2a0c7d8` ([Run 41249425002](https://github.com/geekammar/Rabet/actions/runs/41249425002), executed 2026-10-31 22:44 UTC):
 
 ### Summary Table
 
 | Scope | Exit Code | Findings Count | Severity Breakdown | Runtime Exposure | Decision |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Production Dependencies** (`--omit=dev`) | `0` | **0** | None (Clean) | No advisories reported by the production dependency audit at that commit/time | **Ready for Launch** |
-| **Full Dependency Tree** (including dev) | `1` | **16** | 6 High, 9 Moderate, 1 Low | Full-tree findings are present in tooling paths; exploit reachability has not been demonstrated | **Non-blocking / Triage Only** |
+| **Full Dependency Tree** (including dev) | `1` | **34** | 6 High, 27 Moderate, 1 Low, 0 Critical | Full-tree findings are present in tooling paths; exploit reachability has not been demonstrated | **Non-blocking / Triage Only** |
+
+*(Historical baseline note: An earlier audit execution on commit `c3218e4`, run `40958988519`, reported 16 advisories [6 High, 9 Moderate, 1 Low]. The subsequent shift to 34 advisories reflects newly published upstream CVE database entries in the public npm registry affecting existing transitive dev dependencies—primarily under `drizzle-kit` / `esbuild` and `shadcn` CLI tooling—rather than changes in the application bundle or additions of new packages. Tooling advisory counts in public registries fluctuate over time and do not imply exploit reachability).*
 
 ### Detailed Breakdown of Full-Tree Advisories
 1. **`deepmerge` / `@shadcn/registry` / `ip-address` (via `shadcn` CLI devDependency):**
@@ -181,7 +183,7 @@ Fresh audit evidence was collected on GitHub-hosted runners using `scripts/valid
    - Severity: Moderate.
    - Execution Context: Test runner executing locally and in CI.
 
-**Conclusion:** No advisories are reported by the production dependency audit (`npm audit --omit=dev`) at this commit and time. Full-tree findings are present in development tooling paths (`shadcn`, `drizzle-kit`, `vitest`); exploit reachability in the deployed application has not been demonstrated. Running `npm audit fix --force` is prohibited as it causes breaking downgrades of development tooling. Launch is **unblocked** from a dependency advisory perspective.
+**Conclusion:** No advisories are reported by the production dependency audit (`npm audit --omit=dev`) at this commit and time. Full-tree findings are present in development tooling paths (`shadcn`, `drizzle-kit`, `vitest`); exploit reachability in the deployed application has not been demonstrated, nor does an advisory report alone prove exploitability. Running `npm audit fix --force` is prohibited as it causes breaking downgrades of development tooling. Launch is **unblocked** from a dependency advisory perspective.
 
 ---
 
@@ -331,7 +333,10 @@ print(f"Last Sync Error Date:   {res.get('last_synchronization_error_date', '(No
    - Sets a finite network timeout (15s).
    - Validates that `ok === true` and `result === true`.
    - **Do not automatically retry an ambiguous write.** If a network timeout or transport failure occurs, perform a read-only `getWebhookInfo` status inspection to determine the actual state before deciding whether another write is appropriate.
-   - Immediately queries `getWebhookInfo` to verify that the reported URL exactly matches the intended URL, confirms allowed update types, and verifies no new error timestamps appear. (Historical error timestamps from prior failures may remain and are not required to disappear immediately).
+   - Immediately queries `getWebhookInfo` to verify that the reported URL exactly matches the intended approved URL, confirms the expected `allowed_updates` set (`{"message", "callback_query"}`), and checks pending update counts.
+   - **Every failed post-registration inspection exits non-zero (`sys.exit(1)`).**
+   - Distinguishes initial registration acknowledgement from configuration verification.
+   - Does not claim live delivery from configuration inspection alone (live test messages in Step 10.2 are required).
 
 ```python
 import getpass
@@ -402,25 +407,59 @@ if not isinstance(data, dict) or data.get("ok") is not True or data.get("result"
     print("Registration failed: setWebhook was rejected or returned non-true result.", file=sys.stderr)
     sys.exit(1)
 
-print("Webhook registration acknowledged (ok: true, result: true).")
-
 # Immediate post-registration verification:
+print("Webhook registration acknowledged by Telegram Bot API (ok: true, result: true).")
+print("Executing read-only configuration verification via getWebhookInfo...")
+
 verify_req = urllib.request.Request(
     f"https://api.telegram.org/bot{token}/getWebhookInfo",
     headers={"User-Agent": "Rabet-Operator/1.0"}
 )
+
 try:
     with urllib.request.urlopen(verify_req, timeout=15) as vresp:
-        vdata = json.loads(vresp.read().decode("utf-8"))
-        vres = vdata.get("result", {})
-        if vres.get("url") != prod_url:
-            print("Verification warning: Reported webhook URL does not match submitted URL.", file=sys.stderr)
-            sys.exit(1)
-        print("Verification confirmed: Webhook active on intended URL.")
-        print(f"Pending updates: {vres.get('pending_update_count', 0)}")
-        print(f"Allowed update types: {vres.get('allowed_updates')}")
+        vbody = vresp.read().decode("utf-8")
+except urllib.error.HTTPError as e:
+    print(f"Verification failed: Telegram API returned HTTP status {e.code}.", file=sys.stderr)
+    print("Registration was acknowledged, but verification inspection failed. Run getWebhookInfo separately to reconcile state.", file=sys.stderr)
+    sys.exit(1)
+except urllib.error.URLError:
+    print("Verification failed: Network transport error or timeout during post-registration inspection.", file=sys.stderr)
+    print("Registration was acknowledged, but current server configuration could not be verified.", file=sys.stderr)
+    print("DO NOT retry setWebhook blindly. Run a read-only getWebhookInfo inspection to reconcile state.", file=sys.stderr)
+    sys.exit(1)
 except Exception:
-    print("Post-registration inspection timed out or encountered error. Run getWebhookInfo separately.", file=sys.stderr)
+    print("Verification failed: Unexpected system or I/O error during post-registration inspection.", file=sys.stderr)
+    print("Run a read-only getWebhookInfo inspection to reconcile state.", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    vdata = json.loads(vbody)
+except Exception:
+    print("Verification failed: Inspection response payload is not valid JSON.", file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(vdata, dict) or vdata.get("ok") is not True or not isinstance(vdata.get("result"), dict):
+    print("Verification failed: getWebhookInfo returned error or unexpected response structure.", file=sys.stderr)
+    sys.exit(1)
+
+vres = vdata["result"]
+
+# 1. Require exact URL equality with approved submitted endpoint
+if vres.get("url") != prod_url:
+    print("Verification failed: Reported webhook URL does not match submitted approved URL.", file=sys.stderr)
+    sys.exit(1)
+
+# 2. Require expected allowed_updates set
+expected_updates = {"message", "callback_query"}
+reported_updates = set(vres.get("allowed_updates") or [])
+if reported_updates != expected_updates:
+    print(f"Verification failed: Reported allowed_updates ({sorted(reported_updates)}) do not match expected ({sorted(expected_updates)}).", file=sys.stderr)
+    sys.exit(1)
+
+print("Configuration verified: Webhook target URL and allowed updates confirmed on Telegram Bot API.")
+print(f"Pending updates count: {vres.get('pending_update_count', 0)}")
+print("Note: Configuration inspection verifies endpoint registration only; live update delivery must be validated via actual test messages in Step 10.2.")
 ```
 
 2. Smoke Test Verification:
