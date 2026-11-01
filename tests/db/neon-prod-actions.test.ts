@@ -128,7 +128,7 @@ async function runReal({
 
 async function createEmptyDatabase(label: string): Promise<Throwaway> {
   const safeLabel = label.replace(/[^a-z0-9]/gi, "_");
-  const name = `rabet_prod_${safeLabel}_${process.pid}_${globalThis.crypto
+  const name = `rabet_actions_prod_${safeLabel}_${process.pid}_${globalThis.crypto
     .getRandomValues(new Uint8Array(8))
     .reduce((acc, byte) => acc + byte.toString(36).padStart(2, "0"), "")}`.toLowerCase();
 
