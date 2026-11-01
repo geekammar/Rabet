@@ -1629,9 +1629,11 @@ Ordered so implementation can start without re-deciding anything.
 - **Migrations are immutable once merged**; a fix is a new migration.
 - **`drizzle-kit push` is not in any script, README or CI step** and is never run against
   any environment.
-- **Production migrations are run by hand** from the development VPS against the
-  **unpooled** connection, after a manual snapshot — never from a Vercel build, never at
-  application startup.
+- **Production migrations are run by hand** via the dedicated GitHub Actions runner
+  (`.github/workflows/neon-prod-migrate.yml`) against the **unpooled** direct connection,
+  after a manual snapshot — never from a Vercel build, never at application startup, and
+  not from the development VPS (which cannot reach Neon endpoints on TCP 5432; historical note:
+  early Phase 03B design assumed VPS connectivity before network boundaries were verified in Phase 03B/10B).
 - Each migration runs in a transaction; the journal is the source of truth for what is
   applied; a failed production migration stops the release and is fixed with a new
   migration, never by blindly re-running the failing one.

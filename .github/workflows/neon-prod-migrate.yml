@@ -1,0 +1,163 @@
+# Neon PROD database — manual inspect / migrate
+#
+# A safe, manual workflow that inspects and applies reviewed migrations to the
+# Rabet *production* database on GitHub-hosted runners.
+#
+# It is triggered ONLY by hand via workflow_dispatch. There is no `push`,
+# `pull_request`, or `schedule` trigger, so a merge to main — or any other
+# event — never migrates anything automatically. Production migrations remain a
+# deliberate, owner-approved action.
+#
+# Two modes, chosen in the "Run workflow" dropdown:
+#
+#   inspect (default) — strictly read-only: verifies connectivity, PostgreSQL
+#                       version, live target identity, application table list,
+#                       Drizzle migration ledger history, pending migrations,
+#                       and schema drift. No DDL, no ledger writes, no data
+#                       modification.
+#   migrate           — revalidates target identity, refuses drift and
+#                       mismatched history, applies the committed migration
+#                       chain through the existing `npm run db:migrate` command,
+#                       then re-inspects the live database and verifies schema
+#                       objects and hashes instead of trusting exit codes.
+#                       Requires typing MIGRATE_RABET_PROD exactly.
+#
+# Safety properties, enforced in the workflow and re-checked in code by
+# scripts/neon-prod-actions.mjs:
+#
+#   - main branch only. Both the workflow gate and script enforce
+#     GITHUB_REF=refs/heads/main and GITHUB_EVENT_NAME=workflow_dispatch.
+#   - Fixed GitHub Environment: Production.
+#   - Non-secret target identity settings (NEON_PROD_EXPECTED_HOST and
+#     NEON_PROD_EXPECTED_DB_NAME) must be explicitly configured in the
+#     Production environment variables.
+#   - The direct connection string is read from NEON_PROD_DATABASE_URL in the
+#     Production environment secrets.
+#   - The secret is passed ONLY to the runner execution step, never to install
+#     or validation steps.
+#   - Rejects pooled hosts, loopback targets, known DEV endpoints, and any
+#     unapproved target before opening a connection.
+#   - Serialized runs with cancel-in-progress: false so an in-flight migration
+#     is never interrupted mid-transaction.
+#   - Finite job and statement/connection timeouts.
+#   - Minimum permissions: `contents: read` only.
+
+name: Neon PROD database
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "inspect = read-only report (default). migrate = apply pending production migrations."
+        type: choice
+        options:
+          - inspect
+          - migrate
+        default: inspect
+        required: true
+      confirm:
+        description: "Required only for migrate mode — type MIGRATE_RABET_PROD exactly."
+        type: string
+        default: ""
+        required: false
+
+# One production-migration run at a time. A queued run waits for the running
+# one instead of cancelling it, so an in-flight migration is never interrupted.
+concurrency:
+  group: neon-prod-migrate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  neon-prod:
+    name: ${{ inputs.mode == 'migrate' && 'Migrate' || 'Inspect' }} the Rabet PROD database
+    runs-on: ubuntu-latest
+    environment: Production
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fail early, before exposing or materializing any database credential,
+      # when the manual request or execution context is invalid.
+      - name: Validate execution context, mode and confirmation
+        env:
+          RABET_MODE: ${{ inputs.mode }}
+          RABET_CONFIRM: ${{ inputs.confirm }}
+        run: |
+          node - <<'NODE'
+            const ref = process.env.GITHUB_REF ?? "";
+            const eventName = process.env.GITHUB_EVENT_NAME ?? "";
+            const mode = process.env.RABET_MODE ?? "";
+            const confirm = process.env.RABET_CONFIRM ?? "";
+            const expectedConfirm = "MIGRATE_RABET_PROD";
+
+            if (eventName !== "workflow_dispatch") {
+              console.error(
+                `Refusing to run: event "${eventName}" is not workflow_dispatch. ` +
+                  "Production migrations are manual only.",
+              );
+              process.exit(1);
+            }
+
+            if (ref !== "refs/heads/main") {
+              console.error(
+                `Refusing to run: ref "${ref}" is not refs/heads/main. ` +
+                  "Production migrations must run from reviewed code on main.",
+              );
+              process.exit(1);
+            }
+
+            if (mode !== "inspect" && mode !== "migrate") {
+              console.error(
+                `Refusing to run: unknown mode "${mode}". ` +
+                  'Use "inspect" (read-only) or "migrate".',
+              );
+              process.exit(1);
+            }
+
+            if (mode === "migrate" && confirm !== expectedConfirm) {
+              console.error(
+                "Refusing to run: migrate mode requires typing the confirmation phrase " +
+                  `"${expectedConfirm}" exactly into the "confirm" input.`,
+              );
+              process.exit(1);
+            }
+
+            console.log(`Execution context valid. Mode: ${mode}. Ref: ${ref}.`);
+          NODE
+
+      # The Production runner. NEON_PROD_DATABASE_URL is passed through the
+      # environment only to this step. The runner redacts every line it prints.
+      - name: ${{ inputs.mode == 'migrate' && 'Migrate' || 'Inspect' }} the production database
+        timeout-minutes: 10
+        env:
+          NEON_PROD_DATABASE_URL: ${{ secrets.NEON_PROD_DATABASE_URL }}
+          NEON_PROD_EXPECTED_HOST: ${{ vars.NEON_PROD_EXPECTED_HOST }}
+          NEON_PROD_EXPECTED_DB_NAME: ${{ vars.NEON_PROD_EXPECTED_DB_NAME }}
+          NEON_PROD_MODE: ${{ inputs.mode }}
+          NEON_PROD_MIGRATE_CONFIRM: ${{ inputs.confirm }}
+        run: node scripts/neon-prod-actions.mjs
+
+      - name: Report execution summary
+        run: |
+          echo "Neon PROD database runner completed."
+          echo "  mode:              ${{ inputs.mode }}"
+          echo "  environment:       Production"
+          echo "  target secret:     NEON_PROD_DATABASE_URL (Production Environment secret)"
+          echo "  expected host var: NEON_PROD_EXPECTED_HOST (Production Environment variable)"
+          echo "  expected db var:   NEON_PROD_EXPECTED_DB_NAME (Production Environment variable)"
+          echo "  command executed:  ${{ inputs.mode == 'migrate' && 'npm run db:migrate' || 'read-only inspection' }}"
+          echo "  drizzle-kit push:  never executed"
