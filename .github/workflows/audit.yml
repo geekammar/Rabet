@@ -1,0 +1,265 @@
+name: Dependency Audit
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Run npm audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run audit validator self-test
+        run: |
+          node - <<'NODE'
+          import assert from "node:assert";
+          import { validateAuditReport } from "./scripts/validate-audit-report.mjs";
+
+          console.log("Running audit validator self-test suite on hosted runner...");
+
+          // 1. Valid clean report (exit 0)
+          const cleanReport = JSON.stringify({
+            auditReportVersion: 2,
+            vulnerabilities: {},
+            metadata: {
+              vulnerabilities: { total: 0, info: 0, low: 0, moderate: 0, high: 0, critical: 0 },
+              dependencies: { prod: 110, dev: 15, total: 125 }
+            }
+          });
+          const cleanRes = validateAuditReport(cleanReport, 0);
+          assert.strictEqual(cleanRes.valid, true, "Clean report must be valid");
+          assert.strictEqual(cleanRes.classification, "clean");
+          assert.strictEqual(cleanRes.total, 0);
+
+          // 2. Valid, internally consistent findings report (coherent small fixture, exit 1)
+          const findingsReport = JSON.stringify({
+            auditReportVersion: 2,
+            vulnerabilities: {
+              lodash: { name: "lodash", severity: "high" },
+              minimist: { name: "minimist", severity: "moderate" }
+            },
+            metadata: {
+              vulnerabilities: { total: 2, info: 0, low: 0, moderate: 1, high: 1, critical: 0 },
+              dependencies: { prod: 110, dev: 15, total: 125 }
+            }
+          });
+          const findingsRes = validateAuditReport(findingsReport, 1);
+          assert.strictEqual(findingsRes.valid, true, "Findings report must be valid");
+          assert.strictEqual(findingsRes.classification, "findings");
+          assert.strictEqual(findingsRes.total, 2);
+
+          // 3. Four reviewer-reproduced invalid cases
+          // Case A: Missing counters
+          const caseA = validateAuditReport('{"metadata":{"vulnerabilities":{}},"vulnerabilities":{}}', 0);
+          assert.strictEqual(caseA.valid, false, "Case A must be rejected");
+          assert.strictEqual(caseA.classification, "collection_failed");
+
+          // Case B: Arrays instead of objects
+          const caseB = validateAuditReport('{"metadata":{"vulnerabilities":[]},"vulnerabilities":[]}', 0);
+          assert.strictEqual(caseB.valid, false, "Case B must be rejected");
+          assert.strictEqual(caseB.classification, "collection_failed");
+
+          // Case C: Invalid total string
+          const caseC = validateAuditReport('{"metadata":{"vulnerabilities":{"total":"not-a-number"}},"vulnerabilities":{}}', 0);
+          assert.strictEqual(caseC.valid, false, "Case C must be rejected");
+          assert.strictEqual(caseC.classification, "collection_failed");
+
+          // Case D: Failed command exit code 2
+          const caseD = validateAuditReport('{"metadata":{"vulnerabilities":{"total":1,"high":1}},"vulnerabilities":{"demo":{"severity":"high"}}}', 2);
+          assert.strictEqual(caseD.valid, false, "Case D must be rejected");
+          assert.strictEqual(caseD.classification, "collection_failed");
+
+          // 4. Missing individual counters, negative/fractional/string counters
+          const missingKey = validateAuditReport(JSON.stringify({
+            auditReportVersion: 2,
+            vulnerabilities: {},
+            metadata: { vulnerabilities: { total: 0, info: 0, low: 0, moderate: 0, high: 0 } }
+          }), 0);
+          assert.strictEqual(missingKey.valid, false, "Missing critical counter must be rejected");
+
+          const negativeVal = validateAuditReport(JSON.stringify({
+            auditReportVersion: 2,
+            vulnerabilities: {},
+            metadata: { vulnerabilities: { total: -1, info: 0, low: -1, moderate: 0, high: 0, critical: 0 } }
+          }), 0);
+          assert.strictEqual(negativeVal.valid, false, "Negative counter must be rejected");
+
+          const stringVal = validateAuditReport(JSON.stringify({
+            auditReportVersion: 2,
+            vulnerabilities: {},
+            metadata: { vulnerabilities: { total: 0, info: "0", low: 0, moderate: 0, high: 0, critical: 0 } }
+          }), 0);
+          assert.strictEqual(stringVal.valid, false, "String counter must be rejected");
+
+          // 5. Severity totals that do not add up
+          const mismatchSum = validateAuditReport(JSON.stringify({
+            auditReportVersion: 2,
+            vulnerabilities: { pkg: { severity: "high" } },
+            metadata: { vulnerabilities: { total: 5, info: 0, low: 0, moderate: 0, high: 1, critical: 0 } }
+          }), 1);
+          assert.strictEqual(mismatchSum.valid, false, "Mismatched total sum must be rejected");
+
+          // 6. Missing or malformed exit code
+          const missingExit = validateAuditReport(cleanReport, undefined);
+          assert.strictEqual(missingExit.valid, false, "Undefined exit code must be rejected");
+
+          const unsupportedExit = validateAuditReport(cleanReport, 127);
+          assert.strictEqual(unsupportedExit.valid, false, "Exit code 127 must be rejected");
+
+          // 7. Error payload
+          const errorPayload = JSON.stringify({
+            error: { code: "ENOTFOUND", summary: "registry lookup failed" }
+          });
+          const errRes = validateAuditReport(errorPayload, 1);
+          assert.strictEqual(errRes.valid, false, "Error payload must not be valid");
+          assert.strictEqual(errRes.classification, "collection_failed");
+
+          console.log("✓ Audit validator self-test passed cleanly.");
+          NODE
+
+      - name: Collect npm audit (production dependencies --omit=dev)
+        id: audit-prod
+        run: |
+          set +e
+          npm audit --omit=dev --json > audit-prod.json 2> audit-prod.stderr.log
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "PROD_EXIT=$EXIT_CODE" >> "$GITHUB_ENV"
+          echo "npm audit (--omit=dev) completed with exit code: $EXIT_CODE"
+
+      - name: Collect npm audit (all dependencies)
+        id: audit-all
+        run: |
+          set +e
+          npm audit --json > audit-all.json 2> audit-all.stderr.log
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "ALL_EXIT=$EXIT_CODE" >> "$GITHUB_ENV"
+          echo "npm audit (all) completed with exit code: $EXIT_CODE"
+
+      - name: Validate production audit report
+        id: validate-prod
+        run: |
+          set +e
+          node scripts/validate-audit-report.mjs audit-prod.json "${{ env.PROD_EXIT }}" prod
+          EXIT_CODE=$?
+          echo "VALIDATE_PROD_EXIT=$EXIT_CODE" >> "$GITHUB_ENV"
+          echo "Production validation completed with exit code: $EXIT_CODE"
+
+      - name: Validate full-tree audit report
+        id: validate-all
+        run: |
+          set +e
+          node scripts/validate-audit-report.mjs audit-all.json "${{ env.ALL_EXIT }}" all
+          EXIT_CODE=$?
+          echo "VALIDATE_ALL_EXIT=$EXIT_CODE" >> "$GITHUB_ENV"
+          echo "Full-tree validation completed with exit code: $EXIT_CODE"
+
+      - name: Generate audit summary artifact
+        if: always()
+        run: |
+          node - <<'NODE'
+          import fs from "node:fs";
+
+          let summary = "======================================================\n";
+          summary += "DEPENDENCY AUDIT EVIDENCE SUMMARY\n";
+          summary += `Generated: ${new Date().toISOString()}\n`;
+          summary += "======================================================\n\n";
+
+          function appendReport(jsonFile, stderrFile, label, exitCodeEnv) {
+            summary += `--- ${label} ---\n`;
+            summary += `Audit Command Exit Code: ${process.env[exitCodeEnv] ?? "unknown"}\n`;
+
+            if (fs.existsSync(stderrFile)) {
+              const stderrContent = fs.readFileSync(stderrFile, "utf8").trim();
+              if (stderrContent.length > 0) {
+                summary += `Diagnostics (stderr):\n${stderrContent}\n`;
+              } else {
+                summary += `Diagnostics (stderr): (empty)\n`;
+              }
+            } else {
+              summary += `Diagnostics (stderr): file not found\n`;
+            }
+
+            if (!fs.existsSync(jsonFile)) {
+              summary += `JSON Report: file not found (${jsonFile})\n\n`;
+              return;
+            }
+
+            try {
+              const raw = fs.readFileSync(jsonFile, "utf8");
+              if (!raw.trim()) {
+                summary += `JSON Report: empty file\n\n`;
+                return;
+              }
+              const data = JSON.parse(raw);
+              summary += `Report Version: ${data.auditReportVersion ?? "unknown"}\n`;
+              if (data.metadata?.vulnerabilities) {
+                summary += `Vulnerabilities: ${JSON.stringify(data.metadata.vulnerabilities, null, 2)}\n`;
+              }
+              if (data.metadata?.dependencies) {
+                summary += `Dependencies: ${JSON.stringify(data.metadata.dependencies, null, 2)}\n`;
+              }
+              if (data.vulnerabilities && typeof data.vulnerabilities === "object" && !Array.isArray(data.vulnerabilities)) {
+                summary += `Packages with advisories: ${Object.keys(data.vulnerabilities).join(", ")}\n`;
+              }
+            } catch (err) {
+              summary += `JSON Parse Error: ${err.message}\n`;
+            }
+            summary += "\n";
+          }
+
+          appendReport("audit-prod.json", "audit-prod.stderr.log", "PRODUCTION DEPENDENCIES (--omit=dev)", "PROD_EXIT");
+          appendReport("audit-all.json", "audit-all.stderr.log", "ALL DEPENDENCIES (INCLUDING DEV)", "ALL_EXIT");
+
+          fs.writeFileSync("audit-summary.txt", summary, "utf8");
+          console.log("Saved audit-summary.txt");
+          NODE
+
+      - name: Upload sanitized audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-reports
+          path: |
+            audit-all.json
+            audit-all.stderr.log
+            audit-prod.json
+            audit-prod.stderr.log
+            audit-summary.txt
+          if-no-files-found: warn
+
+      - name: Enforce audit gate results
+        run: |
+          echo "Evaluation of audit collection and validation results:"
+          echo "Production validation exit code: ${{ env.VALIDATE_PROD_EXIT }}"
+          echo "Full-tree validation exit code: ${{ env.VALIDATE_ALL_EXIT }}"
+
+          GATE_FAILED=0
+          if [ "${{ env.VALIDATE_PROD_EXIT }}" != "0" ]; then
+            echo "::error::Production dependency audit gate failed with exit code ${{ env.VALIDATE_PROD_EXIT }}."
+            GATE_FAILED=1
+          fi
+
+          if [ "${{ env.VALIDATE_ALL_EXIT }}" != "0" ]; then
+            echo "::error::Full-tree dependency audit validation failed with exit code ${{ env.VALIDATE_ALL_EXIT }}."
+            GATE_FAILED=1
+          fi
+
+          if [ "$GATE_FAILED" -ne 0 ]; then
+            exit 1
+          fi
+          echo "All audit validation gates passed."
