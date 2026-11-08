@@ -315,6 +315,33 @@ describe.skipIf(!shouldRun)("production runner inspect mode on real PostgreSQL",
     );
     expect(checks.indexes).toBe(false);
   });
+
+  it("fails inspect mode and reports manual-review when application table exists with empty ledger", async () => {
+    const db = await emptyDatabase();
+    await db.sql`create schema if not exists drizzle`;
+    await db.sql`
+      create table if not exists drizzle.__drizzle_migrations (
+        id serial primary key,
+        hash text not null,
+        created_at bigint
+      )
+    `;
+    await db.sql`create table if not exists "language" (id text)`;
+
+    const { result, output, calls } = await runReal({ url: db.url });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(result.state?.status).toBe("drift");
+    expect(
+      calls.filter((c) => c.args.join(" ").includes("db:migrate")),
+    ).toHaveLength(0);
+    expect(output).toContain("unmanaged schema");
+
+    // Table remains and ledger stays empty
+    expect(await appTables(db.sql)).toEqual(["language"]);
+    expect(await appliedHashes(db.sql)).toEqual([]);
+  });
 });
 
 describe.skipIf(!shouldRun)("production runner target identity on real PostgreSQL", () => {
@@ -533,5 +560,36 @@ describe.skipIf(!shouldRun)("production runner migrate mode on real PostgreSQL",
     expect(result.ok).toBe(false);
     expect(result.outcome).toBe("manual-review");
     expect(calls.filter((c) => c.args.join(" ").includes("db:migrate"))).toHaveLength(0);
+  });
+
+  it("refuses migrate mode when application table exists with empty ledger", async () => {
+    const db = await emptyDatabase();
+    await db.sql`create schema if not exists drizzle`;
+    await db.sql`
+      create table if not exists drizzle.__drizzle_migrations (
+        id serial primary key,
+        hash text not null,
+        created_at bigint
+      )
+    `;
+    await db.sql`create table if not exists "language" (id text)`;
+
+    const { result, output, calls } = await runReal({
+      url: db.url,
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(result.state?.status).toBe("drift");
+    expect(
+      calls.filter((c) => c.args.join(" ").includes("db:migrate")),
+    ).toHaveLength(0);
+    expect(output).toContain("unmanaged schema");
+
+    // Table remains and ledger stays empty
+    expect(await appTables(db.sql)).toEqual(["language"]);
+    expect(await appliedHashes(db.sql)).toEqual([]);
   });
 });

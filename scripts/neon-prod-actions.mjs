@@ -552,15 +552,17 @@ export async function inspectTarget(ctx) {
     totalRows,
   });
 
-  // Explicit check: app tables exist without migration ledger
-  if (!ledgerExists && appTables.length > 0) {
+  // Explicit check: app tables exist with zero recorded migrations (whether ledger is absent or empty)
+  if (appTables.length > 0 && state.appliedCount === 0) {
+    const ledgerDetail = !ledgerExists
+      ? "the Drizzle migration ledger (drizzle.__drizzle_migrations) does not exist"
+      : "the Drizzle migration ledger (drizzle.__drizzle_migrations) contains 0 recorded migrations";
     state = {
       ...state,
       status: "drift",
       stopReason:
         `The database contains ${appTables.length} application table(s) ` +
-        `(${appTables.join(", ")}), but the Drizzle migration ledger ` +
-        `(drizzle.__drizzle_migrations) does not exist. The runner refuses ` +
+        `(${appTables.join(", ")}), but ${ledgerDetail}. The runner refuses ` +
         "to run on an unmanaged schema.",
     };
   }

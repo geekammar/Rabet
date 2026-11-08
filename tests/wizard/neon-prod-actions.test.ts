@@ -920,6 +920,36 @@ describe("production runner identity and query failure handling", () => {
     expect(output()).toContain("unmanaged schema");
   });
 
+  it("refuses schema when application tables exist and migration ledger exists but is empty", async () => {
+    const { io, output } = testIo();
+    const scenario = emptyScenario();
+    scenario.appTables = ["language"];
+    scenario.ledgerExists = true;
+    scenario.applied = [];
+
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => ({ code: 0 }),
+      mode: "inspect",
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(output()).toContain("contains 0 recorded migrations");
+    expect(output()).toContain("unmanaged schema");
+  });
+
   it("fails closed if live current_database() mismatches case of expected database", async () => {
     const { io, output } = testIo();
     const scenario = emptyScenario();
@@ -1338,5 +1368,41 @@ describe("production runner flows and execution", () => {
     // db:migrate must NOT be called
     expect(executedCommands).not.toContain("npm run db:migrate");
     expect(output()).toContain("drizzle-kit check reported a problem (exit code 1)");
+  });
+
+  it("refuses migrate mode when application tables exist and migration ledger exists but is empty", async () => {
+    const { io, output } = testIo();
+    const scenario = emptyScenario();
+    scenario.appTables = ["language"];
+    scenario.ledgerExists = true;
+    scenario.applied = [];
+
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    let commandCalled = false;
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandCalled = true;
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(commandCalled).toBe(false);
+    expect(output()).toContain("contains 0 recorded migrations");
+    expect(output()).toContain("unmanaged schema");
   });
 });
