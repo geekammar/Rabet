@@ -1032,31 +1032,40 @@ Key verified findings & incorporated platform evidence:
 
 Phase 10B delivered the dedicated manual Production database migration runner and the complete operator setup packet for environment variables and WAF configuration. Full instructions are recorded in [docs/PHASE_10B_PRODUCTION_PREPARATION.md](./PHASE_10B_PRODUCTION_PREPARATION.md).
 
-Key implementation deliverables:
+Tooling is implemented and under review on PR #21 (`feat/phase-10b-production-preparation`). PR #20 is merged (`5b009085aa4e96e9607aa9a801be0034aadc4c40`). Actual hosted production state changes — provisioning the `Rabet_prod` project on Neon, executing production database migrations, configuring Vercel Production variables, and activating WAF rate limiting — remain strictly pending independent review and authorization.
+
+Key implementation deliverables & security repairs:
 1. **Dedicated Production Runner (`scripts/neon-prod-actions.mjs`):**
    - Implements manual `inspect` (read-only default) and `migrate` modes.
-   - Requires explicit target configuration: direct unpooled hostname (`NEON_PROD_EXPECTED_HOST`) and database name (`NEON_PROD_EXPECTED_DB_NAME`) configured in the `Production` GitHub Environment.
+   - Refuses real CLI execution outside the intended GitHub Actions context before opening any connection.
+   - Requires explicit target configuration: direct unpooled hostname (`NEON_PROD_EXPECTED_HOST`) and case-sensitive database name (`NEON_PROD_EXPECTED_DB_NAME`) configured in the `Production` GitHub Environment.
    - Refuses to connect if target settings are missing (never derives identity from connection strings).
-   - Before connection: enforces TLS (`sslmode=require`), rejects pooled endpoints (`-pooler`), rejects loopback/test targets in CLI path, and explicitly rejects the known `Rabet_dev` host (`ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech`).
-   - Live server verification: queries `current_database()` live and fails closed on query failure (never falls back to URL).
+   - Before connection: explicitly parses TLS parameters, requires exactly one `sslmode=require`, rejects duplicate/invalid/conflicting TLS settings (e.g., `ssl=false`), rejects pooled endpoints (`-pooler`), rejects loopback/test targets in CLI path, and explicitly rejects the known `Rabet_dev` host (`ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech`).
+   - Live server verification: queries `current_database()` live, compares identity case-sensitively, and fails closed on query failure (never falls back to URL).
    - Distinguishes absent migration ledger explicitly from failed catalog queries; treats query errors as failures (never defaults to empty).
-   - Refuses schema drift and inconsistent migration histories.
+   - Inspect mode: strictly read-only; when inspect sees a complete migration ledger, it automatically verifies critical live schema objects (tables, indexes, constraints, recursive trees) before reporting success.
+   - Migrate mode: requires typing `MIGRATE_RABET_PROD` literally (no trimming); refuses partial, unmanaged, inconsistent, or ambiguous states before any write; stops immediately on any non-zero `db:check` exit code regardless of stderr text.
    - Re-inspects live database post-migration, verifies applied SHA-256 hashes byte-for-byte against committed files, and verifies real tables, indexes, constraints, and recursive tree foreign keys.
    - Redacts credentials and connection strings from all outputs.
 2. **Manual Workflow (`.github/workflows/neon-prod-migrate.yml`):**
    - Strictly `workflow_dispatch` only (no push, pull_request, or schedule trigger).
+   - Gated to `refs/heads/main` at workflow, guard, and script boundaries.
+   - Preliminary `guard` job runs on `ubuntu-latest` without Environment, checkout, or secret access. It rejects invalid event names, non-main refs, invalid modes, and untrimmed/mismatched confirmations before the Production job starts.
+   - Production job (`neon-prod`) gates entry on `needs: guard` and `if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'`, ensuring environment access and secrets are requested only for validated manual dispatches on main.
    - Fixed GitHub Environment: `Production`.
-   - Restricts execution to `refs/heads/main` at workflow and script boundaries.
-   - Validates mode, ref, and exact confirmation phrase (`MIGRATE_RABET_PROD`) before materializing credentials.
    - `concurrency` with `cancel-in-progress: false` to serialize runs and protect in-flight transactions.
    - Finite job and connection/statement timeouts.
    - Minimum permissions: `contents: read`.
-3. **Comprehensive Automated Test Coverage:**
-   - `tests/wizard/neon-prod-actions.test.ts`: 25 focused tests driving target gates, mode validation, GitHub context enforcement, live query fail-closed behavior, absent vs failed ledger reads, read-only empty inspection, clean migration execution, honest repeated no-ops, drift refusal, and subprocess redaction.
-   - `tests/db/neon-prod-actions.test.ts`: 11 real PostgreSQL tests running on disposable service containers, verifying live wire-protocol interaction, unpooled migration execution, live schema object creation, and fail-closed security.
-4. **Operator Setup Packet (`docs/PHASE_10B_PRODUCTION_PREPARATION.md`):**
-   - Mobile-friendly, step-by-step instructions for provisioning a dedicated `Rabet_prod` Neon project without copying development data.
-   - Exact GitHub Environment, secret (`NEON_PROD_DATABASE_URL`), and non-secret variable settings (`NEON_PROD_EXPECTED_HOST`, `NEON_PROD_EXPECTED_DB_NAME`).
-   - Vercel `DATABASE_URL` scoping to Production only (distinguishing pooled application driver from direct migration runner, preserving owner credentials).
-   - Minimal WAF Rate Limiting proposal protecting `/login` and `/api/auth/callback/credentials` while excluding `/api/telegram/webhook`.
-   - Clear confirmation that actual hosted state changes, migrations, and WAF activation remain pending owner review.
+3. **Workflow Guards vs. GitHub Environment Protection:**
+   - Clearly distinguishes platform-level GitHub Environment protection rules (deployment branch filtering and required reviewer approvals) from workflow/script guards (pre-flight validation, literal confirmation matching, CLI context enforcement, and live schema verification).
+4. **Preserved Operator Order & Auth Configuration:**
+   - Runbook documents the mandatory 6-step operator order:
+     1. Inspect read-only with the manual workflow.
+     2. Record a verified restore point (Neon branch snapshot or PITR baseline).
+     3. Migrate only with authorization (`MIGRATE_RABET_PROD` literally).
+     4. Verify live schema objects and byte-for-byte migration hashes.
+     5. Configure Vercel Production (`DATABASE_URL` with pooled endpoint and `?sslmode=require`).
+     6. Verify deployment of the approved commit picked up the database configuration without errors.
+   - Existing verified admin credentials (`ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, `AUTH_SECRET`) are explicitly preserved and must not be overwritten or regenerated.
+5. **Comprehensive Automated Test Coverage:**
+   - Extended unit tests in `tests/wizard/neon-prod-actions.test.ts` and PostgreSQL tests in `tests/db/neon-prod-actions.test.ts` covering real CLI refusal, exact confirmation, case-mismatched DB identity, invalid/duplicate/conflicting TLS, missing critical objects on complete ledger, partial-state refusal, and non-zero `db:check` failure.

@@ -296,6 +296,25 @@ describe.skipIf(!shouldRun)("production runner inspect mode on real PostgreSQL",
     const rows = await db.sql`select count(*)::int as n from prod_drift_probe`;
     expect(Number(rows[0].n)).toBe(0);
   });
+
+  it("fails inspect mode when complete ledger is missing a critical object", async () => {
+    const db = await emptyDatabase();
+    await applyChain(db);
+
+    // Drop a critical index on the live complete database
+    await db.sql`drop index if exists "idx_product_category_sort"`;
+
+    const { result, calls } = await runReal({ url: db.url });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(calls.filter((c) => c.args.join(" ").includes("db:migrate"))).toHaveLength(0);
+
+    const checks = Object.fromEntries(
+      result.checks.map((check) => [check.name, check.passed]),
+    );
+    expect(checks.indexes).toBe(false);
+  });
 });
 
 describe.skipIf(!shouldRun)("production runner target identity on real PostgreSQL", () => {
@@ -324,6 +343,21 @@ describe.skipIf(!shouldRun)("production runner target identity on real PostgreSQ
     const pin = {
       expectedHost: parsed.host,
       expectedDbName: "other_db_name",
+    };
+
+    const { result } = await runReal({ url: db.url, pin });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+  });
+
+  it("refuses connection when expected database name case mismatches", async () => {
+    const db = await emptyDatabase();
+    const parsed = wizard.parsePgUrl(db.url);
+
+    const pin = {
+      expectedHost: parsed.host,
+      expectedDbName: parsed.dbname.toUpperCase(),
     };
 
     const { result } = await runReal({ url: db.url, pin });
@@ -469,5 +503,35 @@ describe.skipIf(!shouldRun)("production runner migrate mode on real PostgreSQL",
     expect(output).not.toContain(db.url);
     expect(output).toContain("exited with code 1");
     expect(await appTables(db.sql)).toEqual([]);
+  });
+
+  it("refuses migrate mode when database is in a partial migration state", async () => {
+    const db = await emptyDatabase();
+    // Simulate partial state: insert ledger row for initial migration but not second migration
+    await db.sql`create schema if not exists drizzle`;
+    await db.sql`
+      create table if not exists drizzle.__drizzle_migrations (
+        id serial primary key,
+        hash text not null,
+        created_at bigint
+      )
+    `;
+    const hashes = wizard.computeMigrationHashes(repo);
+    await db.sql`
+      insert into drizzle.__drizzle_migrations (hash, created_at)
+      values (${hashes[0].hash}, ${hashes[0].when})
+    `;
+    // Create at least one app table so it's not considered empty
+    await db.sql`create table if not exists "language" (id text)`;
+
+    const { result, calls } = await runReal({
+      url: db.url,
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(calls.filter((c) => c.args.join(" ").includes("db:migrate"))).toHaveLength(0);
   });
 });

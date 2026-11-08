@@ -142,10 +142,10 @@ export function parseMode(value) {
 }
 
 /**
- * True only when the confirmation exactly matches MIGRATE_RABET_PROD.
+ * True only when the confirmation exactly matches MIGRATE_RABET_PROD (literal match, no trim).
  */
 export function verifyConfirmation(value, expected = MIGRATE_CONFIRMATION) {
-  return typeof value === "string" && value.trim() === expected;
+  return typeof value === "string" && value === expected;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,13 +154,21 @@ export function verifyConfirmation(value, expected = MIGRATE_CONFIRMATION) {
 
 /**
  * Enforces workflow_dispatch and refs/heads/main when running on GitHub Actions.
+ * When requireGithub is true, strictly refuses execution outside GitHub Actions.
  */
-export function validateGithubContext(env) {
+export function validateGithubContext(env, { requireGithub = false } = {}) {
+  const problems = [];
+
   if (env.GITHUB_ACTIONS !== "true") {
+    if (requireGithub) {
+      problems.push(
+        "This runner must execute within GitHub Actions. Local or manual CLI " +
+          "execution outside GitHub Actions is refused.",
+      );
+      return { ok: false, problems, context: "outside-github" };
+    }
     return { ok: true, problems: [], context: "local" };
   }
-
-  const problems = [];
 
   if (env.GITHUB_EVENT_NAME !== "workflow_dispatch") {
     problems.push(
@@ -212,8 +220,101 @@ export function isLoopbackOrTestHost(host) {
 }
 
 // ---------------------------------------------------------------------------
-// Production Target Validation (Before Any Connection)
+// TLS and Production Target Validation (Before Any Connection)
 // ---------------------------------------------------------------------------
+
+/**
+ * Parses and strictly validates TLS parameters in a PostgreSQL connection string.
+ * Requires exactly one sslmode=require and rejects invalid, duplicate, or conflicting settings.
+ */
+export function parseAndValidateTlsParams(rawUrl) {
+  if (typeof rawUrl !== "string" || rawUrl.trim() === "") {
+    return {
+      ok: false,
+      error:
+        "The connection string does not require TLS. Production connections " +
+        "must explicitly specify ?sslmode=require in NEON_PROD_DATABASE_URL.",
+    };
+  }
+
+  const queryStart = rawUrl.indexOf("?");
+  if (queryStart === -1) {
+    return {
+      ok: false,
+      error:
+        "The connection string does not require TLS. Production connections " +
+        "must explicitly specify ?sslmode=require in NEON_PROD_DATABASE_URL.",
+    };
+  }
+
+  const queryString = rawUrl.slice(queryStart + 1);
+  let params;
+  try {
+    params = new URLSearchParams(queryString);
+  } catch {
+    return {
+      ok: false,
+      error: "The connection string contains an invalid query string.",
+    };
+  }
+
+  const sslmodes = params.getAll("sslmode");
+  if (sslmodes.length === 0) {
+    return {
+      ok: false,
+      error:
+        "The connection string does not require TLS. Production connections " +
+        "must explicitly specify ?sslmode=require in NEON_PROD_DATABASE_URL.",
+    };
+  }
+
+  if (sslmodes.length > 1) {
+    return {
+      ok: false,
+      error:
+        `The connection string contains duplicate sslmode parameters (${sslmodes.length} occurrences). ` +
+        "Production connections require exactly one sslmode=require.",
+    };
+  }
+
+  const sslmode = sslmodes[0];
+  if (sslmode !== "require") {
+    return {
+      ok: false,
+      error:
+        `The connection string specifies invalid sslmode "${sslmode}". ` +
+        "Production connections must specify sslmode=require.",
+    };
+  }
+
+  // Reject conflicting or disabled TLS settings
+  const sslValues = params.getAll("ssl");
+  for (const val of sslValues) {
+    if (/^(false|0|disable|no|off)$/i.test(val)) {
+      return {
+        ok: false,
+        error:
+          `The connection string contains conflicting TLS setting ssl=${val}. ` +
+          "Production connections must require TLS without conflicting settings.",
+      };
+    }
+  }
+
+  for (const [key, val] of params.entries()) {
+    const k = key.toLowerCase();
+    if (k === "sslmode") continue;
+    if (k.includes("ssl") && /^(false|0|disable|no|off|prefer|allow)$/i.test(val)) {
+      return {
+        ok: false,
+        error:
+          `The connection string contains conflicting TLS setting ${key}=${val}. ` +
+          "Production connections must require TLS without conflicting settings.",
+      };
+    }
+  }
+
+  return { ok: true, sslmode };
+}
 
 /**
  * Validates the Production connection string and enforces exact match with
@@ -279,13 +380,11 @@ export function validateProdUrl(
     return { ok: false, url: null, problems, target: null };
   }
 
-  // Reject missing or disabled TLS in raw connection string
+  // Reject missing, duplicate, invalid, or conflicting TLS settings in connection string
   if (!allowTestTarget) {
-    if (!/(?:^|[?&])sslmode=require/i.test(rawUrl)) {
-      problems.push(
-        "The connection string does not require TLS. Production connections " +
-          "must explicitly specify ?sslmode=require in NEON_PROD_DATABASE_URL.",
-      );
+    const tlsCheck = parseAndValidateTlsParams(rawUrl);
+    if (!tlsCheck.ok) {
+      problems.push(tlsCheck.error);
     }
   }
 
@@ -331,13 +430,6 @@ export function validateProdUrl(
           "endpoint hostname. Production host must end with .neon.tech.",
       );
     }
-
-    if (!/(?:^|&)sslmode=require/i.test(parsed.params)) {
-      problems.push(
-        "The connection string does not require TLS. Production connections " +
-          "must specify ?sslmode=require.",
-      );
-    }
   }
 
   // Exact target host match
@@ -349,8 +441,8 @@ export function validateProdUrl(
     );
   }
 
-  // Exact target database name match
-  if (dbTrimmed && parsed.dbname.toLowerCase() !== dbTrimmed.toLowerCase()) {
+  // Exact target database name match (case-sensitive)
+  if (dbTrimmed && parsed.dbname !== dbTrimmed) {
     problems.push(
       "The connection string does not name the approved Production database. " +
         `Expected "${dbTrimmed}", but the URL names "${parsed.dbname}". This ` +
@@ -370,7 +462,7 @@ export function validateProdUrl(
       host: maskEndpoint(parsed.host),
       dbname: parsed.dbname,
       user: parsed.user,
-      tls: /(?:^|&)sslmode=require/i.test(parsed.params)
+      tls: !allowTestTarget || parseAndValidateTlsParams(rawUrl).ok
         ? "required"
         : "not requested",
     },
@@ -869,6 +961,7 @@ export async function runProdActions({
   expectedDbName = env[EXPECTED_DB_NAME_ENV],
   allowTestTarget = false,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  requireGithubContext = false,
 }) {
   const ctx = {
     io,
@@ -901,7 +994,7 @@ export async function runProdActions({
     // ------------------------------------------------------------------
     header(`${RUNNER} — mode: ${mode}`);
 
-    const github = validateGithubContext(env);
+    const github = validateGithubContext(env, { requireGithub: requireGithubContext });
     if (!github.ok) {
       for (const problem of github.problems) {
         io.line(`FAIL ${problem}`);
@@ -1072,8 +1165,8 @@ export async function runProdActions({
     note(ctx, `Endpoint      ${ctx.target.endpoint}`);
     note(ctx, `TLS           ${ctx.target.tls}`);
 
-    // Compare live database identity to approved target setting
-    if (liveDbName.toLowerCase() !== prodTarget.target.dbname.toLowerCase()) {
+    // Compare live database identity to approved target setting (case-sensitive)
+    if (liveDbName !== prodTarget.target.dbname) {
       io.line("");
       io.line(
         `FAIL The connected database is "${liveDbName}", not the approved ` +
@@ -1122,7 +1215,7 @@ export async function runProdActions({
       return finalize(ctx);
     }
 
-    // Inspect mode stops here
+    // Inspect mode
     if (ctx.mode === "inspect") {
       header("Read-only inspection complete");
       note(
@@ -1134,6 +1227,23 @@ export async function runProdActions({
         }`,
       );
       note(ctx, `Application data rows: ${inspected.totalRows}`);
+
+      // When inspect sees a complete migration ledger, verify critical live schema objects before reporting success
+      if (inspected.state.pending.length === 0 && inspected.ledgerExists) {
+        header("Validating live schema objects on complete target (read-only)");
+        const validated = await validateTarget(ctx);
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target ledger indicates " +
+              "complete migrations, but critical live schema objects are missing or invalid.",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      }
+
       io.line("");
       io.line(
         "  No DDL ran, no migration ledger was modified, and nothing was " +
@@ -1159,6 +1269,29 @@ export async function runProdActions({
       return finalize(ctx);
     }
 
+    // Refuse partial, unmanaged, or ambiguous states before any write
+    if (inspected.state.status === "partial") {
+      io.line("");
+      io.line(
+        `FAIL The database is in a partial migration state (${inspected.state.appliedCount} of ` +
+          `${inspected.state.journalCount} migrations applied). Production migrations must ` +
+          "start from a clean empty target or be an already-configured no-op. Refusing to " +
+          "write to a partially migrated database.",
+      );
+      ctx.outcome = "manual-review";
+      return finalize(ctx);
+    }
+
+    if (inspected.state.status !== "empty" && inspected.state.status !== "configured") {
+      io.line("");
+      io.line(
+        `FAIL Database state is "${inspected.state.status}". Production migration refuses ` +
+          "to write to an unmanaged, partial, or ambiguous schema.",
+      );
+      ctx.outcome = "manual-review";
+      return finalize(ctx);
+    }
+
     if (inspected.state.appliedCount > inspected.state.journalCount) {
       io.line(
         `FAIL Database records ${inspected.state.appliedCount} applied migrations, ` +
@@ -1168,7 +1301,7 @@ export async function runProdActions({
       return finalize(ctx);
     }
 
-    // Consistency check via drizzle-kit check
+    // Consistency check via drizzle-kit check (stop on any non-zero exit)
     const check = await runCommand({
       command: "npm",
       args: ["run", "db:check"],
@@ -1182,23 +1315,14 @@ export async function runProdActions({
       record(ctx, "migration-check", true);
     } else {
       const stderr = String(check.stderr ?? "");
-      if (
-        !inspected.ledgerExists &&
-        inspected.state.status === "empty" &&
-        /drizzle\.\w+__drizzle_migrations|relation .* does not exist/i.test(stderr)
-      ) {
-        note(ctx, "drizzle-kit check: no migrations table yet (empty target)");
-        record(ctx, "migration-check", true, "no migrations table yet");
-      } else {
-        io.line("");
-        io.line("  FAIL drizzle-kit check reported a problem (schema/migration drift).");
-        for (const line of stderr.split("\n").filter(Boolean).slice(-3)) {
-          io.line(`    ${line}`);
-        }
-        record(ctx, "migration-check", false);
-        ctx.outcome = "manual-review";
-        return finalize(ctx);
+      io.line("");
+      io.line(`  FAIL drizzle-kit check reported a problem (exit code ${check.code}).`);
+      for (const line of stderr.split("\n").filter(Boolean).slice(-3)) {
+        io.line(`    ${line}`);
       }
+      record(ctx, "migration-check", false, `exit code ${check.code}`);
+      ctx.outcome = "manual-review";
+      return finalize(ctx);
     }
 
     // Honest no-op when already configured
@@ -1333,15 +1457,24 @@ export async function runCli() {
   const io = createRealIo();
   const env = process.env;
 
+  if (env.RABET_ACTIONS_HELP === "1") {
+    process.stdout.write(`${HELP}\n`);
+    process.exit(0);
+  }
+
+  // Refuse execution outside intended GitHub Actions context before any DB connection
+  const github = validateGithubContext(env, { requireGithub: true });
+  if (!github.ok) {
+    for (const problem of github.problems) {
+      process.stderr.write(`FAIL ${problem}\n`);
+    }
+    process.exit(1);
+  }
+
   const parsedMode = parseMode(env[MODE_ENV]);
   if (!parsedMode.ok) {
     process.stderr.write(`${parsedMode.error}\n\n${HELP}\n`);
     process.exit(2);
-  }
-
-  if (env.RABET_ACTIONS_HELP === "1") {
-    process.stdout.write(`${HELP}\n`);
-    process.exit(0);
   }
 
   const result = await runProdActions({
@@ -1354,6 +1487,7 @@ export async function runCli() {
     env,
     root: process.cwd(),
     allowTestTarget: false, // Strict: CLI path never allows loopback or test bypass
+    requireGithubContext: true,
   });
 
   process.exit(result.ok ? 0 : 1);

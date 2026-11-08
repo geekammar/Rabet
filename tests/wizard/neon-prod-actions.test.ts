@@ -25,11 +25,14 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
 
 import * as actions from "../../scripts/neon-prod-actions.mjs";
 import * as wizard from "../../scripts/setup-neon-dev.mjs";
 
 const root = process.cwd();
+const cliScript = path.resolve(root, "scripts", "neon-prod-actions.mjs");
 const committed = wizard.computeMigrationHashes(root);
 
 expect(committed.length).toBe(wizard.EXPECTED_MIGRATION_TAGS.length);
@@ -479,6 +482,147 @@ describe("production runner target gates", () => {
     expect(result.outcome).toBe("refused");
     expect(output()).toContain("does not name the approved Production database");
   });
+
+  it("rejects database name case mismatch against expected database in URL", async () => {
+    const { io, output } = testIo();
+    const caseMismatchedUrl = `postgresql://rabet_prod_owner:s3cret@${FIXTURE_HOST}/RABET_PRODUCTION?sslmode=require`;
+    const env = {
+      [actions.PROD_URL_ENV]: caseMismatchedUrl,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: "rabet_production",
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => {
+        throw new Error("connect should not be called");
+      },
+      runCommand: async () => {
+        throw new Error("command should not be run");
+      },
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: "rabet_production",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(output()).toContain("does not name the approved Production database");
+    expect(output()).toContain('Expected "rabet_production", but the URL names "RABET_PRODUCTION"');
+  });
+
+  it("rejects duplicate sslmode parameters in connection URL", async () => {
+    const { io, output } = testIo();
+    const duplicateTlsUrl = `postgresql://rabet_prod_owner:s3cret@${FIXTURE_HOST}/${FIXTURE_DB}?sslmode=require&sslmode=require`;
+    const env = {
+      [actions.PROD_URL_ENV]: duplicateTlsUrl,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => {
+        throw new Error("connect should not be called");
+      },
+      runCommand: async () => {
+        throw new Error("command should not be run");
+      },
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(output()).toContain("duplicate sslmode parameters");
+  });
+
+  it("rejects conflicting sslmode parameters in connection URL", async () => {
+    const { io, output } = testIo();
+    const conflictingTlsUrl = `postgresql://rabet_prod_owner:s3cret@${FIXTURE_HOST}/${FIXTURE_DB}?sslmode=require&sslmode=disable`;
+    const env = {
+      [actions.PROD_URL_ENV]: conflictingTlsUrl,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => {
+        throw new Error("connect should not be called");
+      },
+      runCommand: async () => {
+        throw new Error("command should not be run");
+      },
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(output()).toContain("duplicate sslmode parameters");
+  });
+
+  it("rejects invalid sslmode parameter values (e.g. sslmode=prefer or sslmode=disable)", async () => {
+    const { io, output } = testIo();
+    const preferUrl = `postgresql://rabet_prod_owner:s3cret@${FIXTURE_HOST}/${FIXTURE_DB}?sslmode=prefer`;
+    const env = {
+      [actions.PROD_URL_ENV]: preferUrl,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => {
+        throw new Error("connect should not be called");
+      },
+      runCommand: async () => {
+        throw new Error("command should not be run");
+      },
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(output()).toContain('invalid sslmode "prefer"');
+  });
+
+  it("rejects conflicting TLS settings (e.g. ssl=false or ssl=0)", async () => {
+    const { io, output } = testIo();
+    const conflictingSslUrl = `postgresql://rabet_prod_owner:s3cret@${FIXTURE_HOST}/${FIXTURE_DB}?sslmode=require&ssl=false`;
+    const env = {
+      [actions.PROD_URL_ENV]: conflictingSslUrl,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => {
+        throw new Error("connect should not be called");
+      },
+      runCommand: async () => {
+        throw new Error("command should not be run");
+      },
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(output()).toContain("conflicting TLS setting ssl=false");
+  });
 });
 
 describe("production runner GitHub context and mode validation", () => {
@@ -570,6 +714,96 @@ describe("production runner GitHub context and mode validation", () => {
     expect(result.outcome).toBe("refused");
     expect(output()).toContain("Migrate mode requires the exact confirmation phrase");
     expect(output()).toContain(actions.MIGRATE_CONFIRMATION);
+  });
+
+  it("real CLI refuses execution outside intended GitHub Actions context before any DB connection", () => {
+    const res = spawnSync(process.execPath, [cliScript], {
+      env: {
+        PATH: process.env.PATH,
+        [actions.PROD_URL_ENV]: GOOD_URL,
+        [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+        [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+      },
+      encoding: "utf8",
+    });
+
+    expect(res.status).toBe(1);
+    const combined = [res.stdout, res.stderr].join("\n");
+    expect(combined).toContain("This runner must execute within GitHub Actions");
+  });
+
+  it("real CLI refuses execution when event is not workflow_dispatch", () => {
+    const res = spawnSync(process.execPath, [cliScript], {
+      env: {
+        PATH: process.env.PATH,
+        GITHUB_ACTIONS: "true",
+        GITHUB_EVENT_NAME: "push",
+        GITHUB_REF: "refs/heads/main",
+        [actions.PROD_URL_ENV]: GOOD_URL,
+        [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+        [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+      },
+      encoding: "utf8",
+    });
+
+    expect(res.status).toBe(1);
+    const combined = [res.stdout, res.stderr].join("\n");
+    expect(combined).toContain("event other than workflow_dispatch");
+  });
+
+  it("real CLI refuses execution when ref is not refs/heads/main", () => {
+    const res = spawnSync(process.execPath, [cliScript], {
+      env: {
+        PATH: process.env.PATH,
+        GITHUB_ACTIONS: "true",
+        GITHUB_EVENT_NAME: "workflow_dispatch",
+        GITHUB_REF: "refs/heads/feature-branch",
+        [actions.PROD_URL_ENV]: GOOD_URL,
+        [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+        [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+      },
+      encoding: "utf8",
+    });
+
+    expect(res.status).toBe(1);
+    const combined = [res.stdout, res.stderr].join("\n");
+    expect(combined).toContain("ref other than refs/heads/main");
+  });
+
+  it("matches confirmation phrase literally without trimming", async () => {
+    expect(actions.verifyConfirmation("MIGRATE_RABET_PROD")).toBe(true);
+    expect(actions.verifyConfirmation("  MIGRATE_RABET_PROD  ")).toBe(false);
+    expect(actions.verifyConfirmation("MIGRATE_RABET_PROD ")).toBe(false);
+    expect(actions.verifyConfirmation(" MIGRATE_RABET_PROD")).toBe(false);
+    expect(actions.verifyConfirmation("MIGRATE_RABET_PROD\n")).toBe(false);
+    expect(actions.verifyConfirmation("migrate_rabet_prod")).toBe(false);
+
+    const { io, output } = testIo();
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => {
+        throw new Error("connect should not be called with untrimmed confirmation");
+      },
+      runCommand: async () => {
+        throw new Error("command should not be run");
+      },
+      mode: "migrate",
+      confirm: "  MIGRATE_RABET_PROD  ",
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(output()).toContain("Migrate mode requires the exact confirmation phrase");
   });
 });
 
@@ -684,6 +918,35 @@ describe("production runner identity and query failure handling", () => {
     expect(result.outcome).toBe("manual-review");
     expect(output()).toContain("Drizzle migration ledger (drizzle.__drizzle_migrations) does not exist");
     expect(output()).toContain("unmanaged schema");
+  });
+
+  it("fails closed if live current_database() mismatches case of expected database", async () => {
+    const { io, output } = testIo();
+    const scenario = emptyScenario();
+    scenario.dbName = "Rabet_Production"; // uppercase letters
+
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL, // has lowercase rabet_production
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB, // lowercase rabet_production
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => ({ code: 0 }),
+      mode: "inspect",
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(output()).toContain(
+      'The connected database is "Rabet_Production", not the approved Production database "rabet_production"',
+    );
   });
 });
 
@@ -963,5 +1226,117 @@ describe("production runner flows and execution", () => {
     // The raw password "s3cret" in connection string must be redacted
     expect(rendered).not.toContain("s3cret@");
     expect(rendered).toContain("***");
+  });
+
+  it("fails and reports manual-review when inspect mode sees complete ledger but missing critical objects", async () => {
+    const { io, output } = testIo();
+    const scenario = configuredScenario();
+    // Drop indexes to simulate missing critical live schema objects on complete target
+    scenario.indexes = [];
+
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => ({ code: 0 }),
+      mode: "inspect",
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(output()).toContain("Inspection validation checks failed");
+    expect(output()).toContain("FAIL indexes — missing");
+  });
+
+  it("refuses migrate mode when database is in a partial migration state", async () => {
+    const { io, output } = testIo();
+    const scenario = emptyScenario();
+    scenario.ledgerExists = true;
+    scenario.appTables = [wizard.EXPECTED_TABLES[0]];
+    scenario.applied = [
+      {
+        id: "1",
+        hash: committed[0].hash,
+        created_at: String(committed[0].when),
+      },
+    ];
+
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    let commandCalled = false;
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandCalled = true;
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(commandCalled).toBe(false);
+    expect(output()).toContain("partial migration state");
+    expect(output()).toContain("Refusing to write to a partially migrated database");
+  });
+
+  it("stops immediately on any non-zero db:check exit, regardless of stderr", async () => {
+    const { io, output } = testIo();
+    const scenario = emptyScenario();
+    const executedCommands: string[] = [];
+
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async (opts) => {
+        executedCommands.push(`${opts.command} ${opts.args.join(" ")}`);
+        if (opts.args.includes("db:check")) {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "error: relation drizzle.__drizzle_migrations does not exist",
+          };
+        }
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(executedCommands).toContain("npm run db:check");
+    // db:migrate must NOT be called
+    expect(executedCommands).not.toContain("npm run db:migrate");
+    expect(output()).toContain("drizzle-kit check reported a problem (exit code 1)");
   });
 });

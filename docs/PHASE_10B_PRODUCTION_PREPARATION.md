@@ -49,6 +49,21 @@ Follow these steps in exact order when approved to prepare the Production enviro
 
 Configure the GitHub repository settings to authorize execution strictly from reviewed code on `main`.
 
+#### Distinction: Workflow Guards vs. GitHub Environment Protection Rules
+
+Security is enforced at two distinct boundaries:
+1. **GitHub Environment Protection (Platform-Level Gate):**
+   - Configured in GitHub repository settings under the `Production` Environment.
+   - Restricts which branches (`refs/heads/main` only) and reviewers can access environment secrets and variables.
+   - Provides administrative authorization control before any runner accesses the `Production` environment.
+2. **Workflow Guards (Pre-Flight & Execution Gates):**
+   - Implemented in `.github/workflows/neon-prod-migrate.yml` and `scripts/neon-prod-actions.mjs`.
+   - A dedicated `guard` job runs *before* the `Production`-environment job starts, with no environment, no checkout, and no secret access. It immediately rejects invalid event triggers (must be manual `workflow_dispatch`), non-main branches (`refs/heads/main` only), invalid modes, and missing/untrimmed confirmation phrases (`MIGRATE_RABET_PROD` literally).
+   - The `neon-prod` job has `needs: guard` and `if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'`, ensuring the Production-environment job is never entered for invalid requests.
+   - The CLI runner (`scripts/neon-prod-actions.mjs`) independently verifies the GitHub Actions context before opening any database connection and refuses execution outside GitHub Actions.
+
+#### Configuration Steps
+
 1. **Create GitHub Environment:**
    - In GitHub repository settings: **Settings → Environments → New environment**.
    - Name the environment exactly: **`Production`** (case-sensitive).
@@ -56,15 +71,11 @@ Configure the GitHub repository settings to authorize execution strictly from re
 2. **Configure Environment Protection Rules:**
    - **Deployment branches:** Select **Selected branches** → add **`refs/heads/main`** only.
    - **Required reviewers:** If available on your GitHub plan (Team/Enterprise), specify the repository owner as a required reviewer.
-   - *Honest Note on GitHub Free/Pro Plans:* If branch protection or required reviewers are restricted for private repositories on Free plans, the runner script itself **strictly re-enforces** these boundaries in code:
-     - Rejects any run where `GITHUB_REF !== "refs/heads/main"`.
-     - Rejects any run where `GITHUB_EVENT_NAME !== "workflow_dispatch"`.
-     - Rejects `migrate` mode unless the exact confirmation phrase `MIGRATE_RABET_PROD` is provided.
 
 3. **Configure Non-Secret Target Settings (Environment Variables):**
    - Under *Environment variables* in `Production`:
      - **`NEON_PROD_EXPECTED_HOST`**: Set to the exact direct unpooled hostname recorded in Section A (e.g., `ep-cool-name-12345.us-east-2.aws.neon.tech`).
-     - **`NEON_PROD_EXPECTED_DB_NAME`**: Set to the exact SQL database name (e.g., `neondb`).
+     - **`NEON_PROD_EXPECTED_DB_NAME`**: Set to the exact SQL database name (case-sensitive, e.g., `neondb`).
 
 4. **Configure Secret Variable:**
    - Under *Environment secrets* in `Production`:
@@ -73,67 +84,55 @@ Configure the GitHub repository settings to authorize execution strictly from re
 
 ---
 
-### C. Migration Execution & Live Verification
+### C. Migration Execution & Live Verification (Operator Order)
 
-Once GitHub configuration is complete and target settings are established:
+Follow this exact six-step sequence to inspect, backup, migrate, verify, and activate the Production database:
 
 1. **Step 1 — Read-Only Inspection (`inspect` mode):**
    - Navigate to **Actions → Neon PROD database → Run workflow**.
+   - Select `Use workflow from Branch: main`.
    - Mode: **`inspect`** (default).
    - Leave `confirm` empty.
    - Click **Run workflow**.
    - **Verify output:**
-     - Confirms connection to target.
-     - Confirms live `current_database()` matches `NEON_PROD_EXPECTED_DB_NAME`.
-     - Confirms `0 application tables` and `2 pending migrations` (`0000_initial_schema`, `0001_tree_and_snapshot_integrity`).
+     - The `guard` job passes and gates execution to `refs/heads/main`.
+     - Confirms connection to target and case-sensitive database identity match.
+     - For a clean empty database: confirms `0 application tables` and `2 pending migrations` (`0000_initial_schema`, `0001_tree_and_snapshot_integrity`).
+     - If inspect sees a complete migration ledger, it automatically validates all critical live schema objects before reporting success.
      - Confirms no DDL or writes occurred.
 
-2. **Step 2 — Establish Pre-Migration Recovery Point:**
-   - In Neon Console, verify project state or create a manual branch snapshot (`pre-migration-0000`).
+2. **Step 2 — Record a Verified Restore Point:**
+   - In Neon Console, verify project state and PITR retention window.
+   - Create a manual branch snapshot (e.g., `pre-migration-0000`) or record the exact branch creation timestamp as a verified restore point.
 
-3. **Step 3 — Execute Migration (`migrate` mode):**
+3. **Step 3 — Migrate Only with Authorization (`migrate` mode):**
    - In **Actions → Neon PROD database → Run workflow**:
+   - Select `Use workflow from Branch: main`.
    - Mode: select **`migrate`**.
-   - Confirmation: type **`MIGRATE_RABET_PROD`** exactly.
+   - Confirmation: type **`MIGRATE_RABET_PROD`** exactly (literal match, no leading or trailing whitespace).
    - Click **Run workflow**.
-   - **Verification in log:**
-     - Pre-checks pass.
-     - `npm run db:migrate` applies `0000_initial_schema` and `0001_tree_and_snapshot_integrity`.
-     - Runner re-inspects live database post-migration.
+   - The runner runs pre-checks, rejects partial/unmanaged/drift states, verifies that `npm run db:check` exits 0, and runs `npm run db:migrate`.
+
+4. **Step 4 — Verify the Live Schema:**
+   - Post-migration, the runner automatically re-inspects the live database:
      - Proves live byte-for-byte SHA-256 match against committed SQL files.
-     - Live validation confirms all 14 tables, constraints, indexes, and recursive foreign keys.
-     - *(Note: `drizzle-kit check` only checks repository schema consistency; the live validation performed by `neon-prod-actions.mjs` is the authoritative proof of database state).*
+     - Confirms live existence of all 14 application tables.
+     - Verifies critical indexes, unique constraints, and recursive foreign keys.
+     - Verifies a read-only multi-statement batch probe.
 
----
-
-### D. Vercel Application Configuration
-
-After the Production database is migrated and verified:
-
-1. **Configure Production `DATABASE_URL` in Vercel:**
+5. **Step 5 — Configure Vercel Production:**
    - In Vercel Project Settings → **Environment Variables**:
-   - Add **`DATABASE_URL`**.
-   - **Target Environment:** Check **Production** ONLY.
-   - *Crucial Isolation Rule:* Uncheck **Preview** and **Development**. Preview and local VPS must never inherit or touch the Production database.
-   - **Connection Pooler:** For the Vercel application runtime, use the pooled connection string (Neon Dashboard → Connection Details → Pooled connection tab, e.g. host containing `-pooler`) with `?sslmode=require`.
+     - Add **`DATABASE_URL`**.
+     - **Target Environment:** Check **Production** ONLY (uncheck Preview and Development).
+     - **Connection Pooler:** Use Neon's pooled connection string (host containing `-pooler`) with `?sslmode=require`.
+   - **Preserve Existing Verified Admin Credentials:**
+     - Confirm that `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, and `AUTH_SECRET` remain untouched.
+   - **Pending Telegram Variables (Phase 10C):**
+     - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` remain unpopulated until Phase 10C live cutover.
 
-2. **Preserve Existing Verified Credentials:**
-   - Verify that the following existing Production environment variables remain untouched:
-     - `ADMIN_EMAIL`
-     - `ADMIN_PASSWORD_HASH`
-     - `AUTH_SECRET`
-   - *Do not overwrite or regenerate these values.*
-
-3. **Pending Telegram Variables (Phase 10C):**
-   - The following variables remain pending for Phase 10C cutover:
-     - `TELEGRAM_BOT_TOKEN`
-     - `TELEGRAM_WEBHOOK_SECRET`
-   - Do not populate dummy or test tokens in Production.
-
-4. **Activation Flow:**
-   - The new database configuration activates upon the next standard Git deployment on `main`. Do not perform manual out-of-band overrides.
-
----
+6. **Step 6 — Verify Production Deployment:**
+   - Verify that a standard Git deployment of the approved commit on `main` picked up the database configuration without errors.
+   - Verify that the application boots cleanly, connects via the pooled connection, and protected routes enforce administrator authentication.
 
 ### E. Vercel WAF & Rate Limiting Preparation
 

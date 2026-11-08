@@ -10,11 +10,14 @@ import { defineConfig } from "drizzle-kit";
  *   journal and snapshot metadata to `drizzle/`. It never touches a database.
  * - **Migrate** (`npm run db:migrate`) requires `DATABASE_URL` and applies the
  *   committed chain through the journal. Run it only against a development or
- *   throwaway database; a production migration is run by hand from the
- *   development VPS against the **unpooled** connection after a manual
- *   snapshot. It is never run from a Vercel build, at application startup or
- *   by a deploy hook, and `drizzle-kit push` is not wired into any script or
- *   CI step (DATA_MODEL.md §17.3).
+ *   throwaway database; production migrations are run via the dedicated manual
+ *   GitHub Actions workflow (`.github/workflows/neon-prod-migrate.yml` and
+ *   `scripts/neon-prod-actions.mjs`) on GitHub-hosted runners against the
+ *   **unpooled** connection after an operator records a verified restore point.
+ *   The development VPS cannot reach Neon on TCP 5432 and never runs production
+ *   migrations directly. It is never run from a Vercel build, at application
+ *   startup or by a deploy hook, and `drizzle-kit push` is not wired into any
+ *   script or CI step (DATA_MODEL.md §17.3).
  *
  * Local values are read from `.env.local` — the same file Next.js loads and
  * the one `.env.example` tells you to copy — so `npm run db:migrate` works

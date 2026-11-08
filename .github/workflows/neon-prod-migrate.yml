@@ -71,8 +71,64 @@ permissions:
   contents: read
 
 jobs:
+  guard:
+    name: Validate dispatch context, mode and confirmation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate execution context, mode and confirmation
+        env:
+          RABET_REF: ${{ github.ref }}
+          RABET_EVENT: ${{ github.event_name }}
+          RABET_MODE: ${{ inputs.mode }}
+          RABET_CONFIRM: ${{ inputs.confirm }}
+        run: |
+          node - <<'NODE'
+            const ref = process.env.RABET_REF ?? "";
+            const eventName = process.env.RABET_EVENT ?? "";
+            const mode = process.env.RABET_MODE ?? "";
+            const confirm = process.env.RABET_CONFIRM ?? "";
+            const expectedConfirm = "MIGRATE_RABET_PROD";
+
+            if (eventName !== "workflow_dispatch") {
+              console.error(
+                `Refusing to run: event "${eventName}" is not workflow_dispatch. ` +
+                  "Production migrations are manual only.",
+              );
+              process.exit(1);
+            }
+
+            if (ref !== "refs/heads/main") {
+              console.error(
+                `Refusing to run: ref "${ref}" is not refs/heads/main. ` +
+                  "Production migrations must run from reviewed code on main.",
+              );
+              process.exit(1);
+            }
+
+            if (mode !== "inspect" && mode !== "migrate") {
+              console.error(
+                `Refusing to run: unknown mode "${mode}". ` +
+                  'Use "inspect" (read-only) or "migrate".',
+              );
+              process.exit(1);
+            }
+
+            if (mode === "migrate" && confirm !== expectedConfirm) {
+              console.error(
+                "Refusing to run: migrate mode requires typing the confirmation phrase " +
+                  `"${expectedConfirm}" exactly without leading or trailing spaces.`,
+              );
+              process.exit(1);
+            }
+
+            console.log(`Execution context valid. Mode: ${mode}. Ref: ${ref}.`);
+          NODE
+
   neon-prod:
     name: ${{ inputs.mode == 'migrate' && 'Migrate' || 'Inspect' }} the Rabet PROD database
+    needs: guard
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: Production
     timeout-minutes: 10
