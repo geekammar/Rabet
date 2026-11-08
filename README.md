@@ -162,7 +162,7 @@ Then `npm run dev` and sign in at `/login`.
 | `npm run test:auth` | Run only the auth integration suite (`tests/auth.test.ts`) |
 | `npm run test:db` | Start a disposable PostgreSQL cluster, run `tests/db` against it, then delete the cluster |
 | `npm run db:generate` | Generate SQL migrations from `src/db/schema` into `drizzle/` — offline, touches no database |
-| `npm run db:migrate` | Apply the committed migration chain to the database in `DATABASE_URL` |
+| `npm run db:migrate` | Apply the committed migration chain to the database in `DATABASE_URL` (development/throwaway only) |
 | `npm run db:check` | Verify the schema and the committed migrations are consistent (needs a database) |
 | `npm run db:setup:dev` | The one-command Neon **development** setup wizard — asks before any write, safe to re-run |
 
@@ -203,6 +203,7 @@ financial entity exists anywhere** (ADR-013).
 | `scripts/db-test-postgres.mjs` | Disposable PostgreSQL cluster for local DB tests |
 | `scripts/setup-neon-dev.mjs` | The Neon development setup wizard (`npm run db:setup:dev`) |
 | `scripts/neon-dev-actions.mjs` | The GitHub Actions development-migration runner (`npm run db:dev:actions`) |
+| `scripts/neon-prod-actions.mjs` | The GitHub Actions Production database runner (`.github/workflows/neon-prod-migrate.yml`) |
 
 ### The data access layer (Phase 03C-A)
 
@@ -309,6 +310,24 @@ for `migrate`, pins the endpoint host and database name to the committed
 development identity, and never prints the connection string. The exact owner
 workflow — secret, inspect first, then migrate — is §15.7 of
 [docs/NEON_DEV_SETUP.md](./docs/NEON_DEV_SETUP.md#157-the-exact-owner-workflow-the-first-time).
+
+### Setting up the Neon Production database (Phase 10B)
+
+Production migrations are **never** run from the development VPS (which cannot reach
+Neon on TCP 5432) or a local machine. Instead, they are executed on GitHub-hosted
+runners via a dedicated, manual workflow (`.github/workflows/neon-prod-migrate.yml`,
+exposed as the "Neon PROD database" action) and runner script (`scripts/neon-prod-actions.mjs`).
+
+The runner enforces strict safety properties before opening a connection or writing:
+- Gated to manual `workflow_dispatch` on `refs/heads/main` only (pre-flight guard job rejects invalid inputs before checkout or secret exposure).
+- Dedicated `Production` GitHub Environment.
+- Explicit non-secret target settings (`NEON_PROD_EXPECTED_HOST` and `NEON_PROD_EXPECTED_DB_NAME`) must match the unpooled endpoint and database name.
+- Direct unpooled connection secret (`NEON_PROD_DATABASE_URL`) with required `?sslmode=require`. Rejects pooled (`-pooler`) and development endpoints.
+- Default `inspect` mode is strictly read-only; when a complete migration ledger is detected, it validates critical live schema objects before reporting success.
+- `migrate` mode requires the literal confirmation phrase `MIGRATE_RABET_PROD` and refuses partial, unmanaged, or drifted states.
+- Exact operator order: inspect read-only, record a verified restore point, migrate only with authorization, verify live schema objects, configure Vercel Production, and verify deployment.
+
+The full operator guide is in [docs/PHASE_10B_PRODUCTION_PREPARATION.md](./docs/PHASE_10B_PRODUCTION_PREPARATION.md).
 
 ### Running the DB tests
 
