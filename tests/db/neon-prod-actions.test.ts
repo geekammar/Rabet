@@ -302,7 +302,7 @@ describe.skipIf(!shouldRun)("production runner inspect mode on real PostgreSQL",
     await applyChain(db);
 
     // Drop a critical index on the live complete database
-    await db.sql`drop index if exists "idx_product_category_sort"`;
+    await db.sql`drop index if exists "category_sibling_sort_order_idx"`;
 
     const { result, calls } = await runReal({ url: db.url });
 
