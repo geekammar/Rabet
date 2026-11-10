@@ -60,6 +60,7 @@ interface ProductActionEditorProps {
   categories?: CatalogCategoryRecord[];
   products?: CatalogProductRecord[];
   paymentMethods?: PaymentMethodRecord[];
+  paymentMethodsAvailable?: boolean;
   settings?: {
     displayName: string;
     currency: string;
@@ -78,6 +79,7 @@ export function ProductActionEditor({
   categories = [],
   products = [],
   paymentMethods: initialPaymentMethods = [],
+  paymentMethodsAvailable = true,
   settings,
   onClose,
 }: ProductActionEditorProps) {
@@ -85,6 +87,26 @@ export function ProductActionEditor({
   const [paymentMethodsList, setPaymentMethodsList] = useState<PaymentMethodRecord[]>(
     initialPaymentMethods ?? [],
   );
+  const [isRefreshingMethods, setIsRefreshingMethods] = useState(false);
+  const methodsGenerationRef = useRef(0);
+
+  const refreshPaymentMethods = async () => {
+    const gen = ++methodsGenerationRef.current;
+    setIsRefreshingMethods(true);
+    try {
+      const res = await loadPaymentMethodsAction();
+      if (gen === methodsGenerationRef.current && res.success && res.methods) {
+        setPaymentMethodsList(res.methods);
+      }
+    } catch {
+      // Safely ignore errors without disrupting unsaved edits
+    } finally {
+      if (gen === methodsGenerationRef.current) {
+        setIsRefreshingMethods(false);
+      }
+    }
+  };
+
   const [isLoading, setIsLoading] = useState(true);
   const [isPending, startTransition] = useTransition();
   const [actionFeedback, setActionFeedback] = useState<ProductActionResult | null>(null);
@@ -140,6 +162,16 @@ export function ProductActionEditor({
   const [editDraftTranslations, setEditDraftTranslations] = useState<
     Record<string, { label: string; menuText: string; templateBody: string }>
   >({});
+
+  useEffect(() => {
+    const handleFocus = () => {
+      if (editingActionId && editActionType === "PAYMENT_METHOD") {
+        void refreshPaymentMethods();
+      }
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [editingActionId, editActionType]);
 
   // Reset local state if product changes
   if (product.id !== prevProductId) {
@@ -410,6 +442,9 @@ export function ProductActionEditor({
     setEditingActionId(node.id);
     setActionFeedback(null);
     syncEditDraft(node);
+    if (node.actionType === "PAYMENT_METHOD") {
+      void refreshPaymentMethods();
+    }
   };
 
   const handleSaveEdit = () => {
@@ -1095,10 +1130,14 @@ export function ProductActionEditor({
                       (selectedNode.actionType === "OPEN_SUBMENU" &&
                         selectedNode.children.length > 0)
                     }
-                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                      setEditActionType(e.target.value as SupportedActionType)
-                    }
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
+                      const nextType = e.target.value as SupportedActionType;
+                      setEditActionType(nextType);
+                      if (nextType === "PAYMENT_METHOD") {
+                        void refreshPaymentMethods();
+                      }
+                    }}
+                    className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                   >
                     <option value="OPEN_SUBMENU">OPEN_SUBMENU (Submenu with child buttons)</option>
                     <option value="SHOW_DETAILS">SHOW_DETAILS (Display product description & details)</option>
@@ -1107,7 +1146,9 @@ export function ProductActionEditor({
                     <option value="OPEN_URL">OPEN_URL (Open external HTTPS web link)</option>
                     <option value="OPEN_SUPPORT">OPEN_SUPPORT (Open general support conversation)</option>
                     <option value="NAVIGATE_CATALOG">NAVIGATE_CATALOG (Jump to category or product)</option>
-                    <option value="PAYMENT_METHOD">PAYMENT_METHOD (Central payment method instructions)</option>
+                    <option value="PAYMENT_METHOD" disabled={!paymentMethodsAvailable}>
+                      PAYMENT_METHOD (Central payment method instructions){!paymentMethodsAvailable ? " [Requires DB Upgrade]" : ""}
+                    </option>
                   </select>
                   {selectedNode.actionType === "OPEN_SUBMENU" &&
                     selectedNode.children.length > 0 && (
@@ -1157,7 +1198,7 @@ export function ProductActionEditor({
                       disabled={isBusy}
                       onChange={(e) => setEditUrl(e.target.value)}
                       placeholder="https://example.com/info"
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                     />
                     <p className="text-[11px] text-muted-foreground">
                       Opens an external web page. Must use HTTPS. Cannot be used for payments or checkout.
@@ -1177,7 +1218,7 @@ export function ProductActionEditor({
                       value={editSupportCategory}
                       disabled={isBusy}
                       onChange={(e) => setEditSupportCategory(e.target.value)}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                     >
                       <option value="">General Support (No category)</option>
                       {(settings?.supportCategory ?? []).map((cat) => (
@@ -1218,7 +1259,7 @@ export function ProductActionEditor({
                           setEditNavTargetKind(e.target.value as "category" | "product");
                           setEditNavTargetId("");
                         }}
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                        className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       >
                         <option value="category">Category</option>
                         <option value="product">Product</option>
@@ -1235,7 +1276,7 @@ export function ProductActionEditor({
                         value={editNavTargetId}
                         disabled={isBusy}
                         onChange={(e) => setEditNavTargetId(e.target.value)}
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                        className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       >
                         <option value="">-- Choose destination --</option>
                         {editNavTargetKind === "category" &&
@@ -1372,21 +1413,36 @@ export function ProductActionEditor({
                 {editActionType === "PAYMENT_METHOD" && (
                   <div className="space-y-3 pt-2 border-t">
                     <div className="space-y-1.5">
-                      <label htmlFor="edit-action-payment-method" className="text-xs font-semibold">
-                        Payment Method <span className="text-destructive">*</span>
-                      </label>
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="edit-action-payment-method" className="text-xs font-semibold">
+                          Payment Method <span className="text-destructive">*</span>
+                        </label>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void refreshPaymentMethods()}
+                          disabled={isBusy || isRefreshingMethods}
+                          className="h-7 px-2 text-[11px] gap-1 text-muted-foreground hover:text-foreground touch-manipulation"
+                          title="Refresh payment methods list"
+                          data-testid="refresh-payment-methods-btn"
+                        >
+                          <RefreshCw className={`size-3 ${isRefreshingMethods ? "animate-spin" : ""}`} />
+                          Refresh
+                        </Button>
+                      </div>
                       <select
                         id="edit-action-payment-method"
                         data-testid="edit-action-payment-method-select"
                         value={editPaymentMethodId}
                         disabled={isBusy}
                         onChange={(e) => setEditPaymentMethodId(e.target.value)}
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                        className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       >
                         <option value="">-- Choose payment method --</option>
                         {paymentMethodsList.map((m) => (
                           <option key={m.id} value={m.id}>
-                            {m.adminLabel} {m.isActive ? "(Active)" : "(Disabled)"}
+                            {m.adminLabel} {m.isActive ? "(Enabled - Preview)" : "(Disabled)"}
                           </option>
                         ))}
                         {editPaymentMethodId &&
@@ -1414,11 +1470,15 @@ export function ProductActionEditor({
                         );
                       }
 
-                      const trans =
-                        selectedMethod.translations[activeLangTab] ??
-                        selectedMethod.translations[defaultLangCode];
-                      const title = trans?.title ?? "";
-                      const instructions = trans?.instructions ?? "";
+                      const direct = selectedMethod.translations[activeLangTab];
+                      const fallback = selectedMethod.translations[defaultLangCode];
+                      const isFallback = !direct?.title && Boolean(fallback?.title);
+                      const displayedTrans = (direct?.title ? direct : fallback) ?? null;
+                      const title = displayedTrans?.title ?? "";
+                      const instructions = displayedTrans?.instructions ?? "";
+                      const displayedDir: "ltr" | "rtl" = isFallback
+                        ? ((languages.find((l) => l.code === defaultLangCode)?.textDirection === "rtl" || defaultLangCode === "ar") ? "rtl" : "ltr")
+                        : activeLangDir;
 
                       return (
                         <div
@@ -1430,19 +1490,26 @@ export function ProductActionEditor({
                               <Info className="size-3.5" />
                               Customer Preview ({activeLangTab.toUpperCase()}):
                             </span>
-                            {!selectedMethod.isActive && (
-                              <Badge
-                                variant="outline"
-                                className="border-amber-500/30 bg-amber-500/10 text-amber-700 text-[10px]"
-                                data-testid="edit-method-disabled-warning"
-                              >
-                                Method is Disabled
-                              </Badge>
-                            )}
+                            <div className="flex items-center gap-1">
+                              {isFallback && (
+                                <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                                  Fallback ({defaultLangCode.toUpperCase()})
+                                </Badge>
+                              )}
+                              {!selectedMethod.isActive && (
+                                <Badge
+                                  variant="outline"
+                                  className="border-amber-500/30 bg-amber-500/10 text-amber-700 text-[10px]"
+                                  data-testid="edit-method-disabled-warning"
+                                >
+                                  Method Disabled
+                                </Badge>
+                              )}
+                            </div>
                           </div>
                           <div
                             className="rounded-lg bg-background border p-3 space-y-1.5"
-                            dir={activeLangDir}
+                            dir={displayedDir}
                           >
                             <div className="font-semibold text-sm">
                               {title || <span className="text-muted-foreground italic">No title</span>}
@@ -1451,11 +1518,10 @@ export function ProductActionEditor({
                               {instructions || <span className="italic">No instructions</span>}
                             </div>
                           </div>
-                          {!selectedMethod.isActive && (
-                            <p className="text-[11px] text-amber-600">
-                              This payment method is currently disabled. Button reference will be preserved, but customers cannot complete this action.
-                            </p>
-                          )}
+                          <p className="text-[11px] text-muted-foreground">
+                            Telegram customer channel is currently unavailable for payment method buttons. This button is for dashboard preparation and preview only.
+                            {!selectedMethod.isActive && " Method is disabled. Button reference is preserved."}
+                          </p>
                         </div>
                       );
                     })()}
@@ -1549,7 +1615,7 @@ export function ProductActionEditor({
                           },
                         }));
                       }}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       placeholder={
                         activeLangTab === "ar"
                           ? "مثال: عرض الخيارات"
@@ -1592,7 +1658,7 @@ export function ProductActionEditor({
                           }));
                         }}
                         rows={3}
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                        className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                         placeholder={
                           activeLangTab === "ar"
                             ? "رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
@@ -1807,8 +1873,8 @@ export function ProductActionEditor({
 
       {/* Creation Modal / Dialog */}
       {isCreateOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-lg rounded-2xl bg-background border shadow-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 max-w-full overflow-x-hidden">
+          <div className="w-full max-w-[calc(100vw-2rem)] sm:max-w-lg rounded-2xl bg-background border shadow-xl p-4 sm:p-6 space-y-4 max-h-[90vh] overflow-y-auto overflow-x-hidden min-w-0">
             <div className="flex items-center justify-between border-b pb-3">
               <div>
                 <h3 className="text-lg font-semibold">
@@ -1845,10 +1911,14 @@ export function ProductActionEditor({
                   data-testid="create-action-type-select"
                   value={createType}
                   disabled={isBusy}
-                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                    setCreateType(e.target.value as SupportedActionType)
-                  }
-                  className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
+                    const nextType = e.target.value as SupportedActionType;
+                    setCreateType(nextType);
+                    if (nextType === "PAYMENT_METHOD") {
+                      void refreshPaymentMethods();
+                    }
+                  }}
+                  className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                 >
                   <option value="OPEN_SUBMENU">OPEN_SUBMENU (Submenu with child buttons)</option>
                   <option value="SHOW_DETAILS">SHOW_DETAILS (Display product description & details)</option>
@@ -1857,7 +1927,9 @@ export function ProductActionEditor({
                   <option value="OPEN_URL">OPEN_URL (Open external HTTPS web link)</option>
                   <option value="OPEN_SUPPORT">OPEN_SUPPORT (Open general support conversation)</option>
                   <option value="NAVIGATE_CATALOG">NAVIGATE_CATALOG (Jump to category or product)</option>
-                  <option value="PAYMENT_METHOD">PAYMENT_METHOD (Central payment method instructions)</option>
+                  <option value="PAYMENT_METHOD" disabled={!paymentMethodsAvailable}>
+                    PAYMENT_METHOD (Central payment method instructions){!paymentMethodsAvailable ? " [Requires DB Upgrade]" : ""}
+                  </option>
                 </select>
               </div>
 
@@ -1894,7 +1966,7 @@ export function ProductActionEditor({
                     disabled={isBusy}
                     onChange={(e) => setCreateUrl(e.target.value)}
                     placeholder="https://example.com/info"
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                   />
                   <p className="text-[11px] text-muted-foreground">
                     External link for information pages. Must use HTTPS. Cannot be used for payments or checkout.
@@ -1914,7 +1986,7 @@ export function ProductActionEditor({
                     value={createSupportCategory}
                     disabled={isBusy}
                     onChange={(e) => setCreateSupportCategory(e.target.value)}
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                   >
                     <option value="">General Support (No category)</option>
                     {(settings?.supportCategory ?? []).map((cat) => (
@@ -1942,7 +2014,7 @@ export function ProductActionEditor({
                         setCreateNavTargetKind(e.target.value as "category" | "product");
                         setCreateNavTargetId("");
                       }}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                     >
                       <option value="category">Category</option>
                       <option value="product">Product</option>
@@ -1959,7 +2031,7 @@ export function ProductActionEditor({
                       value={createNavTargetId}
                       disabled={isBusy}
                       onChange={(e) => setCreateNavTargetId(e.target.value)}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                     >
                       <option value="">-- Choose destination --</option>
                       {createNavTargetKind === "category"
@@ -2008,21 +2080,36 @@ export function ProductActionEditor({
               {createType === "PAYMENT_METHOD" && (
                 <div className="space-y-3 pt-2 border-t">
                   <div className="space-y-1.5">
-                    <label htmlFor="create-action-payment-method" className="text-xs font-semibold">
-                      Payment Method <span className="text-destructive">*</span>
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label htmlFor="create-action-payment-method" className="text-xs font-semibold">
+                        Payment Method <span className="text-destructive">*</span>
+                      </label>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void refreshPaymentMethods()}
+                        disabled={isBusy || isRefreshingMethods}
+                        className="h-7 px-2 text-[11px] gap-1 text-muted-foreground hover:text-foreground touch-manipulation"
+                        title="Refresh payment methods list"
+                        data-testid="refresh-payment-methods-btn-create"
+                      >
+                        <RefreshCw className={`size-3 ${isRefreshingMethods ? "animate-spin" : ""}`} />
+                        Refresh
+                      </Button>
+                    </div>
                     <select
                       id="create-action-payment-method"
                       data-testid="create-action-payment-method-select"
                       value={createPaymentMethodId}
                       disabled={isBusy}
                       onChange={(e) => setCreatePaymentMethodId(e.target.value)}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                     >
                       <option value="">-- Choose payment method --</option>
                       {paymentMethodsList.map((m) => (
                         <option key={m.id} value={m.id}>
-                          {m.adminLabel} {m.isActive ? "(Active)" : "(Disabled)"}
+                          {m.adminLabel} {m.isActive ? "(Enabled - Preview)" : "(Disabled)"}
                         </option>
                       ))}
                     </select>
@@ -2058,7 +2145,7 @@ export function ProductActionEditor({
                               variant="outline"
                               className="border-amber-500/30 bg-amber-500/10 text-amber-700 text-[10px]"
                             >
-                              Method is Disabled
+                              Method Disabled
                             </Badge>
                           )}
                         </div>
@@ -2071,6 +2158,9 @@ export function ProductActionEditor({
                             {instructions || "No instructions"}
                           </div>
                         </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          Telegram customer channel is currently unavailable for payment method buttons. This button is for dashboard preparation and preview only.
+                        </p>
                       </div>
                     );
                   })()}
@@ -2098,7 +2188,7 @@ export function ProductActionEditor({
                   value={createLabel}
                   disabled={isBusy}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateLabel(e.target.value)}
-                  className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                  className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                   placeholder={
                     defaultLangCode === "ar"
                       ? "مثال: عرض الخيارات"
@@ -2130,7 +2220,7 @@ export function ProductActionEditor({
                     disabled={isBusy}
                     onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCreateMenuText(e.target.value)}
                     rows={2}
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                     placeholder={
                       defaultLangCode === "ar"
                         ? "رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
@@ -2228,7 +2318,7 @@ export function ProductActionEditor({
                       value={createArabicLabel}
                       disabled={isBusy}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateArabicLabel(e.target.value)}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       placeholder="مثال: عرض الخيارات"
                       maxLength={MAX_ACTION_LABEL_LENGTH}
                     />
@@ -2250,7 +2340,7 @@ export function ProductActionEditor({
                         disabled={isBusy}
                         onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCreateArabicMenuText(e.target.value)}
                         rows={2}
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                        className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                         placeholder="رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
                       />
                     </div>

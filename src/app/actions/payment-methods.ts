@@ -5,14 +5,15 @@ import { revalidatePath } from "next/cache";
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import {
+  checkPaymentMethodsCapability,
   createPaymentMethod,
   editPaymentMethod,
   listLanguages,
   listPaymentMethods,
-  type PaymentMethodRecord,
   RabetDataError,
   resolveDefaultLanguage,
   toSafeErrorMessage,
+  type PaymentMethodRecord,
 } from "@/lib/data";
 import { validateBoolean, validateUuid } from "@/lib/product-actions/validation";
 
@@ -22,35 +23,43 @@ import {
   validatePaymentTitle,
 } from "@/lib/payment-methods/validation";
 
-export type PaymentMethodActionResult = {
+export interface PaymentMethodActionResult {
   success: boolean;
-  message?: string;
-  code?: string;
-  errors?: Record<string, string>;
   methodId?: string;
   method?: PaymentMethodRecord;
   methods?: PaymentMethodRecord[];
-};
+  code?: string;
+  message?: string;
+  errors?: Record<string, string>;
+}
 
-function extractField(source: unknown, field: string): unknown {
-  if (typeof FormData !== "undefined" && source instanceof FormData) {
-    if (!source.has(field)) return undefined;
-    return source.get(field);
+function extractField(input: unknown, field: string): unknown {
+  if (input instanceof FormData) {
+    return input.get(field) ?? undefined;
   }
-  if (typeof source === "object" && source !== null) {
-    return (source as Record<string, unknown>)[field];
+  if (input && typeof input === "object" && field in input) {
+    return (input as Record<string, unknown>)[field];
   }
   return undefined;
 }
 
 /**
- * Loads all central payment methods.
+ * Server action to fetch all central payment methods.
+ * Protected by requireAdmin().
  */
 export async function loadPaymentMethodsAction(): Promise<PaymentMethodActionResult> {
   await requireAdmin();
 
   try {
     const db = getDb();
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      return {
+        success: true,
+        methods: [],
+      };
+    }
+
     const methods = await listPaymentMethods(db);
     return {
       success: true,
@@ -75,10 +84,15 @@ export async function createPaymentMethodAction(
     | {
         adminLabel: unknown;
         isActive?: unknown;
-        title: unknown;
+        title?: unknown;
         instructions?: unknown;
         arabicTitle?: unknown;
         arabicInstructions?: unknown;
+        translations?: Array<{
+          languageCode: unknown;
+          title?: unknown;
+          instructions?: unknown;
+        }>;
       },
 ): Promise<PaymentMethodActionResult> {
   await requireAdmin();
@@ -89,6 +103,7 @@ export async function createPaymentMethodAction(
   const rawInstructions = extractField(input, "instructions");
   const rawArabicTitle = extractField(input, "arabicTitle");
   const rawArabicInstructions = extractField(input, "arabicInstructions");
+  const rawTranslations = extractField(input, "translations");
 
   const errors: Record<string, string> = {};
 
@@ -107,100 +122,156 @@ export async function createPaymentMethodAction(
     }
   }
 
-  const titleRes = validatePaymentTitle(rawTitle, "Default language");
-  if (!titleRes.success) {
-    errors.title = titleRes.error;
-  }
-
-  let instructions: string | null = null;
-  const instRes = validatePaymentInstructions(rawInstructions, "Default language");
-  if (!instRes.success) {
-    errors.instructions = instRes.error;
-  } else {
-    instructions = instRes.data;
-  }
-
-  let arabicTitle: string | null = null;
-  if (rawArabicTitle !== undefined && rawArabicTitle !== null && String(rawArabicTitle).trim().length > 0) {
-    const arTitleRes = validatePaymentTitle(rawArabicTitle, "Arabic");
-    if (!arTitleRes.success) {
-      errors.arabicTitle = arTitleRes.error;
-    } else {
-      arabicTitle = arTitleRes.data;
-    }
-  }
-
-  let arabicInstructions: string | null = null;
-  if (rawArabicInstructions !== undefined && rawArabicInstructions !== null) {
-    const arInstRes = validatePaymentInstructions(rawArabicInstructions, "Arabic");
-    if (!arInstRes.success) {
-      errors.arabicInstructions = arInstRes.error;
-    } else {
-      arabicInstructions = arInstRes.data;
-    }
-  }
-
-  if (arabicInstructions && !arabicTitle) {
-    errors.arabicTitle = "Arabic title is required when Arabic instructions are provided.";
-  }
-
-  if (Object.keys(errors).length > 0 || !adminLabelRes.success || !titleRes.success) {
-    return {
-      success: false,
-      code: "INVALID_INPUT",
-      message: "Please correct the errors in the form.",
-      errors,
-    };
-  }
-
   try {
     const db = getDb();
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      return {
+        success: false,
+        code: "SCHEMA_UPGRADE_REQUIRED",
+        message: capability.reason ?? "Payment methods feature requires pending migration 0002_payment_methods.",
+      };
+    }
+
     const [languages, defaultLanguage] = await Promise.all([
       listLanguages(db),
       resolveDefaultLanguage(db),
     ]);
 
-    const defaultLangId = defaultLanguage?.id;
-    const defaultLangCode = defaultLanguage?.code;
-    if (!defaultLangId || !defaultLangCode) {
-      return {
-        success: false,
-        code: "SETTINGS_NOT_INITIALIZED",
-        message: "Store default language is not configured. Please complete store setup in Settings.",
-      };
+    const defaultCode = (defaultLanguage?.code ?? "en").toLowerCase();
+
+    // Collect translations to create
+    const translationsToCreate: Array<{
+      languageId: string;
+      languageCode: string;
+      title: string;
+      instructions: string | null;
+    }> = [];
+
+    if (Array.isArray(rawTranslations) && rawTranslations.length > 0) {
+      for (const t of rawTranslations) {
+        if (!t || typeof t !== "object") continue;
+        const code = String(extractField(t, "languageCode") ?? "").trim().toLowerCase();
+        if (!code) continue;
+
+        const lang = languages.find((l) => l.code.toLowerCase() === code);
+        if (!lang) {
+          errors[`lang_${code}`] = `Language "${code}" is not registered.`;
+          continue;
+        }
+
+        const tTitle = extractField(t, "title");
+        const tInstructions = extractField(t, "instructions");
+
+        const hasTitle = tTitle !== undefined && tTitle !== null && String(tTitle).trim().length > 0;
+        const hasInst = tInstructions !== undefined && tInstructions !== null && String(tInstructions).trim().length > 0;
+
+        if (!hasTitle && !hasInst) {
+          // Empty optional draft, ignore
+          continue;
+        }
+
+        const titleRes = validatePaymentTitle(tTitle, lang.label);
+        if (!titleRes.success) {
+          errors[`title_${code}`] = titleRes.error;
+        }
+
+        let instructionsVal: string | null = null;
+        if (tInstructions !== undefined && tInstructions !== null) {
+          const instRes = validatePaymentInstructions(tInstructions, lang.label);
+          if (!instRes.success) {
+            errors[`instructions_${code}`] = instRes.error;
+          } else {
+            instructionsVal = instRes.data;
+          }
+        }
+
+        if (titleRes.success) {
+          translationsToCreate.push({
+            languageId: lang.id,
+            languageCode: code,
+            title: titleRes.data,
+            instructions: instructionsVal,
+          });
+        }
+      }
+    } else {
+      // Legacy single default language + optional Arabic form
+      const titleRes = validatePaymentTitle(rawTitle, defaultLanguage?.label ?? "Default language");
+      if (!titleRes.success) {
+        errors.title = titleRes.error;
+      }
+
+      let instructions: string | null = null;
+      const instRes = validatePaymentInstructions(rawInstructions, defaultLanguage?.label ?? "Default language");
+      if (!instRes.success) {
+        errors.instructions = instRes.error;
+      } else {
+        instructions = instRes.data;
+      }
+
+      if (titleRes.success && defaultLanguage) {
+        translationsToCreate.push({
+          languageId: defaultLanguage.id,
+          languageCode: defaultCode,
+          title: titleRes.data,
+          instructions,
+        });
+      }
+
+      let arabicTitle: string | null = null;
+      if (rawArabicTitle !== undefined && rawArabicTitle !== null && String(rawArabicTitle).trim().length > 0) {
+        const arTitleRes = validatePaymentTitle(rawArabicTitle, "Arabic");
+        if (!arTitleRes.success) {
+          errors.arabicTitle = arTitleRes.error;
+        } else {
+          arabicTitle = arTitleRes.data;
+        }
+      }
+
+      let arabicInstructions: string | null = null;
+      if (rawArabicInstructions !== undefined && rawArabicInstructions !== null) {
+        const arInstRes = validatePaymentInstructions(rawArabicInstructions, "Arabic");
+        if (!arInstRes.success) {
+          errors.arabicInstructions = arInstRes.error;
+        } else {
+          arabicInstructions = arInstRes.data;
+        }
+      }
+
+      if (arabicInstructions && !arabicTitle) {
+        errors.arabicTitle = "Arabic title is required when Arabic instructions are provided.";
+      }
+
+      const arabicLang = languages.find((l) => l.code === "ar");
+      if (arabicTitle && arabicLang && defaultCode !== "ar") {
+        translationsToCreate.push({
+          languageId: arabicLang.id,
+          languageCode: "ar",
+          title: arabicTitle,
+          instructions: arabicInstructions,
+        });
+      }
     }
 
-    const translationsToInsert = [
-      {
-        languageId: defaultLangId,
-        languageCode: defaultLangCode,
-        title: titleRes.data,
-        instructions,
-      },
-    ];
+    const hasDefault = translationsToCreate.some((t) => t.languageCode === defaultCode);
+    if (!hasDefault && !errors.title && !errors[`title_${defaultCode}`]) {
+      errors.title = `A customer-facing title in the store's default language (${defaultCode.toUpperCase()}) is required.`;
+    }
 
-    if (arabicTitle && defaultLangCode !== "ar") {
-      const arabicLang = languages.find((l) => l.code === "ar");
-      if (!arabicLang) {
-        return {
-          success: false,
-          code: "NOT_FOUND",
-          message: "Arabic is not a registered language in this store.",
-          errors: { arabicTitle: "Arabic is not registered in this store." },
-        };
-      }
-      translationsToInsert.push({
-        languageId: arabicLang.id,
-        languageCode: "ar",
-        title: arabicTitle,
-        instructions: arabicInstructions,
-      });
+    if (Object.keys(errors).length > 0 || !adminLabelRes.success) {
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        message: "Please correct the errors in the form.",
+        errors,
+      };
     }
 
     const result = await createPaymentMethod(db, {
       adminLabel: adminLabelRes.data,
       isActive,
-      translations: translationsToInsert,
+      translations: translationsToCreate,
     });
 
     revalidatePath("/payment-methods");
@@ -224,27 +295,33 @@ export async function createPaymentMethodAction(
 
 /**
  * Server action to update a central payment method.
+ * Supports updating multiple language drafts atomically in a single operation.
+ * Partial updates preserve omitted fields.
  */
 export async function updatePaymentMethodAction(
   input:
     | FormData
     | {
-        id: unknown;
+        id?: unknown;
+        methodId?: unknown;
         adminLabel?: unknown;
         isActive?: unknown;
         languageCode?: unknown;
         title?: unknown;
         instructions?: unknown;
+        translations?: Array<{
+          languageCode: unknown;
+          title?: unknown;
+          instructions?: unknown;
+        }>;
       },
 ): Promise<PaymentMethodActionResult> {
   await requireAdmin();
 
-  const rawId = extractField(input, "id");
+  const rawId = extractField(input, "id") ?? extractField(input, "methodId");
   const rawAdminLabel = extractField(input, "adminLabel");
   const rawIsActive = extractField(input, "isActive");
-  const rawLangCode = extractField(input, "languageCode");
-  const rawTitle = extractField(input, "title");
-  const rawInstructions = extractField(input, "instructions");
+  const rawTranslations = extractField(input, "translations");
 
   const errors: Record<string, string> = {};
 
@@ -273,76 +350,127 @@ export async function updatePaymentMethodAction(
     }
   }
 
-  const isTranslationSubmitted = rawTitle !== undefined || rawInstructions !== undefined;
-  let langCode: string | undefined = undefined;
-  let title: string | undefined = undefined;
-  let instructions: string | null | undefined = undefined;
-
-  if (isTranslationSubmitted) {
-    if (typeof rawLangCode !== "string" || rawLangCode.trim().length === 0) {
-      errors.languageCode = "Language code is required when updating translations.";
-    } else {
-      langCode = rawLangCode.trim().toLowerCase();
-    }
-
-    const langLabel = langCode ? langCode.toUpperCase() : "the selected language";
-
-    if (rawTitle !== undefined) {
-      const titleRes = validatePaymentTitle(rawTitle, langLabel);
-      if (!titleRes.success) {
-        errors.title = titleRes.error;
-      } else {
-        title = titleRes.data;
-      }
-    }
-
-    if (rawInstructions !== undefined) {
-      const instRes = validatePaymentInstructions(rawInstructions, langLabel);
-      if (!instRes.success) {
-        errors.instructions = instRes.error;
-      } else {
-        instructions = instRes.data;
-      }
-    }
-  }
-
-  if (Object.keys(errors).length > 0 || !idRes.success) {
-    return {
-      success: false,
-      code: "INVALID_INPUT",
-      message: "Please correct the errors in the form.",
-      errors,
-    };
-  }
-
   try {
     const db = getDb();
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      return {
+        success: false,
+        code: "SCHEMA_UPGRADE_REQUIRED",
+        message: capability.reason ?? "Payment methods feature requires pending migration 0002_payment_methods.",
+      };
+    }
+
     const languages = await listLanguages(db);
+    const langByCode = new Map(languages.map((l) => [l.code.toLowerCase(), l]));
 
-    let translationToUpdate:
-      | {
-          languageId: string;
-          languageCode: string;
-          title: string;
-          instructions?: string | null;
+    // Normalize translations to update
+    const translationsToUpdate: Array<{
+      languageId: string;
+      languageCode: string;
+      title?: string;
+      instructions?: string | null;
+    }> = [];
+
+    if (Array.isArray(rawTranslations)) {
+      for (const t of rawTranslations) {
+        if (!t || typeof t !== "object") continue;
+        const code = String(extractField(t, "languageCode") ?? "").trim().toLowerCase();
+        if (!code) continue;
+
+        const lang = langByCode.get(code);
+        if (!lang) {
+          errors[`lang_${code}`] = `Language "${code}" is not registered.`;
+          continue;
         }
-      | undefined = undefined;
 
-    if (isTranslationSubmitted && langCode && title) {
-      const targetLang = languages.find((l) => l.code === langCode);
-      if (!targetLang) {
-        return {
-          success: false,
-          code: "NOT_FOUND",
-          message: `Language "${langCode}" is not registered in this store.`,
-          errors: { languageCode: `Language "${langCode}" is not registered.` },
-        };
+        const rawTTitle = extractField(t, "title");
+        const rawTInstructions = extractField(t, "instructions");
+
+        let validatedTitle: string | undefined = undefined;
+        if (rawTTitle !== undefined) {
+          const titleRes = validatePaymentTitle(rawTTitle, lang.label);
+          if (!titleRes.success) {
+            errors[`title_${code}`] = titleRes.error;
+          } else {
+            validatedTitle = titleRes.data;
+          }
+        }
+
+        let validatedInstructions: string | null | undefined = undefined;
+        if (rawTInstructions !== undefined) {
+          const instRes = validatePaymentInstructions(rawTInstructions, lang.label);
+          if (!instRes.success) {
+            errors[`instructions_${code}`] = instRes.error;
+          } else {
+            validatedInstructions = instRes.data;
+          }
+        }
+
+        if (validatedTitle !== undefined || validatedInstructions !== undefined) {
+          translationsToUpdate.push({
+            languageId: lang.id,
+            languageCode: code,
+            title: validatedTitle,
+            instructions: validatedInstructions,
+          });
+        }
       }
-      translationToUpdate = {
-        languageId: targetLang.id,
-        languageCode: targetLang.code,
-        title,
-        instructions: instructions === undefined ? undefined : instructions,
+    } else {
+      // Single translation format
+      const rawLangCode = extractField(input, "languageCode");
+      const rawTitle = extractField(input, "title");
+      const rawInstructions = extractField(input, "instructions");
+
+      const isTranslationSubmitted = rawTitle !== undefined || rawInstructions !== undefined;
+      if (isTranslationSubmitted) {
+        if (typeof rawLangCode !== "string" || rawLangCode.trim().length === 0) {
+          errors.languageCode = "Language code is required when updating translations.";
+        } else {
+          const code = rawLangCode.trim().toLowerCase();
+          const lang = langByCode.get(code);
+          if (!lang) {
+            errors.languageCode = `Language "${code}" is not registered.`;
+          } else {
+            let validatedTitle: string | undefined = undefined;
+            if (rawTitle !== undefined) {
+              const titleRes = validatePaymentTitle(rawTitle, lang.label);
+              if (!titleRes.success) {
+                errors.title = titleRes.error;
+              } else {
+                validatedTitle = titleRes.data;
+              }
+            }
+
+            let validatedInstructions: string | null | undefined = undefined;
+            if (rawInstructions !== undefined) {
+              const instRes = validatePaymentInstructions(rawInstructions, lang.label);
+              if (!instRes.success) {
+                errors.instructions = instRes.error;
+              } else {
+                validatedInstructions = instRes.data;
+              }
+            }
+
+            if (validatedTitle !== undefined || validatedInstructions !== undefined) {
+              translationsToUpdate.push({
+                languageId: lang.id,
+                languageCode: code,
+                title: validatedTitle,
+                instructions: validatedInstructions,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    if (Object.keys(errors).length > 0 || !idRes.success) {
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        message: "Please correct the errors in the form.",
+        errors,
       };
     }
 
@@ -350,7 +478,7 @@ export async function updatePaymentMethodAction(
       id: idRes.data,
       adminLabel,
       isActive,
-      translation: translationToUpdate,
+      translations: translationsToUpdate,
     });
 
     revalidatePath("/payment-methods");
@@ -373,25 +501,47 @@ export async function updatePaymentMethodAction(
 
 /**
  * Server action to toggle a payment method between active and disabled.
+ * Supports both togglePaymentMethodActiveAction(id, isActive) and
+ * togglePaymentMethodActiveAction({ id, isActive }).
  */
 export async function togglePaymentMethodActiveAction(
-  id: unknown,
-  isActive: unknown,
+  idOrInput: unknown,
+  maybeIsActive?: unknown,
 ): Promise<PaymentMethodActionResult> {
   await requireAdmin();
 
-  const idRes = validateUuid(id, "Payment method ID");
+  let rawId: unknown;
+  let rawIsActive: unknown;
+
+  if (idOrInput && typeof idOrInput === "object" && !(idOrInput instanceof FormData)) {
+    rawId = extractField(idOrInput, "id") ?? extractField(idOrInput, "methodId");
+    rawIsActive = extractField(idOrInput, "isActive");
+  } else {
+    rawId = idOrInput;
+    rawIsActive = maybeIsActive;
+  }
+
+  const idRes = validateUuid(rawId, "Payment method ID");
   if (!idRes.success) {
     return { success: false, code: "INVALID_INPUT", message: idRes.error };
   }
 
-  const activeRes = validateBoolean(isActive, "Active state");
+  const activeRes = validateBoolean(rawIsActive, "Active state");
   if (!activeRes.success) {
     return { success: false, code: "INVALID_INPUT", message: activeRes.error };
   }
 
   try {
     const db = getDb();
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      return {
+        success: false,
+        code: "SCHEMA_UPGRADE_REQUIRED",
+        message: capability.reason ?? "Payment methods feature requires pending migration 0002_payment_methods.",
+      };
+    }
+
     const result = await editPaymentMethod(db, {
       id: idRes.data,
       isActive: activeRes.data,

@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import {
+  checkPaymentMethodsCapability,
   createProductAction,
   editProductAction,
   listLanguages,
@@ -269,6 +270,13 @@ export async function createProductActionAction(
         }
       }
     } else if (actionType === "PAYMENT_METHOD") {
+      const db = getDb();
+      const capability = await checkPaymentMethodsCapability(db);
+      if (!capability.supported) {
+        errors.actionType =
+          "Payment method buttons are unavailable until pending migration 0002_payment_methods is applied.";
+      }
+
       const hasPm =
         rawPaymentMethodId !== undefined &&
         rawPaymentMethodId !== null &&
@@ -695,6 +703,15 @@ export async function updateProductActionAction(
     ) {
       errors.navigationTarget =
         "Cannot specify both a category and a product navigation target.";
+    }
+  }
+
+  if (typeRes.success && typeRes.data === "PAYMENT_METHOD") {
+    const db = getDb();
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      errors.actionType =
+        "Payment method buttons are unavailable until pending migration 0002_payment_methods is applied.";
     }
   }
 

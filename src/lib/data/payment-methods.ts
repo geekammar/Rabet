@@ -10,7 +10,7 @@ import {
 } from "@/db/schema";
 import { executeAtomicBatch } from "./catalog";
 import { mapDatabaseError, RabetDataError } from "./errors";
-import { resolveDefaultLanguage } from "./languages";
+import { listLanguages, resolveDefaultLanguage } from "./languages";
 
 /**
  * ===========================================================================
@@ -24,6 +24,73 @@ import { resolveDefaultLanguage } from "./languages";
  * Does NOT store provider credentials, bank/card secrets, or real payment data.
  * Methods default to disabled (isActive = false).
  */
+
+export interface PaymentMethodsCapability {
+  supported: boolean;
+  reason?: string;
+}
+
+/**
+ * Server-side detection of payment methods capability in the database.
+ * Does NOT swallow database connection errors.
+ * Returns supported = true only when:
+ * 1. payment_method table exists
+ * 2. product_action.payment_method_id column exists
+ * 3. action_type enum has 'PAYMENT_METHOD' value
+ */
+export async function checkPaymentMethodsCapability(
+  db: Database,
+): Promise<PaymentMethodsCapability> {
+  const result = await db.execute<{
+    has_table: boolean;
+    has_column: boolean;
+    has_enum: boolean;
+  }>(sql`
+    SELECT
+      to_regclass('public.payment_method') IS NOT NULL AS has_table,
+      EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'product_action'
+          AND column_name = 'payment_method_id'
+      ) AS has_column,
+      EXISTS (
+        SELECT 1 FROM pg_enum e
+        JOIN pg_type t ON e.enumtypid = t.oid
+        WHERE t.typname = 'action_type'
+          AND e.enumlabel = 'PAYMENT_METHOD'
+      ) AS has_enum
+  `);
+
+  const rawRows: unknown = Array.isArray(result)
+    ? result
+    : (result as { rows?: unknown[] })?.rows;
+  const rows = Array.isArray(rawRows) ? rawRows : [];
+  const row = rows[0] as
+    | { has_table?: boolean; has_column?: boolean; has_enum?: boolean }
+    | undefined;
+  if (!row) {
+    return { supported: false, reason: "Capability check returned no result." };
+  }
+
+  const hasTable = Boolean(row.has_table);
+  const hasColumn = Boolean(row.has_column);
+  const hasEnum = Boolean(row.has_enum);
+
+  if (hasTable && hasColumn && hasEnum) {
+    return { supported: true };
+  }
+
+  const missing: string[] = [];
+  if (!hasTable) missing.push("payment_method table");
+  if (!hasColumn) missing.push("product_action.payment_method_id column");
+  if (!hasEnum) missing.push("action_type.PAYMENT_METHOD enum value");
+
+  return {
+    supported: false,
+    reason: `Database is missing required objects: ${missing.join(", ")}. Pending migration 0002_payment_methods must be applied.`,
+  };
+}
 
 export interface PaymentMethodTranslationRecord {
   id: string;
@@ -49,32 +116,41 @@ export interface CreatePaymentMethodData {
   adminLabel: string;
   isActive?: boolean;
   translations: Array<{
-    languageId: string;
+    languageId?: string;
     languageCode: string;
     title: string;
     instructions?: string | null;
   }>;
 }
 
+export interface EditPaymentMethodTranslationInput {
+  languageId?: string;
+  languageCode: string;
+  title?: string;
+  instructions?: string | null;
+}
+
 export interface EditPaymentMethodData {
   id: string;
   adminLabel?: string;
   isActive?: boolean;
-  translation?: {
-    languageId: string;
-    languageCode: string;
-    title: string;
-    instructions?: string | null;
-  };
+  translations?: EditPaymentMethodTranslationInput[];
+  translation?: EditPaymentMethodTranslationInput;
 }
 
 /**
  * Lists all central payment methods ordered by sortOrder ASC, createdAt ASC.
+ * If the database schema does not yet support payment methods, safely returns [].
  */
 export async function listPaymentMethods(
   db: Database,
 ): Promise<PaymentMethodRecord[]> {
   try {
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      return [];
+    }
+
     const methodRows = await db
       .select()
       .from(paymentMethod)
@@ -139,12 +215,18 @@ export async function listPaymentMethods(
 
 /**
  * Reads a single payment method by ID with all translations.
+ * Returns null if not found or if payment methods are unsupported.
  */
 export async function readPaymentMethod(
   db: Database,
   id: string,
 ): Promise<PaymentMethodRecord | null> {
   try {
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      return null;
+    }
+
     const [row] = await db
       .select()
       .from(paymentMethod)
@@ -194,7 +276,7 @@ export async function readPaymentMethod(
 }
 
 /**
- * Creates a central payment method with its required initial translations atomically.
+ * Creates a central payment method with its initial translations atomically.
  * Defaults to disabled (`isActive = false`).
  */
 export async function createPaymentMethod(
@@ -202,18 +284,68 @@ export async function createPaymentMethod(
   input: CreatePaymentMethodData,
 ): Promise<{ methodId: string; method: PaymentMethodRecord }> {
   try {
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      throw new RabetDataError(
+        "SCHEMA_UPGRADE_REQUIRED",
+        capability.reason ?? "Payment methods feature requires pending migration 0002_payment_methods.",
+      );
+    }
+
     const adminLabel = input.adminLabel.trim();
     if (adminLabel.length === 0) {
       throw new RabetDataError("INVALID_INPUT", "Admin label is required.");
     }
 
-    const defaultLang = await resolveDefaultLanguage(db);
-    const defaultCode = defaultLang?.code ?? "en";
-    const defaultTrans = input.translations.find(
-      (t) => t.languageCode === defaultCode || t.languageId === defaultLang?.id,
-    );
+    const languages = await listLanguages(db);
+    const langByCode = new Map(languages.map((l) => [l.code.toLowerCase(), l]));
 
-    if (!defaultTrans || defaultTrans.title.trim().length === 0) {
+    const defaultLang = await resolveDefaultLanguage(db);
+    const defaultCode = (defaultLang?.code ?? "en").toLowerCase();
+
+    // Filter and validate translations
+    const validTranslations: Array<{
+      languageId: string;
+      languageCode: string;
+      title: string;
+      instructions: string | null;
+    }> = [];
+
+    for (const t of input.translations) {
+      const code = t.languageCode.trim().toLowerCase();
+      const lang = langByCode.get(code);
+      if (!lang) {
+        throw new RabetDataError("NOT_FOUND", `Language "${t.languageCode}" is not registered.`);
+      }
+
+      const trimmedTitle = t.title.trim();
+      const trimmedInstructions = t.instructions !== undefined && t.instructions !== null
+        ? t.instructions.trim()
+        : null;
+
+      const hasContent = trimmedTitle.length > 0 || (trimmedInstructions !== null && trimmedInstructions.length > 0);
+      if (!hasContent) {
+        // Skip empty optional translation
+        continue;
+      }
+
+      if (trimmedTitle.length === 0) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          `Customer-facing title is required for language ${code.toUpperCase()}.`,
+        );
+      }
+
+      validTranslations.push({
+        languageId: t.languageId ?? lang.id,
+        languageCode: code,
+        title: trimmedTitle,
+        instructions: trimmedInstructions && trimmedInstructions.length > 0 ? trimmedInstructions : null,
+      });
+    }
+
+    const defaultTrans = validTranslations.find((t) => t.languageCode === defaultCode);
+    if (!defaultTrans || defaultTrans.title.length === 0) {
       throw new RabetDataError(
         "INVALID_INPUT",
         `A customer-facing title in the store's default language (${defaultCode.toUpperCase()}) is required.`,
@@ -238,13 +370,13 @@ export async function createPaymentMethod(
       sortOrder: nextSortOrder,
     });
 
-    const translationInserts = input.translations.map((t) =>
+    const translationInserts = validTranslations.map((t) =>
       db.insert(paymentMethodTranslation).values({
         id: globalThis.crypto.randomUUID(),
         paymentMethodId: methodId,
         languageId: t.languageId,
-        title: t.title.trim(),
-        instructions: t.instructions?.trim() || null,
+        title: t.title,
+        instructions: t.instructions,
       }),
     );
 
@@ -265,19 +397,33 @@ export async function createPaymentMethod(
 }
 
 /**
- * Updates a central payment method and optionally a submitted translation atomically.
+ * Updates a central payment method and submitted translations atomically.
+ * Partial update semantics:
+ * - Omitted fields preserve existing values.
+ * - Explicit empty instructions ("") or null clears instructions.
+ * - Empty string title fails validation with zero writes.
+ * - Instructions-only updates work and preserve existing title.
+ * - Title-only updates work and preserve existing instructions.
+ * - Rejects incomplete new translations clearly.
+ * - All translations are validated before any write. A failure in any language aborts the entire save.
  */
 export async function editPaymentMethod(
   db: Database,
   input: EditPaymentMethodData,
 ): Promise<{ method: PaymentMethodRecord }> {
   try {
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      throw new RabetDataError(
+        "SCHEMA_UPGRADE_REQUIRED",
+        capability.reason ?? "Payment methods feature requires pending migration 0002_payment_methods.",
+      );
+    }
+
     const existing = await readPaymentMethod(db, input.id);
     if (!existing) {
       throw new RabetDataError("NOT_FOUND", "Payment method not found.");
     }
-
-    const queries: unknown[] = [];
 
     const updateSet: Record<string, unknown> = {
       updatedAt: sql`now()`,
@@ -291,17 +437,114 @@ export async function editPaymentMethod(
       updateSet.adminLabel = trimmed;
     }
 
-    if (input.isActive !== undefined) {
-      // If enabling, ensure default language title exists
-      if (input.isActive && !existing.isActive) {
-        const defaultLang = await resolveDefaultLanguage(db);
-        const defaultCode = defaultLang?.code ?? "en";
-        const willHaveDefaultTitle =
-          input.translation && input.translation.languageCode === defaultCode
-            ? input.translation.title.trim().length > 0
-            : Boolean(existing.translations[defaultCode]?.title?.trim());
+    // Normalize submitted translations (supporting both array and single translation object)
+    const submittedList: EditPaymentMethodTranslationInput[] = [];
+    if (Array.isArray(input.translations)) {
+      submittedList.push(...input.translations);
+    }
+    if (input.translation) {
+      submittedList.push(input.translation);
+    }
 
-        if (!willHaveDefaultTitle) {
+    const languages = await listLanguages(db);
+    const langByCode = new Map(languages.map((l) => [l.code.toLowerCase(), l]));
+
+    // Resolved translations to upsert
+    const translationsToUpsert: Array<{
+      languageId: string;
+      languageCode: string;
+      title: string;
+      instructions: string | null;
+    }> = [];
+
+    // Track merged titles by language for activation validation
+    const resultingTitles: Record<string, string> = {};
+    for (const [code, rec] of Object.entries(existing.translations)) {
+      resultingTitles[code.toLowerCase()] = rec.title;
+    }
+
+    for (const t of submittedList) {
+      const code = t.languageCode.trim().toLowerCase();
+      const lang = langByCode.get(code);
+      if (!lang) {
+        throw new RabetDataError("NOT_FOUND", `Language "${t.languageCode}" is not registered.`);
+      }
+
+      const existingTrans = existing.translations[code];
+
+      if (existingTrans) {
+        // Updating an existing translation
+        let titleToSave = existingTrans.title;
+        let instructionsToSave = existingTrans.instructions;
+
+        if (t.title !== undefined) {
+          const trimmedTitle = t.title.trim();
+          if (trimmedTitle.length === 0) {
+            throw new RabetDataError(
+              "INVALID_INPUT",
+              `Customer-facing title cannot be empty for language ${code.toUpperCase()}.`,
+            );
+          }
+          titleToSave = trimmedTitle;
+        }
+
+        if (t.instructions !== undefined) {
+          if (t.instructions === null || t.instructions.trim().length === 0) {
+            instructionsToSave = null;
+          } else {
+            instructionsToSave = t.instructions.trim();
+          }
+        }
+
+        resultingTitles[code] = titleToSave;
+
+        translationsToUpsert.push({
+          languageId: t.languageId ?? existingTrans.languageId ?? lang.id,
+          languageCode: code,
+          title: titleToSave,
+          instructions: instructionsToSave,
+        });
+      } else {
+        // New translation for this language
+        const isTitleDefined = t.title !== undefined;
+        const trimmedTitle = t.title ? t.title.trim() : "";
+        const isInstructionsDefined = t.instructions !== undefined && t.instructions !== null;
+        const trimmedInstructions = isInstructionsDefined ? t.instructions!.trim() : "";
+
+        const hasAnyContent = trimmedTitle.length > 0 || trimmedInstructions.length > 0;
+        if (!hasAnyContent) {
+          // Unchanged empty optional tab; skip without error
+          continue;
+        }
+
+        if (!isTitleDefined || trimmedTitle.length === 0) {
+          throw new RabetDataError(
+            "INVALID_INPUT",
+            `Customer-facing title is required for a new translation in language ${code.toUpperCase()}.`,
+          );
+        }
+
+        const instructionsToSave = trimmedInstructions.length > 0 ? trimmedInstructions : null;
+        resultingTitles[code] = trimmedTitle;
+
+        translationsToUpsert.push({
+          languageId: t.languageId ?? lang.id,
+          languageCode: code,
+          title: trimmedTitle,
+          instructions: instructionsToSave,
+        });
+      }
+    }
+
+    if (input.isActive !== undefined) {
+      // If active or enabling, ensure default language title exists
+      const targetActive = input.isActive;
+      if (targetActive) {
+        const defaultLang = await resolveDefaultLanguage(db);
+        const defaultCode = (defaultLang?.code ?? "en").toLowerCase();
+        const hasDefaultTitle = Boolean(resultingTitles[defaultCode]?.trim());
+
+        if (!hasDefaultTitle) {
           throw new RabetDataError(
             "INVALID_INPUT",
             `A customer-facing title in the store's default language (${defaultCode.toUpperCase()}) is required before activating.`,
@@ -311,39 +554,33 @@ export async function editPaymentMethod(
       updateSet.isActive = input.isActive;
     }
 
-    queries.push(
+    const queries: unknown[] = [
       db.update(paymentMethod).set(updateSet).where(eq(paymentMethod.id, input.id)),
-    );
+    ];
 
-    if (input.translation) {
-      const trimmedTitle = input.translation.title.trim();
-      if (trimmedTitle.length === 0) {
-        throw new RabetDataError("INVALID_INPUT", "Customer-facing title cannot be empty.");
-      }
-      const trimmedInstructions = input.translation.instructions?.trim() || null;
-
-      const translationUpsert = db
-        .insert(paymentMethodTranslation)
-        .values({
-          id: globalThis.crypto.randomUUID(),
-          paymentMethodId: input.id,
-          languageId: input.translation.languageId,
-          title: trimmedTitle,
-          instructions: trimmedInstructions,
-        })
-        .onConflictDoUpdate({
-          target: [
-            paymentMethodTranslation.paymentMethodId,
-            paymentMethodTranslation.languageId,
-          ],
-          set: {
-            title: trimmedTitle,
-            instructions: trimmedInstructions,
-            updatedAt: sql`now()`,
-          },
-        });
-
-      queries.push(translationUpsert);
+    for (const trans of translationsToUpsert) {
+      queries.push(
+        db
+          .insert(paymentMethodTranslation)
+          .values({
+            id: globalThis.crypto.randomUUID(),
+            paymentMethodId: input.id,
+            languageId: trans.languageId,
+            title: trans.title,
+            instructions: trans.instructions,
+          })
+          .onConflictDoUpdate({
+            target: [
+              paymentMethodTranslation.paymentMethodId,
+              paymentMethodTranslation.languageId,
+            ],
+            set: {
+              title: trans.title,
+              instructions: trans.instructions,
+              updatedAt: sql`now()`,
+            },
+          }),
+      );
     }
 
     await executeAtomicBatch(db, queries);

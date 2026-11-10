@@ -23,4 +23,5 @@ export interface CatalogViewData {
   categories: CatalogCategoryRecord[];
   products: CatalogProductRecord[];
   paymentMethods?: PaymentMethodRecord[];
+  paymentMethodsAvailable?: boolean;
 }

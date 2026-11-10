@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, eq, isNull, ne } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -290,6 +290,19 @@ async function isProductHierarchyActive(
   return { valid: true, productRow: prod };
 }
 
+export type ActionHierarchyRow = {
+  id: string;
+  productId: string;
+  parentActionId: string | null;
+  actionType: (typeof productAction.$inferSelect)["actionType"];
+  isActive: boolean;
+  url: string | null;
+  navigateCategoryId: string | null;
+  navigateProductId: string | null;
+  actionConfig: unknown;
+  sortOrder: number;
+};
+
 /**
  * Checks action existence, active flag, ancestor actions active and OPEN_SUBMENU,
  * and product/category hierarchy fully active.
@@ -299,12 +312,12 @@ async function isActionHierarchyActive(
   actionId: string,
 ): Promise<{
   valid: boolean;
-  actionRow?: typeof productAction.$inferSelect;
+  actionRow?: ActionHierarchyRow;
   productRow?: typeof product.$inferSelect;
 }> {
   let currentId: string | null = actionId;
   let depth = 0;
-  let targetRow: typeof productAction.$inferSelect | undefined;
+  let targetRow: ActionHierarchyRow | undefined;
 
   const visited = new Set<string>();
 
@@ -315,7 +328,18 @@ async function isActionHierarchyActive(
     visited.add(currentId);
 
     const [row] = await db
-      .select()
+      .select({
+        id: productAction.id,
+        productId: productAction.productId,
+        parentActionId: productAction.parentActionId,
+        actionType: productAction.actionType,
+        isActive: productAction.isActive,
+        url: productAction.url,
+        navigateCategoryId: productAction.navigateCategoryId,
+        navigateProductId: productAction.navigateProductId,
+        actionConfig: productAction.actionConfig,
+        sortOrder: productAction.sortOrder,
+      })
       .from(productAction)
       .where(eq(productAction.id, currentId))
       .limit(1);
@@ -1121,7 +1145,7 @@ async function renderProductCard(
         eq(productAction.productId, prodRow.id),
         isNull(productAction.parentActionId),
         eq(productAction.isActive, true),
-        ne(productAction.actionType, "PAYMENT_METHOD"),
+        sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'`,
       ),
     )
     .orderBy(asc(productAction.sortOrder), asc(productAction.id));
@@ -1230,7 +1254,7 @@ async function handleActionExecution(
         and(
           eq(productAction.parentActionId, actRow.id),
           eq(productAction.isActive, true),
-          ne(productAction.actionType, "PAYMENT_METHOD"),
+          sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'`,
         ),
       )
       .orderBy(asc(productAction.sortOrder), asc(productAction.id));

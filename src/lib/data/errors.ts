@@ -41,6 +41,8 @@ export type DataErrorCode =
   | "DATABASE_UNAVAILABLE"
   /** Input failed Zod validation before any query ran. */
   | "INVALID_INPUT"
+  /** The operation requires a newer database schema migration that is not yet applied. */
+  | "SCHEMA_UPGRADE_REQUIRED"
   /** A row the operation names directly (by key or code) does not exist. */
   | "NOT_FOUND"
   /** A unique key is already taken. */

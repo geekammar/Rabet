@@ -72,7 +72,9 @@ import postgres from "postgres";
 import {
   CRITICAL_CONSTRAINTS,
   EXPECTED_INDEXES,
+  EXPECTED_INDEXES_V1,
   EXPECTED_TABLES,
+  EXPECTED_TABLES_V1,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -577,8 +579,13 @@ export async function inspectTarget(ctx) {
 /**
  * Verifies real schema objects and migration hashes byte-for-byte on the live database.
  */
-export async function validateTarget(ctx) {
+export async function validateTarget(ctx, options = {}) {
   const { sql } = ctx;
+  const expectedTables = options.expectedTables ?? EXPECTED_TABLES;
+  const expectedIndexes = options.expectedIndexes ?? EXPECTED_INDEXES;
+  const expectedHashes = options.expectedHashes ?? ctx.committedHashes.map((entry) => entry.hash);
+  const expectedConstraints = options.expectedConstraints ?? CRITICAL_CONSTRAINTS;
+  const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
 
   // 1. Tables check
   try {
@@ -586,8 +593,8 @@ export async function validateTarget(ctx) {
     const tables = tableRows.map((row) => String(row.name));
     const tableSet = new Set(tables);
 
-    const missingTables = EXPECTED_TABLES.filter((name) => !tableSet.has(name));
-    const unknownTables = tables.filter((name) => !EXPECTED_TABLES.includes(name));
+    const missingTables = expectedTables.filter((name) => !tableSet.has(name));
+    const unknownTables = tables.filter((name) => !expectedTables.includes(name));
 
     record(
       ctx,
@@ -597,7 +604,7 @@ export async function validateTarget(ctx) {
         ? `missing ${missingTables.join(", ")}`
         : unknownTables.length
           ? `unexpected ${unknownTables.join(", ")}`
-          : `${EXPECTED_TABLES.length}/${EXPECTED_TABLES.length}`,
+          : `${expectedTables.length}/${expectedTables.length}`,
     );
   } catch (error) {
     record(ctx, "tables", false, `query error: ${redact(String(error.message ?? error))}`);
@@ -607,7 +614,6 @@ export async function validateTarget(ctx) {
   try {
     const appliedRows = await sql.query(QUERIES.drizzleMigrations);
     const applied = (appliedRows ?? []).map((row) => String(row.hash));
-    const expectedHashes = ctx.committedHashes.map((entry) => entry.hash);
     const historyOk =
       applied.length === expectedHashes.length &&
       expectedHashes.every((hash, index) => applied[index] === hash);
@@ -618,7 +624,7 @@ export async function validateTarget(ctx) {
       historyOk,
       historyOk
         ? "matches the committed files byte for byte"
-        : `${applied.length} applied / ${expectedHashes.length} committed`,
+        : `${applied.length} applied / ${expectedHashes.length} expected`,
     );
   } catch (error) {
     record(ctx, "migration-history", false, `query error: ${redact(String(error.message ?? error))}`);
@@ -628,7 +634,7 @@ export async function validateTarget(ctx) {
   try {
     const indexRows = await sql.query(QUERIES.indexes);
     const indexSet = new Set(indexRows.map((row) => String(row.name)));
-    const missingIndexes = EXPECTED_INDEXES.filter((name) => !indexSet.has(name));
+    const missingIndexes = expectedIndexes.filter((name) => !indexSet.has(name));
 
     record(
       ctx,
@@ -636,7 +642,7 @@ export async function validateTarget(ctx) {
       missingIndexes.length === 0,
       missingIndexes.length
         ? `missing ${missingIndexes.join(", ")}`
-        : `${EXPECTED_INDEXES.length}/${EXPECTED_INDEXES.length}`,
+        : `${expectedIndexes.length}/${expectedIndexes.length}`,
     );
   } catch (error) {
     record(ctx, "indexes", false, `query error: ${redact(String(error.message ?? error))}`);
@@ -646,7 +652,7 @@ export async function validateTarget(ctx) {
   try {
     const constraintRows = await sql.query(QUERIES.constraints);
     const constraintSet = new Set(constraintRows.map((row) => String(row.name)));
-    const missingConstraints = CRITICAL_CONSTRAINTS.filter(
+    const missingConstraints = expectedConstraints.filter(
       (name) => !constraintSet.has(name),
     );
 
@@ -656,7 +662,7 @@ export async function validateTarget(ctx) {
       missingConstraints.length === 0,
       missingConstraints.length
         ? `missing ${missingConstraints.join(", ")}`
-        : `${CRITICAL_CONSTRAINTS.length}/${CRITICAL_CONSTRAINTS.length}`,
+        : `${expectedConstraints.length}/${expectedConstraints.length}`,
     );
   } catch (error) {
     record(ctx, "constraints", false, `query error: ${redact(String(error.message ?? error))}`);
@@ -666,7 +672,7 @@ export async function validateTarget(ctx) {
   try {
     const treeRows = await sql.query(QUERIES.treeFks);
     const treeSet = new Set(treeRows.map((row) => String(row.name)));
-    const trees = Object.entries(EXPECTED_TREE_FKS).map(([tree, fk]) => ({
+    const trees = Object.entries(expectedTreeFks).map(([tree, fk]) => ({
       tree,
       ok: treeSet.has(fk),
     }));
@@ -1244,6 +1250,28 @@ export async function runProdActions({
           ctx.ok = false;
           return finalize(ctx);
         }
+      } else if (
+        inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 2 &&
+        inspected.state.pending.length === 1 &&
+        inspected.state.pending[0] === "0002_payment_methods"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V1,
+          expectedIndexes: EXPECTED_INDEXES_V1,
+          expectedHashes: ctx.committedHashes.slice(0, 2).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 2 migrations recorded, " +
+              "but live schema does not match the supported prior release (0001_tree_and_snapshot_integrity).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
       }
 
       io.line("");
@@ -1271,20 +1299,59 @@ export async function runProdActions({
       return finalize(ctx);
     }
 
-    // Refuse partial, unmanaged, or ambiguous states before any write
+    // Refuse partial, unmanaged, or ambiguous states before any write,
+    // unless verified as a healthy supported prior release upgrade baseline.
+    let isSupportedUpgrade = false;
+
     if (inspected.state.status === "partial") {
-      io.line("");
-      io.line(
-        `FAIL The database is in a partial migration state (${inspected.state.appliedCount} of ` +
-          `${inspected.state.journalCount} migrations applied). Production migrations must ` +
-          "start from a clean empty target or be an already-configured no-op. Refusing to " +
-          "write to a partially migrated database.",
-      );
-      ctx.outcome = "manual-review";
-      return finalize(ctx);
+      const isKnownPriorRelease =
+        inspected.state.appliedCount === 2 &&
+        inspected.state.pending.length === 1 &&
+        inspected.state.pending[0] === "0002_payment_methods";
+
+      if (isKnownPriorRelease) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V1,
+          expectedIndexes: EXPECTED_INDEXES_V1,
+          expectedHashes: ctx.committedHashes.slice(0, 2).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0001_tree_and_snapshot_integrity). " +
+              "Proceeding with migration to 0002_payment_methods.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else {
+        io.line("");
+        io.line(
+          `FAIL The database is in a partial migration state (${inspected.state.appliedCount} of ` +
+            `${inspected.state.journalCount} migrations applied). Production migrations must ` +
+            "start from a clean empty target, a verified prior release upgrade baseline, " +
+            "or be an already-configured no-op. Refusing to write to a partially migrated database.",
+        );
+        ctx.outcome = "manual-review";
+        return finalize(ctx);
+      }
     }
 
-    if (inspected.state.status !== "empty" && inspected.state.status !== "configured") {
+    if (
+      inspected.state.status !== "empty" &&
+      inspected.state.status !== "configured" &&
+      !isSupportedUpgrade
+    ) {
       io.line("");
       io.line(
         `FAIL Database state is "${inspected.state.status}". Production migration refuses ` +

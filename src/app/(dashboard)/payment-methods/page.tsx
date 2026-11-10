@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { connection } from "next/server";
+import { AlertCircle } from "lucide-react";
 
 import { PaymentMethodsManager } from "@/components/dashboard/payment-methods/payment-methods-manager";
 import { CatalogStoreSetupRequired } from "@/components/dashboard/catalog/catalog-store-setup-required";
@@ -8,6 +9,7 @@ import { DatabaseUnavailable } from "@/components/dashboard/settings/database-un
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import {
+  checkPaymentMethodsCapability,
   isConfigured,
   listLanguages,
   listPaymentMethods,
@@ -27,6 +29,7 @@ type PaymentMethodsViewResult =
   | { kind: "database_setup_required" }
   | { kind: "database_unavailable"; message: string }
   | { kind: "store_setup_required" }
+  | { kind: "upgrade_required"; message: string }
   | {
       kind: "ready";
       data: {
@@ -35,6 +38,43 @@ type PaymentMethodsViewResult =
         languages: Awaited<ReturnType<typeof listLanguages>>;
       };
     };
+
+function PaymentMethodsUpgradeRequired({ message }: { message: string }) {
+  return (
+    <div className="p-4 sm:p-6 max-w-3xl space-y-6">
+      <div className="space-y-1">
+        <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Payment Methods</h1>
+        <p className="text-sm text-muted-foreground">
+          Central payment methods, instructions, and customer preview.
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-6 space-y-4">
+        <div className="flex items-start gap-3">
+          <AlertCircle className="size-5 text-amber-600 mt-0.5 shrink-0" />
+          <div className="space-y-1">
+            <h2 className="text-base font-semibold text-amber-900 dark:text-amber-100">
+              Database Upgrade Required
+            </h2>
+            <p className="text-sm text-amber-800 dark:text-amber-200">
+              {message}
+            </p>
+          </div>
+        </div>
+
+        <div className="rounded-lg bg-background border p-4 space-y-2 text-xs">
+          <p className="font-semibold text-foreground">Operator Action Required:</p>
+          <p className="text-muted-foreground">
+            Run the approved migration runner workflow to apply pending migrations. Existing catalog features, inquiries, and customer Telegram bot journeys remain fully operational.
+          </p>
+          <div className="font-mono bg-muted p-2 rounded text-[11px] text-muted-foreground">
+            gh workflow run neon-prod-migrate.yml -f mode=migrate -f confirm=MIGRATE_RABET_PROD
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 async function loadPaymentMethodsViewData(): Promise<PaymentMethodsViewResult> {
   const rawDbUrl = process.env.DATABASE_URL;
@@ -53,6 +93,16 @@ async function loadPaymentMethodsViewData(): Promise<PaymentMethodsViewResult> {
     const settings = await readSettings(db);
     if (!settings) {
       return { kind: "store_setup_required" };
+    }
+
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      return {
+        kind: "upgrade_required",
+        message:
+          capability.reason ??
+          "Payment method management is unavailable until the database is upgraded with pending migration 0002_payment_methods.sql.",
+      };
     }
 
     const [paymentMethods, languages, defaultLanguage] = await Promise.all([
@@ -103,6 +153,8 @@ export default async function PaymentMethodsPage() {
       );
     case "store_setup_required":
       return <CatalogStoreSetupRequired />;
+    case "upgrade_required":
+      return <PaymentMethodsUpgradeRequired message={result.message} />;
     case "ready":
       return (
         <PaymentMethodsManager

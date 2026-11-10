@@ -14,6 +14,7 @@ const mockReadSettings = vi.fn();
 const mockListLanguages = vi.fn();
 const mockResolveDefaultLanguage = vi.fn();
 const mockListPaymentMethods = vi.fn();
+const mockCheckPaymentMethodsCapability = vi.fn();
 const mockGetDb = vi.fn(() => ({}));
 
 vi.mock("@/db/client", () => ({
@@ -29,6 +30,8 @@ vi.mock("@/lib/data", async (importOriginal) => {
     listLanguages: (...args: unknown[]) => mockListLanguages(...args),
     resolveDefaultLanguage: (...args: unknown[]) => mockResolveDefaultLanguage(...args),
     listPaymentMethods: (...args: unknown[]) => mockListPaymentMethods(...args),
+    checkPaymentMethodsCapability: (...args: unknown[]) =>
+      mockCheckPaymentMethodsCapability(...args),
   };
 });
 
@@ -46,6 +49,7 @@ describe("Payment Methods Page — Authorization & Availability States", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockRequireAdmin.mockResolvedValue({ email: "admin@rabet.test", role: "admin" });
+    mockCheckPaymentMethodsCapability.mockResolvedValue({ supported: true });
   });
 
   afterEach(() => {
@@ -124,6 +128,35 @@ describe("Payment Methods Page — Authorization & Availability States", () => {
     expect(el.type.name).toBe("PaymentMethodsManager");
     expect(el.props.initialMethods).toHaveLength(1);
     expect(el.props.initialMethods[0].adminLabel).toBe("Bank Transfer");
+  });
+
+  it("renders PaymentMethodsUpgradeRequired when capability is unsupported on old schema", async () => {
+    process.env.DATABASE_URL = "postgres://fake:5432/db";
+    mockIsConfigured.mockResolvedValueOnce(true);
+    mockReadSettings.mockResolvedValueOnce({
+      displayName: "Acme Digital",
+      currency: "USD",
+      supportCategory: ["Help"],
+    });
+    mockListLanguages.mockResolvedValueOnce([
+      { id: "lang-en", code: "en", label: "English", textDirection: "ltr", isEnabled: true },
+    ]);
+    mockResolveDefaultLanguage.mockResolvedValueOnce({
+      id: "lang-en",
+      code: "en",
+      label: "English",
+      textDirection: "ltr",
+      isEnabled: true,
+    });
+    mockCheckPaymentMethodsCapability.mockResolvedValueOnce({
+      supported: false,
+      reason: "Payment methods schema migration 0002_payment_methods is pending.",
+    });
+
+    const el = await PaymentMethodsPage();
+    expect(el).toBeDefined();
+    expect(el.type.name).toBe("PaymentMethodsUpgradeRequired");
+    expect(el.props.message).toContain("0002_payment_methods");
   });
 });
 

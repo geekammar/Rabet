@@ -223,6 +223,239 @@ describe.skipIf(!shouldRun)("Central Payment Methods — Creation, Editing, Togg
     const readDisabled = await readPaymentMethod(appDb, created.methodId);
     expect(readDisabled!.isActive).toBe(false);
   });
+
+  it("atomic multilingual save: updates EN and AR drafts and adminLabel simultaneously", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const created = await createPaymentMethod(appDb, {
+      adminLabel: "Initial Multilingual Method",
+      translations: [
+        {
+          languageId: defaultLangId,
+          languageCode: "en",
+          title: "Initial EN Title",
+          instructions: "Initial EN Instructions",
+        },
+        {
+          languageId: arabicLangId,
+          languageCode: "ar",
+          title: "عنوان ابتدائي",
+          instructions: "تعليمات ابتدائية",
+        },
+      ],
+    });
+
+    // Save both EN and AR drafts together in one atomic call
+    const result = await editPaymentMethod(appDb, {
+      id: created.methodId,
+      adminLabel: "Updated Multilingual Method",
+      translations: [
+        {
+          languageCode: "en",
+          title: "Saved EN Title",
+          instructions: "Saved EN Instructions",
+        },
+        {
+          languageCode: "ar",
+          title: "عنوان محفوظ",
+          instructions: "تعليمات محفوظة",
+        },
+      ],
+    });
+
+    expect(result.method.adminLabel).toBe("Updated Multilingual Method");
+    expect(result.method.translations["en"]?.title).toBe("Saved EN Title");
+    expect(result.method.translations["en"]?.instructions).toBe("Saved EN Instructions");
+    expect(result.method.translations["ar"]?.title).toBe("عنوان محفوظ");
+    expect(result.method.translations["ar"]?.instructions).toBe("تعليمات محفوظة");
+
+    // Verify in database
+    const stored = await readPaymentMethod(appDb, created.methodId);
+    expect(stored!.adminLabel).toBe("Updated Multilingual Method");
+    expect(stored!.translations["en"]?.title).toBe("Saved EN Title");
+    expect(stored!.translations["ar"]?.title).toBe("عنوان محفوظ");
+  });
+
+  it("atomic multilingual save: failure in either language leaves both languages and shared fields unchanged", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const created = await createPaymentMethod(appDb, {
+      adminLabel: "Stable Method",
+      translations: [
+        {
+          languageId: defaultLangId,
+          languageCode: "en",
+          title: "Original EN Title",
+          instructions: "Original EN Instructions",
+        },
+        {
+          languageId: arabicLangId,
+          languageCode: "ar",
+          title: "العنوان الأصلي",
+          instructions: "التعليمات الأصلية",
+        },
+      ],
+    });
+
+    // Attempt save with valid EN draft and invalid AR draft (empty title)
+    await expect(
+      editPaymentMethod(appDb, {
+        id: created.methodId,
+        adminLabel: "Modified Method Admin Label",
+        translations: [
+          {
+            languageCode: "en",
+            title: "Changed EN Title That Must Not Persist",
+            instructions: "Changed EN Instructions",
+          },
+          {
+            languageCode: "ar",
+            title: "   ", // Empty title fails validation
+            instructions: "Modified AR instructions",
+          },
+        ],
+      }),
+    ).rejects.toThrow("Customer-facing title cannot be empty");
+
+    // Verify database state is 100% unchanged
+    const unchanged = await readPaymentMethod(appDb, created.methodId);
+    expect(unchanged!.adminLabel).toBe("Stable Method");
+    expect(unchanged!.translations["en"]?.title).toBe("Original EN Title");
+    expect(unchanged!.translations["en"]?.instructions).toBe("Original EN Instructions");
+    expect(unchanged!.translations["ar"]?.title).toBe("العنوان الأصلي");
+    expect(unchanged!.translations["ar"]?.instructions).toBe("التعليمات الأصلية");
+  });
+
+  it("partial update: title-only update preserves existing instructions", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const created = await createPaymentMethod(appDb, {
+      adminLabel: "Partial Title Method",
+      translations: [
+        {
+          languageId: defaultLangId,
+          languageCode: "en",
+          title: "Version 1 Title",
+          instructions: "Preserved Instructions Text",
+        },
+      ],
+    });
+
+    // Update title only (omitting instructions)
+    await editPaymentMethod(appDb, {
+      id: created.methodId,
+      translations: [
+        {
+          languageCode: "en",
+          title: "Version 2 Title",
+        },
+      ],
+    });
+
+    const stored = await readPaymentMethod(appDb, created.methodId);
+    expect(stored!.translations["en"]?.title).toBe("Version 2 Title");
+    expect(stored!.translations["en"]?.instructions).toBe("Preserved Instructions Text");
+  });
+
+  it("partial update: instructions-only update works and preserves existing title", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const created = await createPaymentMethod(appDb, {
+      adminLabel: "Partial Instructions Method",
+      translations: [
+        {
+          languageId: defaultLangId,
+          languageCode: "en",
+          title: "Preserved Title",
+          instructions: "Old instructions",
+        },
+      ],
+    });
+
+    // Update instructions only (omitting title)
+    await editPaymentMethod(appDb, {
+      id: created.methodId,
+      translations: [
+        {
+          languageCode: "en",
+          instructions: "Brand new instructions text",
+        },
+      ],
+    });
+
+    const stored = await readPaymentMethod(appDb, created.methodId);
+    expect(stored!.translations["en"]?.title).toBe("Preserved Title");
+    expect(stored!.translations["en"]?.instructions).toBe("Brand new instructions text");
+  });
+
+  it("partial update: explicit empty string instructions clears instructions", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const created = await createPaymentMethod(appDb, {
+      adminLabel: "Clear Instructions Method",
+      translations: [
+        {
+          languageId: defaultLangId,
+          languageCode: "en",
+          title: "Method Title",
+          instructions: "Instructions that will be cleared",
+        },
+      ],
+    });
+
+    // Explicit empty instructions
+    await editPaymentMethod(appDb, {
+      id: created.methodId,
+      translations: [
+        {
+          languageCode: "en",
+          instructions: "",
+        },
+      ],
+    });
+
+    const stored = await readPaymentMethod(appDb, created.methodId);
+    expect(stored!.translations["en"]?.title).toBe("Method Title");
+    expect(stored!.translations["en"]?.instructions).toBeNull();
+  });
+
+  it("partial update: empty optional translation tab does not block a valid save", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const created = await createPaymentMethod(appDb, {
+      adminLabel: "Single Language Method",
+      translations: [
+        {
+          languageId: defaultLangId,
+          languageCode: "en",
+          title: "English Only Title",
+          instructions: "English Only Instructions",
+        },
+      ],
+    });
+
+    // Send valid EN draft with completely empty optional AR draft
+    const res = await editPaymentMethod(appDb, {
+      id: created.methodId,
+      adminLabel: "Single Language Method Updated",
+      translations: [
+        {
+          languageCode: "en",
+          title: "English Only Title V2",
+          instructions: "English Only Instructions V2",
+        },
+        {
+          languageCode: "ar",
+          title: "",
+          instructions: "",
+        },
+      ],
+    });
+
+    expect(res.method.adminLabel).toBe("Single Language Method Updated");
+    expect(res.method.translations["en"]?.title).toBe("English Only Title V2");
+    expect(res.method.translations["ar"]).toBeUndefined();
+  });
 });
 
 describe.skipIf(!shouldRun)("Product Action Binding — PAYMENT_METHOD Button Type", () => {

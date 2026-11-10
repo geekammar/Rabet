@@ -21,6 +21,22 @@ import { validateActionTemplateBody } from "@/lib/product-actions/templates";
 import { executeAtomicBatch } from "./catalog";
 import { mapDatabaseError, RabetDataError } from "./errors";
 import { resolveDefaultLanguage } from "./languages";
+import { checkPaymentMethodsCapability } from "./payment-methods";
+
+const BASE_PRODUCT_ACTION_COLUMNS = {
+  id: productAction.id,
+  productId: productAction.productId,
+  parentActionId: productAction.parentActionId,
+  sortOrder: productAction.sortOrder,
+  actionType: productAction.actionType,
+  isActive: productAction.isActive,
+  url: productAction.url,
+  navigateCategoryId: productAction.navigateCategoryId,
+  navigateProductId: productAction.navigateProductId,
+  actionConfig: productAction.actionConfig,
+  createdAt: productAction.createdAt,
+  updatedAt: productAction.updatedAt,
+};
 
 /**
  * ===========================================================================
@@ -116,11 +132,24 @@ export async function listProductActions(
       );
     }
 
-    const actionRows = await db
-      .select()
-      .from(productAction)
-      .where(eq(productAction.productId, productId))
-      .orderBy(productAction.sortOrder, productAction.createdAt);
+    const capability = await checkPaymentMethodsCapability(db);
+
+    const actionRows = capability.supported
+      ? await db
+          .select({
+            ...BASE_PRODUCT_ACTION_COLUMNS,
+            paymentMethodId: productAction.paymentMethodId,
+          })
+          .from(productAction)
+          .where(eq(productAction.productId, productId))
+          .orderBy(productAction.sortOrder, productAction.createdAt)
+      : (
+          await db
+            .select(BASE_PRODUCT_ACTION_COLUMNS)
+            .from(productAction)
+            .where(eq(productAction.productId, productId))
+            .orderBy(productAction.sortOrder, productAction.createdAt)
+        ).map((r) => ({ ...r, paymentMethodId: null }));
 
     if (actionRows.length === 0) {
       return [];
@@ -188,11 +217,24 @@ export async function readProductAction(
   actionId: string,
 ): Promise<ProductActionRecord | null> {
   try {
-    const [actionRow] = await db
-      .select()
-      .from(productAction)
-      .where(eq(productAction.id, actionId))
-      .limit(1);
+    const capability = await checkPaymentMethodsCapability(db);
+
+    const [actionRow] = capability.supported
+      ? await db
+          .select({
+            ...BASE_PRODUCT_ACTION_COLUMNS,
+            paymentMethodId: productAction.paymentMethodId,
+          })
+          .from(productAction)
+          .where(eq(productAction.id, actionId))
+          .limit(1)
+      : (
+          await db
+            .select(BASE_PRODUCT_ACTION_COLUMNS)
+            .from(productAction)
+            .where(eq(productAction.id, actionId))
+            .limit(1)
+        ).map((r) => ({ ...r, paymentMethodId: null }));
 
     if (!actionRow) return null;
 
@@ -383,7 +425,15 @@ export async function createProductAction(
       }
     }
 
+    const capability = await checkPaymentMethodsCapability(db);
+
     if (input.actionType === "PAYMENT_METHOD") {
+      if (!capability.supported) {
+        throw new RabetDataError(
+          "SCHEMA_UPGRADE_REQUIRED",
+          capability.reason ?? "Payment method buttons are unavailable until pending migration 0002_payment_methods is applied.",
+        );
+      }
       const pmId = input.paymentMethodId?.trim() || null;
       if (isActive && !pmId) {
         throw new RabetDataError(
@@ -546,7 +596,7 @@ export async function createProductAction(
       }
     }
 
-    const actionInsert = db.insert(productAction).values({
+    const actionValues: typeof productAction.$inferInsert = {
       id: actionId,
       productId: input.productId,
       parentActionId: parentId,
@@ -562,15 +612,29 @@ export async function createProductAction(
         input.actionType === "NAVIGATE_CATALOG"
           ? (input.navigateProductId?.trim() ?? null)
           : null,
-      paymentMethodId:
-        input.actionType === "PAYMENT_METHOD"
-          ? (input.paymentMethodId?.trim() ?? null)
-          : null,
       actionConfig:
         input.actionType === "OPEN_SUPPORT" && input.actionConfig
           ? input.actionConfig
           : sql`'{}'::jsonb`,
-    });
+      paymentMethodId:
+        capability.supported && input.actionType === "PAYMENT_METHOD"
+          ? (input.paymentMethodId?.trim() ?? null)
+          : null,
+    };
+
+    const actionInsert = !capability.supported
+      ? sql`
+        INSERT INTO "product_action" (
+          "id", "product_id", "parent_action_id", "action_type",
+          "url", "navigate_category_id", "navigate_product_id",
+          "action_config", "sort_order", "is_active"
+        ) VALUES (
+          ${actionId}, ${input.productId}, ${parentId}, ${input.actionType},
+          ${actionValues.url}, ${actionValues.navigateCategoryId}, ${actionValues.navigateProductId},
+          ${actionValues.actionConfig}, ${nextSortOrder}, ${isActive}
+        )
+      `
+      : db.insert(productAction).values(actionValues);
 
     const translationInserts = input.translations.map((t) =>
       db.insert(productActionTranslation).values({
@@ -892,6 +956,13 @@ export async function editProductAction(
         }
       }
     } else if (input.actionType === "PAYMENT_METHOD") {
+      const capability = await checkPaymentMethodsCapability(db);
+      if (!capability.supported) {
+        throw new RabetDataError(
+          "SCHEMA_UPGRADE_REQUIRED",
+          capability.reason ?? "Payment method buttons are unavailable until pending migration 0002_payment_methods is applied.",
+        );
+      }
       paymentMethodIdToSet =
         input.paymentMethodId !== undefined
           ? (input.paymentMethodId?.trim() ?? null)
@@ -981,18 +1052,24 @@ export async function editProductAction(
     }
 
     // 6. Base action update
+    const capability = await checkPaymentMethodsCapability(db);
+    const updateSet: Record<string, unknown> = {
+      actionType: input.actionType,
+      isActive: input.isActive,
+      url: urlToSet,
+      navigateCategoryId: navCatToSet,
+      navigateProductId: navProdToSet,
+      actionConfig: configToSet,
+      updatedAt: sql`now()`,
+    };
+
+    if (capability.supported) {
+      updateSet.paymentMethodId = paymentMethodIdToSet;
+    }
+
     const actionUpdate = db
       .update(productAction)
-      .set({
-        actionType: input.actionType,
-        isActive: input.isActive,
-        url: urlToSet,
-        navigateCategoryId: navCatToSet,
-        navigateProductId: navProdToSet,
-        paymentMethodId: paymentMethodIdToSet,
-        actionConfig: configToSet,
-        updatedAt: sql`now()`,
-      })
+      .set(updateSet)
       .where(eq(productAction.id, input.actionId));
 
     queries.push(actionUpdate);

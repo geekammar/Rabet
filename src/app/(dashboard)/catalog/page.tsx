@@ -8,6 +8,7 @@ import { DatabaseUnavailable } from "@/components/dashboard/settings/database-un
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import {
+  checkPaymentMethodsCapability,
   isConfigured,
   listCatalogCategories,
   listCatalogProducts,
@@ -42,6 +43,7 @@ type CatalogViewResult =
         categories: Awaited<ReturnType<typeof listCatalogCategories>>;
         products: Awaited<ReturnType<typeof listCatalogProducts>>;
         paymentMethods: Awaited<ReturnType<typeof listPaymentMethods>>;
+        paymentMethodsAvailable: boolean;
       };
     };
 
@@ -64,12 +66,14 @@ async function loadCatalogViewData(): Promise<CatalogViewResult> {
       return { kind: "store_setup_required" };
     }
 
+    const capability = await checkPaymentMethodsCapability(db);
+
     const [languages, defaultLanguage, categories, products, paymentMethods] = await Promise.all([
       listLanguages(db),
       resolveDefaultLanguage(db),
       listCatalogCategories(db),
       listCatalogProducts(db),
-      listPaymentMethods(db),
+      capability.supported ? listPaymentMethods(db) : Promise.resolve([]),
     ]);
 
     return {
@@ -85,6 +89,7 @@ async function loadCatalogViewData(): Promise<CatalogViewResult> {
         categories,
         products,
         paymentMethods,
+        paymentMethodsAvailable: capability.supported,
       },
     };
   } catch (error) {
@@ -130,6 +135,7 @@ export default async function CatalogPage() {
           categories={result.data.categories}
           products={result.data.products}
           paymentMethods={result.data.paymentMethods}
+          paymentMethodsAvailable={result.data.paymentMethodsAvailable}
         />
       );
   }

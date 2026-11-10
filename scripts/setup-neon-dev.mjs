@@ -104,6 +104,32 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0002_payment_methods",
 ];
 
+/** The fourteen domain tables created by the 0000+0001 schema (prior release baseline). */
+export const EXPECTED_TABLES_V1 = EXPECTED_TABLES.filter(
+  (t) => t !== "payment_method" && t !== "payment_method_translation",
+);
+
+/** The seventeen indexes present in the 0000+0001 schema (prior release baseline). */
+export const EXPECTED_INDEXES_V1 = [
+  "category_sibling_sort_order_idx",
+  "category_root_sort_order_idx",
+  "product_action_sibling_sort_order_idx",
+  "product_action_root_sort_order_idx",
+  "inquiry_active_per_customer_product_idx",
+  "category_slug_unique",
+  "product_slug_unique",
+  "language_code_unique",
+  "message_template_key_unique",
+  "customer_telegram_id_unique",
+  "telegram_update_update_id_unique",
+  "inquiry_reference_unique",
+  "inquiry_message_telegram_message_idx",
+  "category_translation_category_language_idx",
+  "product_translation_product_language_idx",
+  "product_action_translation_action_language_idx",
+  "message_translation_template_language_idx",
+];
+
 /**
  * Indexes the wizard requires. The five partial unique indexes carry the
  * integrity rules, the business-key indexes protect the natural unique keys,
