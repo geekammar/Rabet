@@ -28,6 +28,7 @@ import { auth } from "@/auth";
 const PROTECTED_PREFIXES = [
   "/overview",
   "/catalog",
+  "/payment-methods",
   "/inquiries",
   "/customers",
   "/bot-content",

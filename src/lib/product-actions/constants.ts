@@ -21,6 +21,7 @@ export const SUPPORTED_ACTION_TYPES = [
   "OPEN_URL",
   "OPEN_SUPPORT",
   "NAVIGATE_CATALOG",
+  "PAYMENT_METHOD",
 ] as const;
 
 export type SupportedActionType = (typeof SUPPORTED_ACTION_TYPES)[number];

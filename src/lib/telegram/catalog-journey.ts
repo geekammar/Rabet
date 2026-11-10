@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, ne } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -1121,6 +1121,7 @@ async function renderProductCard(
         eq(productAction.productId, prodRow.id),
         isNull(productAction.parentActionId),
         eq(productAction.isActive, true),
+        ne(productAction.actionType, "PAYMENT_METHOD"),
       ),
     )
     .orderBy(asc(productAction.sortOrder), asc(productAction.id));
@@ -1229,6 +1230,7 @@ async function handleActionExecution(
         and(
           eq(productAction.parentActionId, actRow.id),
           eq(productAction.isActive, true),
+          ne(productAction.actionType, "PAYMENT_METHOD"),
         ),
       )
       .orderBy(asc(productAction.sortOrder), asc(productAction.id));
@@ -1638,6 +1640,25 @@ async function handleActionExecution(
       backTarget,
       returnToProductTarget,
       options: journeyOptions,
+    });
+    return;
+  }
+
+  // H. PAYMENT_METHOD: Not supported in customer-facing Telegram; reject safely
+  if (actRow.actionType === "PAYMENT_METHOD") {
+    const keyboard: TelegramInlineKeyboardButton[][] = [
+      [{ text: ui.back, callback_data: backTarget }],
+    ];
+    if (actRow.parentActionId) {
+      keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+    }
+    keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+    await editOrThrow(transport, {
+      chatId,
+      messageId,
+      text: ui.optionUnavailable,
+      replyMarkup: { inline_keyboard: keyboard },
     });
     return;
   }

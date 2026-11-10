@@ -12,6 +12,7 @@ import {
   listCatalogCategories,
   listCatalogProducts,
   listLanguages,
+  listPaymentMethods,
   readSettings,
   resolveDefaultLanguage,
   toSafeErrorMessage,
@@ -40,6 +41,7 @@ type CatalogViewResult =
         languages: Awaited<ReturnType<typeof listLanguages>>;
         categories: Awaited<ReturnType<typeof listCatalogCategories>>;
         products: Awaited<ReturnType<typeof listCatalogProducts>>;
+        paymentMethods: Awaited<ReturnType<typeof listPaymentMethods>>;
       };
     };
 
@@ -62,11 +64,12 @@ async function loadCatalogViewData(): Promise<CatalogViewResult> {
       return { kind: "store_setup_required" };
     }
 
-    const [languages, defaultLanguage, categories, products] = await Promise.all([
+    const [languages, defaultLanguage, categories, products, paymentMethods] = await Promise.all([
       listLanguages(db),
       resolveDefaultLanguage(db),
       listCatalogCategories(db),
       listCatalogProducts(db),
+      listPaymentMethods(db),
     ]);
 
     return {
@@ -81,6 +84,7 @@ async function loadCatalogViewData(): Promise<CatalogViewResult> {
         languages,
         categories,
         products,
+        paymentMethods,
       },
     };
   } catch (error) {
@@ -125,6 +129,7 @@ export default async function CatalogPage() {
           languages={result.data.languages}
           categories={result.data.categories}
           products={result.data.products}
+          paymentMethods={result.data.paymentMethods}
         />
       );
   }

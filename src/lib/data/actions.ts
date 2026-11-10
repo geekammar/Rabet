@@ -7,6 +7,7 @@ import {
   botSetting,
   category,
   language,
+  paymentMethod,
   product,
   productAction,
   productActionTranslation,
@@ -37,6 +38,7 @@ export interface ProductActionRecord {
   url: string | null;
   navigateCategoryId: string | null;
   navigateProductId: string | null;
+  paymentMethodId: string | null;
   actionConfig: unknown;
   createdAt: Date;
   updatedAt: Date;
@@ -62,6 +64,7 @@ export interface CreateProductActionData {
   url?: string | null;
   navigateCategoryId?: string | null;
   navigateProductId?: string | null;
+  paymentMethodId?: string | null;
   actionConfig?: Record<string, unknown>;
   translations: Array<{
     languageId: string;
@@ -80,6 +83,7 @@ export interface EditProductActionData {
   url?: string | null;
   navigateCategoryId?: string | null;
   navigateProductId?: string | null;
+  paymentMethodId?: string | null;
   actionConfig?: Record<string, unknown>;
   translation?: {
     languageId: string;
@@ -379,6 +383,30 @@ export async function createProductAction(
       }
     }
 
+    if (input.actionType === "PAYMENT_METHOD") {
+      const pmId = input.paymentMethodId?.trim() || null;
+      if (isActive && !pmId) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "A valid payment method target is required before activating a PAYMENT_METHOD button.",
+        );
+      }
+      if (pmId) {
+        const [targetMethod] = await db
+          .select({ id: paymentMethod.id, isActive: paymentMethod.isActive })
+          .from(paymentMethod)
+          .where(eq(paymentMethod.id, pmId))
+          .limit(1);
+
+        if (!targetMethod) {
+          throw new RabetDataError(
+            "NOT_FOUND",
+            "Referenced payment method does not exist.",
+          );
+        }
+      }
+    }
+
     if (input.actionType === "OPEN_SUPPORT" && input.actionConfig) {
       const cat = (input.actionConfig as { support_category?: string }).support_category;
       if (cat && typeof cat === "string" && cat.trim().length > 0) {
@@ -534,6 +562,10 @@ export async function createProductAction(
         input.actionType === "NAVIGATE_CATALOG"
           ? (input.navigateProductId?.trim() ?? null)
           : null,
+      paymentMethodId:
+        input.actionType === "PAYMENT_METHOD"
+          ? (input.paymentMethodId?.trim() ?? null)
+          : null,
       actionConfig:
         input.actionType === "OPEN_SUPPORT" && input.actionConfig
           ? input.actionConfig
@@ -661,6 +693,7 @@ export async function editProductAction(
     let urlToSet: string | null = null;
     let navCatToSet: string | null = null;
     let navProdToSet: string | null = null;
+    let paymentMethodIdToSet: string | null = null;
     let configToSet: unknown = sql`'{}'::jsonb`;
 
     if (input.actionType === "SEND_TEMPLATE_MESSAGE") {
@@ -858,6 +891,33 @@ export async function editProductAction(
           }
         }
       }
+    } else if (input.actionType === "PAYMENT_METHOD") {
+      paymentMethodIdToSet =
+        input.paymentMethodId !== undefined
+          ? (input.paymentMethodId?.trim() ?? null)
+          : (isTypeChange ? null : existing.paymentMethodId);
+
+      if (paymentMethodIdToSet) {
+        const [targetMethod] = await db
+          .select({ id: paymentMethod.id, isActive: paymentMethod.isActive })
+          .from(paymentMethod)
+          .where(eq(paymentMethod.id, paymentMethodIdToSet))
+          .limit(1);
+
+        if (!targetMethod) {
+          throw new RabetDataError(
+            "NOT_FOUND",
+            "Referenced payment method does not exist.",
+          );
+        }
+      }
+
+      if (input.isActive && !paymentMethodIdToSet) {
+        throw new RabetDataError(
+          "INVALID_INPUT",
+          "A valid payment method target is required before activating a PAYMENT_METHOD button.",
+        );
+      }
     }
 
     // 5. Build atomic queries with concurrency-safe active limit check
@@ -929,6 +989,7 @@ export async function editProductAction(
         url: urlToSet,
         navigateCategoryId: navCatToSet,
         navigateProductId: navProdToSet,
+        paymentMethodId: paymentMethodIdToSet,
         actionConfig: configToSet,
         updatedAt: sql`now()`,
       })

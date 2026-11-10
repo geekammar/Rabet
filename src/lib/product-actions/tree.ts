@@ -25,6 +25,7 @@ export interface RawActionNode {
   url?: string | null;
   navigateCategoryId?: string | null;
   navigateProductId?: string | null;
+  paymentMethodId?: string | null;
   actionConfig?: unknown;
   translations: Record<string, RawActionTranslation>;
 }

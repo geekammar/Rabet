@@ -88,6 +88,8 @@ export const EXPECTED_TABLES = [
   "language",
   "message_template",
   "message_translation",
+  "payment_method",
+  "payment_method_translation",
   "product",
   "product_action",
   "product_action_translation",
@@ -99,6 +101,7 @@ export const EXPECTED_TABLES = [
 export const EXPECTED_MIGRATION_TAGS = [
   "0000_initial_schema",
   "0001_tree_and_snapshot_integrity",
+  "0002_payment_methods",
 ];
 
 /**
@@ -124,6 +127,7 @@ export const EXPECTED_INDEXES = [
   "product_translation_product_language_idx",
   "product_action_translation_action_language_idx",
   "message_translation_template_language_idx",
+  "payment_method_translation_method_language_idx",
 ];
 
 /** CHECK constraints the wizard requires (domain rules the schema enforces). */

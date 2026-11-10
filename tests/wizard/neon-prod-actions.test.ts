@@ -1010,7 +1010,9 @@ describe("production runner flows and execution", () => {
     expect(result.outcome).toBe("inspected");
     expect(commandsRun).toBe(0);
     expect(output()).toContain("Read-only inspection complete");
-    expect(output()).toContain("Pending migrations: 2");
+    expect(output()).toContain(
+      `Pending migrations: ${wizard.EXPECTED_MIGRATION_TAGS.length}`,
+    );
     expect(output()).toContain("No DDL ran, no migration ledger was modified");
   });
 

@@ -52,6 +52,7 @@ export function CatalogEditor({
   languages,
   categories: initialCategories,
   products: initialProducts,
+  paymentMethods = [],
 }: CatalogViewData) {
   // Categories & Products state
   const [categories, setCategories] = useState(initialCategories);
@@ -570,6 +571,7 @@ export function CatalogEditor({
           languages={languages}
           categories={categories}
           products={products}
+          paymentMethods={paymentMethods}
           settings={settings}
           onClose={handleCloseActionEditor}
         />

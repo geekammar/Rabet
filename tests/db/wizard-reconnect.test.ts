@@ -431,10 +431,10 @@ describe.skipIf(!shouldRun)("replacement-VPS reconnect on real PostgreSQL", () =
       expect(run.result.ok).toBe(true);
       expect(run.result.outcome).toBe("configured");
 
-      // Only the new migration was applied — the first one was not repeated.
-      expect(run.result.writes.migrationsApplied).toEqual([
-        wizard.EXPECTED_MIGRATION_TAGS[1],
-      ]);
+      // Only the new migrations were applied — the first one was not repeated.
+      expect(run.result.writes.migrationsApplied).toEqual(
+        wizard.EXPECTED_MIGRATION_TAGS.slice(1),
+      );
       expect(await appliedHashes(db.sql)).toEqual(
         wizard.computeMigrationHashes(repo).map((entry) => entry.hash),
       );

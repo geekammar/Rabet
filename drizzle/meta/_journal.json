@@ -15,6 +15,13 @@
       "when": 1791780534652,
       "tag": "0001_tree_and_snapshot_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794345229674,
+      "tag": "0002_payment_methods",
+      "breakpoints": true
     }
   ]
 }

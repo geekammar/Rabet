@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 
+import { loadPaymentMethodsAction } from "@/app/actions/payment-methods";
 import {
   createProductActionAction,
   loadProductActionsAction,
@@ -31,7 +32,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import type { LanguageRow, ResolvedLanguage } from "@/lib/data";
+import type { LanguageRow, PaymentMethodRecord, ResolvedLanguage } from "@/lib/data";
 import {
   ACTION_MESSAGE_PLACEHOLDERS,
   MAX_ACTION_LABEL_LENGTH,
@@ -58,6 +59,7 @@ interface ProductActionEditorProps {
   languages: LanguageRow[];
   categories?: CatalogCategoryRecord[];
   products?: CatalogProductRecord[];
+  paymentMethods?: PaymentMethodRecord[];
   settings?: {
     displayName: string;
     currency: string;
@@ -75,10 +77,14 @@ export function ProductActionEditor({
   languages,
   categories = [],
   products = [],
+  paymentMethods: initialPaymentMethods = [],
   settings,
   onClose,
 }: ProductActionEditorProps) {
   const [actions, setActions] = useState<RawActionNode[]>([]);
+  const [paymentMethodsList, setPaymentMethodsList] = useState<PaymentMethodRecord[]>(
+    initialPaymentMethods ?? [],
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [isPending, startTransition] = useTransition();
   const [actionFeedback, setActionFeedback] = useState<ProductActionResult | null>(null);
@@ -103,6 +109,11 @@ export function ProductActionEditor({
 
   // Active language tab in edit drawer
   const [activeLangTab, setActiveLangTab] = useState<string>(defaultLangCode);
+  const activeLangDir: "ltr" | "rtl" =
+    languages.find((l) => l.code === activeLangTab)?.textDirection === "rtl" ||
+    activeLangTab === "ar"
+      ? "rtl"
+      : "ltr";
 
   const saveVersionRef = useRef(0);
   const loadGenerationRef = useRef(0);
@@ -124,6 +135,7 @@ export function ProductActionEditor({
   const [editSupportCategory, setEditSupportCategory] = useState("");
   const [editNavTargetKind, setEditNavTargetKind] = useState<"category" | "product">("category");
   const [editNavTargetId, setEditNavTargetId] = useState("");
+  const [editPaymentMethodId, setEditPaymentMethodId] = useState("");
 
   const [editDraftTranslations, setEditDraftTranslations] = useState<
     Record<string, { label: string; menuText: string; templateBody: string }>
@@ -137,8 +149,28 @@ export function ProductActionEditor({
     setEditingActionId(null);
     setActionFeedback(null);
     setEditDraftTranslations({});
+    setEditPaymentMethodId("");
     setIsCreateOpen(false);
   }
+
+  // Keep payment methods in sync
+  const [prevPaymentMethods, setPrevPaymentMethods] = useState(initialPaymentMethods);
+  if (initialPaymentMethods !== prevPaymentMethods) {
+    setPrevPaymentMethods(initialPaymentMethods);
+    setPaymentMethodsList(initialPaymentMethods ?? []);
+  }
+
+  useEffect(() => {
+    let isCurrent = true;
+    loadPaymentMethodsAction().then((res) => {
+      if (isCurrent && res.success && res.methods) {
+        setPaymentMethodsList(res.methods);
+      }
+    });
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   // Combined busy flag for UI controls
   const isBusy = isLoading || isPending;
@@ -152,6 +184,12 @@ export function ProductActionEditor({
     isReadActiveRef.current = true;
     setIsLoading(true);
     setActionFeedback(null);
+
+    loadPaymentMethodsAction().then((res) => {
+      if (res.success && res.methods) {
+        setPaymentMethodsList(res.methods);
+      }
+    });
 
     loadProductActionsAction(targetProductId)
       .then((res) => {
@@ -352,6 +390,8 @@ export function ProductActionEditor({
       setEditNavTargetId("");
     }
 
+    setEditPaymentMethodId(node.paymentMethodId ?? "");
+
     const trans: Record<string, { label: string; menuText: string; templateBody: string }> = {};
     for (const [code, t] of Object.entries(node.translations)) {
       trans[code] = {
@@ -413,6 +453,8 @@ export function ProductActionEditor({
             editActionType === "NAVIGATE_CATALOG" && editNavTargetKind === "product"
               ? (editNavTargetId || null)
               : null,
+          paymentMethodId:
+            editActionType === "PAYMENT_METHOD" ? (editPaymentMethodId || null) : null,
           actionConfig:
             editActionType === "OPEN_SUPPORT"
               ? (editSupportCategory ? { support_category: editSupportCategory } : {})
@@ -504,6 +546,7 @@ export function ProductActionEditor({
   const [createSupportCategory, setCreateSupportCategory] = useState("");
   const [createNavTargetKind, setCreateNavTargetKind] = useState<"category" | "product">("category");
   const [createNavTargetId, setCreateNavTargetId] = useState("");
+  const [createPaymentMethodId, setCreatePaymentMethodId] = useState("");
 
   const [createArabicLabel, setCreateArabicLabel] = useState("");
   const [createArabicMenuText, setCreateArabicMenuText] = useState("");
@@ -523,6 +566,7 @@ export function ProductActionEditor({
     setCreateSupportCategory("");
     setCreateNavTargetKind("category");
     setCreateNavTargetId("");
+    setCreatePaymentMethodId("");
     setCreateArabicLabel("");
     setCreateArabicMenuText("");
     setCreateArabicTemplateBody("");
@@ -575,6 +619,8 @@ export function ProductActionEditor({
             createType === "NAVIGATE_CATALOG" && createNavTargetKind === "product"
               ? (createNavTargetId || null)
               : null,
+          paymentMethodId:
+            createType === "PAYMENT_METHOD" ? (createPaymentMethodId || null) : null,
           actionConfig:
             createType === "OPEN_SUPPORT"
               ? (createSupportCategory ? { support_category: createSupportCategory } : {})
@@ -696,8 +742,41 @@ export function ProductActionEditor({
                       ? "Support"
                       : node.actionType === "NAVIGATE_CATALOG"
                       ? "Navigate"
+                      : node.actionType === "PAYMENT_METHOD"
+                      ? "Payment Method"
                       : node.actionType}
                   </Badge>
+                  {node.actionType === "PAYMENT_METHOD" && (() => {
+                    const pm = node.paymentMethodId
+                      ? paymentMethodsList.find((m) => m.id === node.paymentMethodId)
+                      : null;
+                    if (!pm) {
+                      return (
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] border-destructive/40 text-destructive bg-destructive/10 shrink-0"
+                        >
+                          Unlinked
+                        </Badge>
+                      );
+                    }
+                    if (!pm.isActive) {
+                      return (
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] border-amber-500/40 text-amber-700 bg-amber-500/10 shrink-0"
+                          data-testid="button-method-disabled-badge"
+                        >
+                          Method Disabled: {pm.adminLabel}
+                        </Badge>
+                      );
+                    }
+                    return (
+                      <span className="text-[11px] text-muted-foreground truncate">
+                        ({pm.adminLabel})
+                      </span>
+                    );
+                  })()}
                 </div>
               </div>
             </button>
@@ -1028,6 +1107,7 @@ export function ProductActionEditor({
                     <option value="OPEN_URL">OPEN_URL (Open external HTTPS web link)</option>
                     <option value="OPEN_SUPPORT">OPEN_SUPPORT (Open general support conversation)</option>
                     <option value="NAVIGATE_CATALOG">NAVIGATE_CATALOG (Jump to category or product)</option>
+                    <option value="PAYMENT_METHOD">PAYMENT_METHOD (Central payment method instructions)</option>
                   </select>
                   {selectedNode.actionType === "OPEN_SUBMENU" &&
                     selectedNode.children.length > 0 && (
@@ -1284,6 +1364,100 @@ export function ProductActionEditor({
                         }
                       }
                       return null;
+                    })()}
+                  </div>
+                )}
+
+                {/* TYPE-SPECIFIC CONFIGURATION: PAYMENT_METHOD */}
+                {editActionType === "PAYMENT_METHOD" && (
+                  <div className="space-y-3 pt-2 border-t">
+                    <div className="space-y-1.5">
+                      <label htmlFor="edit-action-payment-method" className="text-xs font-semibold">
+                        Payment Method <span className="text-destructive">*</span>
+                      </label>
+                      <select
+                        id="edit-action-payment-method"
+                        data-testid="edit-action-payment-method-select"
+                        value={editPaymentMethodId}
+                        disabled={isBusy}
+                        onChange={(e) => setEditPaymentMethodId(e.target.value)}
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                      >
+                        <option value="">-- Choose payment method --</option>
+                        {paymentMethodsList.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.adminLabel} {m.isActive ? "(Active)" : "(Disabled)"}
+                          </option>
+                        ))}
+                        {editPaymentMethodId &&
+                          !paymentMethodsList.some((m) => m.id === editPaymentMethodId) && (
+                            <option value={editPaymentMethodId}>
+                              (Unavailable / Deleted method)
+                            </option>
+                          )}
+                      </select>
+                      <p className="text-[11px] text-muted-foreground">
+                        Customer-facing title and instructions are managed centrally under Payment Methods.
+                      </p>
+                    </div>
+
+                    {/* Customer Preview for selected payment method */}
+                    {(() => {
+                      const selectedMethod = paymentMethodsList.find(
+                        (m) => m.id === editPaymentMethodId,
+                      );
+                      if (!selectedMethod) {
+                        return (
+                          <div className="rounded-xl border border-dashed p-3 text-center text-xs text-muted-foreground">
+                            Select a payment method above to preview customer-facing instructions.
+                          </div>
+                        );
+                      }
+
+                      const trans =
+                        selectedMethod.translations[activeLangTab] ??
+                        selectedMethod.translations[defaultLangCode];
+                      const title = trans?.title ?? "";
+                      const instructions = trans?.instructions ?? "";
+
+                      return (
+                        <div
+                          className="rounded-xl border bg-muted/30 p-3 space-y-2"
+                          data-testid="payment-method-preview-card"
+                        >
+                          <div className="flex items-center justify-between text-[11px] font-semibold text-muted-foreground">
+                            <span className="flex items-center gap-1.5">
+                              <Info className="size-3.5" />
+                              Customer Preview ({activeLangTab.toUpperCase()}):
+                            </span>
+                            {!selectedMethod.isActive && (
+                              <Badge
+                                variant="outline"
+                                className="border-amber-500/30 bg-amber-500/10 text-amber-700 text-[10px]"
+                                data-testid="edit-method-disabled-warning"
+                              >
+                                Method is Disabled
+                              </Badge>
+                            )}
+                          </div>
+                          <div
+                            className="rounded-lg bg-background border p-3 space-y-1.5"
+                            dir={activeLangDir}
+                          >
+                            <div className="font-semibold text-sm">
+                              {title || <span className="text-muted-foreground italic">No title</span>}
+                            </div>
+                            <div className="text-xs text-muted-foreground whitespace-pre-wrap break-words">
+                              {instructions || <span className="italic">No instructions</span>}
+                            </div>
+                          </div>
+                          {!selectedMethod.isActive && (
+                            <p className="text-[11px] text-amber-600">
+                              This payment method is currently disabled. Button reference will be preserved, but customers cannot complete this action.
+                            </p>
+                          )}
+                        </div>
+                      );
                     })()}
                   </div>
                 )}
@@ -1683,6 +1857,7 @@ export function ProductActionEditor({
                   <option value="OPEN_URL">OPEN_URL (Open external HTTPS web link)</option>
                   <option value="OPEN_SUPPORT">OPEN_SUPPORT (Open general support conversation)</option>
                   <option value="NAVIGATE_CATALOG">NAVIGATE_CATALOG (Jump to category or product)</option>
+                  <option value="PAYMENT_METHOD">PAYMENT_METHOD (Central payment method instructions)</option>
                 </select>
               </div>
 
@@ -1826,6 +2001,79 @@ export function ProductActionEditor({
                           })}
                     </select>
                   </div>
+                </div>
+              )}
+
+              {/* TYPE-SPECIFIC CREATE FIELDS: PAYMENT_METHOD */}
+              {createType === "PAYMENT_METHOD" && (
+                <div className="space-y-3 pt-2 border-t">
+                  <div className="space-y-1.5">
+                    <label htmlFor="create-action-payment-method" className="text-xs font-semibold">
+                      Payment Method <span className="text-destructive">*</span>
+                    </label>
+                    <select
+                      id="create-action-payment-method"
+                      data-testid="create-action-payment-method-select"
+                      value={createPaymentMethodId}
+                      disabled={isBusy}
+                      onChange={(e) => setCreatePaymentMethodId(e.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                    >
+                      <option value="">-- Choose payment method --</option>
+                      {paymentMethodsList.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.adminLabel} {m.isActive ? "(Active)" : "(Disabled)"}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-muted-foreground">
+                      Customer-facing title and instructions are managed centrally under Payment Methods.
+                    </p>
+                  </div>
+
+                  {/* Customer Preview for create modal */}
+                  {(() => {
+                    const selectedMethod = paymentMethodsList.find(
+                      (m) => m.id === createPaymentMethodId,
+                    );
+                    if (!selectedMethod) {
+                      return null;
+                    }
+
+                    const trans =
+                      selectedMethod.translations[defaultLangCode] ??
+                      selectedMethod.translations["en"];
+                    const title = trans?.title ?? "";
+                    const instructions = trans?.instructions ?? "";
+
+                    return (
+                      <div className="rounded-xl border bg-muted/30 p-2.5 space-y-1.5">
+                        <div className="flex items-center justify-between text-[11px] font-semibold text-muted-foreground">
+                          <span className="flex items-center gap-1.5">
+                            <Info className="size-3.5" />
+                            Customer Preview ({defaultLangLabel}):
+                          </span>
+                          {!selectedMethod.isActive && (
+                            <Badge
+                              variant="outline"
+                              className="border-amber-500/30 bg-amber-500/10 text-amber-700 text-[10px]"
+                            >
+                              Method is Disabled
+                            </Badge>
+                          )}
+                        </div>
+                        <div
+                          className="rounded bg-background border p-2 text-xs space-y-1"
+                          dir={defaultLangDir}
+                        >
+                          <div className="font-semibold">{title || "No title"}</div>
+                          <div className="text-muted-foreground whitespace-pre-wrap break-words">
+                            {instructions || "No instructions"}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
