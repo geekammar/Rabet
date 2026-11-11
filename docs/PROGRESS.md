@@ -1129,8 +1129,13 @@ Key deliverables & repairs across all review findings (A through E):
    - Older pending responses cannot overwrite newer results.
    - Retains usable existing payment methods on refresh errors and displays clear alert messages.
    - Added controlled response ordering regression in `tests/product-action-editor-loader.test.ts`: starting request A, starting newer request B, resolving B, then resolving A guarantees B's methods and all unsaved drafts are retained.
+   - **Refresh Completion Repair:** Settle `isRefreshing: false` whenever the newest generation request completes (`this.isMounted && gen === this.generation`), ensuring background or focus loads correctly settle refresh state when superseding an in-flight manual refresh. Added controlled regression tests for superseded success, server failure, and thrown exceptions.
 
-4. **Mobile Regression & Acceptance Verification:**
+4. **Mobile Regression & Accessible Review Evidence:**
    - Added automated browser regression in `scripts/test-payment-methods-browser-acceptance.mjs` testing single-language create, save, and reopen on a 360x740 narrow mobile viewport with optional Arabic tab untouched.
-   - Captured screenshot artifact `09_mobile_one_language_save_reopen.png`.
+   - Published three verified synthetic screenshots in `docs/review/pr22/`:
+     - `01_mobile_one_language_save_reopen.png`: Narrow-mobile (360x740) single-language save & reopen.
+     - `02_product_button_updated_preview.png`: Product button action editor showing updated central method preview.
+     - `03_disabled_method_reference_retained.png`: Disabled method with button reference retained.
+   - All screenshot evidence inspected to confirm zero credentials, real customer data, or financial information.
    - Preserved deployment order: compatible code deployment -> read-only inspect -> approved manual migration -> live verification -> payment features activated.

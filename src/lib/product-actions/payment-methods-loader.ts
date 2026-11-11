@@ -56,7 +56,7 @@ export class GuardedPaymentMethodsLoader {
       }
       return { applied: false, reason: "exception" };
     } finally {
-      if (this.isMounted && gen === this.generation && options?.isExplicitRefresh) {
+      if (this.isMounted && gen === this.generation) {
         this.onStateChange({ isRefreshing: false });
       }
     }

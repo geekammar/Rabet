@@ -170,4 +170,165 @@ describe("GuardedPaymentMethodsLoader — Preview Freshness & Controlled Respons
     expect(state.error).toBe("Network timeout while fetching payment methods.");
     expect(state.isRefreshing).toBe(false);
   });
+
+  describe("Refresh-state settling when background request supersedes manual refresh", () => {
+    it("settles isRefreshing to false and retains B's data when explicit A is superseded by successful background B, then A resolves", async () => {
+      const deferredA = createDeferred<PaymentMethodFetchResult>();
+      const deferredB = createDeferred<PaymentMethodFetchResult>();
+
+      let callCount = 0;
+      const fetcher = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return deferredA.promise;
+        return deferredB.promise;
+      });
+
+      const state: GuardedLoaderState = {
+        methods: [],
+        error: null,
+        isRefreshing: false,
+      };
+
+      const loader = new GuardedPaymentMethodsLoader(fetcher, (patch) => {
+        Object.assign(state, patch);
+      });
+
+      // 1. Start request A with explicit refresh flag (user clicks refresh button)
+      const loadPromiseA = loader.load({ isExplicitRefresh: true });
+      expect(state.isRefreshing).toBe(true);
+
+      // 2. While A is pending, background/focus request B starts WITHOUT explicit refresh flag
+      const loadPromiseB = loader.load(); // isExplicitRefresh omitted / undefined
+      expect(loader.currentGeneration).toBe(2);
+
+      // 3. Resolve background request B successfully first
+      deferredB.resolve({
+        success: true,
+        methods: [methodB],
+      });
+      const resultB = await loadPromiseB;
+      expect(resultB.applied).toBe(true);
+      expect(state.methods).toEqual([methodB]);
+      expect(state.error).toBeNull();
+      // Crucial assertion: isRefreshing MUST settle to false even though B was not explicit
+      expect(state.isRefreshing).toBe(false);
+
+      // 4. Resolve older explicit request A later
+      deferredA.resolve({
+        success: true,
+        methods: [methodA],
+      });
+      const resultA = await loadPromiseA;
+      expect(resultA.applied).toBe(false);
+      expect(resultA.reason).toBe("stale_or_unmounted");
+
+      // State remains B's methods and isRefreshing remains false
+      expect(state.methods).toEqual([methodB]);
+      expect(state.isRefreshing).toBe(false);
+      expect(state.error).toBeNull();
+    });
+
+    it("settles isRefreshing to false and retains error when explicit A is superseded by failing background B, then A resolves", async () => {
+      const deferredA = createDeferred<PaymentMethodFetchResult>();
+      const deferredB = createDeferred<PaymentMethodFetchResult>();
+
+      let callCount = 0;
+      const fetcher = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return deferredA.promise;
+        return deferredB.promise;
+      });
+
+      const state: GuardedLoaderState = {
+        methods: [methodA], // Existing usable method
+        error: null,
+        isRefreshing: false,
+      };
+
+      const loader = new GuardedPaymentMethodsLoader(fetcher, (patch) => {
+        Object.assign(state, patch);
+      });
+
+      // 1. Start request A with explicit refresh flag
+      const loadPromiseA = loader.load({ isExplicitRefresh: true });
+      expect(state.isRefreshing).toBe(true);
+
+      // 2. While A is pending, background request B starts without explicit flag
+      const loadPromiseB = loader.load();
+
+      // 3. Resolve background request B with server error
+      deferredB.resolve({
+        success: false,
+        message: "Server temporarily unreachable",
+      });
+      const resultB = await loadPromiseB;
+      expect(resultB.applied).toBe(true);
+      expect(resultB.reason).toBe("server_error");
+      // Must preserve existing usable methods while setting error
+      expect(state.methods).toEqual([methodA]);
+      expect(state.error).toBe("Server temporarily unreachable");
+      // Crucial assertion: isRefreshing MUST settle to false
+      expect(state.isRefreshing).toBe(false);
+
+      // 4. Resolve older request A later
+      deferredA.resolve({
+        success: true,
+        methods: [methodB],
+      });
+      const resultA = await loadPromiseA;
+      expect(resultA.applied).toBe(false);
+      expect(resultA.reason).toBe("stale_or_unmounted");
+
+      // B's failure and settled refresh state are preserved
+      expect(state.methods).toEqual([methodA]);
+      expect(state.error).toBe("Server temporarily unreachable");
+      expect(state.isRefreshing).toBe(false);
+    });
+
+    it("settles isRefreshing to false when explicit A is superseded by throwing background B, then A resolves", async () => {
+      const deferredA = createDeferred<PaymentMethodFetchResult>();
+      const deferredB = createDeferred<PaymentMethodFetchResult>();
+
+      let callCount = 0;
+      const fetcher = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return deferredA.promise;
+        return deferredB.promise;
+      });
+
+      const state: GuardedLoaderState = {
+        methods: [methodA],
+        error: null,
+        isRefreshing: false,
+      };
+
+      const loader = new GuardedPaymentMethodsLoader(fetcher, (patch) => {
+        Object.assign(state, patch);
+      });
+
+      const loadPromiseA = loader.load({ isExplicitRefresh: true });
+      expect(state.isRefreshing).toBe(true);
+
+      const loadPromiseB = loader.load();
+
+      deferredB.reject(new Error("Network disconnect"));
+      const resultB = await loadPromiseB;
+      expect(resultB.applied).toBe(false);
+      expect(resultB.reason).toBe("exception");
+      expect(state.methods).toEqual([methodA]);
+      expect(state.error).toBe("Failed to load payment methods.");
+      expect(state.isRefreshing).toBe(false);
+
+      deferredA.resolve({
+        success: true,
+        methods: [methodB],
+      });
+      const resultA = await loadPromiseA;
+      expect(resultA.applied).toBe(false);
+
+      expect(state.methods).toEqual([methodA]);
+      expect(state.error).toBe("Failed to load payment methods.");
+      expect(state.isRefreshing).toBe(false);
+    });
+  });
 });
