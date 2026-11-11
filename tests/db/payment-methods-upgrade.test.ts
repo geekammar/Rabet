@@ -343,6 +343,58 @@ describe.skipIf(!shouldRun)("Production Release Upgrade Path (Phase 10B -> Phase
     }
   });
 
+  it("C1. Runner refusal: altered last timestamp with correct hashes is refused before writes", async () => {
+    const alteredDb = await createThrowawayDb("altered_timestamp");
+    try {
+      await populateV1PriorRelease(alteredDb);
+
+      // Keep correct hashes, but alter created_at timestamp of 0001
+      await alteredDb.sql.unsafe("UPDATE drizzle.__drizzle_migrations SET created_at = 1799999999999 WHERE id = 2;");
+
+      const { result, output } = await runProdActionsRunner({
+        url: alteredDb.url,
+        mode: "migrate",
+        confirm: actions.MIGRATE_CONFIRMATION,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(output).toMatch(/applied migration history does not match the committed chain|timestamp mismatch|does not match the verified prior release schema/i);
+
+      // Verify migration 0002 was NOT applied
+      const [reg] = await alteredDb.sql`SELECT to_regclass('public.payment_method') AS reg`;
+      expect(reg?.reg).toBeNull();
+    } finally {
+      await alteredDb.close();
+    }
+  });
+
+  it("C2. Runner refusal: duplicate or invalid timestamp metadata is refused before writes", async () => {
+    const dupDb = await createThrowawayDb("duplicate_timestamp");
+    try {
+      await populateV1PriorRelease(dupDb);
+
+      // Set duplicate timestamp on 0001 to match 0000
+      await dupDb.sql.unsafe(
+        "UPDATE drizzle.__drizzle_migrations SET created_at = (SELECT created_at FROM drizzle.__drizzle_migrations WHERE id = 1) WHERE id = 2;",
+      );
+
+      const { result, output } = await runProdActionsRunner({
+        url: dupDb.url,
+        mode: "migrate",
+        confirm: actions.MIGRATE_CONFIRMATION,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(output).toMatch(/applied migration history does not match the committed chain|duplicate timestamp|does not match the verified prior release schema/i);
+
+      // Verify migration 0002 was NOT applied
+      const [reg] = await dupDb.sql`SELECT to_regclass('public.payment_method') AS reg`;
+      expect(reg?.reg).toBeNull();
+    } finally {
+      await dupDb.close();
+    }
+  });
+
   it("D. Runner migrate mode: applies 0002, verifies complete schema & preserves data", async () => {
     const { result, output } = await runProdActionsRunner({
       url: v1Db!.url,
@@ -431,5 +483,34 @@ describe.skipIf(!shouldRun)("Production Release Upgrade Path (Phase 10B -> Phase
     });
     expect(updated.method.adminLabel).toBe("Post-Upgrade Wire (Corporate)");
     expect(updated.method.translations["en"]?.title).toBe("Corporate Wire");
+
+    // Register Arabic as second language
+    await ensureLanguage(appDb, {
+      code: "ar",
+      label: "Arabic",
+      textDirection: "rtl",
+      isEnabled: true,
+    });
+
+    // 6. Untouched optional translations do not block save and preserve existing titles
+    const updatedUntouched = await editPaymentMethod(appDb, {
+      id: createdMethod.methodId,
+      adminLabel: "Post-Upgrade Wire (Enterprise)",
+      translations: [
+        {
+          languageCode: "en",
+          instructions: "Direct bank wire to corporate account.",
+        },
+        {
+          languageCode: "ar",
+          title: "",
+          instructions: "",
+        },
+      ],
+    });
+    expect(updatedUntouched.method.adminLabel).toBe("Post-Upgrade Wire (Enterprise)");
+    expect(updatedUntouched.method.translations["en"]?.title).toBe("Corporate Wire");
+    expect(updatedUntouched.method.translations["en"]?.instructions).toBe("Direct bank wire to corporate account.");
+    expect(updatedUntouched.method.translations["ar"]).toBeUndefined();
   });
 });

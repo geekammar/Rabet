@@ -1107,6 +1107,30 @@ Key deliverables & repairs across all review findings (A through E):
    - Proper text direction (`dir="rtl"` for Arabic, `dir="ltr"` for English) and fallback language indicator badge.
 5. **Targeted Verification and Documentation (Finding E):**
    - Disposable PostgreSQL upgrade test (`tests/db/payment-methods-upgrade.test.ts`): verifies prior release with catalog and inquiries, pre-upgrade capability gate, runner inspect/migrate, data preservation, repeat migrate no-op, and post-upgrade capability activation.
-   - 335 passed out of 335 tests in `npm run test:db`.
-   - 614 passed out of 614 tests in `npm test`.
+   - 337 passed out of 337 tests in `npm run test:db`.
+   - 623 passed out of 623 tests in `npm test`.
    - 0 ESLint errors/warnings (`npm run lint`), 0 TypeScript errors (`npm run typecheck`), and successful Turbopack production build (`npm run build`).
+
+### Final Focused Repairs (Untouched Optional Translations, Migration Metadata & Preview Request Ordering)
+
+1. **Untouched Optional Translations Fixed:**
+   - In `PaymentMethodsManager`, drafts are compared against the original method record: absent untouched empty optional translations are omitted from the update payload, while explicit clears to existing translations are preserved.
+   - In `updatePaymentMethodAction`, server validation distinguishes existing translations from new optional translations: absent untouched empty translations skip validation without error; explicit clearing of an existing title fails with a clear field error; instructions entered for a new translation without a title fail with a clear field error; clearing instructions on an existing translation succeeds atomically.
+   - Added targeted regression suite `tests/payment-methods-untouched-optional.test.ts` covering cases (a)-(f): English-only with untouched Arabic, Arabic-only with untouched English, bilingual updates, existing title clearing failure, instructions without title failure, and clearing instructions while preserving title.
+
+2. **Migration Timestamps Verified Before Writes:**
+   - In `scripts/neon-prod-actions.mjs` (`validateTarget`) and `scripts/setup-neon-dev.mjs` (`classifyDbState`), each applied ledger row is validated against its committed journal prefix entry: exact byte-for-byte hash AND `created_at` matching the journal's `when` timestamp.
+   - Safely parses numeric timestamps as `bigint`; rejects null, malformed, duplicate, or out-of-order timestamps before any writes.
+   - Verified on disposable PostgreSQL in `tests/db/payment-methods-upgrade.test.ts` (tests C1 and C2): altered timestamp with correct hashes is refused before writes; duplicate timestamp is refused before writes.
+
+3. **Unified Payment-Method Preview Loading & Request Ordering:**
+   - Extracted and centralized loader into `GuardedPaymentMethodsLoader` (`src/lib/product-actions/payment-methods-loader.ts`).
+   - All payment method fetching in `ProductActionEditor` (initial load, focus, reopening, action reload, and explicit Refresh) routes through this single guarded loader.
+   - Older pending responses cannot overwrite newer results.
+   - Retains usable existing payment methods on refresh errors and displays clear alert messages.
+   - Added controlled response ordering regression in `tests/product-action-editor-loader.test.ts`: starting request A, starting newer request B, resolving B, then resolving A guarantees B's methods and all unsaved drafts are retained.
+
+4. **Mobile Regression & Acceptance Verification:**
+   - Added automated browser regression in `scripts/test-payment-methods-browser-acceptance.mjs` testing single-language create, save, and reopen on a 360x740 narrow mobile viewport with optional Arabic tab untouched.
+   - Captured screenshot artifact `09_mobile_one_language_save_reopen.png`.
+   - Preserved deployment order: compatible code deployment -> read-only inspect -> approved manual migration -> live verification -> payment features activated.

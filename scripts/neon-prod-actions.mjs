@@ -583,9 +583,21 @@ export async function validateTarget(ctx, options = {}) {
   const { sql } = ctx;
   const expectedTables = options.expectedTables ?? EXPECTED_TABLES;
   const expectedIndexes = options.expectedIndexes ?? EXPECTED_INDEXES;
-  const expectedHashes = options.expectedHashes ?? ctx.committedHashes.map((entry) => entry.hash);
   const expectedConstraints = options.expectedConstraints ?? CRITICAL_CONSTRAINTS;
   const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
+
+  const prefixCount = options.expectedHashes
+    ? options.expectedHashes.length
+    : options.expectedEntries
+      ? options.expectedEntries.length
+      : ctx.committedHashes.length;
+  const expectedEntries =
+    options.expectedEntries ??
+    ctx.committedHashes.slice(0, prefixCount).map((entry, index) => ({
+      hash: entry.hash,
+      when: ctx.journal.entries[index]?.when,
+      tag: entry.tag,
+    }));
 
   // 1. Tables check
   try {
@@ -610,21 +622,90 @@ export async function validateTarget(ctx, options = {}) {
     record(ctx, "tables", false, `query error: ${redact(String(error.message ?? error))}`);
   }
 
-  // 2. Migration history byte-for-byte check
+  // 2. Migration history byte-for-byte and timestamp check
   try {
     const appliedRows = await sql.query(QUERIES.drizzleMigrations);
-    const applied = (appliedRows ?? []).map((row) => String(row.hash));
-    const historyOk =
-      applied.length === expectedHashes.length &&
-      expectedHashes.every((hash, index) => applied[index] === hash);
+    const applied = appliedRows ?? [];
+
+    let historyOk = true;
+    let failureDetail = null;
+
+    if (applied.length !== expectedEntries.length) {
+      historyOk = false;
+      failureDetail = `${applied.length} applied / ${expectedEntries.length} expected`;
+    } else {
+      const seenTimestamps = new Set();
+      let prevWhen = null;
+
+      for (let i = 0; i < expectedEntries.length; i++) {
+        const row = applied[i];
+        const exp = expectedEntries[i];
+
+        // 1. Check hash byte-for-byte
+        const rowHash = String(row?.hash ?? "");
+        if (rowHash !== exp.hash) {
+          historyOk = false;
+          failureDetail = `hash mismatch at entry ${i} (${exp.tag}): live=${rowHash.slice(0, 10)}... vs expected=${exp.hash.slice(0, 10)}...`;
+          break;
+        }
+
+        // 2. Parse created_at safely
+        const rawCreatedAt = row?.created_at;
+        if (rawCreatedAt === null || rawCreatedAt === undefined || typeof rawCreatedAt === "boolean") {
+          historyOk = false;
+          failureDetail = `null or missing created_at timestamp at entry ${i} (${exp.tag})`;
+          break;
+        }
+
+        const createdAtStr = String(rawCreatedAt).trim();
+        if (!/^\d+$/.test(createdAtStr)) {
+          historyOk = false;
+          failureDetail = `malformed created_at timestamp "${createdAtStr}" at entry ${i} (${exp.tag})`;
+          break;
+        }
+
+        let parsedWhen;
+        try {
+          parsedWhen = BigInt(createdAtStr);
+        } catch {
+          historyOk = false;
+          failureDetail = `unparseable created_at bigint "${createdAtStr}" at entry ${i} (${exp.tag})`;
+          break;
+        }
+
+        // 3. Match against journal's "when"
+        const expectedWhen = BigInt(exp.when);
+        if (parsedWhen !== expectedWhen) {
+          historyOk = false;
+          failureDetail = `timestamp mismatch at entry ${i} (${exp.tag}): live=${parsedWhen} vs expected=${expectedWhen}`;
+          break;
+        }
+
+        // 4. Duplicate timestamp check
+        if (seenTimestamps.has(parsedWhen)) {
+          historyOk = false;
+          failureDetail = `duplicate timestamp ${parsedWhen} at entry ${i} (${exp.tag})`;
+          break;
+        }
+        seenTimestamps.add(parsedWhen);
+
+        // 5. Out-of-order check
+        if (prevWhen !== null && parsedWhen <= prevWhen) {
+          historyOk = false;
+          failureDetail = `out-of-order timestamp at entry ${i} (${exp.tag}): ${parsedWhen} <= previous ${prevWhen}`;
+          break;
+        }
+        prevWhen = parsedWhen;
+      }
+    }
 
     record(
       ctx,
       "migration-history",
       historyOk,
       historyOk
-        ? "matches the committed files byte for byte"
-        : `${applied.length} applied / ${expectedHashes.length} expected`,
+        ? "matches the committed files byte for byte and journal timestamps"
+        : failureDetail ?? `${applied.length} applied / ${expectedEntries.length} expected`,
     );
   } catch (error) {
     record(ctx, "migration-history", false, `query error: ${redact(String(error.message ?? error))}`);

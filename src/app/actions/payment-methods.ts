@@ -11,6 +11,7 @@ import {
   listLanguages,
   listPaymentMethods,
   RabetDataError,
+  readPaymentMethod,
   resolveDefaultLanguage,
   toSafeErrorMessage,
   type PaymentMethodRecord,
@@ -327,7 +328,12 @@ export async function updatePaymentMethodAction(
 
   const idRes = validateUuid(rawId, "Payment method ID");
   if (!idRes.success) {
-    errors.id = idRes.error;
+    return {
+      success: false,
+      code: "INVALID_INPUT",
+      message: "Please correct the errors in the form.",
+      errors: { id: idRes.error },
+    };
   }
 
   let adminLabel: string | undefined = undefined;
@@ -361,6 +367,15 @@ export async function updatePaymentMethodAction(
       };
     }
 
+    const existing = await readPaymentMethod(db, idRes.data);
+    if (!existing) {
+      return {
+        success: false,
+        code: "NOT_FOUND",
+        message: "Payment method not found.",
+      };
+    }
+
     const languages = await listLanguages(db);
     const langByCode = new Map(languages.map((l) => [l.code.toLowerCase(), l]));
 
@@ -371,6 +386,117 @@ export async function updatePaymentMethodAction(
       title?: string;
       instructions?: string | null;
     }> = [];
+
+    const validateTranslationCandidate = (
+      code: string,
+      rawTTitle: unknown,
+      rawTInstructions: unknown,
+      lang: { id: string; label: string; code: string },
+      errorKeySuffix: string,
+    ) => {
+      const existingTrans = existing.translations[code];
+      const isTitleProvided = rawTTitle !== undefined;
+      const isInstProvided = rawTInstructions !== undefined;
+
+      const trimmedTitle =
+        rawTTitle !== undefined && rawTTitle !== null ? String(rawTTitle).trim() : undefined;
+      const trimmedInst =
+        rawTInstructions !== undefined && rawTInstructions !== null
+          ? String(rawTInstructions).trim()
+          : undefined;
+
+      if (!existingTrans) {
+        // Translation is NOT registered on the existing payment method (absent optional translation)
+        const hasTitleContent = trimmedTitle !== undefined && trimmedTitle.length > 0;
+        const hasInstContent = trimmedInst !== undefined && trimmedInst.length > 0;
+
+        if (!hasTitleContent && !hasInstContent) {
+          // Untouched, empty optional translation -> skip without error
+          return;
+        }
+
+        if (hasInstContent && !hasTitleContent) {
+          // Instructions entered for a new translation without a title MUST fail
+          errors[`title${errorKeySuffix}`] =
+            `Customer-facing title is required for a new translation in language ${code.toUpperCase()}.`;
+          return;
+        }
+
+        // Title provided for new translation -> validate
+        const titleRes = validatePaymentTitle(rawTTitle, lang.label);
+        if (!titleRes.success) {
+          errors[`title${errorKeySuffix}`] = titleRes.error;
+        }
+
+        let instructionsVal: string | null = null;
+        if (isInstProvided && rawTInstructions !== null) {
+          const instRes = validatePaymentInstructions(rawTInstructions, lang.label);
+          if (!instRes.success) {
+            errors[`instructions${errorKeySuffix}`] = instRes.error;
+          } else {
+            instructionsVal = instRes.data;
+          }
+        }
+
+        if (
+          titleRes.success &&
+          (!isInstProvided || rawTInstructions === null || !errors[`instructions${errorKeySuffix}`])
+        ) {
+          translationsToUpdate.push({
+            languageId: lang.id,
+            languageCode: code,
+            title: titleRes.data,
+            instructions: instructionsVal,
+          });
+        }
+      } else {
+        // Translation EXISTS on the payment method
+        let validatedTitle: string | undefined = undefined;
+        let validatedInstructions: string | null | undefined = undefined;
+
+        if (isTitleProvided) {
+          if (trimmedTitle === undefined || trimmedTitle.length === 0) {
+            // Explicitly clearing an existing title MUST fail
+            errors[`title${errorKeySuffix}`] =
+              `Customer-facing title cannot be empty for language ${code.toUpperCase()}.`;
+          } else {
+            const titleRes = validatePaymentTitle(rawTTitle, lang.label);
+            if (!titleRes.success) {
+              errors[`title${errorKeySuffix}`] = titleRes.error;
+            } else {
+              validatedTitle = titleRes.data;
+            }
+          }
+        }
+
+        if (isInstProvided) {
+          if (rawTInstructions === null || trimmedInst === undefined || trimmedInst.length === 0) {
+            // Explicitly clearing existing instructions is allowed and sets instructions to null
+            validatedInstructions = null;
+          } else {
+            const instRes = validatePaymentInstructions(rawTInstructions, lang.label);
+            if (!instRes.success) {
+              errors[`instructions${errorKeySuffix}`] = instRes.error;
+            } else {
+              validatedInstructions = instRes.data;
+            }
+          }
+        }
+
+        if (
+          (validatedTitle !== undefined || validatedInstructions !== undefined) &&
+          !errors[`title${errorKeySuffix}`] &&
+          !errors[`instructions${errorKeySuffix}`]
+        ) {
+          translationsToUpdate.push({
+            languageId: lang.id,
+            languageCode: code,
+            title: validatedTitle,
+            instructions: validatedInstructions,
+          });
+        }
+      }
+    };
 
     if (Array.isArray(rawTranslations)) {
       for (const t of rawTranslations) {
@@ -387,34 +513,7 @@ export async function updatePaymentMethodAction(
         const rawTTitle = extractField(t, "title");
         const rawTInstructions = extractField(t, "instructions");
 
-        let validatedTitle: string | undefined = undefined;
-        if (rawTTitle !== undefined) {
-          const titleRes = validatePaymentTitle(rawTTitle, lang.label);
-          if (!titleRes.success) {
-            errors[`title_${code}`] = titleRes.error;
-          } else {
-            validatedTitle = titleRes.data;
-          }
-        }
-
-        let validatedInstructions: string | null | undefined = undefined;
-        if (rawTInstructions !== undefined) {
-          const instRes = validatePaymentInstructions(rawTInstructions, lang.label);
-          if (!instRes.success) {
-            errors[`instructions_${code}`] = instRes.error;
-          } else {
-            validatedInstructions = instRes.data;
-          }
-        }
-
-        if (validatedTitle !== undefined || validatedInstructions !== undefined) {
-          translationsToUpdate.push({
-            languageId: lang.id,
-            languageCode: code,
-            title: validatedTitle,
-            instructions: validatedInstructions,
-          });
-        }
+        validateTranslationCandidate(code, rawTTitle, rawTInstructions, lang, `_${code}`);
       }
     } else {
       // Single translation format
@@ -432,34 +531,7 @@ export async function updatePaymentMethodAction(
           if (!lang) {
             errors.languageCode = `Language "${code}" is not registered.`;
           } else {
-            let validatedTitle: string | undefined = undefined;
-            if (rawTitle !== undefined) {
-              const titleRes = validatePaymentTitle(rawTitle, lang.label);
-              if (!titleRes.success) {
-                errors.title = titleRes.error;
-              } else {
-                validatedTitle = titleRes.data;
-              }
-            }
-
-            let validatedInstructions: string | null | undefined = undefined;
-            if (rawInstructions !== undefined) {
-              const instRes = validatePaymentInstructions(rawInstructions, lang.label);
-              if (!instRes.success) {
-                errors.instructions = instRes.error;
-              } else {
-                validatedInstructions = instRes.data;
-              }
-            }
-
-            if (validatedTitle !== undefined || validatedInstructions !== undefined) {
-              translationsToUpdate.push({
-                languageId: lang.id,
-                languageCode: code,
-                title: validatedTitle,
-                instructions: validatedInstructions,
-              });
-            }
+            validateTranslationCandidate(code, rawTitle, rawInstructions, lang, "");
           }
         }
       }

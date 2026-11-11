@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import { loadPaymentMethodsAction } from "@/app/actions/payment-methods";
+import { GuardedPaymentMethodsLoader } from "@/lib/product-actions/payment-methods-loader";
 import {
   createProductActionAction,
   loadProductActionsAction,
@@ -88,24 +89,29 @@ export function ProductActionEditor({
     initialPaymentMethods ?? [],
   );
   const [isRefreshingMethods, setIsRefreshingMethods] = useState(false);
-  const methodsGenerationRef = useRef(0);
+  const [methodsLoadError, setMethodsLoadError] = useState<string | null>(null);
 
-  const refreshPaymentMethods = async () => {
-    const gen = ++methodsGenerationRef.current;
-    setIsRefreshingMethods(true);
-    try {
-      const res = await loadPaymentMethodsAction();
-      if (gen === methodsGenerationRef.current && res.success && res.methods) {
-        setPaymentMethodsList(res.methods);
-      }
-    } catch {
-      // Safely ignore errors without disrupting unsaved edits
-    } finally {
-      if (gen === methodsGenerationRef.current) {
-        setIsRefreshingMethods(false);
-      }
-    }
-  };
+  const loaderRef = useRef<GuardedPaymentMethodsLoader | null>(null);
+  if (loaderRef.current == null) {
+    loaderRef.current = new GuardedPaymentMethodsLoader(
+      () => loadPaymentMethodsAction(),
+      (patch) => {
+        if (patch.methods !== undefined) setPaymentMethodsList(patch.methods);
+        if (patch.error !== undefined) setMethodsLoadError(patch.error);
+        if (patch.isRefreshing !== undefined) setIsRefreshingMethods(patch.isRefreshing);
+      },
+    );
+  }
+
+  useEffect(() => {
+    return () => {
+      loaderRef.current?.unmount();
+    };
+  }, []);
+
+  const refreshPaymentMethods = useCallback((options?: { isExplicitRefresh?: boolean }) => {
+    return loaderRef.current?.load(options);
+  }, []);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isPending, startTransition] = useTransition();
@@ -171,7 +177,7 @@ export function ProductActionEditor({
     };
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
-  }, [editingActionId, editActionType]);
+  }, [editingActionId, editActionType, refreshPaymentMethods]);
 
   // Reset local state if product changes
   if (product.id !== prevProductId) {
@@ -194,15 +200,15 @@ export function ProductActionEditor({
 
   useEffect(() => {
     let isCurrent = true;
-    loadPaymentMethodsAction().then((res) => {
-      if (isCurrent && res.success && res.methods) {
-        setPaymentMethodsList(res.methods);
+    Promise.resolve().then(() => {
+      if (isCurrent) {
+        void refreshPaymentMethods();
       }
     });
     return () => {
       isCurrent = false;
     };
-  }, []);
+  }, [refreshPaymentMethods]);
 
   // Combined busy flag for UI controls
   const isBusy = isLoading || isPending;
@@ -217,11 +223,7 @@ export function ProductActionEditor({
     setIsLoading(true);
     setActionFeedback(null);
 
-    loadPaymentMethodsAction().then((res) => {
-      if (res.success && res.methods) {
-        setPaymentMethodsList(res.methods);
-      }
-    });
+    void refreshPaymentMethods();
 
     loadProductActionsAction(targetProductId)
       .then((res) => {
@@ -1421,7 +1423,7 @@ export function ProductActionEditor({
                           type="button"
                           variant="ghost"
                           size="sm"
-                          onClick={() => void refreshPaymentMethods()}
+                          onClick={() => void refreshPaymentMethods({ isExplicitRefresh: true })}
                           disabled={isBusy || isRefreshingMethods}
                           className="h-7 px-2 text-[11px] gap-1 text-muted-foreground hover:text-foreground touch-manipulation"
                           title="Refresh payment methods list"
@@ -1431,6 +1433,15 @@ export function ProductActionEditor({
                           Refresh
                         </Button>
                       </div>
+                      {methodsLoadError && (
+                        <div
+                          role="alert"
+                          data-testid="payment-methods-load-error"
+                          className="p-2 text-xs text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/40 rounded border border-amber-200 dark:border-amber-800"
+                        >
+                          {methodsLoadError}
+                        </div>
+                      )}
                       <select
                         id="edit-action-payment-method"
                         data-testid="edit-action-payment-method-select"
@@ -2088,7 +2099,7 @@ export function ProductActionEditor({
                         type="button"
                         variant="ghost"
                         size="sm"
-                        onClick={() => void refreshPaymentMethods()}
+                        onClick={() => void refreshPaymentMethods({ isExplicitRefresh: true })}
                         disabled={isBusy || isRefreshingMethods}
                         className="h-7 px-2 text-[11px] gap-1 text-muted-foreground hover:text-foreground touch-manipulation"
                         title="Refresh payment methods list"
@@ -2098,6 +2109,15 @@ export function ProductActionEditor({
                         Refresh
                       </Button>
                     </div>
+                    {methodsLoadError && (
+                      <div
+                        role="alert"
+                        data-testid="payment-methods-load-error-create"
+                        className="p-2 text-xs text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/40 rounded border border-amber-200 dark:border-amber-800"
+                      >
+                        {methodsLoadError}
+                      </div>
+                    )}
                     <select
                       id="create-action-payment-method"
                       data-testid="create-action-payment-method-select"

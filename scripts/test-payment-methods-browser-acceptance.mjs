@@ -854,6 +854,97 @@ async function main() {
   await cdp.takeScreenshot("08_mobile_arabic_default_view.png");
   log("Arabic default store layout captured on mobile viewport.");
 
+  // =========================================================================
+  // STEP 6: ONE-LANGUAGE EDIT / SAVE / REOPEN REGRESSION (NARROW MOBILE 360x740)
+  // =========================================================================
+  log("Step 6: Testing one-language edit/save/reopen regression on narrow mobile viewport (360x740)...");
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 360,
+    height: 740,
+    deviceScaleFactor: 2,
+    mobile: true,
+  });
+  await sleep(500);
+
+  // Switch default back to English for standard single-language scenario
+  await pgClient`UPDATE bot_setting SET default_language_id = ${langEn.id}`;
+
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/payment-methods` });
+  await sleep(1500);
+
+  // Create English-only payment method with Arabic untouched
+  log("Creating English-only payment method with untouched optional Arabic tab...");
+  await cdp.evaluate(`(() => {
+    document.querySelector('[data-testid="create-payment-method-btn"]').click();
+  })()`);
+  await sleep(800);
+
+  await setInputValue(cdp, '[data-testid="create-admin-label-input"]', "Cash on Delivery");
+  await setInputValue(cdp, '[data-testid="create-title-input"]', "Pay on Delivery");
+  await setInputValue(cdp, '[data-testid="create-instructions-input"]', "Hand exact cash to courier upon arrival.");
+
+  // Submit English-only creation
+  await cdp.evaluate(`(() => {
+    document.querySelector('[data-testid="submit-create-payment-method-btn"]').click();
+  })()`);
+  await sleep(1500);
+
+  // Edit English-only method: change admin label and title while Arabic tab remains untouched
+  log("Editing English-only method: changing admin label and title while Arabic remains untouched...");
+  await cdp.evaluate(`(() => {
+    const editBtns = Array.from(document.querySelectorAll('[data-testid="edit-method-btn"]'));
+    const lastBtn = editBtns[editBtns.length - 1];
+    if (lastBtn) lastBtn.click();
+  })()`);
+  await sleep(800);
+
+  await setInputValue(cdp, '[data-testid="edit-admin-label-input"]', "Cash on Delivery (Courier)");
+  await setInputValue(cdp, '[data-testid="edit-title-input"]', "Cash on Delivery (Courier)");
+
+  // Submit Save Changes
+  await cdp.evaluate(`(() => {
+    document.querySelector('[data-testid="submit-edit-payment-method-btn"]').click();
+  })()`);
+  await sleep(1500);
+
+  // Verify modal closed without INVALID_INPUT failure
+  const isEditModalOpen = await cdp.evaluate(`(() => {
+    return Boolean(document.querySelector('[data-testid="edit-payment-method-modal"]'));
+  })()`);
+  if (isEditModalOpen) {
+    await fail("Edit modal remained open; one-language save was blocked by untouched optional tab!");
+  }
+  log("One-language save succeeded cleanly and modal closed.");
+
+  // Reopen modal to verify saved single-language state
+  log("Reopening the edit modal to verify persisted single-language state...");
+  await cdp.evaluate(`(() => {
+    const editBtns = Array.from(document.querySelectorAll('[data-testid="edit-method-btn"]'));
+    const lastBtn = editBtns[editBtns.length - 1];
+    if (lastBtn) lastBtn.click();
+  })()`);
+  await sleep(800);
+
+  await cdp.takeScreenshot("09_mobile_one_language_save_reopen.png");
+  log("Captured one-language save/reopen screenshot on narrow mobile viewport (360x740).");
+
+  // Verify in PostgreSQL that only English translation exists
+  const codMethodRows = await pgClient`
+    SELECT id, admin_label FROM payment_method WHERE admin_label = 'Cash on Delivery (Courier)'
+  `;
+  if (codMethodRows.length === 0) {
+    await fail("Payment method 'Cash on Delivery (Courier)' not found in DB!");
+  }
+  const codTransRows = await pgClient`
+    SELECT pmt.title, l.code FROM payment_method_translation pmt
+    JOIN language l ON l.id = pmt.language_id
+    WHERE pmt.payment_method_id = ${codMethodRows[0].id}
+  `;
+  if (codTransRows.length !== 1 || codTransRows[0].code !== "en") {
+    await fail(`Expected exactly 1 English translation row, got: ${JSON.stringify(codTransRows)}`);
+  }
+  log("Verified in DB: Exactly 1 English translation persisted, optional Arabic was untouched.");
+
   log("\n=======================================================");
   log("ALL PAYMENT METHOD ACCEPTANCE SCENARIOS PASSED!");
   log("=======================================================\n");

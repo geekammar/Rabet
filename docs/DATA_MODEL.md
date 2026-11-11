@@ -585,11 +585,11 @@ Rabet follows a continuous-deployment sequence where `main` deploys before the o
    - In the catalog action editor, `PAYMENT_METHOD` is disabled with an explanatory note; mutation attempts fail closed with `SCHEMA_UPGRADE_REQUIRED`.
 2. **Approved Runner Upgrade (`scripts/neon-prod-actions.mjs`):**
    - The production migration runner distinguishes a supported previous release (0000+0001, 14 tables, 17 indexes) with pending `0002_payment_methods.sql` from damaged/unmanaged partial states.
-   - Inspect verifies the prior release schema objects and ledger hash prefix.
-   - Migrate runs pre-flight validation, applies `0002_payment_methods.sql`, and validates the upgraded schema (16 tables, 21 indexes). Repeated migrate is a no-op.
+   - Inspect verifies the prior release schema objects, ledger hash prefix, and exact `created_at` matching the journal's `when` timestamps before executing writes. Refuses malformed, duplicate, or out-of-order timestamp metadata.
+   - Migrate runs pre-flight validation, applies `0002_payment_methods.sql`, and validates the upgraded schema (16 tables, 21 indexes) and full ledger metadata. Repeated migrate is a no-op.
 3. **Full Capability Activation:**
    - On the upgraded schema, `checkPaymentMethodsCapability(db)` returns `supported: true`.
-   - Payment method management, multi-language editing, and product button binding become immediately available in the dashboard without downtime or redeployment.
+   - Payment method management, atomic multi-language editing (with untouched optional translation protection), and product button binding (with unified preview loader request-ordering protection) become immediately available in the dashboard without downtime or redeployment.
 
 ---
 

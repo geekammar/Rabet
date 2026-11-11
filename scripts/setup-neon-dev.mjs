@@ -655,21 +655,56 @@ export function classifyDbState({
   const unknownTables = [...present].filter((name) => !expected.has(name));
   const missingTables = [...expected].filter((name) => !present.has(name));
 
-  const applied = (appliedMigrations ?? []).map((row) => ({
-    id: Number(row.id),
-    hash: String(row.hash),
-    when: Number(row.created_at),
-  }));
+  const applied = (appliedMigrations ?? []).map((row) => {
+    let whenVal = null;
+    if (
+      row.created_at !== undefined &&
+      row.created_at !== null &&
+      typeof row.created_at !== "boolean"
+    ) {
+      const s = String(row.created_at).trim();
+      if (/^\d+$/.test(s)) {
+        try {
+          whenVal = BigInt(s);
+        } catch {
+          whenVal = null;
+        }
+      }
+    }
+    return {
+      id: Number(row.id),
+      hash: String(row.hash),
+      when: whenVal,
+    };
+  });
 
   const byHash = new Map(committedHashes.map((entry) => [entry.hash, entry]));
   const appliedMatchingFile = applied.filter((row) => byHash.has(row.hash));
 
-  // The applied history must be a prefix of the committed chain, in order.
-  const prefixOk = appliedMatchingFile.every((row, index) => {
-    const entry = byHash.get(row.hash);
+  // The applied history must be a prefix of the committed chain, in order,
+  // matching byte-for-byte hashes and journal "when" timestamps, with strictly
+  // increasing and non-duplicate timestamps.
+  const seenTimestamps = new Set();
+  let prevWhen = null;
+  const prefixOk =
+    applied.length === appliedMatchingFile.length &&
+    appliedMatchingFile.every((row, index) => {
+      const entry = byHash.get(row.hash);
+      const journalEntry = journal.entries[index];
+      if (!journalEntry || journalEntry.tag !== entry.tag) return false;
 
-    return journal.entries[index] && journal.entries[index].tag === entry.tag;
-  });
+      if (row.when === null || row.when === undefined) return false;
+      const expectedWhen = BigInt(journalEntry.when);
+      if (row.when !== expectedWhen) return false;
+
+      if (seenTimestamps.has(row.when)) return false;
+      seenTimestamps.add(row.when);
+
+      if (prevWhen !== null && row.when <= prevWhen) return false;
+      prevWhen = row.when;
+
+      return true;
+    });
 
   const appliedCount = applied.length;
   const journalCount = journal.entries.length;

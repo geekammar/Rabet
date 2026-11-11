@@ -221,12 +221,46 @@ export function PaymentMethodsManager({
     setEditModalError(null);
     setEditFieldErrors({});
 
-    // Atomic multilingual save: Send all drafts across all languages in one payload
-    const translationsPayload = Object.entries(editDraftTranslations).map(([code, draft]) => ({
-      languageCode: code,
-      title: draft.title,
-      instructions: draft.instructions,
-    }));
+    // Compare drafts against the original method:
+    // - Send only changed translation drafts, omitting absent untouched empty ones.
+    // - Preserve explicit clears to existing translations; do not filter them away.
+    // - Send invalid attempts on new translations (e.g. instructions without title) so server validates clearly.
+    const translationsPayload: Array<{
+      languageCode: string;
+      title: string;
+      instructions: string;
+    }> = [];
+
+    for (const [code, draft] of Object.entries(editDraftTranslations)) {
+      const existing = selectedEditingMethod.translations[code.toLowerCase()];
+      const titleTrimmed = draft.title.trim();
+      const instructionsTrimmed = draft.instructions.trim();
+
+      if (existing) {
+        // Translation already exists on record:
+        // Include if changed or cleared (preserving explicit clears).
+        const isTitleChanged = draft.title !== existing.title;
+        const isInstructionsChanged = draft.instructions !== (existing.instructions ?? "");
+        if (isTitleChanged || isInstructionsChanged) {
+          translationsPayload.push({
+            languageCode: code,
+            title: draft.title,
+            instructions: draft.instructions,
+          });
+        }
+      } else {
+        // Translation is absent from original record:
+        // Omit if untouched and empty. Include if any content was entered.
+        const hasContent = titleTrimmed.length > 0 || instructionsTrimmed.length > 0;
+        if (hasContent) {
+          translationsPayload.push({
+            languageCode: code,
+            title: draft.title,
+            instructions: draft.instructions,
+          });
+        }
+      }
+    }
 
     startTransition(async () => {
       try {
@@ -745,6 +779,7 @@ export function PaymentMethodsManager({
         <div
           role="dialog"
           aria-modal="true"
+          data-testid="edit-payment-method-modal"
           aria-labelledby="edit-payment-method-title"
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto overflow-x-hidden"
         >

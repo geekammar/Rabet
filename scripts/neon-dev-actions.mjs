@@ -342,22 +342,57 @@ async function validateTarget(ctx) {
         : `${EXPECTED_TABLES.length}/${EXPECTED_TABLES.length}`,
   );
 
-  // The applied hashes must equal the committed files' sha256, in order. This
-  // is the byte-for-byte check, not a row count.
+  // The applied hashes must equal the committed files' sha256, in order,
+  // and created_at timestamps must match the journal's "when" values.
   const appliedRows = await sql.query(QUERIES.drizzleMigrations).catch(() => []);
-  const applied = (appliedRows ?? []).map((row) => String(row.hash));
-  const expectedHashes = ctx.committedHashes.map((entry) => entry.hash);
-  const historyOk =
-    applied.length === expectedHashes.length &&
-    expectedHashes.every((hash, index) => applied[index] === hash);
+  const applied = appliedRows ?? [];
+  const expectedEntries = ctx.committedHashes.map((entry, index) => ({
+    hash: entry.hash,
+    when: ctx.journal.entries[index]?.when,
+    tag: entry.tag,
+  }));
+
+  let historyOk = applied.length === expectedEntries.length;
+  if (historyOk) {
+    const seenTimestamps = new Set();
+    let prevWhen = null;
+    for (let i = 0; i < expectedEntries.length; i++) {
+      const row = applied[i];
+      const exp = expectedEntries[i];
+      if (String(row?.hash ?? "") !== exp.hash) {
+        historyOk = false;
+        break;
+      }
+      const rawCreatedAt = String(row?.created_at ?? "").trim();
+      if (!/^\d+$/.test(rawCreatedAt)) {
+        historyOk = false;
+        break;
+      }
+      const whenVal = BigInt(rawCreatedAt);
+      if (whenVal !== BigInt(exp.when)) {
+        historyOk = false;
+        break;
+      }
+      if (seenTimestamps.has(whenVal)) {
+        historyOk = false;
+        break;
+      }
+      seenTimestamps.add(whenVal);
+      if (prevWhen !== null && whenVal <= prevWhen) {
+        historyOk = false;
+        break;
+      }
+      prevWhen = whenVal;
+    }
+  }
 
   record(
     ctx,
     "migration-history",
     historyOk,
     historyOk
-      ? "matches the committed files byte for byte"
-      : `${applied.length} applied / ${expectedHashes.length} committed`,
+      ? "matches the committed files byte for byte and journal timestamps"
+      : `${applied.length} applied / ${expectedEntries.length} committed`,
   );
 
   const indexRows = await sql.query(QUERIES.indexes).catch(() => []);
