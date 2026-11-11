@@ -64,10 +64,11 @@ primary business interaction of the MVP.
 ### 1.3 Non-goals enforced by this design
 
 No multi-tenancy, no multi-bot, no multi-vendor marketplace, no employee roles or granular
-permissions, no advanced analytics, no warehouse, **and no payments**. The system has
-exactly one bot, one administrator and one seller, and the schema says so by construction:
-there is no `tenant_id`, no `bot_id`, no `seller_id`, no `role` column, and no money-flow
-table anywhere.
+permissions, no advanced analytics, no warehouse, **and no live checkout or payment processing**.
+The system has exactly one bot, one administrator and one seller, and the schema says so by
+construction: there is no `tenant_id`, no `bot_id`, no `seller_id`, no `role` column, and no
+money-flow or checkout table anywhere. Central payment method definitions exist solely for
+merchant configuration and button preview (§5.6).
 
 ### 1.4 Design principles applied
 
@@ -128,6 +129,8 @@ what was dropped and why.
 | 12 | `inquiry` | Conversations | One customer ↔ seller thread (product inquiry **or** general support) | ✅ |
 | 13 | `inquiry_message` | Conversations | One message on a thread (customer or admin) + delivery state | ✅ |
 | 14 | `telegram_update` | Integration | Deduplication / idempotency log for Telegram updates | ✅ |
+| 15 | `payment_method` | Payments | **Central payment method definition** (admin label, sorting, active/disabled state) | ✅ |
+| 16 | `payment_method_translation` | Payments | Per-language customer-facing title and instructions | ✅ |
 
 ### 2.1 Deliberately absent, with reasons
 
@@ -164,6 +167,9 @@ product_action ──0..N──▶ product_action        (self-reference: parent
 product_action ──0..N──▶ product_action_translation
 product_action ──0..1──▶ category      (navigate_category_id, NAVIGATE_CATALOG only)
 product_action ──0..1──▶ product       (navigate_product_id, NAVIGATE_CATALOG only)
+product_action ──0..1──▶ payment_method (payment_method_id, PAYMENT_METHOD only, ON DELETE SET NULL)
+
+payment_method ──0..N──▶ payment_method_translation
 
 customer  ──0..N──▶ inquiry
 product   ──0..N──▶ inquiry            (product_id, nullable — null = general support)
@@ -407,6 +413,7 @@ it (§11.2, constraint **A2**).
 | `url` | `text` | nullable, `CHECK (url IS NULL OR url ~ '^https://')` | used by `OPEN_URL` only; DB-level HTTPS guarantee, full validation in the app (§12.4) |
 | `navigate_category_id` | `uuid` | nullable, `FK → category.id ON DELETE SET NULL` | used by `NAVIGATE_CATALOG` only |
 | `navigate_product_id` | `uuid` | nullable, `FK → product.id ON DELETE SET NULL` | used by `NAVIGATE_CATALOG` only |
+| `payment_method_id` | `uuid` | nullable, `FK → payment_method.id ON DELETE SET NULL` | used by `PAYMENT_METHOD` only |
 | `action_config` | `jsonb` | `NOT NULL DEFAULT '{}'` | validated object; scalar extension room for future action types (§5.4) |
 | `sort_order` | `integer` | `NOT NULL DEFAULT 0` | ordering among siblings of the same parent |
 | `is_active` | `boolean` | `NOT NULL DEFAULT true` | a newly created button is live once it has a label; the whole tree is gated on `product.is_active` |
@@ -423,7 +430,8 @@ CREATE TYPE action_type AS ENUM (
   'SEND_TEMPLATE_MESSAGE',
   'OPEN_URL',
   'OPEN_SUPPORT',
-  'NAVIGATE_CATALOG'
+  'NAVIGATE_CATALOG',
+  'PAYMENT_METHOD'
 );
 ```
 
@@ -448,6 +456,7 @@ JavaScript, no SQL, no script, no webhook, no general-purpose workflow engine.
 | `OPEN_URL` | No | `url` (HTTPS, validated) | Renders as a Telegram **URL button** — the customer's Telegram client decides in-app vs. external browser; Rabet cannot and does not guarantee which, or that the customer leaves Telegram at all. Information pages only, **never** a payment or checkout redirect (§16, ADR-013). |
 | `OPEN_SUPPORT` | No | optional support category in `action_config` | Creates or resumes a **general** conversation (no product) with a configurable support category. Same messaging system as a product inquiry (§9.4). |
 | `NAVIGATE_CATALOG` | No | `navigate_category_id` **or** `navigate_product_id` (exactly one) | Jumps the customer to another category menu or product card. The targets are real foreign keys, so a moved or deleted catalog node cannot produce a dangling button. |
+| `PAYMENT_METHOD` | No | `payment_method_id` (FK → `payment_method.id`) | Stores a typed reference to a central payment method. Previews customer-facing instructions in the admin dashboard. Excluded from customer Telegram keyboards and rejected safely with `ui.optionUnavailable` at execution. Unknown channels default to unavailable. Does not enable live checkout, payment credentials, or financial secrets. |
 
 **What this deliberately excludes:** arbitrary executable actions, user-defined
 JavaScript/SQL, external automation scripts, webhook dispatch, timed/delayed sequences,
@@ -518,6 +527,69 @@ strategy can be reused. The answer is **reuse the strategy, which means a table*
 
 `jsonb` is kept only where it genuinely has no relational or localizable meaning
 (`action_config`), which is the right tool for the right job.
+
+### 5.6 Central Payment Methods — `payment_method` & `payment_method_translation`
+
+Central payment methods allow the merchant to define customer-facing payment instructions once, bind them to product buttons (`PAYMENT_METHOD` button type), and preview the customer experience in the dashboard.
+
+#### 5.6.1 `payment_method`
+
+| Column | Type | Constraints | Notes |
+| --- | --- | --- | --- |
+| `id` | `uuid` | `PRIMARY KEY` | stable uuid reference |
+| `admin_label` | `varchar(100)` | `NOT NULL` | merchant identifier (e.g. "Vodafone Cash (Personal)", "Wire Transfer") |
+| `is_active` | `boolean` | `NOT NULL DEFAULT false` | defaults to disabled; admin must explicitly activate |
+| `sort_order` | `integer` | `NOT NULL DEFAULT 0` | ordering in admin dashboard |
+| `created_at` | `timestamptz` | `NOT NULL DEFAULT now()` | |
+| `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()` | touched by trigger `payment_method_touch_updated_at` |
+
+#### 5.6.2 `payment_method_translation`
+
+| Column | Type | Constraints | Notes |
+| --- | --- | --- | --- |
+| `id` | `uuid` | `PRIMARY KEY` | |
+| `payment_method_id` | `uuid` | `NOT NULL`, `FK → payment_method.id ON DELETE CASCADE` | |
+| `language_id` | `uuid` | `NOT NULL`, `FK → language.id` | |
+| `title` | `varchar(100)` | `NOT NULL` | customer-facing method title |
+| `instructions` | `text` | nullable | customer instructions (IBAN, transfer details, steps) |
+| `created_at` | `timestamptz` | `NOT NULL DEFAULT now()` | |
+| `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()` | touched by trigger `payment_method_translation_touch_updated_at` |
+
+Integrity constraint: `UNIQUE (payment_method_id, language_id)`.
+
+#### 5.6.3 Architectural and Security Boundaries
+
+1. **Prepares future channels; does NOT enable live checkout:**
+   - No payment provider credentials, API tokens, card/bank secrets, or financial webhooks are stored.
+   - No public payment routes, checkout links, Orders table, payment confirmation, or Stars integration are added.
+2. **Channel isolation & safety rejection:**
+   - The `PAYMENT_METHOD` button is excluded from customer Telegram keyboards using text-safe SQL (`sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'``) to guarantee dual-schema safety without Postgres enum lookup failures.
+   - If invoked directly via Telegram callback query, execution is safely rejected returning `ui.optionUnavailable` ("This option is no longer available.") with Back/Home navigation.
+   - Unknown channels default to unavailable.
+3. **Reference binding & edit propagation:**
+   - Product buttons store only `payment_method_id` without copying titles/instructions into button rows.
+   - Editing a central method automatically propagates to previews of all buttons referencing it.
+   - Disabling a central method preserves button references and flags disabled status to the admin.
+   - Deleting a central method safely sets `payment_method_id` to `NULL` on referencing buttons (`ON DELETE SET NULL`).
+
+#### 5.6.4 Deployment Sequence and Schema Compatibility
+
+Rabet follows a continuous-deployment sequence where `main` deploys before the operator manually applies migrations via the approved Production runner:
+
+1. **Deployment on Previous Schema (0000+0001 applied, 0002 pending):**
+   - Application boots safely against the legacy database schema.
+   - `checkPaymentMethodsCapability(db)` detects that `payment_method` tables and `payment_method_id` columns are not yet present.
+   - Existing catalog, product action editing, Telegram browsing, customer inquiries, and seller replies remain 100% operational.
+   - All customer-facing queries filter out `PAYMENT_METHOD` using text-safe SQL (`sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'``) to avoid Postgres enum lookup failure `22P02`.
+   - Admin access to `/payment-methods` displays an informative `PaymentMethodsUpgradeRequired` state explaining the pending migration to the operator.
+   - In the catalog action editor, `PAYMENT_METHOD` is disabled with an explanatory note; mutation attempts fail closed with `SCHEMA_UPGRADE_REQUIRED`.
+2. **Approved Runner Upgrade (`scripts/neon-prod-actions.mjs`):**
+   - The production migration runner distinguishes a supported previous release (0000+0001, 14 tables, 17 indexes) with pending `0002_payment_methods.sql` from damaged/unmanaged partial states.
+   - Inspect verifies the prior release schema objects, ledger hash prefix, and exact `created_at` matching the journal's `when` timestamps before executing writes. Refuses malformed, duplicate, or out-of-order timestamp metadata.
+   - Migrate runs pre-flight validation, applies `0002_payment_methods.sql`, and validates the upgraded schema (16 tables, 21 indexes) and full ledger metadata. Repeated migrate is a no-op.
+3. **Full Capability Activation:**
+   - On the upgraded schema, `checkPaymentMethodsCapability(db)` returns `supported: true`.
+   - Payment method management, atomic multi-language editing (with untouched optional translation protection), and product button binding (with unified preview loader request-ordering protection) become immediately available in the dashboard without downtime or redeployment.
 
 ---
 
@@ -1670,7 +1742,7 @@ rules of §11 hold at the database level.
 | V-15 | Long button lists paginate | `MENU_PAGE_SIZE` (10) with self-scoping `m:<actionUuid>:<n>` page tokens; `MAX_ACTIVE_CHILDREN` (20) bounds menu size | §8.3, §11.3 |
 | V-16 | Idempotent state-changing actions | the one-row-lock pattern in three places | §11.6 |
 | V-17 | Customer data minimization | `customer` has only Telegram-provided attributes; no analytics or profiling tables | §12.3, §2.1 |
-| V-18 | No payment, order or financial state in the MVP | none of those tables exist; price is a display attribute; inquiry is not a purchase | §1.1, §16 |
+| V-18 | No live checkout, order or financial state in the MVP | `order` and `payment` transaction tables do not exist; `payment_method` is definition & preview only; price is a display attribute; inquiry is not a purchase | §1.1, §5.6, §16 |
 
 ---
 

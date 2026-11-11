@@ -668,7 +668,9 @@ describe("migrate mode applies the chain only after every gate passes", () => {
 
     expect(result.ok).toBe(true);
     expect(result.outcome).toBe("migrated");
-    expect(result.writes.migrationsApplied).toEqual([wizard.EXPECTED_MIGRATION_TAGS[1]]);
+    expect(result.writes.migrationsApplied).toEqual(
+      wizard.EXPECTED_MIGRATION_TAGS.slice(1),
+    );
   });
 
   it("refuses schema drift instead of migrating", async () => {

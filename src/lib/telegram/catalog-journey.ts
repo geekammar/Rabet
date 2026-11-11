@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -290,6 +290,19 @@ async function isProductHierarchyActive(
   return { valid: true, productRow: prod };
 }
 
+export type ActionHierarchyRow = {
+  id: string;
+  productId: string;
+  parentActionId: string | null;
+  actionType: (typeof productAction.$inferSelect)["actionType"];
+  isActive: boolean;
+  url: string | null;
+  navigateCategoryId: string | null;
+  navigateProductId: string | null;
+  actionConfig: unknown;
+  sortOrder: number;
+};
+
 /**
  * Checks action existence, active flag, ancestor actions active and OPEN_SUBMENU,
  * and product/category hierarchy fully active.
@@ -299,12 +312,12 @@ async function isActionHierarchyActive(
   actionId: string,
 ): Promise<{
   valid: boolean;
-  actionRow?: typeof productAction.$inferSelect;
+  actionRow?: ActionHierarchyRow;
   productRow?: typeof product.$inferSelect;
 }> {
   let currentId: string | null = actionId;
   let depth = 0;
-  let targetRow: typeof productAction.$inferSelect | undefined;
+  let targetRow: ActionHierarchyRow | undefined;
 
   const visited = new Set<string>();
 
@@ -315,7 +328,18 @@ async function isActionHierarchyActive(
     visited.add(currentId);
 
     const [row] = await db
-      .select()
+      .select({
+        id: productAction.id,
+        productId: productAction.productId,
+        parentActionId: productAction.parentActionId,
+        actionType: productAction.actionType,
+        isActive: productAction.isActive,
+        url: productAction.url,
+        navigateCategoryId: productAction.navigateCategoryId,
+        navigateProductId: productAction.navigateProductId,
+        actionConfig: productAction.actionConfig,
+        sortOrder: productAction.sortOrder,
+      })
       .from(productAction)
       .where(eq(productAction.id, currentId))
       .limit(1);
@@ -1121,6 +1145,7 @@ async function renderProductCard(
         eq(productAction.productId, prodRow.id),
         isNull(productAction.parentActionId),
         eq(productAction.isActive, true),
+        sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'`,
       ),
     )
     .orderBy(asc(productAction.sortOrder), asc(productAction.id));
@@ -1229,6 +1254,7 @@ async function handleActionExecution(
         and(
           eq(productAction.parentActionId, actRow.id),
           eq(productAction.isActive, true),
+          sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'`,
         ),
       )
       .orderBy(asc(productAction.sortOrder), asc(productAction.id));
@@ -1638,6 +1664,25 @@ async function handleActionExecution(
       backTarget,
       returnToProductTarget,
       options: journeyOptions,
+    });
+    return;
+  }
+
+  // H. PAYMENT_METHOD: Not supported in customer-facing Telegram; reject safely
+  if (actRow.actionType === "PAYMENT_METHOD") {
+    const keyboard: TelegramInlineKeyboardButton[][] = [
+      [{ text: ui.back, callback_data: backTarget }],
+    ];
+    if (actRow.parentActionId) {
+      keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
+    }
+    keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+    await editOrThrow(transport, {
+      chatId,
+      messageId,
+      text: ui.optionUnavailable,
+      replyMarkup: { inline_keyboard: keyboard },
     });
     return;
   }

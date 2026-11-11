@@ -15,6 +15,8 @@ const mockListLanguages = vi.fn();
 const mockResolveDefaultLanguage = vi.fn();
 const mockListCatalogCategories = vi.fn();
 const mockListCatalogProducts = vi.fn();
+const mockListPaymentMethods = vi.fn().mockResolvedValue([]);
+const mockCheckPaymentMethodsCapability = vi.fn().mockResolvedValue({ supported: true });
 const mockGetDb = vi.fn(() => ({}));
 
 vi.mock("@/db/client", () => ({
@@ -31,6 +33,8 @@ vi.mock("@/lib/data", async (importOriginal) => {
     resolveDefaultLanguage: (...args: unknown[]) => mockResolveDefaultLanguage(...args),
     listCatalogCategories: (...args: unknown[]) => mockListCatalogCategories(...args),
     listCatalogProducts: (...args: unknown[]) => mockListCatalogProducts(...args),
+    listPaymentMethods: (...args: unknown[]) => mockListPaymentMethods(...args),
+    checkPaymentMethodsCapability: (...args: unknown[]) => mockCheckPaymentMethodsCapability(...args),
   };
 });
 

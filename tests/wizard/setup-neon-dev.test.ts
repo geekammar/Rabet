@@ -546,7 +546,7 @@ describe("state classification", () => {
     });
 
     expect(state.status).toBe("partial");
-    expect(state.pending).toEqual([committed[1].tag]);
+    expect(state.pending).toEqual(committed.slice(1).map((c) => c.tag));
   });
 
   it("stops on unknown tables", () => {
@@ -640,6 +640,7 @@ describe("committed migration files", () => {
     expect(committed.map((entry) => entry.hash)).toEqual([
       "86cb09f9965ded128acf4a4c61b8e2cfb0f0ee182fd419e41d82254537383fa1",
       "65e31ff2a8efa943344fb7499e48dfb771b5ac007cc9bc982b0790fdd3ab3946",
+      "ad6dc3bbd4b07d9ced852fd86a88732ac95317200e5c6e5e9d9e2ed387649b45",
     ]);
   });
 
@@ -975,7 +976,7 @@ describe("wizard flows", () => {
     ]);
 
     expect(result.ok).toBe(true);
-    expect(result.writes.migrationsApplied).toEqual([committed[1].tag]);
+    expect(result.writes.migrationsApplied).toEqual(committed.slice(1).map((c) => c.tag));
   });
 
   it("stops for manual review on unknown tables and migrates nothing", async () => {

@@ -1,5 +1,6 @@
 import {
   Bot,
+  CreditCard,
   LayoutDashboard,
   MessageSquareText,
   Package,
@@ -32,6 +33,12 @@ export const navItems: NavItem[] = [
     href: "/catalog",
     icon: Package,
     description: "Digital products, categories, prices, and configurable buttons.",
+  },
+  {
+    label: "Payment Methods",
+    href: "/payment-methods",
+    icon: CreditCard,
+    description: "Central payment methods, instructions, and customer preview.",
   },
   {
     label: "Inquiries",

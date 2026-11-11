@@ -321,6 +321,7 @@ export function validateActionConfig(
  * - OPEN_URL: accepts url; rejects menuText, templateBody, targets, custom config.
  * - OPEN_SUPPORT: accepts optional support_category; rejects menuText, templateBody, url, targets.
  * - NAVIGATE_CATALOG: accepts exactly one target; rejects menuText, templateBody, url, custom config.
+ * - PAYMENT_METHOD: accepts paymentMethodId; rejects menuText, templateBody, url, targets, custom config.
  * - SHOW_DETAILS / START_INQUIRY: rejects menuText, templateBody, url, targets, custom config.
  */
 export function validateActionParameters(input: {
@@ -332,6 +333,7 @@ export function validateActionParameters(input: {
   url?: unknown;
   navigateCategoryId?: unknown;
   navigateProductId?: unknown;
+  paymentMethodId?: unknown;
   actionConfig?: unknown;
   isFormData?: boolean;
   availableCategories?: string[];
@@ -408,7 +410,20 @@ export function validateActionParameters(input: {
     };
   }
 
-  // 5. Config validation
+  // 5. Payment method target: PAYMENT_METHOD only
+  const hasPaymentMethod =
+    input.paymentMethodId !== undefined &&
+    input.paymentMethodId !== null &&
+    String(input.paymentMethodId).trim().length > 0;
+
+  if (actionType !== "PAYMENT_METHOD" && hasPaymentMethod) {
+    return {
+      success: false,
+      error: `Payment method target is only permitted on PAYMENT_METHOD actions, not on ${actionType}.`,
+    };
+  }
+
+  // 6. Config validation
   const configRes = validateActionConfig(
     input.actionConfig,
     actionType,

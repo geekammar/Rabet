@@ -24,5 +24,6 @@ export * from "./catalog";
 export * from "./content";
 export * from "./customer";
 export * from "./inquiry";
+export * from "./payment-methods";
 export * from "./settings";
 export * from "./telegram";

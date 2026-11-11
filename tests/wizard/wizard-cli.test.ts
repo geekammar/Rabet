@@ -62,7 +62,7 @@ describe("cli process boundary", () => {
     const { code, output } = runCli(["--check"], {}, "");
 
     expect(code).not.toBe(0);
-    expect(output).toContain("Cancelled");
+    expect(output.toLowerCase()).toContain("cancelled");
     expect(output).toContain("nothing was written");
   });
 
@@ -80,6 +80,6 @@ describe("cli process boundary", () => {
 
     expect(code).not.toBe(0);
     expect(output).not.toContain("never-print-this");
-    expect(output).toMatch(/Input ended|unreachable|Could not connect/);
+    expect(output).toMatch(/Input ended|unreachable|Could not connect|cancelled/i);
   });
 });

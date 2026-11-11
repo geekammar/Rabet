@@ -30,6 +30,7 @@ export const DEFAULT_LOGIN_REDIRECT = "/overview";
 const ALLOWED_PREFIXES = [
   "/overview",
   "/catalog",
+  "/payment-methods",
   "/inquiries",
   "/customers",
   "/bot-content",

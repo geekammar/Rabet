@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import {
+  checkPaymentMethodsCapability,
   createProductAction,
   editProductAction,
   listLanguages,
@@ -53,6 +54,7 @@ export type CreateProductActionInput =
       url?: unknown;
       navigateCategoryId?: unknown;
       navigateProductId?: unknown;
+      paymentMethodId?: unknown;
       actionConfig?: unknown;
       supportCategory?: unknown;
     };
@@ -71,6 +73,7 @@ export type UpdateProductActionInput =
       url?: unknown;
       navigateCategoryId?: unknown;
       navigateProductId?: unknown;
+      paymentMethodId?: unknown;
       actionConfig?: unknown;
       supportCategory?: unknown;
     };
@@ -146,6 +149,7 @@ export async function createProductActionAction(
   const rawUrl = extractField(input, "url");
   const rawNavCat = extractField(input, "navigateCategoryId");
   const rawNavProd = extractField(input, "navigateProductId");
+  const rawPaymentMethodId = extractField(input, "paymentMethodId");
   let rawConfig = extractField(input, "actionConfig");
   const rawSupportCategory = extractField(input, "supportCategory");
 
@@ -205,6 +209,7 @@ export async function createProductActionAction(
   let validatedUrl: string | null = null;
   let navCategoryId: string | null = null;
   let navProductId: string | null = null;
+  let paymentMethodId: string | null = null;
 
   if (typeRes.success) {
     const actionType = typeRes.data;
@@ -262,6 +267,30 @@ export async function createProductActionAction(
           errors.navigateProductId = prodRes.error;
         } else {
           navProductId = prodRes.data;
+        }
+      }
+    } else if (actionType === "PAYMENT_METHOD") {
+      const db = getDb();
+      const capability = await checkPaymentMethodsCapability(db);
+      if (!capability.supported) {
+        errors.actionType =
+          "Payment method buttons are unavailable until pending migration 0002_payment_methods is applied.";
+      }
+
+      const hasPm =
+        rawPaymentMethodId !== undefined &&
+        rawPaymentMethodId !== null &&
+        String(rawPaymentMethodId).trim().length > 0;
+
+      if (isActive && !hasPm) {
+        errors.paymentMethodId =
+          "A payment method target is required before activating a PAYMENT_METHOD button.";
+      } else if (hasPm) {
+        const pmRes = validateUuid(rawPaymentMethodId, "Payment method ID");
+        if (!pmRes.success) {
+          errors.paymentMethodId = pmRes.error;
+        } else {
+          paymentMethodId = pmRes.data;
         }
       }
     }
@@ -365,6 +394,7 @@ export async function createProductActionAction(
       url: rawUrl,
       navigateCategoryId: rawNavCat,
       navigateProductId: rawNavProd,
+      paymentMethodId: rawPaymentMethodId,
       actionConfig: rawConfig,
       isFormData,
       availableCategories,
@@ -448,6 +478,7 @@ export async function createProductActionAction(
       url: validatedUrl,
       navigateCategoryId: navCategoryId,
       navigateProductId: navProductId,
+      paymentMethodId,
       actionConfig: parsedConfig.success ? parsedConfig.data : {},
       translations: translationsToInsert,
     });
@@ -491,6 +522,7 @@ export async function updateProductActionAction(
   const rawUrl = extractField(input, "url");
   const rawNavCat = extractField(input, "navigateCategoryId");
   const rawNavProd = extractField(input, "navigateProductId");
+  const rawPaymentMethodId = extractField(input, "paymentMethodId");
   let rawConfig = extractField(input, "actionConfig");
   const rawSupportCategory = extractField(input, "supportCategory");
 
@@ -650,6 +682,20 @@ export async function updateProductActionAction(
     }
   }
 
+  let validatedPaymentMethodId: string | null | undefined = undefined;
+  if (rawPaymentMethodId !== undefined) {
+    if (rawPaymentMethodId === null || String(rawPaymentMethodId).trim().length === 0) {
+      validatedPaymentMethodId = null;
+    } else {
+      const pmRes = validateUuid(rawPaymentMethodId, "Payment method ID");
+      if (!pmRes.success) {
+        errors.paymentMethodId = pmRes.error;
+      } else {
+        validatedPaymentMethodId = pmRes.data;
+      }
+    }
+  }
+
   if (typeRes.success && typeRes.data === "NAVIGATE_CATALOG") {
     if (
       navCategoryId &&
@@ -657,6 +703,15 @@ export async function updateProductActionAction(
     ) {
       errors.navigationTarget =
         "Cannot specify both a category and a product navigation target.";
+    }
+  }
+
+  if (typeRes.success && typeRes.data === "PAYMENT_METHOD") {
+    const db = getDb();
+    const capability = await checkPaymentMethodsCapability(db);
+    if (!capability.supported) {
+      errors.actionType =
+        "Payment method buttons are unavailable until pending migration 0002_payment_methods is applied.";
     }
   }
 
@@ -711,6 +766,7 @@ export async function updateProductActionAction(
       url: rawUrl,
       navigateCategoryId: rawNavCat,
       navigateProductId: rawNavProd,
+      paymentMethodId: rawPaymentMethodId,
       actionConfig: rawConfig,
       isFormData,
       availableCategories,
@@ -773,6 +829,7 @@ export async function updateProductActionAction(
       url: validatedUrl,
       navigateCategoryId: navCategoryId,
       navigateProductId: navProductId,
+      paymentMethodId: validatedPaymentMethodId,
       actionConfig: parsedConfig,
       translation: translationToUpdate,
     });

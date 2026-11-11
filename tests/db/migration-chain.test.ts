@@ -46,9 +46,9 @@ describe.skipIf(!shouldRun)("migration chain", () => {
     }>(sql`select count(*)::int as count from information_schema.tables
       where table_schema = 'public'`);
 
-    // The fourteen domain tables. `__drizzle_migrations` lives in the separate
+    // The sixteen domain tables. `__drizzle_migrations` lives in the separate
     // `drizzle` schema and is not counted here.
-    expect(rows[0].count).toBe(14);
+    expect(rows[0].count).toBe(16);
   });
 
   it("records every migration in the journal", async () => {
@@ -56,7 +56,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
       sql`select count(*)::int as count from drizzle.__drizzle_migrations`,
     );
 
-    expect(rows[0].count).toBe(2);
+    expect(rows[0].count).toBe(3);
   });
 
   it("re-applying the chain is a no-op that duplicates no objects", async () => {
@@ -87,7 +87,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
     expect(names).toContain("product_action_check_ancestry");
     expect(names).toContain("product_action_guard_menu_capability");
     expect(names).toContain("inquiry_freeze_context");
-    expect(names.filter((name) => name.endsWith("_touch_updated_at")).length).toBe(11);
+    expect(names.filter((name) => name.endsWith("_touch_updated_at")).length).toBe(13);
   });
 
   it("creates the partial unique indexes that enforce sibling ordering", async () => {
@@ -129,13 +129,13 @@ describe.skipIf(!shouldRun)("migration chain", () => {
       idx: journal.entries.length,
       version: "7",
       when: Date.now(),
-      tag: "0002_deliberately_broken",
+      tag: "0003_deliberately_broken",
       breakpoints: true,
     });
 
     writeFileSync(journalPath, JSON.stringify(journal, null, 2));
     writeFileSync(
-      path.join(broken, "0002_deliberately_broken.sql"),
+      path.join(broken, "0003_deliberately_broken.sql"),
       [
         "-- Probe table that should NOT survive a failed migration.",
         "CREATE TABLE migration_failure_probe (id integer);",
@@ -161,11 +161,11 @@ describe.skipIf(!shouldRun)("migration chain", () => {
 
     // The probe table from the first statement of the broken file is gone: the
     // pending apply ran in one transaction and rolled back atomically, leaving
-    // no partial schema behind. The two committed migrations were already
+    // no partial schema behind. The three committed migrations were already
     // applied before this run, so the journal still holds them — the point is
     // that the broken migration was *not* recorded and built nothing.
     expect(probes[0].count).toBe(0);
-    expect(applied[0].count).toBe(2);
+    expect(applied[0].count).toBe(3);
 
     // The committed schema is intact, not half-dropped.
     const tables = await db.execute<{ count: number }>(
@@ -173,7 +173,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
         where table_schema = 'public'`,
     );
 
-    expect(tables[0].count).toBe(14);
+    expect(tables[0].count).toBe(16);
 
     await pool.end();
     rmSync(path.dirname(broken), { recursive: true, force: true });

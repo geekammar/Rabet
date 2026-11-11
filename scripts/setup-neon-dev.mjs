@@ -88,6 +88,8 @@ export const EXPECTED_TABLES = [
   "language",
   "message_template",
   "message_translation",
+  "payment_method",
+  "payment_method_translation",
   "product",
   "product_action",
   "product_action_translation",
@@ -99,6 +101,33 @@ export const EXPECTED_TABLES = [
 export const EXPECTED_MIGRATION_TAGS = [
   "0000_initial_schema",
   "0001_tree_and_snapshot_integrity",
+  "0002_payment_methods",
+];
+
+/** The fourteen domain tables created by the 0000+0001 schema (prior release baseline). */
+export const EXPECTED_TABLES_V1 = EXPECTED_TABLES.filter(
+  (t) => t !== "payment_method" && t !== "payment_method_translation",
+);
+
+/** The seventeen indexes present in the 0000+0001 schema (prior release baseline). */
+export const EXPECTED_INDEXES_V1 = [
+  "category_sibling_sort_order_idx",
+  "category_root_sort_order_idx",
+  "product_action_sibling_sort_order_idx",
+  "product_action_root_sort_order_idx",
+  "inquiry_active_per_customer_product_idx",
+  "category_slug_unique",
+  "product_slug_unique",
+  "language_code_unique",
+  "message_template_key_unique",
+  "customer_telegram_id_unique",
+  "telegram_update_update_id_unique",
+  "inquiry_reference_unique",
+  "inquiry_message_telegram_message_idx",
+  "category_translation_category_language_idx",
+  "product_translation_product_language_idx",
+  "product_action_translation_action_language_idx",
+  "message_translation_template_language_idx",
 ];
 
 /**
@@ -124,6 +153,7 @@ export const EXPECTED_INDEXES = [
   "product_translation_product_language_idx",
   "product_action_translation_action_language_idx",
   "message_translation_template_language_idx",
+  "payment_method_translation_method_language_idx",
 ];
 
 /** CHECK constraints the wizard requires (domain rules the schema enforces). */
@@ -625,21 +655,56 @@ export function classifyDbState({
   const unknownTables = [...present].filter((name) => !expected.has(name));
   const missingTables = [...expected].filter((name) => !present.has(name));
 
-  const applied = (appliedMigrations ?? []).map((row) => ({
-    id: Number(row.id),
-    hash: String(row.hash),
-    when: Number(row.created_at),
-  }));
+  const applied = (appliedMigrations ?? []).map((row) => {
+    let whenVal = null;
+    if (
+      row.created_at !== undefined &&
+      row.created_at !== null &&
+      typeof row.created_at !== "boolean"
+    ) {
+      const s = String(row.created_at).trim();
+      if (/^\d+$/.test(s)) {
+        try {
+          whenVal = BigInt(s);
+        } catch {
+          whenVal = null;
+        }
+      }
+    }
+    return {
+      id: Number(row.id),
+      hash: String(row.hash),
+      when: whenVal,
+    };
+  });
 
   const byHash = new Map(committedHashes.map((entry) => [entry.hash, entry]));
   const appliedMatchingFile = applied.filter((row) => byHash.has(row.hash));
 
-  // The applied history must be a prefix of the committed chain, in order.
-  const prefixOk = appliedMatchingFile.every((row, index) => {
-    const entry = byHash.get(row.hash);
+  // The applied history must be a prefix of the committed chain, in order,
+  // matching byte-for-byte hashes and journal "when" timestamps, with strictly
+  // increasing and non-duplicate timestamps.
+  const seenTimestamps = new Set();
+  let prevWhen = null;
+  const prefixOk =
+    applied.length === appliedMatchingFile.length &&
+    appliedMatchingFile.every((row, index) => {
+      const entry = byHash.get(row.hash);
+      const journalEntry = journal.entries[index];
+      if (!journalEntry || journalEntry.tag !== entry.tag) return false;
 
-    return journal.entries[index] && journal.entries[index].tag === entry.tag;
-  });
+      if (row.when === null || row.when === undefined) return false;
+      const expectedWhen = BigInt(journalEntry.when);
+      if (row.when !== expectedWhen) return false;
+
+      if (seenTimestamps.has(row.when)) return false;
+      seenTimestamps.add(row.when);
+
+      if (prevWhen !== null && row.when <= prevWhen) return false;
+      prevWhen = row.when;
+
+      return true;
+    });
 
   const appliedCount = applied.length;
   const journalCount = journal.entries.length;

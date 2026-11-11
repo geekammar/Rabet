@@ -6,7 +6,7 @@ import { MobileNav } from "@/components/dashboard/mobile-nav";
 
 export function Header() {
   return (
-    <header className="sticky top-0 z-30 flex min-h-16 items-center gap-3 border-b bg-background/80 px-4 pt-[env(safe-area-inset-top)] backdrop-blur-md md:px-6">
+    <header className="sticky top-0 z-30 flex min-h-16 items-center gap-3 border-b bg-background/80 px-4 pt-[env(safe-area-inset-top)] backdrop-blur-md md:px-6 w-full max-w-full overflow-x-hidden min-w-0">
       <MobileNav />
       <Link
         href="/"
@@ -14,8 +14,8 @@ export function Header() {
       >
         Rabet
       </Link>
-      <div className="ml-auto flex items-center gap-2">
-        <Badge variant="outline" className="font-normal text-muted-foreground">
+      <div className="ml-auto flex items-center gap-2 min-w-0">
+        <Badge variant="outline" className="hidden sm:inline-flex font-normal text-muted-foreground shrink-0">
           <span
             aria-hidden="true"
             className="size-1.5 rounded-full bg-amber-500"

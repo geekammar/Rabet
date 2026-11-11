@@ -15,6 +15,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { category, product } from "./catalog";
+import { paymentMethod } from "./payment-methods";
 import { language } from "./settings";
 
 /**
@@ -52,6 +53,7 @@ export const actionTypeEnum = pgEnum("action_type", [
   "OPEN_URL",
   "OPEN_SUPPORT",
   "NAVIGATE_CATALOG",
+  "PAYMENT_METHOD",
 ]);
 
 /**
@@ -107,6 +109,9 @@ export const productAction = pgTable(
     navigateProductId: uuid("navigate_product_id").references(() => product.id, {
       onDelete: "set null",
     }),
+    paymentMethodId: uuid("payment_method_id").references(() => paymentMethod.id, {
+      onDelete: "set null",
+    }),
     // A flat, validated object and the extension point for a future action
     // type whose scalar config does not deserve a column. Never localizable
     // text, never an action type, never a parent reference — those are
@@ -148,6 +153,11 @@ export const productAction = pgTable(
     check(
       "product_action_navigation_target_type_check",
       sql`${table.actionType} = 'NAVIGATE_CATALOG' OR (${table.navigateCategoryId} IS NULL AND ${table.navigateProductId} IS NULL)`,
+    ),
+    // A payment method target exists only on a `PAYMENT_METHOD` button.
+    check(
+      "product_action_payment_method_type_check",
+      sql`${table.actionType}::text = 'PAYMENT_METHOD' OR ${table.paymentMethodId} IS NULL`,
     ),
     // The bot's main read: load a product's whole tree.
     index("product_action_tree_idx").on(table.productId, table.parentActionId),

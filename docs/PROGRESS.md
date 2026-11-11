@@ -1069,3 +1069,73 @@ Key implementation deliverables & security repairs:
    - Existing verified admin credentials (`ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, `AUTH_SECRET`) are explicitly preserved and must not be overwritten or regenerated.
 5. **Comprehensive Automated Test Coverage:**
    - Extended unit tests in `tests/wizard/neon-prod-actions.test.ts` and PostgreSQL tests in `tests/db/neon-prod-actions.test.ts` covering real CLI refusal, exact confirmation, case-mismatched DB identity, invalid/duplicate/conflicting TLS, missing critical objects on complete ledger, partial-state refusal, and non-zero `db:check` failure.
+
+---
+
+## What was done in PR #22 (Central Payment Methods, Save Integrity & Safe Production Upgrade)
+
+PR #22 delivers central payment methods definition, product button binding, preview in the admin dashboard, atomic multilingual drafts, and safe dual-schema production deployment compatibility. PR is open on `feat/payment-methods-product-binding`.
+
+Key deliverables & repairs across all review findings (A through E):
+1. **Safe Upgrade from Existing Production Release (Finding A):**
+   - Production runner (`scripts/neon-prod-actions.mjs`) distinguishes a healthy prior release (ledger `0000_init` + `0001_inquiries_and_support`, 14 tables, 17 indexes) with pending `0002_payment_methods.sql` from damaged, unmanaged, or ambiguous partial states.
+   - Inspect verifies live schema against `EXPECTED_TABLES_V1` and `EXPECTED_INDEXES_V1` and verifies the byte-for-byte committed hash prefix before any writes. Continues refusing damaged partial states, empty ledger with application tables, or unmanaged tables.
+   - Post-migration verification checks full 16 tables, 21 indexes, new constraints, and verified relationships. Repeated migrate is a verified no-op.
+   - **Deployment compatibility:** Continuous deployment pushes `main` before manual migration. Server-side capability check `checkPaymentMethodsCapability(db)` detects schema support without swallowing connection errors. On legacy schema:
+     - All customer-facing queries filter `PAYMENT_METHOD` using text-safe SQL (`sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'``) to avoid Postgres enum lookup failure `22P02`.
+     - Catalog actions insert and select explicit columns, avoiding Drizzle inserting default `payment_method_id`.
+     - Telegram browsing, inquiries, and seller replies operate 100% normally.
+     - Admin `/payment-methods` displays an informative `PaymentMethodsUpgradeRequired` view with operator instructions.
+     - Catalog editor disables `PAYMENT_METHOD` selection; mutation attempts fail closed with `SCHEMA_UPGRADE_REQUIRED`.
+2. **Multilingual Save Without Lost Drafts (Finding B):**
+   - In `PaymentMethodsManager`, "Save Changes" submits all changed language drafts and shared fields in a single atomic payload (`updatePaymentMethodAction`).
+   - Validates all submitted drafts before writing; a failure in any language leaves both languages and shared fields unchanged.
+   - Preserves all draft inputs across all tabs and keeps the modal open on error, displaying errors inside the form dialog.
+   - Unchanged, empty optional translation tabs do not block saving.
+   - Symmetrical support for English and Arabic whether store default is English or Arabic in create, edit, and preview.
+   - Methods default to disabled.
+3. **Correct Partial Update Semantics (Finding C):**
+   - Omitted translation fields preserve existing values (title-only update preserves existing instructions; instructions-only update works and preserves title).
+   - Explicit empty string instructions (`""`) or `null` clears instructions.
+   - Empty title fails validation with zero writes. Incomplete new translations are cleanly rejected.
+   - Returns the authoritative saved record.
+   - `requireAdmin()` enforced before database access on every server action.
+4. **Preview Freshness and Honest UI (Finding D):**
+   - Added explicit "Refresh" button and automatic refresh on window focus / reopening product action editor.
+   - Uses request generation counter to safely ignore stale asynchronous responses while preserving unsaved action draft inputs.
+   - Replaced misleading claims with honest availability copy: "Enabled (Preview ready — Telegram channel unavailable)" and "Disabled (Draft)".
+   - Proper text direction (`dir="rtl"` for Arabic, `dir="ltr"` for English) and fallback language indicator badge.
+5. **Targeted Verification and Documentation (Finding E):**
+   - Disposable PostgreSQL upgrade test (`tests/db/payment-methods-upgrade.test.ts`): verifies prior release with catalog and inquiries, pre-upgrade capability gate, runner inspect/migrate, data preservation, repeat migrate no-op, and post-upgrade capability activation.
+   - 337 passed out of 337 tests in `npm run test:db`.
+   - 623 passed out of 623 tests in `npm test`.
+   - 0 ESLint errors/warnings (`npm run lint`), 0 TypeScript errors (`npm run typecheck`), and successful Turbopack production build (`npm run build`).
+
+### Final Focused Repairs (Untouched Optional Translations, Migration Metadata & Preview Request Ordering)
+
+1. **Untouched Optional Translations Fixed:**
+   - In `PaymentMethodsManager`, drafts are compared against the original method record: absent untouched empty optional translations are omitted from the update payload, while explicit clears to existing translations are preserved.
+   - In `updatePaymentMethodAction`, server validation distinguishes existing translations from new optional translations: absent untouched empty translations skip validation without error; explicit clearing of an existing title fails with a clear field error; instructions entered for a new translation without a title fail with a clear field error; clearing instructions on an existing translation succeeds atomically.
+   - Added targeted regression suite `tests/payment-methods-untouched-optional.test.ts` covering cases (a)-(f): English-only with untouched Arabic, Arabic-only with untouched English, bilingual updates, existing title clearing failure, instructions without title failure, and clearing instructions while preserving title.
+
+2. **Migration Timestamps Verified Before Writes:**
+   - In `scripts/neon-prod-actions.mjs` (`validateTarget`) and `scripts/setup-neon-dev.mjs` (`classifyDbState`), each applied ledger row is validated against its committed journal prefix entry: exact byte-for-byte hash AND `created_at` matching the journal's `when` timestamp.
+   - Safely parses numeric timestamps as `bigint`; rejects null, malformed, duplicate, or out-of-order timestamps before any writes.
+   - Verified on disposable PostgreSQL in `tests/db/payment-methods-upgrade.test.ts` (tests C1 and C2): altered timestamp with correct hashes is refused before writes; duplicate timestamp is refused before writes.
+
+3. **Unified Payment-Method Preview Loading & Request Ordering:**
+   - Extracted and centralized loader into `GuardedPaymentMethodsLoader` (`src/lib/product-actions/payment-methods-loader.ts`).
+   - All payment method fetching in `ProductActionEditor` (initial load, focus, reopening, action reload, and explicit Refresh) routes through this single guarded loader.
+   - Older pending responses cannot overwrite newer results.
+   - Retains usable existing payment methods on refresh errors and displays clear alert messages.
+   - Added controlled response ordering regression in `tests/product-action-editor-loader.test.ts`: starting request A, starting newer request B, resolving B, then resolving A guarantees B's methods and all unsaved drafts are retained.
+   - **Refresh Completion Repair:** Settle `isRefreshing: false` whenever the newest generation request completes (`this.isMounted && gen === this.generation`), ensuring background or focus loads correctly settle refresh state when superseding an in-flight manual refresh. Added controlled regression tests for superseded success, server failure, and thrown exceptions.
+
+4. **Mobile Regression & Accessible Review Evidence:**
+   - Added automated browser regression in `scripts/test-payment-methods-browser-acceptance.mjs` testing single-language create, save, and reopen on a 360x740 narrow mobile viewport with optional Arabic tab untouched.
+   - Published three verified synthetic screenshots in `docs/review/pr22/`:
+     - `01_mobile_one_language_save_reopen.png`: Narrow-mobile (360x740) single-language save & reopen.
+     - `02_product_button_updated_preview.png`: Product button action editor showing updated central method preview.
+     - `03_disabled_method_reference_retained.png`: Disabled method with button reference retained.
+   - All screenshot evidence inspected to confirm zero credentials, real customer data, or financial information.
+   - Preserved deployment order: compatible code deployment -> read-only inspect -> approved manual migration -> live verification -> payment features activated.

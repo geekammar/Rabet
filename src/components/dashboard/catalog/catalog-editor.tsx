@@ -52,6 +52,8 @@ export function CatalogEditor({
   languages,
   categories: initialCategories,
   products: initialProducts,
+  paymentMethods = [],
+  paymentMethodsAvailable = true,
 }: CatalogViewData) {
   // Categories & Products state
   const [categories, setCategories] = useState(initialCategories);
@@ -556,7 +558,7 @@ export function CatalogEditor({
 
   if (isActionEditorOpen && selectedProduct) {
     return (
-      <div className="space-y-8" data-testid="catalog-editor">
+      <div className="space-y-8 min-w-0 max-w-full overflow-x-hidden" data-testid="catalog-editor">
         <PageHeader
           title="Catalog"
           description="Digital products, categories, displayed prices and customer navigation."
@@ -570,6 +572,8 @@ export function CatalogEditor({
           languages={languages}
           categories={categories}
           products={products}
+          paymentMethods={paymentMethods}
+          paymentMethodsAvailable={paymentMethodsAvailable}
           settings={settings}
           onClose={handleCloseActionEditor}
         />

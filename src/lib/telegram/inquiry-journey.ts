@@ -50,6 +50,14 @@ export interface InquiryJourneyOptions {
   receipt?: TelegramBusinessReceipt | null;
 }
 
+export type ActionAncestorRow = {
+  id: string;
+  productId: string;
+  parentActionId: string | null;
+  actionType: (typeof productAction.$inferSelect)["actionType"];
+  isActive: boolean;
+};
+
 /**
  * Walks action ancestry to root, verifying each ancestor is active and OPEN_SUBMENU.
  * Returns ordered root-to-leaf ancestor actions (excluding the terminal action itself).
@@ -57,10 +65,10 @@ export interface InquiryJourneyOptions {
 export async function getActionAncestorsRootToLeaf(
   db: Database,
   actionId: string,
-): Promise<{ valid: boolean; ancestors?: (typeof productAction.$inferSelect)[] }> {
+): Promise<{ valid: boolean; ancestors?: ActionAncestorRow[] }> {
   let currentId: string | null = actionId;
   let depth = 0;
-  const ancestors: (typeof productAction.$inferSelect)[] = [];
+  const ancestors: ActionAncestorRow[] = [];
   const visited = new Set<string>();
 
   while (currentId !== null && depth < MAX_SAFEGUARD_DEPTH) {
@@ -70,7 +78,13 @@ export async function getActionAncestorsRootToLeaf(
     visited.add(currentId);
 
     const [row] = await db
-      .select()
+      .select({
+        id: productAction.id,
+        productId: productAction.productId,
+        parentActionId: productAction.parentActionId,
+        actionType: productAction.actionType,
+        isActive: productAction.isActive,
+      })
       .from(productAction)
       .where(eq(productAction.id, currentId))
       .limit(1);
@@ -289,6 +303,12 @@ export async function recoverAndRenderCommittedInquiryCallback(
   });
 }
 
+export type SupportActionRow = {
+  id: string;
+  parentActionId: string | null;
+  actionConfig?: unknown;
+};
+
 /**
  * Handles START_INQUIRY inline action button tap.
  */
@@ -299,7 +319,7 @@ export async function handleProductInquiryCallback(
     chatId: number | string;
     messageId: number;
     user: TelegramUser;
-    actionRow: typeof productAction.$inferSelect;
+    actionRow: SupportActionRow;
     productRow: typeof product.$inferSelect;
     langContext: ResolvedLanguageContext;
     ui: ReturnType<typeof getLocalizedUiStrings>;
@@ -481,7 +501,7 @@ export async function handleSupportInquiryCallback(
     chatId: number | string;
     messageId: number;
     user: TelegramUser;
-    actionRow: typeof productAction.$inferSelect;
+    actionRow: SupportActionRow;
     langContext: ResolvedLanguageContext;
     ui: ReturnType<typeof getLocalizedUiStrings>;
     backTarget: string;
