@@ -397,8 +397,12 @@ export async function retrySellerNotificationDeliveryAction(
       return { success: true, message: `Notification delivered successfully (message ID ${result.messageId}).` };
     }
 
-    if (result.status === "paused") {
-      return { success: false, message: "Notifications are currently disabled. Enable notifications first." };
+    if (result.status === "pending") {
+      const msg =
+        result.reason === "notifications_disabled"
+          ? "Notifications are currently disabled. Enable notifications first."
+          : `Notification kept pending: ${result.reason}`;
+      return { success: false, message: msg };
     }
 
     if (result.status === "cancelled") {

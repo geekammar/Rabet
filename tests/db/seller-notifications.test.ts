@@ -39,6 +39,7 @@ import {
   readSellerNotificationConfig,
   recordVerificationSuccess,
   recoverExpiredSendingDeliveries,
+  revalidatePreDispatchAuthorization,
   routeAndAppendCustomerText,
   saveSellerNotificationConfig,
   setSellerNotificationEnabled,
@@ -1026,6 +1027,336 @@ describe.skipIf(!shouldRun)("Seller Notification Bot v1 — Database Integration
           language: "en",
         })
       ).rejects.toThrow();
+    });
+  });
+
+  // =========================================================================
+  // Group E Tests (31 - 36): Bot Identity, Pre-Dispatch Auth & Truthful Outcomes
+  // =========================================================================
+
+  describe("Group E: Bot Identity Binding, Pre-Dispatch Authorization & Truthful Outcomes", () => {
+    it("Test 31: Verifying a DIFFERENT bot increments revision, disables alerts, and cancels old events; SAME bot preserves revision and pending events", async () => {
+      if (!testDb) return;
+      const db = testDb.db;
+      const appDb = asAppDb(db);
+
+      // Configure destination and verify Bot A (botId: 1001)
+      await saveSellerNotificationConfig(appDb, { destinationChatId: "123456789", language: "ar" });
+      const initialSetting = await readSellerNotificationConfig(appDb);
+      const rev1 = initialSetting?.revision ?? 1;
+
+      const configA = await recordVerificationSuccess(appDb, {
+        botId: 1001,
+        botUsername: "BotA",
+        destinationChatId: "123456789",
+        expectedRevision: rev1,
+        expectedDestination: "123456789",
+      });
+      expect(configA.revision).toBe(rev1);
+      expect(configA.verifiedBotId).toBe(1001);
+
+      // Enable notifications with Bot A
+      await setSellerNotificationEnabled(appDb, true, 1001);
+      const enabledState = await readSellerNotificationConfig(appDb);
+      expect(enabledState?.enabled).toBe(true);
+
+      // Create a pending delivery under revision rev1
+      const inqId = await createTestInquiryRow(db, fixtureCustomerId);
+      const [pendingDelivery] = await db
+        .insert(sellerNotificationDelivery)
+        .values({
+          inquiryId: inqId,
+          destinationChatId: "123456789",
+          revision: rev1,
+          reference: generateDeliveryReference(),
+          eventType: "new_inquiry",
+          status: "pending",
+        })
+        .returning();
+
+      // Case 1: Repeat test for SAME Bot A preserves revision, enabled state, and pending deliveries
+      const repeatA = await recordVerificationSuccess(appDb, {
+        botId: 1001,
+        botUsername: "BotA",
+        expectedRevision: rev1,
+        expectedDestination: "123456789",
+      });
+      expect(repeatA.revision).toBe(rev1);
+      expect(repeatA.enabled).toBe(true);
+
+      const deliveryStillPending = await getSellerNotificationDelivery(appDb, pendingDelivery.id);
+      expect(deliveryStillPending?.status).toBe("pending");
+
+      // Case 2: Verifying a DIFFERENT Bot B (botId: 2002) is a real identity change
+      const verifiedB = await recordVerificationSuccess(appDb, {
+        botId: 2002,
+        botUsername: "BotB",
+        expectedRevision: rev1,
+        expectedDestination: "123456789",
+      });
+      // Revision must increment atomically to rev1 + 1
+      expect(verifiedB.revision).toBe(rev1 + 1);
+      expect(verifiedB.verifiedBotId).toBe(2002);
+      // Alerts must be automatically disabled
+      expect(verifiedB.enabled).toBe(false);
+
+      // The old revision rev1 event must be cancelled with incompatible_configuration
+      const oldDeliveryCancelled = await getSellerNotificationDelivery(appDb, pendingDelivery.id);
+      expect(oldDeliveryCancelled?.status).toBe("cancelled");
+      expect(oldDeliveryCancelled?.errorCategory).toBe("incompatible_configuration");
+
+      // Attempting to send old delivery fails and cannot be delivered through Bot B
+      const sendRes = await attemptSellerNotificationDelivery({
+        db: appDb,
+        deliveryId: pendingDelivery.id,
+      });
+      expect(sendRes.status).toBe("cancelled");
+    });
+
+    it("Test 32: Pre-dispatch authorization halts delivery if notifications are disabled in-flight", async () => {
+      if (!testDb) return;
+      const db = testDb.db;
+      const appDb = asAppDb(db);
+
+      // Configure, verify, and enable
+      await saveSellerNotificationConfig(appDb, { destinationChatId: "123456789", language: "ar" });
+      const cfg = await recordVerificationSuccess(appDb, {
+        botId: 3003,
+        botUsername: "TestBot",
+        destinationChatId: "123456789",
+      });
+      await setSellerNotificationEnabled(appDb, true, 3003);
+
+      const inqId = await createTestInquiryRow(db, fixtureCustomerId);
+      const [del] = await db
+        .insert(sellerNotificationDelivery)
+        .values({
+          inquiryId: inqId,
+          destinationChatId: "123456789",
+          revision: cfg.revision,
+          reference: generateDeliveryReference(),
+          eventType: "new_inquiry",
+          status: "pending",
+        })
+        .returning();
+
+      // Worker claims attempt
+      const attemptId = crypto.randomUUID();
+      await db
+        .update(sellerNotificationDelivery)
+        .set({ status: "sending", claimAttemptId: attemptId, claimExpiresAt: new Date(Date.now() + 60000) })
+        .where(eq(sellerNotificationDelivery.id, del.id));
+
+      // In-flight event: operator disables alerts
+      await db.update(sellerNotificationSetting).set({ enabled: false }).where(eq(sellerNotificationSetting.id, 1));
+
+      // Authoritative pre-dispatch authorization check must reject send and release claim to pending
+      const auth = await revalidatePreDispatchAuthorization(appDb, {
+        deliveryId: del.id,
+        attemptId,
+        expectedRevision: cfg.revision,
+        expectedDestination: "123456789",
+        expectedBotId: 3003,
+      });
+
+      expect(auth.authorized).toBe(false);
+      expect(auth.reason).toBe("notifications_disabled");
+
+      const refreshed = await getSellerNotificationDelivery(appDb, del.id);
+      expect(refreshed?.status).toBe("pending");
+      expect(refreshed?.claimAttemptId).toBeNull();
+    });
+
+    it("Test 33: Pre-dispatch authorization cancels delivery if destination or revision changes in-flight", async () => {
+      if (!testDb) return;
+      const db = testDb.db;
+      const appDb = asAppDb(db);
+
+      await saveSellerNotificationConfig(appDb, { destinationChatId: "123456789", language: "ar" });
+      const cfg = await recordVerificationSuccess(appDb, { botId: 3003, destinationChatId: "123456789" });
+      await setSellerNotificationEnabled(appDb, true, 3003);
+
+      const inqId = await createTestInquiryRow(db, fixtureCustomerId);
+      const [del] = await db
+        .insert(sellerNotificationDelivery)
+        .values({
+          inquiryId: inqId,
+          destinationChatId: "123456789",
+          revision: cfg.revision,
+          reference: generateDeliveryReference(),
+          eventType: "new_inquiry",
+          status: "pending",
+        })
+        .returning();
+
+      const attemptId = crypto.randomUUID();
+      await db
+        .update(sellerNotificationDelivery)
+        .set({ status: "sending", claimAttemptId: attemptId, claimExpiresAt: new Date(Date.now() + 60000) })
+        .where(eq(sellerNotificationDelivery.id, del.id));
+
+      // In-flight event: destination changed to a new destination, bumping revision
+      await saveSellerNotificationConfig(appDb, { destinationChatId: "987654321", language: "ar" });
+
+      const auth = await revalidatePreDispatchAuthorization(appDb, {
+        deliveryId: del.id,
+        attemptId,
+        expectedRevision: cfg.revision,
+        expectedDestination: "123456789",
+        expectedBotId: 3003,
+      });
+
+      expect(auth.authorized).toBe(false);
+      expect(auth.reason).toBe("incompatible_configuration");
+
+      const refreshed = await getSellerNotificationDelivery(appDb, del.id);
+      expect(refreshed?.status).toBe("cancelled");
+      expect(refreshed?.errorCategory).toBe("incompatible_configuration");
+    });
+
+    it("Test 34: Pre-dispatch authorization halts without modifying DB if claim ownership was lost", async () => {
+      if (!testDb) return;
+      const db = testDb.db;
+      const appDb = asAppDb(db);
+
+      await saveSellerNotificationConfig(appDb, { destinationChatId: "123456789", language: "ar" });
+      const cfg = await recordVerificationSuccess(appDb, { botId: 3003, destinationChatId: "123456789" });
+      await setSellerNotificationEnabled(appDb, true, 3003);
+
+      const inqId = await createTestInquiryRow(db, fixtureCustomerId);
+      const [del] = await db
+        .insert(sellerNotificationDelivery)
+        .values({
+          inquiryId: inqId,
+          destinationChatId: "123456789",
+          revision: cfg.revision,
+          reference: generateDeliveryReference(),
+          eventType: "new_inquiry",
+          status: "pending",
+        })
+        .returning();
+
+      const oldAttemptId = crypto.randomUUID();
+      const newAttemptId = crypto.randomUUID();
+
+      // Another worker claimed the record
+      await db
+        .update(sellerNotificationDelivery)
+        .set({ status: "sending", claimAttemptId: newAttemptId, claimExpiresAt: new Date(Date.now() + 60000) })
+        .where(eq(sellerNotificationDelivery.id, del.id));
+
+      // Old worker checks authorization with oldAttemptId
+      const auth = await revalidatePreDispatchAuthorization(appDb, {
+        deliveryId: del.id,
+        attemptId: oldAttemptId,
+        expectedRevision: cfg.revision,
+        expectedDestination: "123456789",
+        expectedBotId: 3003,
+      });
+
+      expect(auth.authorized).toBe(false);
+      expect(auth.reason).toBe("claim_lost");
+
+      // Record must remain belonging to the new worker
+      const refreshed = await getSellerNotificationDelivery(appDb, del.id);
+      expect(refreshed?.status).toBe("sending");
+      expect(refreshed?.claimAttemptId).toBe(newAttemptId);
+    });
+
+    it("Test 35: Ambiguous Telegram 200 response with missing/invalid message_id is marked unknown", async () => {
+      if (!testDb) return;
+      const db = testDb.db;
+      const appDb = asAppDb(db);
+
+      await saveSellerNotificationConfig(appDb, { destinationChatId: "123456789", language: "ar" });
+      const cfg = await recordVerificationSuccess(appDb, { botId: 3003, destinationChatId: "123456789" });
+      await setSellerNotificationEnabled(appDb, true, 3003);
+
+      const inqId = await createTestInquiryRow(db, fixtureCustomerId);
+      const [del] = await db
+        .insert(sellerNotificationDelivery)
+        .values({
+          inquiryId: inqId,
+          destinationChatId: "123456789",
+          revision: cfg.revision,
+          reference: generateDeliveryReference(),
+          eventType: "new_inquiry",
+          status: "pending",
+        })
+        .returning();
+
+      // Transport that returns ok: false with HTTP 200 (ambiguous response)
+      const fakeTransport = createFakeTelegramTransport();
+      fakeTransport.sendMessage = async () => {
+        return {
+          ok: false,
+          error: "Ambiguous Telegram 200 response without valid message acknowledgment",
+          errorKind: "api_error",
+          httpStatus: 200,
+        };
+      };
+
+      const res = await attemptSellerNotificationDelivery({
+        db: appDb,
+        deliveryId: del.id,
+        transport: fakeTransport,
+      });
+
+      expect(res).toMatchObject({
+        status: "unknown",
+        errorCategory: "ambiguous_telegram_response",
+      });
+
+      const refreshed = await getSellerNotificationDelivery(appDb, del.id);
+      expect(refreshed?.status).toBe("unknown");
+      expect(refreshed?.errorCategory).toBe("ambiguous_telegram_response");
+    });
+
+    it("Test 36: Persistence failure on acknowledged Telegram send records unknown without fabricating success", async () => {
+      if (!testDb) return;
+      const db = testDb.db;
+      const appDb = asAppDb(db);
+
+      await saveSellerNotificationConfig(appDb, { destinationChatId: "123456789", language: "ar" });
+      const cfg = await recordVerificationSuccess(appDb, { botId: 3003, destinationChatId: "123456789" });
+      await setSellerNotificationEnabled(appDb, true, 3003);
+
+      const inqId = await createTestInquiryRow(db, fixtureCustomerId);
+      const [del] = await db
+        .insert(sellerNotificationDelivery)
+        .values({
+          inquiryId: inqId,
+          destinationChatId: "123456789",
+          revision: cfg.revision,
+          reference: generateDeliveryReference(),
+          eventType: "new_inquiry",
+          status: "pending",
+        })
+        .returning();
+
+      // Transport intercepts and changes DB delivery row before returning Telegram success
+      const fakeTransport = createFakeTelegramTransport();
+      fakeTransport.sendMessage = async () => {
+        // While send was in-flight, lease expired and was recovered to unknown with category lease_expired
+        await db
+          .update(sellerNotificationDelivery)
+          .set({ status: "unknown", claimAttemptId: null, claimExpiresAt: null, errorCategory: "lease_expired" })
+          .where(eq(sellerNotificationDelivery.id, del.id));
+
+        return { ok: true, messageId: 88888 };
+      };
+
+      const res = await attemptSellerNotificationDelivery({
+        db: appDb,
+        deliveryId: del.id,
+        transport: fakeTransport,
+      });
+
+      // Must NOT fabricate sent status! Must return unknown with persistence_mismatch
+      expect(res).toMatchObject({
+        status: "unknown",
+        errorCategory: "persistence_mismatch",
+      });
     });
   });
 });

@@ -162,28 +162,47 @@ Located in Store Settings (`/settings`):
 
 ## 7. Operator Setup Guidance (Future Production Deployment)
 
-When deploying to Production (to be executed only after Ammar's independent review):
+When deploying to Production (to be executed only after Ammar's independent review and merge):
 
-1. **Bot Creation:**
-   - In Telegram, open `@BotFather`.
-   - Run `/newbot` and create a dedicated notification bot (e.g., `@YourStore_SellerBot`).
-   - Do NOT configure a webhook for this bot (it is outbound only).
-2. **Environment Secret:**
-   - In hosting environment (e.g., Vercel), add:
-     `TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN=<your_new_bot_token>`
-   - Redeploy or restart the application.
-3. **Run Production Migration:**
-   - Execute the migration runner in migrate mode:
-     `npm run db:prod:actions migrate`
-   - Verifies the healthy 0002 baseline and applies `0003_seller_notifications.sql`.
-4. **Configure in Settings:**
-   - Visit `/settings` as admin.
-   - Click "Check Bot Connection" to verify bot identity.
-   - Click `/start` in the Telegram bot from your seller account.
-   - Click "Discover Chat ID" or enter your numeric ID.
-   - Click "Save Configuration".
-   - Click "Send Test Notification" and verify receipt in Telegram.
-   - Switch "Enable Notifications" to ON.
+### Step 1: Merge PR to `main`
+- PR #23 must be reviewed and merged into `main`. Production migration workflows strictly require `main` (`GITHUB_REF=refs/heads/main`).
+
+### Step 2: Fresh Read-Only Inspection via GitHub Actions
+- Open GitHub Actions in the repository: **Neon PROD database** (`.github/workflows/neon-prod-migrate.yml`).
+- Click **Run workflow**:
+  - Branch: `main`
+  - Mode: `inspect` (default)
+- Review the workflow run output to confirm:
+  - PostgreSQL connectivity and target identity (`NEON_PROD_EXPECTED_HOST`, `NEON_PROD_EXPECTED_DB_NAME`).
+  - Baseline migration status (confirms healthy `0002_customer_journey` ledger state).
+  - Exactly one pending migration: `0003_seller_notifications`.
+  - Zero schema drift on existing tables.
+
+### Step 3: Production Migration Execution
+- In GitHub Actions, trigger **Neon PROD database** again:
+  - Branch: `main`
+  - Mode: `migrate`
+  - Confirmation phrase: type `MIGRATE_RABET_PROD` exactly.
+- The workflow applies `0003_seller_notifications.sql` in a single isolated transaction and verifies table creation, triggers, and journal entry integrity.
+
+### Step 4: Dedicated Bot Creation & Environment Secret
+- In Telegram, open `@BotFather`.
+- Run `/newbot` and create a dedicated outbound-only seller notification bot (e.g., `@YourStore_SellerBot`).
+  - *Note:* Do NOT configure a webhook or enable inline mode for this bot; it is strictly an outbound delivery bot.
+- In your hosting environment (e.g., Vercel / Production environment variables):
+  - Add: `TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN=<your_new_bot_token>`
+  - Redeploy or trigger production restart so the runtime picks up the new secret.
+
+### Step 5: Configure & Test in Dashboard Settings
+- Sign in to Rabet dashboard as admin and navigate to `/settings`.
+- In the **Seller Notifications** card:
+  1. Click **Check Bot Connection**: confirms runtime token validity and displays the bot's username (`@YourStore_SellerBot`).
+  2. In Telegram, open a chat with `@YourStore_SellerBot` and send `/start`.
+  3. In the Settings card, click **Discover Chat ID** (or enter your numeric private chat ID).
+  4. Select preferred language (Arabic or English) and click **Save Configuration**.
+  5. Click **Send Test Notification**: verifies bot authorization and records `verified_at` and `verified_bot_id` in the database.
+  6. Switch **Enable Notifications** to ON.
+  7. Newly opened inquiries will now immediately notify the verified seller chat!
 
 ---
 
@@ -192,9 +211,9 @@ When deploying to Production (to be executed only after Ammar's independent revi
 | Check | Tool / Scope | Result | Details |
 |---|---|---|---|
 | **Unit Tests** | `vitest run` | **Passed** (40 test files, 637 tests) | Setup, security, formatting, capability detection |
-| **DB Integration Tests** | `npm run test:db` (disposable PostgreSQL) | **Passed** (22 test files, 360 tests) | Atomic batches, outbox claims, cooldown, migrations 0000..0003 |
-| **Seller Notifications DB Tests** | `tests/db/seller-notifications.test.ts` | **Passed** (23 tests) | Fencing, receipt replay, 429 backoff, revision invalidation, atomic cooldown, expired sending recovery |
+| **DB Integration Tests** | `npm run test:db` (disposable PostgreSQL) | **Passed** (22 test files, 366 tests) | Atomic batches, outbox claims, cooldown, migrations 0000..0003 |
+| **Seller Notifications DB Tests** | `tests/db/seller-notifications.test.ts` | **Passed** (29 tests) | Fencing, replay, 429 backoff, bot identity & revision invalidation, pre-dispatch authorization, ambiguous response classification, persistence mismatch handling, atomic cooldown, expired sending recovery |
 | **Typecheck** | `npm run typecheck` (`tsc --noEmit`) | **Passed** | 0 type errors |
 | **Lint** | `npm run lint` (`eslint`) | **Passed** | 0 errors, 0 warnings |
-| **Next.js Production Build** | `npm run build` | **Passed** | All 17 routes compiled cleanly |
-| **Browser Acceptance** | `scripts/test-seller-notifications-browser-acceptance.mjs` | **Passed** | Real headless Chromium CDP, 0px horizontal overflow on 360px mobile, Arabic RTL, unknown delivery retry confirmation modal |
+| **Next.js Production Build** | `npm run build` | **Passed** | All routes compiled cleanly |
+| **Browser Acceptance** | `npm run test:browser:notifications` | **Passed** | Real headless Chromium CDP (Scenarios A through K), 0px horizontal overflow on 360px mobile, Arabic RTL layout, duplicate-risk confirmation modal, pre-dispatch fencing, expired sending lease recovery |

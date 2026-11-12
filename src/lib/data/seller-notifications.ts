@@ -338,6 +338,18 @@ export async function recordVerificationSuccess(
         verified_bot_id = ${input.botId}::bigint,
         verified_bot_username = ${input.botUsername ?? null}::text,
         verified_chat_id = destination_chat_id,
+        enabled = CASE
+          WHEN seller_notification_setting.verified_bot_id IS NOT NULL
+               AND seller_notification_setting.verified_bot_id != ${input.botId}::bigint
+          THEN false
+          ELSE seller_notification_setting.enabled
+        END,
+        revision = CASE
+          WHEN seller_notification_setting.verified_bot_id IS NOT NULL
+               AND seller_notification_setting.verified_bot_id != ${input.botId}::bigint
+          THEN seller_notification_setting.revision + 1
+          ELSE seller_notification_setting.revision
+        END,
         last_test_at = now(),
         updated_at = now()
       WHERE id = 1
@@ -358,7 +370,15 @@ export async function recordVerificationSuccess(
       );
     }
 
-    return mapSettingRow(rows[0]);
+    const saved = mapSettingRow(rows[0]);
+    if (
+      input.expectedRevision !== undefined &&
+      saved.revision > input.expectedRevision
+    ) {
+      await cancelObsoleteDeliveriesForRevision(db, saved.revision);
+    }
+
+    return saved;
   } catch (err) {
     throw mapDatabaseError(err);
   }
@@ -1044,6 +1064,122 @@ export async function releaseDeliveryClaim(
   }
 }
 
+export interface PreDispatchAuthorizationParams {
+  deliveryId: string;
+  attemptId: string;
+  expectedRevision: number;
+  expectedDestination: string;
+  expectedBotId?: number | null;
+}
+
+export type PreDispatchAuthorizationResult =
+  | { authorized: true; botId: number | null }
+  | {
+      authorized: false;
+      reason: "incompatible_configuration" | "notifications_disabled" | "claim_lost";
+    };
+
+/**
+ * Authoritative pre-dispatch authorization check immediately before sendMessage.
+ * Revalidates:
+ * - current enabled state
+ * - configuration revision
+ * - destination chat ID
+ * - verified bot ID
+ * - record status ('sending') and active attemptId lease
+ *
+ * Does not perform network requests inside a DB transaction.
+ * Fences stale workers and releases/cancels claims truthfully.
+ */
+export async function revalidatePreDispatchAuthorization(
+  db: Database,
+  params: PreDispatchAuthorizationParams,
+): Promise<PreDispatchAuthorizationResult> {
+  const cap = await checkSellerNotificationCapability(db);
+  if (!cap.supported) {
+    return { authorized: false, reason: "incompatible_configuration" };
+  }
+
+  try {
+    const result = await db.execute(sql`
+      SELECT
+        s.enabled AS setting_enabled,
+        s.revision AS setting_revision,
+        s.destination_chat_id AS setting_destination,
+        s.verified_chat_id AS setting_verified_chat_id,
+        s.verified_bot_id AS setting_verified_bot_id,
+        s.verified_at AS setting_verified_at,
+        d.id AS delivery_id,
+        d.status AS delivery_status,
+        d.claim_attempt_id,
+        d.claim_expires_at,
+        d.revision AS delivery_revision,
+        d.destination_chat_id AS delivery_destination
+      FROM seller_notification_setting s
+      LEFT JOIN seller_notification_delivery d
+        ON d.id = ${params.deliveryId}::uuid
+      WHERE s.id = 1
+    `);
+
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+
+    if (rows.length === 0 || !rows[0].delivery_id) {
+      return { authorized: false, reason: "claim_lost" };
+    }
+
+    const row = rows[0];
+    const deliveryStatus = String(row.delivery_status || "");
+    const claimAttemptId = row.claim_attempt_id ? String(row.claim_attempt_id) : null;
+    const claimExpiresAt = row.claim_expires_at ? new Date(row.claim_expires_at as string | Date) : null;
+
+    // 1. Verify claim ownership
+    const isLeaseActive = !claimExpiresAt || claimExpiresAt.getTime() > Date.now();
+    if (deliveryStatus !== "sending" || claimAttemptId !== params.attemptId || !isLeaseActive) {
+      return { authorized: false, reason: "claim_lost" };
+    }
+
+    const settingRevision = Number(row.setting_revision || 0);
+    const settingDestination = row.setting_destination ? String(row.setting_destination) : null;
+    const settingVerifiedChat = row.setting_verified_chat_id ? String(row.setting_verified_chat_id) : null;
+    const settingVerifiedBotId = row.setting_verified_bot_id ? Number(row.setting_verified_bot_id) : null;
+    const settingEnabled = Boolean(row.setting_enabled);
+    const settingVerifiedAt = row.setting_verified_at;
+
+    const deliveryRevision = Number(row.delivery_revision || 0);
+    const deliveryDestination = String(row.delivery_destination || "");
+
+    // 2. Check configuration compatibility
+    const isConfigCompatible =
+      settingRevision === deliveryRevision &&
+      settingDestination === deliveryDestination &&
+      (!params.expectedBotId || !settingVerifiedBotId || settingVerifiedBotId === params.expectedBotId);
+
+    if (!isConfigCompatible) {
+      await markDeliveryCancelledByWorker(db, params.deliveryId, params.attemptId, "incompatible_configuration");
+      return { authorized: false, reason: "incompatible_configuration" };
+    }
+
+    // 3. Check enabled and verified state
+    const isFullyVerified = Boolean(
+      settingVerifiedAt &&
+      settingVerifiedChat &&
+      settingVerifiedChat === settingDestination
+    );
+
+    if (!settingEnabled || !isFullyVerified) {
+      await releaseDeliveryClaim(db, params.deliveryId, params.attemptId, "pending");
+      return { authorized: false, reason: "notifications_disabled" };
+    }
+
+    return { authorized: true, botId: settingVerifiedBotId };
+  } catch (err) {
+    throw mapDatabaseError(err);
+  }
+}
+
 export async function cancelObsoleteDeliveriesForRevision(
   db: Database,
   currentRevision: number,
@@ -1061,8 +1197,7 @@ export async function cancelObsoleteDeliveriesForRevision(
         claim_expires_at = NULL,
         updated_at = now()
       WHERE revision < ${currentRevision}
-        AND status != 'sent'
-        AND status != 'cancelled'
+        AND status IN ('pending', 'failed')
       RETURNING id
     `);
     const rawRows: unknown = Array.isArray(result)

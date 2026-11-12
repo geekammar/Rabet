@@ -4,12 +4,13 @@
  *
  * Real browser acceptance test suite for Seller Notification Bot v1.
  * Exercises the Settings UI against local Next.js production build (`next start`),
- * disposable loopback PostgreSQL, local mock Telegram HTTP interceptor,
+ * disposable loopback PostgreSQL (or designated CI service container),
+ * hermetic local mock Telegram HTTP interceptor with call auditing,
  * and headless Chromium via Chrome DevTools Protocol (CDP).
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { hash } from "@node-rs/argon2";
@@ -25,7 +26,7 @@ const CDP_PORT = 9349;
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "test-password-123";
-const SCREENSHOT_DIR = "/root/.gemini/antigravity-cli/brain/739bbda4-8349-459a-8983-4929a0ec3232/screenshots";
+const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR || "/root/.gemini/antigravity-cli/brain/739bbda4-8349-459a-8983-4929a0ec3232/screenshots";
 const REVIEW_DOCS_DIR = path.resolve("docs/review/seller-notifications");
 
 let appServer = null;
@@ -33,14 +34,38 @@ let chromeProcess = null;
 let pgClient = null;
 let ownedTempDir = null;
 let ownedPgFixture = null;
+let createdDbName = null;
 let isCleaningUp = false;
 
 function log(msg) {
   process.stdout.write(`[notifications-browser-acceptance] ${msg}\n`);
 }
 
+function assert(condition, message) {
+  if (!condition) {
+    const err = new Error(`[ASSERTION_FAILED] ${message}`);
+    log(err.message);
+    throw err;
+  }
+}
+
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(fn, timeoutMs = 10000, intervalMs = 200, label = "condition") {
+  const start = Date.now();
+  let lastErr = null;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await fn();
+      if (res) return res;
+    } catch (err) {
+      lastErr = err;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(`Timeout waiting for ${label} after ${timeoutMs}ms${lastErr ? `: ${lastErr.message}` : ""}`);
 }
 
 async function cleanup() {
@@ -67,6 +92,15 @@ async function cleanup() {
       await pgClient.end();
     } catch {}
     pgClient = null;
+  }
+
+  if (createdDbName && process.env.RABET_TEST_PG_URL) {
+    try {
+      const cleanupSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+      await cleanupSql.unsafe(`DROP DATABASE IF EXISTS ${createdDbName}`);
+      await cleanupSql.end();
+    } catch {}
+    createdDbName = null;
   }
 
   if (ownedPgFixture && ownedTempDir) {
@@ -188,12 +222,13 @@ class CDPClient {
   async takeScreenshot(filename) {
     const res = await this.send("Page.captureScreenshot", { format: "png" });
     const buffer = Buffer.from(res.data, "base64");
-    const filePath1 = path.join(SCREENSHOT_DIR, filename);
-    writeFileSync(filePath1, buffer);
+    if (SCREENSHOT_DIR) {
+      mkdirSync(SCREENSHOT_DIR, { recursive: true });
+      writeFileSync(path.join(SCREENSHOT_DIR, filename), buffer);
+    }
     mkdirSync(REVIEW_DOCS_DIR, { recursive: true });
-    const filePath2 = path.join(REVIEW_DOCS_DIR, filename);
-    writeFileSync(filePath2, buffer);
-    log(`Saved screenshot: ${filename} to brain artifacts & docs/review/`);
+    writeFileSync(path.join(REVIEW_DOCS_DIR, filename), buffer);
+    log(`Saved screenshot: ${filename} to ${REVIEW_DOCS_DIR}`);
   }
 
   async close() {
@@ -225,8 +260,8 @@ async function setInputValue(cdp, selector, value) {
 
 async function main() {
   log("Starting Seller Notifications browser acceptance test...");
-  mkdirSync(SCREENSHOT_DIR, { recursive: true });
   mkdirSync(REVIEW_DOCS_DIR, { recursive: true });
+  if (SCREENSHOT_DIR) mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
   const chromePath = resolveChromePath();
   if (!chromePath) {
@@ -237,44 +272,59 @@ async function main() {
   ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-notifications-test-"));
   chmodSync(ownedTempDir, 0o700);
 
-  const stateFilePath = path.join(ownedTempDir, "rabet-test-pg.json");
-  const conflict = detectConflictingFixture(stateFilePath);
-  if (conflict) {
-    await fail(`Conflicting PostgreSQL fixture detected: port=${conflict.port}`);
-  }
+  const telegramAuditLog = path.join(ownedTempDir, "telegram-calls.json");
+  writeFileSync(telegramAuditLog, "[]", "utf8");
 
-  log("Starting disposable PostgreSQL cluster...");
-  const pgStartOutput = spawnSync(
-    "node",
-    ["scripts/db-test-postgres.mjs", "start"],
-    {
-      env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
-      encoding: "utf8",
-    }
-  );
-
-  if (pgStartOutput.status !== 0) {
-    await fail(`Failed to start disposable PostgreSQL: ${pgStartOutput.stderr || pgStartOutput.stdout}`);
-  }
-
-  const startLines = (pgStartOutput.stdout || "").split("\n");
   let pgUrl = "";
-  for (const line of startLines) {
-    if (line.startsWith("postgresql://")) {
-      pgUrl = line.trim();
-      break;
-    }
-  }
+  if (process.env.RABET_TEST_PG_URL) {
+    createdDbName = `rabet_notif_browser_${Date.now()}`;
+    const adminSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+    await adminSql.unsafe(`CREATE DATABASE ${createdDbName}`);
+    await adminSql.end();
 
-  if (!pgUrl) {
-    const savedState = readPgState(stateFilePath);
-    if (savedState?.port) {
-      pgUrl = `postgresql://rabet@127.0.0.1:${savedState.port}/postgres`;
+    const parsed = new URL(process.env.RABET_TEST_PG_URL);
+    parsed.pathname = `/${createdDbName}`;
+    pgUrl = parsed.toString();
+    log(`Using designated PostgreSQL service with database: ${createdDbName}`);
+  } else {
+    const stateFilePath = path.join(ownedTempDir, "rabet-test-pg.json");
+    const conflict = detectConflictingFixture(stateFilePath);
+    if (conflict) {
+      await fail(`Conflicting PostgreSQL fixture detected: port=${conflict.port}`);
     }
-  }
 
-  ownedPgFixture = readPgState(stateFilePath);
-  log(`Disposable PostgreSQL started at: ${pgUrl}`);
+    log("Starting disposable PostgreSQL cluster...");
+    const pgStartOutput = spawnSync(
+      "node",
+      ["scripts/db-test-postgres.mjs", "start"],
+      {
+        env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
+        encoding: "utf8",
+      }
+    );
+
+    if (pgStartOutput.status !== 0) {
+      await fail(`Failed to start disposable PostgreSQL: ${pgStartOutput.stderr || pgStartOutput.stdout}`);
+    }
+
+    const startLines = (pgStartOutput.stdout || "").split("\n");
+    for (const line of startLines) {
+      if (line.startsWith("postgresql://")) {
+        pgUrl = line.trim();
+        break;
+      }
+    }
+
+    if (!pgUrl) {
+      const savedState = readPgState(stateFilePath);
+      if (savedState?.port) {
+        pgUrl = `postgresql://rabet@127.0.0.1:${savedState.port}/postgres`;
+      }
+    }
+
+    ownedPgFixture = readPgState(stateFilePath);
+    log(`Disposable PostgreSQL started at: ${pgUrl}`);
+  }
 
   log("Applying database migrations (0000 -> 0001 -> 0002 -> 0003)...");
   const migrate = spawnSync("npm", ["run", "db:migrate"], {
@@ -303,7 +353,7 @@ async function main() {
     VALUES ('Rabet Digital Services', 'USD', ${langAr.id}, true, ARRAY['الدعم الفني', 'المبيعات']);
   `;
 
-  // Seed sample customer and inquiries for delivery history test
+  // Seed sample customer and inquiries
   const [cust] = await pgClient`
     INSERT INTO customer (telegram_id, first_name, telegram_username)
     VALUES (987654, 'Ammar', 'ammar_buyer')
@@ -320,17 +370,17 @@ async function main() {
     RETURNING id;
   `;
 
-  // Seed notification setting row (initially unverified with destination 123456789)
+  // Seed initial setting: unconfigured, destination null, disabled
   await pgClient`
     INSERT INTO seller_notification_setting (
       id, enabled, destination_chat_id, language, verified_at, verified_bot_id, verified_bot_username, verified_chat_id, revision
     )
     VALUES (
-      1, false, '123456789', 'ar', NULL, NULL, NULL, NULL, 1
+      1, false, NULL, 'ar', NULL, NULL, NULL, NULL, 1
     )
     ON CONFLICT (id) DO UPDATE SET
       enabled = false,
-      destination_chat_id = '123456789',
+      destination_chat_id = NULL,
       language = 'ar',
       verified_at = NULL,
       verified_bot_id = NULL,
@@ -339,21 +389,13 @@ async function main() {
       revision = 1;
   `;
 
-  // Seed sample deliveries: one sent, one unknown
+  // Seed 1 delivered record
   await pgClient`
     INSERT INTO seller_notification_delivery (
       inquiry_id, reference, revision, destination_chat_id, status, attempt_count, telegram_message_id, sent_at
     )
     VALUES (
       ${inq1.id}, 'SND-DEMO-001', 1, '123456789', 'sent', 1, 4001, now()
-    );
-  `;
-  await pgClient`
-    INSERT INTO seller_notification_delivery (
-      inquiry_id, reference, revision, destination_chat_id, status, attempt_count, error_category
-    )
-    VALUES (
-      ${inq2.id}, 'SND-UNKWN-002', 1, '123456789', 'unknown', 1, 'timeout'
     );
   `;
 
@@ -364,6 +406,8 @@ async function main() {
   writeFileSync(
     bootstrapFile,
     `import postgres from "${postgresModuleUrl}";\n` +
+      `import fs from "node:fs";\n` +
+      `const auditFile = ${JSON.stringify(telegramAuditLog)};\n` +
       `const originalFetch = globalThis.fetch;\n` +
       `let pg = null;\n` +
       `globalThis.fetch = async (input, init) => {\n` +
@@ -406,7 +450,20 @@ async function main() {
       `    }\n` +
       `  }\n` +
       `  if (url && url.includes("api.telegram.org")) {\n` +
-      `    if (url.includes("getMe")) {\n` +
+      `    let callKind = "unknown";\n` +
+      `    let parsedBody = null;\n` +
+      `    if (init?.body) {\n` +
+      `      try { parsedBody = JSON.parse(init.body); } catch {}\n` +
+      `    }\n` +
+      `    if (url.includes("getMe")) callKind = "getMe";\n` +
+      `    else if (url.includes("sendMessage")) callKind = "sendMessage";\n` +
+      `    else if (url.includes("getUpdates")) callKind = "getUpdates";\n` +
+      `    try {\n` +
+      `      const calls = JSON.parse(fs.readFileSync(auditFile, "utf8"));\n` +
+      `      calls.push({ kind: callKind, url, body: parsedBody, time: Date.now() });\n` +
+      `      fs.writeFileSync(auditFile, JSON.stringify(calls));\n` +
+      `    } catch {}\n` +
+      `    if (callKind === "getMe") {\n` +
       `      return new Response(JSON.stringify({\n` +
       `        ok: true,\n` +
       `        result: {\n` +
@@ -417,17 +474,17 @@ async function main() {
       `        },\n` +
       `      }), { status: 200, headers: { "content-type": "application/json" } });\n` +
       `    }\n` +
-      `    if (url.includes("sendMessage")) {\n` +
+      `    if (callKind === "sendMessage") {\n` +
       `      return new Response(JSON.stringify({\n` +
       `        ok: true,\n` +
       `        result: {\n` +
       `          message_id: 4321,\n` +
       `          date: Math.floor(Date.now() / 1000),\n` +
-      `          chat: { id: 123456789, type: "private" },\n` +
+      `          chat: { id: parsedBody?.chat_id || 123456789, type: "private" },\n` +
       `        },\n` +
       `      }), { status: 200, headers: { "content-type": "application/json" } });\n` +
       `    }\n` +
-      `    if (url.includes("getUpdates")) {\n` +
+      `    if (callKind === "getUpdates") {\n` +
       `      return new Response(JSON.stringify({\n` +
       `        ok: true,\n` +
       `        result: [\n` +
@@ -441,6 +498,7 @@ async function main() {
       `        ],\n` +
       `      }), { status: 200, headers: { "content-type": "application/json" } });\n` +
       `    }\n` +
+      `    return new Response(JSON.stringify({ ok: false, description: "Blocked unexpected Telegram API call in test harness" }), { status: 400, headers: { "content-type": "application/json" } });\n` +
       `  }\n` +
       `  return originalFetch(input, init);\n` +
       `};\n`,
@@ -465,6 +523,7 @@ async function main() {
       `export TEST_REAL_PG_URL='${pgUrl}'`,
       `export AUTH_SECRET='${authSecret}'`,
       `export AUTH_URL='${BASE_URL}'`,
+      `export APP_URL='https://dashboard.rabet.test'`,
       `export AUTH_TRUST_HOST='true'`,
       `export ADMIN_EMAIL='${TEST_EMAIL}'`,
       `export ADMIN_PASSWORD_HASH='${passwordHash}'`,
@@ -499,9 +558,7 @@ async function main() {
     } catch {}
     await sleep(500);
   }
-  if (!serverReady) {
-    await fail("Next.js server failed to become ready within 20s");
-  }
+  assert(serverReady, "Next.js server failed to become ready within 20s");
   log("Next.js server is ready.");
 
   log("Launching headless Chromium with CDP...");
@@ -535,9 +592,7 @@ async function main() {
       }
     } catch {}
   }
-  if (!pageTarget) {
-    await fail("Could not connect to Chromium DevTools Protocol (no page target)");
-  }
+  assert(pageTarget && pageTarget.webSocketDebuggerUrl, "Could not connect to Chromium DevTools Protocol");
 
   const cdp = new CDPClient(pageTarget.webSocketDebuggerUrl);
   await cdp.connect();
@@ -554,161 +609,305 @@ async function main() {
   await setInputValue(cdp, 'input[name="email"]', TEST_EMAIL);
   await setInputValue(cdp, 'input[name="password"]', TEST_PASSWORD);
   await cdp.evaluate(`(() => { document.querySelector('button[type="submit"]').click(); })()`);
-  await sleep(1500);
 
-  // =========================================================================
-  // VIEW 1: DESKTOP VIEWPORT (1280x800) - INITIAL STATE & BOT CONNECTION CHECK
-  // =========================================================================
-  log("Step 1: Desktop Viewport (1280x800) at /settings...");
-  await cdp.send("Emulation.setDeviceMetricsOverride", {
-    width: 1280,
-    height: 800,
-    deviceScaleFactor: 1,
-    mobile: false,
-  });
+  // Wait for redirect to /overview or /settings
+  await waitFor(async () => {
+    const url = await cdp.evaluate(`window.location.pathname`);
+    return url !== "/login";
+  }, 10000, 300, "login redirect");
+
+  // Navigate to /settings
+  log("Navigating to /settings...");
   await cdp.send("Page.navigate", { url: `${BASE_URL}/settings` });
-  await sleep(1500);
 
-  // Scroll to seller notifications card
-  await cdp.evaluate(`(() => {
-    const el = document.getElementById("seller-notifications-section");
-    if (el) el.scrollIntoView({ behavior: "instant", block: "start" });
-  })()`);
-  await sleep(500);
+  await waitFor(async () => {
+    return await cdp.evaluate(`Boolean(document.getElementById("seller-notifications-section"))`);
+  }, 10000, 300, "seller-notifications-section presence");
 
-  // Test Check Bot Connection button
-  log("Clicking 'Check Bot Connection' button...");
-  await cdp.evaluate(`(() => {
-    const btn = document.querySelector('[data-testid="check-bot-connection-button"]');
-    if (!btn) throw new Error("Check bot connection button not found");
-    btn.click();
-  })()`);
-  await sleep(1200);
+  // Scroll to section
+  await cdp.evaluate(`document.getElementById("seller-notifications-section").scrollIntoView({ behavior: "instant", block: "start" })`);
+  await sleep(400);
 
-  // Take screenshot 01: Desktop
+  // =========================================================================
+  // SCENARIO A: Change destination/language, save, reload, confirm persisted
+  // =========================================================================
+  log("Scenario A: Configure destination chat ID and language, save, reload, assert persistence...");
+  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "123456789");
+  await setInputValue(cdp, '[data-testid="notification-language-select"]', "en");
+  await sleep(200);
+
+  await cdp.evaluate(`document.querySelector('[data-testid="save-notification-config-button"]').click()`);
+  await waitFor(async () => {
+    const text = await cdp.evaluate(`document.getElementById("seller-notifications-section").textContent`);
+    return text.includes("Notification configuration saved") || text.includes("saved");
+  }, 8000, 300, "save configuration feedback");
+
+  // Reload page and confirm persisted
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/settings` });
+  await waitFor(async () => {
+    return await cdp.evaluate(`Boolean(document.getElementById("seller-notifications-section"))`);
+  }, 10000, 300, "reload settings section");
+
+  const persistedDest = await cdp.evaluate(`document.querySelector('[data-testid="destination-chat-id-input"]').value`);
+  const persistedLang = await cdp.evaluate(`document.querySelector('[data-testid="notification-language-select"]').value`);
+  assert(persistedDest === "123456789", `Expected persisted destination '123456789', found '${persistedDest}'`);
+  assert(persistedLang === "en", `Expected persisted language 'en', found '${persistedLang}'`);
+
+  // Switch language back to Arabic for primary operation
+  await setInputValue(cdp, '[data-testid="notification-language-select"]', "ar");
+  await cdp.evaluate(`document.querySelector('[data-testid="save-notification-config-button"]').click()`);
+  await sleep(1000);
+
+  // =========================================================================
+  // SCENARIO B: Check connection and verify displayed identity
+  // =========================================================================
+  log("Scenario B: Check connection and verify displayed bot identity...");
+  await cdp.evaluate(`document.querySelector('[data-testid="check-bot-connection-button"]').click()`);
+  await waitFor(async () => {
+    const text = await cdp.evaluate(`document.getElementById("seller-notifications-section").textContent`);
+    return text.includes("MawthoqAlertsBot");
+  }, 8000, 300, "bot connection check feedback");
+
+  const auditAfterCheck = JSON.parse(readFileSync(telegramAuditLog, "utf8"));
+  assert(auditAfterCheck.some((c) => c.kind === "getMe"), "Mock Telegram getMe was not called");
+
+  // Capture Screenshot 01: Desktop Initial Setup
+  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await cdp.evaluate(`document.getElementById("seller-notifications-section").scrollIntoView({ behavior: "instant", block: "start" })`);
+  await sleep(300);
   await cdp.takeScreenshot("01-seller-notifications-desktop.png");
 
   // =========================================================================
-  // STEP 2: CONFIGURE DESTINATION, SEND TEST NOTIFICATION, TOGGLE ENABLE
+  // SCENARIO C: Send TEST, confirm verified bot/destination
   // =========================================================================
-  log("Step 2: Configuring destination chat ID and verifying...");
-  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "123456789");
-  await sleep(300);
+  log("Scenario C: Send test notification and confirm verification in DB...");
+  const sendCountBeforeTest = JSON.parse(readFileSync(telegramAuditLog, "utf8")).filter((c) => c.kind === "sendMessage").length;
 
-  // Click Save Configuration
-  log("Saving notification configuration...");
-  await cdp.evaluate(`(() => {
-    const btn = document.querySelector('[data-testid="save-notification-config-button"]');
-    if (!btn) throw new Error("Save config button not found");
-    btn.click();
-  })()`);
-  await sleep(1200);
+  await cdp.evaluate(`document.querySelector('[data-testid="send-test-notification-button"]').click()`);
+  await waitFor(async () => {
+    const text = await cdp.evaluate(`document.getElementById("seller-notifications-section").textContent`);
+    return text.includes("delivered successfully") || text.includes("verified");
+  }, 10000, 400, "test notification delivery feedback");
 
-  // Send Test Notification
-  log("Sending test notification to verify destination...");
-  await cdp.evaluate(`(() => {
-    const btn = document.querySelector('[data-testid="send-test-notification-button"]');
-    if (!btn) throw new Error("Send test button not found");
-    btn.click();
-  })()`);
-  await sleep(1500);
+  const auditAfterTest = JSON.parse(readFileSync(telegramAuditLog, "utf8")).filter((c) => c.kind === "sendMessage");
+  assert(auditAfterTest.length === sendCountBeforeTest + 1, "Expected exactly 1 test sendMessage to Telegram");
+  const lastSend = auditAfterTest[auditAfterTest.length - 1];
+  assert(String(lastSend.body?.chat_id) === "123456789", `Expected test sent to 123456789, found ${lastSend.body?.chat_id}`);
+  assert(lastSend.body?.text.includes("[تجربة]") || lastSend.body?.text.includes("[TEST]"), "Test notification missing [تجربة] tag");
 
-  // Toggle Notifications Enabled
-  log("Toggling enable notifications switch...");
-  await cdp.evaluate(`(() => {
-    const toggle = document.querySelector('[data-testid="enable-notifications-toggle"]');
-    if (!toggle) throw new Error("Enable toggle button not found");
-    toggle.click();
-  })()`);
-  await sleep(1200);
+  // Verify DB verification state
+  const [dbSetting] = await pgClient`SELECT * FROM seller_notification_setting WHERE id = 1`;
+  assert(dbSetting.verified_at !== null, "seller_notification_setting.verified_at must be populated");
+  assert(Number(dbSetting.verified_bot_id) === 777888999, "verified_bot_id must match mock bot ID");
+  assert(dbSetting.verified_chat_id === "123456789", "verified_chat_id must match destination chat ID");
 
   // =========================================================================
-  // STEP 3: OUTBOX UNKNOWN DELIVERY RETRY & CONFIRMATION MODAL
+  // SCENARIO D: Explicitly enable and disable; assert both resulting states
   // =========================================================================
-  log("Step 3: Testing unknown delivery retry modal and confirmation...");
-  // Find the retry button on the unknown delivery row
-  const unknownRetryFound = await cdp.evaluate(`(() => {
-    const rows = Array.from(document.querySelectorAll('[data-testid="delivery-history-table"] tbody tr'));
-    const unknownRow = rows.find(r => r.textContent.includes("unknown"));
-    if (!unknownRow) return false;
-    const retryBtn = unknownRow.querySelector('[data-testid="delivery-retry-button"]');
-    if (!retryBtn) return false;
-    retryBtn.click();
-    return true;
-  })()`);
+  log("Scenario D: Testing enable and disable toggling...");
+  // Enable Alerts
+  await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').click()`);
+  await waitFor(async () => {
+    const btnText = await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').textContent`);
+    return btnText.includes("Disable Alerts");
+  }, 8000, 300, "enable alerts toggle button text");
 
-  if (!unknownRetryFound) {
-    log("Warning: Unknown delivery row not immediately found, waiting...");
-    await sleep(500);
-  }
-  await sleep(1000);
+  let [enabledCheck] = await pgClient`SELECT enabled FROM seller_notification_setting WHERE id = 1`;
+  assert(enabledCheck.enabled === true, "Database setting.enabled must be true");
 
-  // Assert unknown retry dialog is visible
-  const dialogVisible = await cdp.evaluate(`(() => {
-    const dialog = document.querySelector('[data-testid="unknown-retry-dialog"]');
-    return Boolean(dialog && dialog.offsetParent !== null);
-  })()`);
-  log(`Unknown retry dialog visible: ${dialogVisible}`);
+  // Disable Alerts
+  await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').click()`);
+  await waitFor(async () => {
+    const btnText = await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').textContent`);
+    return btnText.includes("Enable Alerts");
+  }, 8000, 300, "disable alerts toggle button text");
 
-  // Take screenshot 05: Unknown Retry Dialog
-  await cdp.takeScreenshot("05-seller-notifications-unknown-retry.png");
+  [enabledCheck] = await pgClient`SELECT enabled FROM seller_notification_setting WHERE id = 1`;
+  assert(enabledCheck.enabled === false, "Database setting.enabled must be false");
 
-  // Check the acknowledgment checkbox and confirm retry
-  log("Acknowledging duplicate risk and confirming retry...");
-  await cdp.evaluate(`(() => {
-    const cb = document.querySelector('[data-testid="unknown-retry-ack-checkbox"]');
-    if (cb) {
-      cb.checked = true;
-      cb.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-    const confirmBtn = document.querySelector('[data-testid="unknown-retry-confirm-button"]');
-    if (confirmBtn) confirmBtn.click();
-  })()`);
-  await sleep(2000);
+  // Re-enable alerts for configured state
+  await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').click()`);
+  await waitFor(async () => {
+    const btnText = await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').textContent`);
+    return btnText.includes("Disable Alerts");
+  }, 8000, 300, "re-enable alerts");
 
-  // =========================================================================
-  // STEP 4: INVALIDATION CHECK & FULLY CONFIGURED STATE SCREENSHOT
-  // =========================================================================
-  log("Step 4: Checking destination change invalidation...");
-  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "987654321");
-  await sleep(300);
-  await cdp.evaluate(`(() => {
-    const btn = document.querySelector('[data-testid="save-notification-config-button"]');
-    btn.click();
-  })()`);
-  await sleep(1200);
-
-  // Re-save 123456789 and verify
-  log("Restoring destination to 123456789 and re-verifying...");
-  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "123456789");
-  await sleep(300);
-  await cdp.evaluate(`(() => {
-    const btn = document.querySelector('[data-testid="save-notification-config-button"]');
-    btn.click();
-  })()`);
-  await sleep(1200);
-
-  await cdp.evaluate(`(() => {
-    const btn = document.querySelector('[data-testid="send-test-notification-button"]');
-    btn.click();
-  })()`);
-  await sleep(1500);
-
-  await cdp.evaluate(`(() => {
-    const toggle = document.querySelector('[data-testid="enable-notifications-toggle"]');
-    if (toggle.getAttribute("aria-checked") === "false") {
-      toggle.click();
-    }
-  })()`);
-  await sleep(1200);
-
-  // Take screenshot 04: Configured state
+  // Capture Screenshot 04: Configured State
   await cdp.takeScreenshot("04-seller-notifications-configured.png");
 
   // =========================================================================
-  // STEP 5: MOBILE 360px VIEWPORT - RESPONSIVE VERIFICATION & NO OVERFLOW
+  // SCENARIO E: Destination change clears verification and disables
   // =========================================================================
-  log("Step 5: Mobile Viewport (360x740) - verifying responsiveness...");
+  log("Scenario E: Destination change invalidation check...");
+  const [beforeChange] = await pgClient`SELECT revision FROM seller_notification_setting WHERE id = 1`;
+  const prevRev = beforeChange.revision;
+
+  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "987654321");
+  await cdp.evaluate(`document.querySelector('[data-testid="save-notification-config-button"]').click()`);
+  await waitFor(async () => {
+    const text = await cdp.evaluate(`document.getElementById("seller-notifications-section").textContent`);
+    return text.includes("saved");
+  }, 8000, 300, "destination change save feedback");
+
+  const [invalidatedSetting] = await pgClient`SELECT * FROM seller_notification_setting WHERE id = 1`;
+  assert(invalidatedSetting.enabled === false, "Changing destination must disable notifications");
+  assert(invalidatedSetting.verified_at === null, "Changing destination must clear verified_at");
+  assert(invalidatedSetting.revision === prevRev + 1, `Changing destination must increment revision from ${prevRev} to ${prevRev + 1}`);
+
+  // Verify that Enable button is disabled in UI because verification was cleared
+  const toggleDisabled = await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').disabled`);
+  assert(toggleDisabled === true, "Enable alerts toggle must be disabled when unverified");
+
+  // Restore destination to 123456789 and re-verify
+  log("Restoring destination to 123456789 and re-verifying...");
+  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "123456789");
+  await cdp.evaluate(`document.querySelector('[data-testid="save-notification-config-button"]').click()`);
+  await waitFor(async () => {
+    const text = await cdp.evaluate(`document.getElementById("seller-notifications-section").textContent`);
+    return text.includes("saved");
+  }, 8000, 300, "restore save feedback");
+
+  // Wait 5.2s for the 5-second server-persisted test cooldown to elapse
+  await sleep(5200);
+
+  await cdp.evaluate(`document.querySelector('[data-testid="send-test-notification-button"]').click()`);
+  await waitFor(async () => {
+    const text = await cdp.evaluate(`document.getElementById("seller-notifications-section").textContent`);
+    return text.includes("delivered successfully") || text.includes("verified");
+  }, 10000, 300, "re-test feedback");
+
+  await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').click()`);
+  await waitFor(async () => {
+    const btnText = await cdp.evaluate(`document.querySelector('[data-testid="enable-notifications-toggle"]').textContent`);
+    return btnText.includes("Disable Alerts");
+  }, 8000, 300, "re-enabled alerts");
+
+  const [currentRevRow] = await pgClient`SELECT revision FROM seller_notification_setting WHERE id = 1`;
+  const activeRevision = currentRevRow.revision;
+
+  // =========================================================================
+  // SCENARIO F & G: Unknown delivery retry confirmation & duplicate risk ack
+  // =========================================================================
+  log("Scenario F & G: Unknown delivery retry modal, duplicate risk ack, and retry send...");
+  // Seed an unknown delivery with current revision
+  const [seededUnknown] = await pgClient`
+    INSERT INTO seller_notification_delivery (
+      inquiry_id, reference, revision, destination_chat_id, status, attempt_count, error_category
+    )
+    VALUES (
+      ${inq2.id}, 'SND-UNKWN-CDP', ${activeRevision}, '123456789', 'unknown', 1, 'timeout'
+    )
+    RETURNING id;
+  `;
+
+  // Click refresh outbox button
+  await cdp.evaluate(`(() => {
+    const btns = Array.from(document.querySelectorAll('button'));
+    const refBtn = btns.find(b => b.textContent.includes('Refresh Outbox'));
+    if (refBtn) refBtn.click();
+  })()`);
+  await sleep(1000);
+
+  // Locate the unknown row's retry button
+  const unknownRetryFound = await waitFor(async () => {
+    return await cdp.evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('[data-testid="delivery-history-table"] tbody tr'));
+      const unknownRow = rows.find(r => r.textContent.includes("unknown"));
+      if (!unknownRow) return false;
+      const retryBtn = unknownRow.querySelector('[data-testid="delivery-retry-button"]');
+      if (!retryBtn) return false;
+      retryBtn.click();
+      return true;
+    })()`);
+  }, 8000, 300, "unknown delivery row and retry button");
+
+  assert(unknownRetryFound, "Unknown delivery row not found in delivery history table");
+
+  // Assert unknown retry dialog is visible
+  await waitFor(async () => {
+    return await cdp.evaluate(`(() => {
+      const dialog = document.querySelector('[data-testid="unknown-retry-dialog"]');
+      return Boolean(dialog && dialog.offsetParent !== null);
+    })()`);
+  }, 6000, 200, "unknown-retry-dialog visibility");
+
+  // Assert confirm button is initially DISABLED
+  const initialConfirmDisabled = await cdp.evaluate(`document.querySelector('[data-testid="unknown-retry-confirm-button"]').disabled`);
+  assert(initialConfirmDisabled === true, "Confirm retry button must be disabled before checkbox acknowledgment");
+
+  // Scroll dialog into center view and capture Screenshot 05
+  await cdp.evaluate(`document.querySelector('[data-testid="unknown-retry-dialog"]').scrollIntoView({ behavior: "instant", block: "center" })`);
+  await sleep(400);
+  await cdp.takeScreenshot("05-seller-notifications-unknown-retry.png");
+
+  // Activate acknowledgment checkbox
+  log("Activating duplicate-risk acknowledgment checkbox...");
+  await cdp.evaluate(`(() => {
+    const cb = document.querySelector('[data-testid="unknown-retry-ack-checkbox"]');
+    if (!cb) throw new Error("ack checkbox not found");
+    cb.click();
+  })()`);
+  await sleep(300);
+
+  // Assert confirm button is now ENABLED
+  const confirmEnabled = await cdp.evaluate(`!document.querySelector('[data-testid="unknown-retry-confirm-button"]').disabled`);
+  assert(confirmEnabled === true, "Confirm retry button must become enabled after checkbox is clicked");
+
+  // Record send count before retry dispatch
+  const sendsBeforeRetry = JSON.parse(readFileSync(telegramAuditLog, "utf8")).filter((c) => c.kind === "sendMessage").length;
+
+  // Confirm Retry
+  await cdp.evaluate(`document.querySelector('[data-testid="unknown-retry-confirm-button"]').click()`);
+  await waitFor(async () => {
+    const [row] = await pgClient`SELECT status FROM seller_notification_delivery WHERE id = ${seededUnknown.id}::uuid`;
+    return row && row.status === "sent";
+  }, 10000, 400, "delivery row transition to sent in DB");
+
+  const sendsAfterRetry = JSON.parse(readFileSync(telegramAuditLog, "utf8")).filter((c) => c.kind === "sendMessage").length;
+  assert(sendsAfterRetry === sendsBeforeRetry + 1, "Exactly 1 sendMessage call must occur upon confirmed retry");
+
+  // =========================================================================
+  // SCENARIO H: Expired sending recovers to unknown without sending
+  // =========================================================================
+  log("Scenario H: Expired sending lease recovery check...");
+  const [inq3] = await pgClient`
+    INSERT INTO inquiry (customer_id, reference, status, category, product_snapshot)
+    VALUES (${cust.id}, 'INQ-TEST-003', 'open', 'الدعم الفني', '{"kind":"support"}'::jsonb)
+    RETURNING id;
+  `;
+  const [expiredRow] = await pgClient`
+    INSERT INTO seller_notification_delivery (
+      inquiry_id, reference, revision, destination_chat_id, status, claim_attempt_id, claim_expires_at, attempt_count
+    )
+    VALUES (
+      ${inq3.id}, 'SND-EXP-001', ${activeRevision}, '123456789', 'sending', 'stale-worker-uuid', now() - interval '5 minutes', 1
+    )
+    RETURNING id;
+  `;
+
+  const sendsBeforeRecovery = JSON.parse(readFileSync(telegramAuditLog, "utf8")).filter((c) => c.kind === "sendMessage").length;
+
+  // Trigger refresh outbox in UI
+  await cdp.evaluate(`(() => {
+    const btns = Array.from(document.querySelectorAll('button'));
+    const refBtn = btns.find(b => b.textContent.includes('Refresh Outbox'));
+    if (refBtn) refBtn.click();
+  })()`);
+
+  // Assert expired sending recovered to unknown with lease_expired category
+  await waitFor(async () => {
+    const [row] = await pgClient`SELECT status, error_category FROM seller_notification_delivery WHERE id = ${expiredRow.id}::uuid`;
+    return row && row.status === "unknown" && row.error_category === "lease_expired";
+  }, 8000, 300, "recovery of expired sending lease in DB");
+
+  const sendsAfterRecovery = JSON.parse(readFileSync(telegramAuditLog, "utf8")).filter((c) => c.kind === "sendMessage").length;
+  assert(sendsAfterRecovery === sendsBeforeRecovery, "Recovering expired sending must emit zero Telegram messages");
+  log("Expired sending lease recovered atomically to 'unknown' without sending.");
+
+  // =========================================================================
+  // SCENARIO I & J: Mobile 360px viewport - inspect controls, history, 0px overflow
+  // =========================================================================
+  log("Scenario I & J: Mobile 360px viewport responsiveness and overflow verification...");
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 360,
     height: 740,
@@ -717,40 +916,39 @@ async function main() {
   });
   await sleep(600);
 
-  // Check horizontal overflow
-  const hasOverflow = await cdp.evaluate(`(() => {
-    return document.documentElement.scrollWidth > window.innerWidth;
-  })()`);
   const scrollWidth = await cdp.evaluate(`document.documentElement.scrollWidth`);
   const innerWidth = await cdp.evaluate(`window.innerWidth`);
-  log(`Mobile 360px overflow check: scrollWidth=${scrollWidth}, innerWidth=${innerWidth}, hasOverflow=${hasOverflow}`);
-  if (hasOverflow) {
-    log("WARNING: Horizontal overflow detected on mobile 360px viewport");
-  } else {
-    log("PASS: 0px horizontal overflow on 360px viewport (perfect mobile fit)");
-  }
+  log(`Mobile 360px check: scrollWidth=${scrollWidth}, innerWidth=${innerWidth}`);
+  assert(scrollWidth <= innerWidth, `Horizontal overflow detected: scrollWidth (${scrollWidth}) > innerWidth (${innerWidth})`);
+  log("PASS: 0px horizontal overflow on 360px mobile viewport.");
 
+  // Scroll section into view and capture Screenshot 02
+  await cdp.evaluate(`document.getElementById("seller-notifications-section").scrollIntoView({ behavior: "instant", block: "start" })`);
+  await sleep(400);
   await cdp.takeScreenshot("02-seller-notifications-mobile-360px.png");
 
   // =========================================================================
-  // STEP 6: ARABIC RTL MODE
+  // SCENARIO K: Arabic RTL layout stress test
   // =========================================================================
-  log("Step 6: Arabic RTL verification...");
+  log("Scenario K: Arabic RTL layout stress test...");
   await cdp.evaluate(`(() => {
     document.documentElement.setAttribute("dir", "rtl");
     document.documentElement.setAttribute("lang", "ar");
   })()`);
-  await sleep(600);
+  await sleep(500);
+
+  const dirAttr = await cdp.evaluate(`document.documentElement.getAttribute("dir")`);
+  assert(dirAttr === "rtl", "Document dir must be 'rtl'");
 
   await cdp.takeScreenshot("03-seller-notifications-arabic-rtl.png");
 
-  log("All browser acceptance checks and screenshots completed successfully!");
+  log("All browser acceptance gates PASSED successfully with strict assertions!");
   await cdp.close();
   await cleanup();
 }
 
 main().catch(async (err) => {
-  log(`Unexpected error: ${err.stack || err.message}`);
+  log(`Unexpected acceptance failure: ${err.stack || err.message}`);
   await cleanup();
   process.exit(1);
 });

@@ -11,6 +11,7 @@ import {
   markDeliveryUnknown,
   readSellerNotificationConfig,
   releaseDeliveryClaim,
+  revalidatePreDispatchAuthorization,
 } from "@/lib/data/seller-notifications";
 import { getInquiryRecord } from "@/lib/data/inquiry";
 import {
@@ -437,13 +438,7 @@ export async function attemptSellerNotificationDelivery(
     return { status: "pending", reason: "budget_exceeded" };
   }
 
-  // 2. Read configuration
-  const setting = await readSellerNotificationConfig(db);
-  if (!setting || !setting.enabled) {
-    return { status: "paused", reason: "notifications_disabled" };
-  }
-
-  // 3. Read delivery record
+  // 2. Read delivery record
   const record = await getSellerNotificationDelivery(db, deliveryId);
   if (!record) {
     return { status: "cancelled", reason: "record_not_found" };
@@ -455,6 +450,12 @@ export async function attemptSellerNotificationDelivery(
 
   if (record.status === "cancelled") {
     return { status: "cancelled", reason: record.errorCategory ?? "cancelled" };
+  }
+
+  // 3. Read configuration
+  const setting = await readSellerNotificationConfig(db);
+  if (!setting || !setting.enabled) {
+    return { status: "paused", reason: "notifications_disabled" };
   }
 
   // 4. Rate limiting check prior to claim
@@ -586,16 +587,41 @@ export async function attemptSellerNotificationDelivery(
   });
 
   // 12. Final budget check before dispatching sendMessage
+  // Reserve 1500ms for database persistence and webhook response completion
   const sendBudget = options.deadline
     ? options.deadline.getRemainingMs()
     : DEFAULT_REQUEST_TIMEOUT_MS;
 
-  if (sendBudget < 1500) {
+  const RESERVED_PERSISTENCE_BUDGET_MS = 1500;
+  const usableSendBudget = sendBudget - RESERVED_PERSISTENCE_BUDGET_MS;
+
+  if (usableSendBudget < 1500) {
     await releaseDeliveryClaim(db, deliveryId, attemptId);
     return { status: "pending", reason: "budget_exceeded" };
   }
 
-  // 13. Network transmission
+  // 13. Authoritative pre-dispatch authorization check
+  // Verifies current enabled state, configuration revision, destination, verified bot,
+  // record status, and active attempt ID immediately before network dispatch.
+  const authCheck = await revalidatePreDispatchAuthorization(db, {
+    deliveryId,
+    attemptId,
+    expectedRevision: record.revision,
+    expectedDestination: record.destinationChatId,
+    expectedBotId: setting.verifiedBotId,
+  });
+
+  if (!authCheck.authorized) {
+    if (authCheck.reason === "claim_lost") {
+      return { status: "in_flight" };
+    }
+    if (authCheck.reason === "incompatible_configuration") {
+      return { status: "cancelled", reason: "incompatible_configuration" };
+    }
+    return { status: "pending", reason: "notifications_disabled" };
+  }
+
+  // 14. Network transmission
   try {
     let sendResult: TelegramSendResult;
 
@@ -606,7 +632,7 @@ export async function attemptSellerNotificationDelivery(
         replyMarkup: formatted.replyMarkup,
       });
     } else {
-      const sendTimeout = Math.min(DEFAULT_REQUEST_TIMEOUT_MS, sendBudget);
+      const sendTimeout = Math.min(DEFAULT_REQUEST_TIMEOUT_MS, usableSendBudget);
       const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -618,64 +644,154 @@ export async function attemptSellerNotificationDelivery(
         signal: AbortSignal.timeout(sendTimeout),
       });
 
-      const data = (await res.json().catch(() => null)) as {
+      const rawText = await res.text().catch(() => null);
+      let data: {
         ok?: boolean;
-        result?: { message_id: number };
+        result?: { message_id?: number };
         description?: string;
         parameters?: { retry_after?: number };
-      } | null;
+      } | null = null;
+      if (rawText) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = null;
+        }
+      }
 
-      if (res.ok && data?.ok && data.result) {
+      if (res.ok && data?.ok === true && typeof data.result?.message_id === "number") {
         sendResult = { ok: true, messageId: data.result.message_id };
-      } else {
+      } else if (res.status === 200) {
+        // Telegram accepted the HTTP request and replied 200 OK, but JSON was malformed
+        // or message_id was missing/invalid. Acceptance cannot be ruled out -> UNKNOWN!
+        sendResult = {
+          ok: false,
+          error: "Ambiguous Telegram 200 response without valid message acknowledgment",
+          errorKind: "api_error",
+          httpStatus: 200,
+        };
+      } else if (res.status === 429) {
+        sendResult = {
+          ok: false,
+          error: sanitizeTelegramError(data?.description ?? "Telegram rate limited", token ?? undefined),
+          errorKind: "rate_limited",
+          httpStatus: 429,
+          retryAfterSeconds: data?.parameters?.retry_after ?? 10,
+        };
+      } else if (res.status >= 400 && res.status < 500) {
         const classified = classifyHttpError(res.status, data ?? undefined, "sendMessage");
         sendResult = {
           ok: false,
           error: sanitizeTelegramError(data?.description ?? "Send failed", token ?? undefined),
           errorKind: classified.errorKind,
           httpStatus: res.status,
-          retryAfterSeconds: data?.parameters?.retry_after,
+        };
+      } else {
+        // 5xx server error, or non-standard status
+        sendResult = {
+          ok: false,
+          error: sanitizeTelegramError(data?.description ?? `Telegram server error ${res.status}`, token ?? undefined),
+          errorKind: "api_error",
+          httpStatus: res.status,
         };
       }
     }
 
     if (sendResult.ok && typeof sendResult.messageId === "number") {
-      await markDeliverySent(db, deliveryId, attemptId, sendResult.messageId);
-      return { status: "sent", messageId: sendResult.messageId };
+      try {
+        const applied = await markDeliverySent(db, deliveryId, attemptId, sendResult.messageId);
+        if (!applied) {
+          const current = await getSellerNotificationDelivery(db, deliveryId);
+          if (current?.status === "sent") {
+            return { status: "sent", messageId: current.telegramMessageId ?? sendResult.messageId };
+          }
+          return { status: "unknown", errorCategory: "persistence_mismatch" };
+        }
+        return { status: "sent", messageId: sendResult.messageId };
+      } catch {
+        return { status: "unknown", errorCategory: "persistence_error" };
+      }
     }
 
     // Classify Telegram response
     if (sendResult.errorKind === "rate_limited") {
       const retryAfter = sendResult.retryAfterSeconds ?? 10;
-      await markDeliveryFailed(db, deliveryId, attemptId, "rate_limited", retryAfter);
+      const failedRes = await markDeliveryFailed(db, deliveryId, attemptId, "rate_limited", retryAfter);
+      if (!failedRes.applied) {
+        const current = await getSellerNotificationDelivery(db, deliveryId);
+        if (current?.status === "sent") {
+          return { status: "sent", messageId: current.telegramMessageId ?? 0 };
+        }
+        if (current?.status === "cancelled") {
+          return { status: "cancelled", reason: current.errorCategory ?? "cancelled" };
+        }
+        return {
+          status: "failed",
+          errorCategory: "rate_limited",
+          retryAfterSeconds: retryAfter,
+        };
+      }
       return { status: "failed", errorCategory: "rate_limited", retryAfterSeconds: retryAfter };
     }
 
-    // Uncertain failures after send dispatched: timeout, network error, or 5xx server error
+    // Uncertain failures after send dispatched: timeout, network error, ambiguous response, or 5xx server error
     if (
       sendResult.errorKind === "timeout" ||
       sendResult.errorKind === "network_error" ||
+      sendResult.httpStatus === 200 ||
       (sendResult.httpStatus && sendResult.httpStatus >= 500)
     ) {
       const errCategory =
         sendResult.errorKind === "timeout"
           ? "timeout"
+          : sendResult.httpStatus === 200
+          ? "ambiguous_telegram_response"
           : sendResult.httpStatus && sendResult.httpStatus >= 500
           ? "telegram_server_error"
           : "network_uncertainty";
-      await markDeliveryUnknown(db, deliveryId, attemptId, errCategory);
+      const unknownRes = await markDeliveryUnknown(db, deliveryId, attemptId, errCategory);
+      if (!unknownRes.applied) {
+        const current = await getSellerNotificationDelivery(db, deliveryId);
+        if (current?.status === "sent") {
+          return { status: "sent", messageId: current.telegramMessageId ?? 0 };
+        }
+        if (current?.status === "cancelled") {
+          return { status: "cancelled", reason: current.errorCategory ?? "cancelled" };
+        }
+        return { status: "unknown", errorCategory: errCategory };
+      }
       return { status: "unknown", errorCategory: errCategory };
     }
 
     // Definitive client/authentication rejection (400, 401, 403, 404, etc.)
     const cat = sendResult.errorKind ?? "api_error";
-    await markDeliveryFailed(db, deliveryId, attemptId, cat);
+    const failedRes = await markDeliveryFailed(db, deliveryId, attemptId, cat);
+    if (!failedRes.applied) {
+      const current = await getSellerNotificationDelivery(db, deliveryId);
+      if (current?.status === "sent") {
+        return { status: "sent", messageId: current.telegramMessageId ?? 0 };
+      }
+      if (current?.status === "cancelled") {
+        return { status: "cancelled", reason: current.errorCategory ?? "cancelled" };
+      }
+      return { status: "failed", errorCategory: cat };
+    }
     return { status: "failed", errorCategory: cat };
   } catch (err) {
     const isTimeout =
       err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
     const errorCat = isTimeout ? "timeout" : "network_uncertainty";
-    await markDeliveryUnknown(db, deliveryId, attemptId, errorCat);
+    const unknownRes = await markDeliveryUnknown(db, deliveryId, attemptId, errorCat);
+    if (!unknownRes.applied) {
+      const current = await getSellerNotificationDelivery(db, deliveryId);
+      if (current?.status === "sent") {
+        return { status: "sent", messageId: current.telegramMessageId ?? 0 };
+      }
+      if (current?.status === "cancelled") {
+        return { status: "cancelled", reason: current.errorCategory ?? "cancelled" };
+      }
+      return { status: "unknown", errorCategory: errorCat };
+    }
     return { status: "unknown", errorCategory: errorCat };
   }
 }
