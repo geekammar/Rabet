@@ -73,8 +73,10 @@ import {
   CRITICAL_CONSTRAINTS,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
+  EXPECTED_INDEXES_V2,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
+  EXPECTED_TABLES_V2,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -1333,8 +1335,28 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 3 &&
+        inspected.state.pending[0] === "0003_seller_notifications"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V2,
+          expectedIndexes: EXPECTED_INDEXES_V2,
+          expectedHashes: ctx.committedHashes.slice(0, 3).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 3 migrations recorded, " +
+              "but live schema does not match the supported prior release (0002_payment_methods).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 2 &&
-        inspected.state.pending.length === 1 &&
         inspected.state.pending[0] === "0002_payment_methods"
       ) {
         header("Validating prior release schema on target (read-only)");
@@ -1385,12 +1407,39 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
-      const isKnownPriorRelease =
+      const isKnownPriorReleaseV2 =
+        inspected.state.appliedCount === 3 &&
+        inspected.state.pending[0] === "0003_seller_notifications";
+      const isKnownPriorReleaseV1 =
         inspected.state.appliedCount === 2 &&
-        inspected.state.pending.length === 1 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorRelease) {
+      if (isKnownPriorReleaseV2) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V2,
+          expectedIndexes: EXPECTED_INDEXES_V2,
+          expectedHashes: ctx.committedHashes.slice(0, 3).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0002_payment_methods). " +
+              "Proceeding with migration to 0003_seller_notifications.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV1) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V1,
@@ -1403,7 +1452,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0001_tree_and_snapshot_integrity). " +
-              "Proceeding with migration to 0002_payment_methods.",
+              "Proceeding with migration to pending migrations.",
           );
         } else {
           io.line("");

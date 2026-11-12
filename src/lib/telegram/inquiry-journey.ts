@@ -16,7 +16,9 @@ import {
   appendInboundCustomerMessage,
   createOrResumeProductInquiry,
   createOrResumeSupportInquiry,
+  generateDeliveryReference,
   getActiveCustomerInquiryByReference,
+  getVerifiedNotificationConfig,
   listActiveCustomerInquiriesPaged,
   readSettings,
   recordTelegramUpdateReceipt,
@@ -25,9 +27,11 @@ import {
   upsertCustomer,
   type TelegramBusinessReceipt,
 } from "@/lib/data";
+import { attemptSellerNotificationDelivery } from "./seller-notifications";
 import { editOrThrow, sendOrThrow, type getLocalizedUiStrings } from "./catalog-journey";
 import { tokens } from "./tokens";
 import type {
+  ExecutionDeadline,
   TelegramInlineKeyboardButton,
   TelegramMessage,
   TelegramTransport,
@@ -48,6 +52,43 @@ export interface InquiryJourneyOptions {
   updateId: number;
   attemptId: string;
   receipt?: TelegramBusinessReceipt | null;
+  deadline?: ExecutionDeadline;
+  notificationTransport?: TelegramTransport;
+  notificationBotToken?: string;
+}
+
+async function prepareNotificationIntent(db: Database) {
+  try {
+    const config = await getVerifiedNotificationConfig(db);
+    if (!config) return null;
+    return {
+      deliveryId: crypto.randomUUID(),
+      reference: generateDeliveryReference(),
+      revision: config.revision,
+      destinationChatId: config.destinationChatId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function safeAttemptSellerNotification(
+  db: Database,
+  deliveryId: string | null | undefined,
+  options: InquiryJourneyOptions,
+) {
+  if (!deliveryId) return;
+  try {
+    await attemptSellerNotificationDelivery({
+      db,
+      deliveryId,
+      deadline: options.deadline,
+      transport: options.notificationTransport,
+      botToken: options.notificationBotToken,
+    });
+  } catch {
+    // Delivery failure must not roll back or fail customer journey
+  }
 }
 
 export type ActionAncestorRow = {
@@ -436,6 +477,8 @@ export async function handleProductInquiryCallback(
   };
 
   // 6. Atomic create or resume
+  const notificationIntent = await prepareNotificationIntent(db);
+
   const inqResult = await createOrResumeProductInquiry(db, {
     customerId: customerRecord.id,
     productId: productRow.id,
@@ -443,6 +486,7 @@ export async function handleProductInquiryCallback(
     selectedOptions: selectedOptions.length > 0 ? selectedOptions : null,
     updateId: options.updateId,
     attemptId: options.attemptId,
+    notificationEvent: notificationIntent,
   });
 
   const activeInquiry = inqResult.inquiry;
@@ -489,6 +533,8 @@ export async function handleProductInquiryCallback(
     text: confirmationBody + details,
     replyMarkup: { inline_keyboard: keyboard },
   });
+
+  await safeAttemptSellerNotification(db, inqResult.notificationDeliveryId, options);
 }
 
 /**
@@ -562,11 +608,14 @@ export async function handleSupportInquiryCallback(
   }
 
   // 3. Atomic create or resume general support inquiry
+  const notificationIntent = await prepareNotificationIntent(db);
+
   const inqResult = await createOrResumeSupportInquiry(db, {
     customerId: customerRecord.id,
     category: supportCategory,
     updateId: options.updateId,
     attemptId: options.attemptId,
+    notificationEvent: notificationIntent,
   });
 
   const activeInquiry = inqResult.inquiry;
@@ -599,6 +648,8 @@ export async function handleSupportInquiryCallback(
     text: confirmationBody + details,
     replyMarkup: { inline_keyboard: keyboard },
   });
+
+  await safeAttemptSellerNotification(db, inqResult.notificationDeliveryId, options);
 }
 
 /**
@@ -892,12 +943,15 @@ export async function handleIncomingMessage(
 
   // 6. Ordinary free text routing: atomic operation in one protected transaction
   // Preserve exact customer body (rawText)
+  const notificationIntent = await prepareNotificationIntent(db);
+
   const routeResult = await routeAndAppendCustomerText(db, {
     customerId: customerRecord.id,
     body: rawText,
     telegramMessageId: msg.message_id,
     updateId: options.updateId,
     attemptId: options.attemptId,
+    notificationEvent: notificationIntent,
   });
 
   if (routeResult.status === "saved") {
@@ -909,6 +963,7 @@ export async function handleIncomingMessage(
         ? `تم استلام رسالتك للمحادثة ${routeResult.inquiry.reference}. يمكنك مواصلة إرسال الرسائل هنا.`
         : `Message received for inquiry ${routeResult.inquiry.reference}. You can continue sending messages here.`;
     await sendOrThrow(transport, { chatId: msg.chat.id, text: ack });
+    await safeAttemptSellerNotification(db, routeResult.notificationDeliveryId, options);
     return;
   }
 
