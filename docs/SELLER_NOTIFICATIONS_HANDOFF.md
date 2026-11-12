@@ -164,6 +164,13 @@ Located in Store Settings (`/settings`):
 
 When deploying to Production (to be executed only after Ammar's independent review and merge):
 
+### Pre-Requisites & Safety Gates
+1. **Verified Pre-Migration Recovery Checkpoint:**
+   - Before executing any production migration, ensure a verified recovery checkpoint (e.g., Neon branch or project recovery snapshot) is created so the database state can be preserved.
+   - *Note:* Do not claim a restore has been tested unless actual verified evidence exists.
+2. **Fresh Successful Read-Only Inspection:**
+   - A fresh, successful read-only inspection via GitHub Actions (`mode: inspect`) must be executed immediately prior to migration.
+
 ### Step 1: Merge PR to `main`
 - PR #23 must be reviewed and merged into `main`. Production migration workflows strictly require `main` (`GITHUB_REF=refs/heads/main`).
 
@@ -174,7 +181,7 @@ When deploying to Production (to be executed only after Ammar's independent revi
   - Mode: `inspect` (default)
 - Review the workflow run output to confirm:
   - PostgreSQL connectivity and target identity (`NEON_PROD_EXPECTED_HOST`, `NEON_PROD_EXPECTED_DB_NAME`).
-  - Baseline migration status (confirms healthy `0002_customer_journey` ledger state).
+  - Baseline migration status (confirms healthy `0002_payment_methods` ledger state).
   - Exactly one pending migration: `0003_seller_notifications`.
   - Zero schema drift on existing tables.
 
