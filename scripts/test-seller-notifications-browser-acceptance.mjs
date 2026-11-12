@@ -26,7 +26,7 @@ const CDP_PORT = 9349;
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "test-password-123";
-const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR || "/root/.gemini/antigravity-cli/brain/739bbda4-8349-459a-8983-4929a0ec3232/screenshots";
+const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR || "";
 const REVIEW_DOCS_DIR = path.resolve("docs/review/seller-notifications");
 
 let appServer = null;
@@ -223,8 +223,10 @@ class CDPClient {
     const res = await this.send("Page.captureScreenshot", { format: "png" });
     const buffer = Buffer.from(res.data, "base64");
     if (SCREENSHOT_DIR) {
-      mkdirSync(SCREENSHOT_DIR, { recursive: true });
-      writeFileSync(path.join(SCREENSHOT_DIR, filename), buffer);
+      try {
+        mkdirSync(SCREENSHOT_DIR, { recursive: true });
+        writeFileSync(path.join(SCREENSHOT_DIR, filename), buffer);
+      } catch {}
     }
     mkdirSync(REVIEW_DOCS_DIR, { recursive: true });
     writeFileSync(path.join(REVIEW_DOCS_DIR, filename), buffer);
@@ -261,7 +263,11 @@ async function setInputValue(cdp, selector, value) {
 async function main() {
   log("Starting Seller Notifications browser acceptance test...");
   mkdirSync(REVIEW_DOCS_DIR, { recursive: true });
-  if (SCREENSHOT_DIR) mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  if (SCREENSHOT_DIR) {
+    try {
+      mkdirSync(SCREENSHOT_DIR, { recursive: true });
+    } catch {}
+  }
 
   const chromePath = resolveChromePath();
   if (!chromePath) {
