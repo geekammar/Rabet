@@ -5,12 +5,13 @@ import { revalidatePath } from "next/cache";
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import {
-  checkAndRecordTestCooldown,
   checkSellerNotificationCapability,
+  claimTestCooldown,
   getSellerNotificationDelivery,
   listSellerNotificationDeliveries,
   RabetDataError,
   readSellerNotificationConfig,
+  recordTestRateLimited,
   recordVerificationSuccess,
   saveSellerNotificationConfig,
   setSellerNotificationEnabled,
@@ -223,8 +224,11 @@ export async function sendSellerTestNotificationAction(): Promise<SellerNotifica
       };
     }
 
+    const expectedRevision = config.revision;
+    const expectedDestination = config.destinationChatId;
+
     // Persisted rate limiter (5 seconds cooldown)
-    const cooldown = await checkAndRecordTestCooldown(db, 5);
+    const cooldown = await claimTestCooldown(db, 5);
     if (!cooldown.allowed) {
       return {
         success: false,
@@ -234,23 +238,39 @@ export async function sendSellerTestNotificationAction(): Promise<SellerNotifica
     }
 
     const testRes = await sendSellerTestNotification({
-      destinationChatId: config.destinationChatId,
+      destinationChatId: expectedDestination,
       language: config.language === "en" ? "en" : "ar",
     });
 
     if (!testRes.ok) {
+      if (testRes.errorKind === "rate_limited") {
+        await recordTestRateLimited(db, testRes.retryAfterSeconds ?? 10);
+      }
       return {
         success: false,
         message: testRes.error,
       };
     }
 
-    // Persist verified metadata
-    const updated = await recordVerificationSuccess(db, {
-      botId: testRes.bot.id,
-      botUsername: testRes.bot.username,
-      destinationChatId: config.destinationChatId,
-    });
+    // Persist verified metadata with compare-and-set
+    let updated: SellerNotificationSettingRecord;
+    try {
+      updated = await recordVerificationSuccess(db, {
+        botId: testRes.bot.id,
+        botUsername: testRes.bot.username,
+        expectedRevision,
+        expectedDestination,
+      });
+    } catch (err) {
+      if (err instanceof RabetDataError && err.code === "CONFIGURATION_CHANGED") {
+        return {
+          success: false,
+          code: "CONFIGURATION_CHANGED",
+          message: "Configuration changed while test was running. Please test again with current settings.",
+        };
+      }
+      throw err;
+    }
 
     revalidatePath("/settings");
 

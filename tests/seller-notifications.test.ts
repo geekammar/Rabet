@@ -14,9 +14,11 @@ import {
   validatePrivateChatId,
 } from "@/lib/data/seller-notifications";
 import {
+  attemptSellerNotificationDelivery,
   formatSellerNotificationMessage,
   getSellerBotMe,
   getSellerNotificationBotToken,
+  getTrustedDashboardInquiryUrl,
   sendSellerTestNotification,
 } from "@/lib/telegram/seller-notifications";
 import { createFakeTelegramTransport } from "@/lib/telegram/transport";
@@ -265,6 +267,80 @@ describe("Seller Notifications — Unit & Security Test Suite", () => {
       expect(arFormatted.text).toContain("الدعم الفني");
       expect(arFormatted.text).toContain("del_ref_def456");
       expect(arFormatted.replyMarkup.inline_keyboard[0][0].text).toContain("عرض الاستفسار");
+    });
+
+    // Production URL Validation
+    it("validates dashboard inquiry URL: enforces HTTPS and forbids localhost/loopback in production", () => {
+      const prevEnv = process.env.NODE_ENV;
+      const prevAppUrl = process.env.APP_URL;
+
+      try {
+        process.env.NODE_ENV = "production";
+
+        // Non-HTTPS in production
+        process.env.APP_URL = "http://dashboard.example.com";
+        const nonHttps = getTrustedDashboardInquiryUrl("inq-123");
+        expect(nonHttps.ok).toBe(false);
+        if (!nonHttps.ok) {
+          expect(nonHttps.error).toContain("HTTPS");
+        }
+
+        // Localhost in production
+        process.env.APP_URL = "https://localhost:3000";
+        const localhost = getTrustedDashboardInquiryUrl("inq-123");
+        expect(localhost.ok).toBe(false);
+        if (!localhost.ok) {
+          expect(localhost.error).toContain("localhost");
+        }
+
+        // 127.0.0.1 in production
+        process.env.APP_URL = "https://127.0.0.1:8443";
+        const loopbackIp = getTrustedDashboardInquiryUrl("inq-123");
+        expect(loopbackIp.ok).toBe(false);
+
+        // Valid HTTPS in production
+        process.env.APP_URL = "https://dashboard.rabet.example";
+        const validProd = getTrustedDashboardInquiryUrl("inq-123");
+        expect(validProd.ok).toBe(true);
+        if (validProd.ok) {
+          expect(validProd.url).toBe("https://dashboard.rabet.example/inquiries/inq-123");
+        }
+
+        // Development mode permits localhost
+        process.env.NODE_ENV = "development";
+        process.env.APP_URL = "http://localhost:3000";
+        const devLocal = getTrustedDashboardInquiryUrl("inq-123");
+        expect(devLocal.ok).toBe(true);
+        if (devLocal.ok) {
+          expect(devLocal.url).toBe("http://localhost:3000/inquiries/inq-123");
+        }
+      } finally {
+        process.env.NODE_ENV = prevEnv;
+        process.env.APP_URL = prevAppUrl;
+      }
+    });
+
+    // Webhook Execution Deadline Budget Check
+    it("respects execution deadline budget: returns pending without network call when budget < 2000ms", async () => {
+      const mockDb = {
+        execute: vi.fn(),
+      };
+
+      const result = await attemptSellerNotificationDelivery({
+        db: mockDb as unknown as Parameters<typeof attemptSellerNotificationDelivery>[0]["db"],
+        deliveryId: "del-budget-123",
+        deadline: {
+          deadlineMs: Date.now() + 500,
+          getRemainingMs: () => 500, // < 2000ms budget remaining
+        },
+      });
+
+      expect(result.status).toBe("pending");
+      if (result.status === "pending") {
+        expect(result.reason).toBe("budget_exceeded");
+      }
+      // No DB queries or network calls should have occurred
+      expect(mockDb.execute).not.toHaveBeenCalled();
     });
   });
 

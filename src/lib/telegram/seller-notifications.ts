@@ -2,13 +2,15 @@ import "server-only";
 
 import type { Database } from "@/db/client";
 import {
-  claimDeliveryAttempt,
+  claimDeliveryAttemptDetailed,
   getSellerNotificationDelivery,
   markDeliveryCancelled,
+  markDeliveryCancelledByWorker,
   markDeliveryFailed,
   markDeliverySent,
   markDeliveryUnknown,
   readSellerNotificationConfig,
+  releaseDeliveryClaim,
 } from "@/lib/data/seller-notifications";
 import { getInquiryRecord } from "@/lib/data/inquiry";
 import {
@@ -26,6 +28,66 @@ import type {
 } from "./types";
 
 export const NOTIFICATION_BOT_TOKEN_ENV = "TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN";
+
+/**
+ * Validates and constructs a trusted dashboard URL for inquiry notifications.
+ * In production:
+ * - Requires HTTPS
+ * - Strictly forbids localhost and loopback addresses
+ */
+export function getTrustedDashboardInquiryUrl(
+  inquiryId: string,
+): { ok: true; url: string } | { ok: false; error: string } {
+  if (!inquiryId || typeof inquiryId !== "string" || inquiryId.trim().length === 0) {
+    return { ok: false, error: "Invalid inquiry ID." };
+  }
+
+  const rawBaseUrl =
+    process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.AUTH_URL;
+
+  const isProduction = process.env.NODE_ENV === "production";
+
+  if (!rawBaseUrl) {
+    if (isProduction) {
+      return {
+        ok: false,
+        error: "Missing trusted dashboard base URL in production environment.",
+      };
+    }
+  }
+
+  const baseCandidate = rawBaseUrl || "http://localhost:3000";
+  let parsed: URL;
+  try {
+    parsed = new URL(baseCandidate);
+  } catch {
+    return { ok: false, error: `Invalid dashboard base URL: ${baseCandidate}` };
+  }
+
+  if (isProduction) {
+    if (parsed.protocol !== "https:") {
+      return { ok: false, error: "Production dashboard URL must use HTTPS." };
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "0.0.0.0" ||
+      hostname === "::1" ||
+      hostname === "[::1]" ||
+      hostname.startsWith("127.") ||
+      hostname.endsWith(".localhost")
+    ) {
+      return {
+        ok: false,
+        error: "Production dashboard URL cannot point to localhost/loopback.",
+      };
+    }
+  }
+
+  const cleanBase = `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/+$/, "")}`;
+  return { ok: true, url: `${cleanBase}/inquiries/${encodeURIComponent(inquiryId.trim())}` };
+}
 
 /**
  * Returns the server-only secret token for the seller notification bot.
@@ -180,7 +242,10 @@ export async function sendSellerTestNotification(params: {
   botToken?: string;
   transport?: TelegramTransport;
   timeoutMs?: number;
-}): Promise<{ ok: true; bot: BotIdentity; messageId: number } | { ok: false; error: string; errorKind?: TelegramErrorKind }> {
+}): Promise<
+  | { ok: true; bot: BotIdentity; messageId: number }
+  | { ok: false; error: string; errorKind?: TelegramErrorKind; retryAfterSeconds?: number }
+> {
   const effectiveToken = params.botToken ?? getSellerNotificationBotToken();
   if (!effectiveToken && !params.transport) {
     return { ok: false, error: "Notification bot token is not configured in hosting environment.", errorKind: "api_error" };
@@ -217,6 +282,7 @@ export async function sendSellerTestNotification(params: {
         ok: false,
         error: sendRes.error ?? "Telegram sendMessage failed",
         errorKind: sendRes.errorKind ?? "api_error",
+        retryAfterSeconds: sendRes.retryAfterSeconds,
       };
     }
     return { ok: true, bot, messageId: sendRes.messageId ?? 1 };
@@ -237,6 +303,7 @@ export async function sendSellerTestNotification(params: {
       ok?: boolean;
       result?: { message_id: number };
       description?: string;
+      parameters?: { retry_after?: number };
     } | null;
 
     if (!res.ok || !data?.ok || !data.result) {
@@ -245,6 +312,7 @@ export async function sendSellerTestNotification(params: {
         ok: false,
         error: sanitizeTelegramError(data?.description ?? "Telegram sendMessage failed", effectiveToken ?? undefined),
         errorKind: classified.errorKind,
+        retryAfterSeconds: data?.parameters?.retry_after,
       };
     }
 
@@ -364,7 +432,7 @@ export async function attemptSellerNotificationDelivery(
 ): Promise<DeliveryAttemptResult> {
   const { db, deliveryId } = options;
 
-  // 1. Check budget
+  // 1. Check budget before touching state
   if (options.deadline && options.deadline.getRemainingMs() < 2000) {
     return { status: "pending", reason: "budget_exceeded" };
   }
@@ -389,25 +457,17 @@ export async function attemptSellerNotificationDelivery(
     return { status: "cancelled", reason: record.errorCategory ?? "cancelled" };
   }
 
-  // 4. Unknown retry requires explicit acknowledgment
-  if (record.status === "unknown" && !options.acknowledgeUnknownRisk) {
-    return {
-      status: "unknown",
-      errorCategory: "requires_duplicate_acknowledgment",
-    };
-  }
-
-  // 5. Rate limiting check
+  // 4. Rate limiting check prior to claim
   if (record.retryAfterUntil && record.retryAfterUntil.getTime() > Date.now()) {
     const remainingSec = Math.ceil((record.retryAfterUntil.getTime() - Date.now()) / 1000);
     return {
       status: "failed",
       errorCategory: "rate_limited",
-      retryAfterSeconds: remainingSec,
+      retryAfterSeconds: Math.max(1, remainingSec),
     };
   }
 
-  // 6. Revision and destination binding check
+  // 5. Revision and destination binding check prior to claim
   if (
     record.revision !== setting.revision ||
     record.destinationChatId !== setting.destinationChatId
@@ -416,36 +476,93 @@ export async function attemptSellerNotificationDelivery(
     return { status: "cancelled", reason: "incompatible_configuration" };
   }
 
-  // 7. Atomic claim
+  // 6. Atomic claim forwarding explicit unknown duplicate risk acknowledgment
   const attemptId = crypto.randomUUID();
-  const claimed = await claimDeliveryAttempt(db, deliveryId, attemptId, 60_000);
-  if (!claimed) {
-    return { status: "in_flight" };
+  const claimRes = await claimDeliveryAttemptDetailed(db, deliveryId, {
+    attemptId,
+    leaseMs: 60_000,
+    acknowledgeUnknownRisk: Boolean(options.acknowledgeUnknownRisk),
+  });
+
+  if (!claimRes.claimed) {
+    if (claimRes.reason === "already_sent") {
+      return { status: "sent", messageId: claimRes.messageId ?? 0 };
+    }
+    if (claimRes.reason === "cancelled") {
+      return { status: "cancelled", reason: claimRes.errorCategory ?? "cancelled" };
+    }
+    if (claimRes.reason === "requires_duplicate_acknowledgment") {
+      return {
+        status: "unknown",
+        errorCategory: "requires_duplicate_acknowledgment",
+      };
+    }
+    if (claimRes.reason === "rate_limited") {
+      const remainingSec = claimRes.retryAfterUntil
+        ? Math.ceil((claimRes.retryAfterUntil.getTime() - Date.now()) / 1000)
+        : 10;
+      return {
+        status: "failed",
+        errorCategory: "rate_limited",
+        retryAfterSeconds: Math.max(1, remainingSec),
+      };
+    }
+    if (claimRes.reason === "in_flight") {
+      return { status: "in_flight" };
+    }
+    return { status: "cancelled", reason: "record_not_found" };
   }
 
-  // 8. Bot token & identity verification
+  // From here onward, the record is CLAIMED ('sending' status with active attemptId).
+  // Any terminal transition must pass attemptId to guarantee freshness.
+
+  // 7. Validate dashboard URL
+  const dashboardUrlRes = getTrustedDashboardInquiryUrl(record.inquiryId);
+  if (!dashboardUrlRes.ok) {
+    await markDeliveryFailed(db, deliveryId, attemptId, "invalid_dashboard_url");
+    return { status: "failed", errorCategory: "invalid_dashboard_url" };
+  }
+
+  // 8. Bot token check
   const token = options.botToken ?? getSellerNotificationBotToken();
   if (!token && !options.transport) {
     await markDeliveryFailed(db, deliveryId, attemptId, "missing_token");
     return { status: "failed", errorCategory: "missing_token" };
   }
 
+  // 9. Deadline check before network work starts
+  const remainingBudget = options.deadline
+    ? options.deadline.getRemainingMs()
+    : DEFAULT_REQUEST_TIMEOUT_MS;
+
+  if (remainingBudget < 2000) {
+    // Release claim back to pending without marking unknown since no send was attempted
+    await releaseDeliveryClaim(db, deliveryId, attemptId);
+    return { status: "pending", reason: "budget_exceeded" };
+  }
+
+  // 10. Bot identity verification
   if (!options.transport && token) {
-    const meRes = await getSellerBotMe(token, 5000);
+    const meTimeout = Math.min(5000, Math.max(1000, remainingBudget - 1000));
+    const meRes = await getSellerBotMe(token, meTimeout);
     if (!meRes.ok) {
+      if (meRes.errorKind === "timeout" || meRes.errorKind === "network_error") {
+        await releaseDeliveryClaim(db, deliveryId, attemptId);
+        return { status: "pending", reason: meRes.errorKind };
+      }
       await markDeliveryFailed(db, deliveryId, attemptId, meRes.errorKind ?? "api_error");
       return { status: "failed", errorCategory: meRes.errorKind ?? "api_error" };
     }
     if (setting.verifiedBotId && meRes.bot.id !== setting.verifiedBotId) {
-      await markDeliveryCancelled(db, deliveryId, "bot_identity_changed");
+      await markDeliveryCancelledByWorker(db, deliveryId, attemptId, "bot_identity_changed");
       return { status: "cancelled", reason: "bot_identity_changed" };
     }
   }
 
-  // 9. Load inquiry details for content
+  // 11. Load inquiry details for content
   const inquiryRow = await getInquiryRecord(db, record.inquiryId);
   if (!inquiryRow) {
-    await markDeliveryCancelled(db, deliveryId, "inquiry_not_found");
+    await markDeliveryCancelledByWorker(db, deliveryId, attemptId, "inquiry_not_found");
     return { status: "cancelled", reason: "inquiry_not_found" };
   }
 
@@ -457,10 +574,6 @@ export async function attemptSellerNotificationDelivery(
   }
   const categoryName = inquiryRow.category;
 
-  const rawBaseUrl = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-  const baseUrl = rawBaseUrl.replace(/\/+$/, "");
-  const dashboardUrl = `${baseUrl}/inquiries/${inquiryRow.id}`;
-
   const formatted = formatSellerNotificationMessage({
     isSupport,
     reference: inquiryRow.reference,
@@ -469,20 +582,20 @@ export async function attemptSellerNotificationDelivery(
     categoryName,
     createdAt: inquiryRow.createdAt,
     language: setting.language === "en" ? "en" : "ar",
-    dashboardUrl,
+    dashboardUrl: dashboardUrlRes.url,
   });
 
-  // 10. Network transmission
-  const timeoutMs = options.deadline
-    ? Math.min(DEFAULT_REQUEST_TIMEOUT_MS, options.deadline.getRemainingMs())
+  // 12. Final budget check before dispatching sendMessage
+  const sendBudget = options.deadline
+    ? options.deadline.getRemainingMs()
     : DEFAULT_REQUEST_TIMEOUT_MS;
 
-  if (timeoutMs <= 0) {
-    // Left pending/unknown for recovery
-    await markDeliveryUnknown(db, deliveryId, attemptId, "budget_exceeded");
-    return { status: "unknown", errorCategory: "budget_exceeded" };
+  if (sendBudget < 1500) {
+    await releaseDeliveryClaim(db, deliveryId, attemptId);
+    return { status: "pending", reason: "budget_exceeded" };
   }
 
+  // 13. Network transmission
   try {
     let sendResult: TelegramSendResult;
 
@@ -493,6 +606,7 @@ export async function attemptSellerNotificationDelivery(
         replyMarkup: formatted.replyMarkup,
       });
     } else {
+      const sendTimeout = Math.min(DEFAULT_REQUEST_TIMEOUT_MS, sendBudget);
       const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -501,7 +615,7 @@ export async function attemptSellerNotificationDelivery(
           text: formatted.text,
           reply_markup: formatted.replyMarkup,
         }),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(sendTimeout),
       });
 
       const data = (await res.json().catch(() => null)) as {
@@ -530,30 +644,39 @@ export async function attemptSellerNotificationDelivery(
       return { status: "sent", messageId: sendResult.messageId };
     }
 
-    // Classify error
+    // Classify Telegram response
     if (sendResult.errorKind === "rate_limited") {
       const retryAfter = sendResult.retryAfterSeconds ?? 10;
       await markDeliveryFailed(db, deliveryId, attemptId, "rate_limited", retryAfter);
       return { status: "failed", errorCategory: "rate_limited", retryAfterSeconds: retryAfter };
     }
 
-    if (sendResult.errorKind === "timeout") {
-      await markDeliveryUnknown(db, deliveryId, attemptId, "timeout");
-      return { status: "unknown", errorCategory: "timeout" };
+    // Uncertain failures after send dispatched: timeout, network error, or 5xx server error
+    if (
+      sendResult.errorKind === "timeout" ||
+      sendResult.errorKind === "network_error" ||
+      (sendResult.httpStatus && sendResult.httpStatus >= 500)
+    ) {
+      const errCategory =
+        sendResult.errorKind === "timeout"
+          ? "timeout"
+          : sendResult.httpStatus && sendResult.httpStatus >= 500
+          ? "telegram_server_error"
+          : "network_uncertainty";
+      await markDeliveryUnknown(db, deliveryId, attemptId, errCategory);
+      return { status: "unknown", errorCategory: errCategory };
     }
 
+    // Definitive client/authentication rejection (400, 401, 403, 404, etc.)
     const cat = sendResult.errorKind ?? "api_error";
     await markDeliveryFailed(db, deliveryId, attemptId, cat);
     return { status: "failed", errorCategory: cat };
   } catch (err) {
     const isTimeout =
       err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
-    if (isTimeout) {
-      await markDeliveryUnknown(db, deliveryId, attemptId, "timeout");
-      return { status: "unknown", errorCategory: "timeout" };
-    }
-
-    await markDeliveryFailed(db, deliveryId, attemptId, "network_error");
-    return { status: "failed", errorCategory: "network_error" };
+    const errorCat = isTimeout ? "timeout" : "network_uncertainty";
+    await markDeliveryUnknown(db, deliveryId, attemptId, errorCat);
+    return { status: "unknown", errorCategory: errorCat };
   }
 }
+

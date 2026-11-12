@@ -27,7 +27,10 @@ import {
   upsertCustomer,
   type TelegramBusinessReceipt,
 } from "@/lib/data";
-import { attemptSellerNotificationDelivery } from "./seller-notifications";
+import {
+  attemptSellerNotificationDelivery,
+  getSellerNotificationBotToken,
+} from "./seller-notifications";
 import { editOrThrow, sendOrThrow, type getLocalizedUiStrings } from "./catalog-journey";
 import { tokens } from "./tokens";
 import type {
@@ -57,8 +60,15 @@ export interface InquiryJourneyOptions {
   notificationBotToken?: string;
 }
 
-async function prepareNotificationIntent(db: Database) {
+async function prepareNotificationIntent(
+  db: Database,
+  options?: { notificationBotToken?: string; notificationTransport?: TelegramTransport },
+) {
   try {
+    const token = options?.notificationBotToken ?? getSellerNotificationBotToken();
+    if (!token && !options?.notificationTransport) {
+      return null;
+    }
     const config = await getVerifiedNotificationConfig(db);
     if (!config) return null;
     return {
@@ -477,7 +487,7 @@ export async function handleProductInquiryCallback(
   };
 
   // 6. Atomic create or resume
-  const notificationIntent = await prepareNotificationIntent(db);
+  const notificationIntent = await prepareNotificationIntent(db, options);
 
   const inqResult = await createOrResumeProductInquiry(db, {
     customerId: customerRecord.id,
@@ -608,7 +618,7 @@ export async function handleSupportInquiryCallback(
   }
 
   // 3. Atomic create or resume general support inquiry
-  const notificationIntent = await prepareNotificationIntent(db);
+  const notificationIntent = await prepareNotificationIntent(db, options);
 
   const inqResult = await createOrResumeSupportInquiry(db, {
     customerId: customerRecord.id,
@@ -943,7 +953,7 @@ export async function handleIncomingMessage(
 
   // 6. Ordinary free text routing: atomic operation in one protected transaction
   // Preserve exact customer body (rawText)
-  const notificationIntent = await prepareNotificationIntent(db);
+  const notificationIntent = await prepareNotificationIntent(db, options);
 
   const routeResult = await routeAndAppendCustomerText(db, {
     customerId: customerRecord.id,

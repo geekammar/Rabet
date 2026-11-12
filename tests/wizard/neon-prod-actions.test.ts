@@ -57,6 +57,7 @@ type Scenario = {
   indexes: string[];
   constraints: Array<{ name: string; type: string }>;
   treeFks: Array<{ name: string; table_name: string }>;
+  triggers?: Array<{ name: string }>;
   throwOnAppTables?: boolean;
   throwOnCurrentDatabase?: boolean;
   throwOnLedgerRead?: boolean;
@@ -73,6 +74,7 @@ function emptyScenario(): Scenario {
     indexes: [],
     constraints: [],
     treeFks: [],
+    triggers: [],
   };
 }
 
@@ -93,6 +95,7 @@ function configuredScenario(): Scenario {
       name,
       table_name: table,
     })),
+    triggers: wizard.EXPECTED_NOTIFICATION_TRIGGERS.map((name) => ({ name })),
   };
 }
 
@@ -112,6 +115,7 @@ function applyMigrationsTo(scenario: Scenario) {
   scenario.treeFks = Object.entries(wizard.EXPECTED_TREE_FKS).map(
     ([table, name]) => ({ name, table_name: table }),
   );
+  scenario.triggers = wizard.EXPECTED_NOTIFICATION_TRIGGERS.map((name) => ({ name }));
 }
 
 function createFakeSql(scenario: Scenario) {
@@ -167,6 +171,10 @@ function createFakeSql(scenario: Scenario) {
 
       if (statement.includes("conrelid = confrelid")) {
         return scenario.treeFks;
+      }
+
+      if (statement.includes("pg_trigger")) {
+        return scenario.triggers ?? [];
       }
 
       if (statement.includes("select 1")) {

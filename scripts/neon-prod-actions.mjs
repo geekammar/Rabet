@@ -71,9 +71,12 @@ import postgres from "postgres";
 
 import {
   CRITICAL_CONSTRAINTS,
+  CRITICAL_CONSTRAINTS_V1,
+  CRITICAL_CONSTRAINTS_V2,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
+  EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
   EXPECTED_TABLES_V2,
@@ -585,7 +588,13 @@ export async function validateTarget(ctx, options = {}) {
   const { sql } = ctx;
   const expectedTables = options.expectedTables ?? EXPECTED_TABLES;
   const expectedIndexes = options.expectedIndexes ?? EXPECTED_INDEXES;
-  const expectedConstraints = options.expectedConstraints ?? CRITICAL_CONSTRAINTS;
+  const expectedConstraints =
+    options.expectedConstraints ??
+    (expectedTables === EXPECTED_TABLES_V1
+      ? CRITICAL_CONSTRAINTS_V1
+      : expectedTables === EXPECTED_TABLES_V2
+        ? CRITICAL_CONSTRAINTS_V2
+        : CRITICAL_CONSTRAINTS);
   const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
 
   const prefixCount = options.expectedHashes
@@ -768,6 +777,27 @@ export async function validateTarget(ctx, options = {}) {
     );
   } catch (error) {
     record(ctx, "recursive-trees", false, `query error: ${redact(String(error.message ?? error))}`);
+  }
+
+  // 6. Notification triggers check (if migration 0003 included)
+  if (expectedEntries.some((e) => e.tag === "0003_seller_notifications")) {
+    try {
+      const triggerRows = await sql.query(QUERIES.triggers);
+      const triggerSet = new Set(triggerRows.map((row) => String(row.name)));
+      const missingTriggers = EXPECTED_NOTIFICATION_TRIGGERS.filter(
+        (name) => !triggerSet.has(name),
+      );
+      record(
+        ctx,
+        "notification-triggers",
+        missingTriggers.length === 0,
+        missingTriggers.length
+          ? `missing ${missingTriggers.join(", ")}`
+          : `${EXPECTED_NOTIFICATION_TRIGGERS.length}/${EXPECTED_NOTIFICATION_TRIGGERS.length}`,
+      );
+    } catch (error) {
+      record(ctx, "notification-triggers", false, `query error: ${redact(String(error.message ?? error))}`);
+    }
   }
 
   // 6. Select 1 probe
@@ -1342,6 +1372,7 @@ export async function runProdActions({
         const validated = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V2,
           expectedIndexes: EXPECTED_INDEXES_V2,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V2,
           expectedHashes: ctx.committedHashes.slice(0, 3).map((e) => e.hash),
         });
         if (!validated) {
@@ -1363,6 +1394,7 @@ export async function runProdActions({
         const validated = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V1,
           expectedIndexes: EXPECTED_INDEXES_V1,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V1,
           expectedHashes: ctx.committedHashes.slice(0, 2).map((e) => e.hash),
         });
         if (!validated) {
@@ -1419,6 +1451,7 @@ export async function runProdActions({
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V2,
           expectedIndexes: EXPECTED_INDEXES_V2,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V2,
           expectedHashes: ctx.committedHashes.slice(0, 3).map((e) => e.hash),
         });
 
@@ -1444,6 +1477,7 @@ export async function runProdActions({
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V1,
           expectedIndexes: EXPECTED_INDEXES_V1,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V1,
           expectedHashes: ctx.committedHashes.slice(0, 2).map((e) => e.hash),
         });
 

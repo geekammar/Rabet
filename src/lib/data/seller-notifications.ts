@@ -157,6 +157,53 @@ export async function getVerifiedNotificationConfig(
   };
 }
 
+function mapSettingRow(row: Record<string, unknown>): SellerNotificationSettingRecord {
+  return {
+    id: Number(row.id ?? 1),
+    enabled: Boolean(row.enabled),
+    destinationChatId:
+      (row.destination_chat_id as string | null) ??
+      (row.destinationChatId as string | null) ??
+      null,
+    language: (row.language === "en" ? "en" : "ar") as "ar" | "en",
+    verifiedAt: row.verified_at
+      ? new Date(row.verified_at as string | number | Date)
+      : row.verifiedAt
+      ? new Date(row.verifiedAt as string | number | Date)
+      : null,
+    verifiedBotId:
+      row.verified_bot_id !== null && row.verified_bot_id !== undefined
+        ? Number(row.verified_bot_id)
+        : row.verifiedBotId !== null && row.verifiedBotId !== undefined
+        ? Number(row.verifiedBotId)
+        : null,
+    verifiedBotUsername:
+      (row.verified_bot_username as string | null) ??
+      (row.verifiedBotUsername as string | null) ??
+      null,
+    verifiedChatId:
+      (row.verified_chat_id as string | null) ??
+      (row.verifiedChatId as string | null) ??
+      null,
+    revision: Number(row.revision ?? 1),
+    lastTestAt: row.last_test_at
+      ? new Date(row.last_test_at as string | number | Date)
+      : row.lastTestAt
+      ? new Date(row.lastTestAt as string | number | Date)
+      : null,
+    createdAt: row.created_at
+      ? new Date(row.created_at as string | number | Date)
+      : row.createdAt
+      ? new Date(row.createdAt as string | number | Date)
+      : new Date(),
+    updatedAt: row.updated_at
+      ? new Date(row.updated_at as string | number | Date)
+      : row.updatedAt
+      ? new Date(row.updatedAt as string | number | Date)
+      : new Date(),
+  };
+}
+
 export interface SaveSellerNotificationInput {
   destinationChatId?: string | null;
   language?: "ar" | "en";
@@ -165,7 +212,7 @@ export interface SaveSellerNotificationInput {
 /**
  * Saves destinationChatId and/or language.
  * Changing destinationChatId invalidates prior verification, disables notifications,
- * and increments revision.
+ * increments revision, and cancels obsolete pending deliveries bound to older revisions.
  */
 export async function saveSellerNotificationConfig(
   db: Database,
@@ -199,46 +246,54 @@ export async function saveSellerNotificationConfig(
     throw new RabetDataError("INVALID_INPUT", "Notification language must be 'ar' or 'en'.");
   }
 
-  const destinationChanged = existing && existing.destinationChatId !== destination;
-
-  const newRevision = destinationChanged ? (existing?.revision ?? 1) + 1 : existing?.revision ?? 1;
-  const newEnabled = destinationChanged ? false : (existing?.enabled ?? false);
-  const newVerifiedAt = destinationChanged ? null : existing?.verifiedAt ?? null;
-  const newVerifiedBotId = destinationChanged ? null : existing?.verifiedBotId ?? null;
-  const newVerifiedBotUsername = destinationChanged ? null : existing?.verifiedBotUsername ?? null;
-  const newVerifiedChatId = destinationChanged ? null : existing?.verifiedChatId ?? null;
-
   try {
-    const [saved] = await db
-      .insert(sellerNotificationSetting)
-      .values({
-        id: 1,
-        enabled: newEnabled,
-        destinationChatId: destination,
-        language,
-        verifiedAt: newVerifiedAt,
-        verifiedBotId: newVerifiedBotId,
-        verifiedBotUsername: newVerifiedBotUsername,
-        verifiedChatId: newVerifiedChatId,
-        revision: newRevision,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: sellerNotificationSetting.id,
-        set: {
-          enabled: newEnabled,
-          destinationChatId: destination,
-          language,
-          verifiedAt: newVerifiedAt,
-          verifiedBotId: newVerifiedBotId,
-          verifiedBotUsername: newVerifiedBotUsername,
-          verifiedChatId: newVerifiedChatId,
-          revision: newRevision,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
+    const result = await db.execute(sql`
+      INSERT INTO ${sellerNotificationSetting} (
+        id, enabled, destination_chat_id, language, verified_at, verified_bot_id, verified_bot_username, verified_chat_id, revision, created_at, updated_at
+      )
+      VALUES (
+        1, false, ${destination}, ${language}, NULL, NULL, NULL, NULL, 1, now(), now()
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        destination_chat_id = ${destination},
+        language = ${language},
+        enabled = CASE
+          WHEN seller_notification_setting.destination_chat_id IS DISTINCT FROM ${destination} THEN false
+          ELSE seller_notification_setting.enabled
+        END,
+        verified_at = CASE
+          WHEN seller_notification_setting.destination_chat_id IS DISTINCT FROM ${destination} THEN NULL
+          ELSE seller_notification_setting.verified_at
+        END,
+        verified_bot_id = CASE
+          WHEN seller_notification_setting.destination_chat_id IS DISTINCT FROM ${destination} THEN NULL
+          ELSE seller_notification_setting.verified_bot_id
+        END,
+        verified_bot_username = CASE
+          WHEN seller_notification_setting.destination_chat_id IS DISTINCT FROM ${destination} THEN NULL
+          ELSE seller_notification_setting.verified_bot_username
+        END,
+        verified_chat_id = CASE
+          WHEN seller_notification_setting.destination_chat_id IS DISTINCT FROM ${destination} THEN NULL
+          ELSE seller_notification_setting.verified_chat_id
+        END,
+        revision = CASE
+          WHEN seller_notification_setting.destination_chat_id IS DISTINCT FROM ${destination} THEN seller_notification_setting.revision + 1
+          ELSE seller_notification_setting.revision
+        END,
+        updated_at = now()
+      RETURNING *
+    `);
+
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+    const saved = mapSettingRow(rows[0]);
+
+    if (saved.revision > 1 && existing && existing.destinationChatId !== destination) {
+      await cancelObsoleteDeliveriesForRevision(db, saved.revision);
+    }
 
     return saved;
   } catch (err) {
@@ -247,15 +302,19 @@ export async function saveSellerNotificationConfig(
 }
 
 /**
- * Persists test success: marks the exact destination and bot identity as verified,
- * and increments revision so old pending attempts with different settings cannot be delivered.
+ * Persists test success with configuration compare-and-set semantics:
+ * Only marks verified if the destination and revision currently in the database match
+ * the expected snapshot tested. Never overwrites a newer destination saved concurrently.
+ * A harmless repeat test of the SAME bot and destination does not increment revision.
  */
 export async function recordVerificationSuccess(
   db: Database,
   input: {
     botId: number;
     botUsername?: string | null;
-    destinationChatId: string;
+    destinationChatId?: string;
+    expectedRevision?: number;
+    expectedDestination?: string;
   },
 ): Promise<SellerNotificationSettingRecord> {
   const cap = await checkSellerNotificationCapability(db);
@@ -263,42 +322,43 @@ export async function recordVerificationSuccess(
     throw new RabetDataError("SCHEMA_UPGRADE_REQUIRED", cap.reason ?? "Schema upgrade required.");
   }
 
-  const existing = await readSellerNotificationConfig(db);
-  const nextRevision = (existing?.revision ?? 1) + 1;
+  const destination = input.expectedDestination ?? input.destinationChatId;
+  const revisionFilter = input.expectedRevision !== undefined
+    ? sql`AND revision = ${input.expectedRevision}::int`
+    : sql``;
+  const destinationFilter = destination !== undefined
+    ? sql`AND destination_chat_id = ${destination}::text`
+    : sql``;
 
   try {
-    const [updated] = await db
-      .insert(sellerNotificationSetting)
-      .values({
-        id: 1,
-        enabled: false, // Remains disabled until seller explicitly enables
-        destinationChatId: input.destinationChatId,
-        language: existing?.language ?? "ar",
-        verifiedAt: new Date(),
-        verifiedBotId: input.botId,
-        verifiedBotUsername: input.botUsername ?? null,
-        verifiedChatId: input.destinationChatId,
-        revision: nextRevision,
-        lastTestAt: new Date(),
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: sellerNotificationSetting.id,
-        set: {
-          destinationChatId: input.destinationChatId,
-          verifiedAt: new Date(),
-          verifiedBotId: input.botId,
-          verifiedBotUsername: input.botUsername ?? null,
-          verifiedChatId: input.destinationChatId,
-          revision: nextRevision,
-          lastTestAt: new Date(),
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
+    const result = await db.execute(sql`
+      UPDATE ${sellerNotificationSetting}
+      SET
+        verified_at = now(),
+        verified_bot_id = ${input.botId}::bigint,
+        verified_bot_username = ${input.botUsername ?? null}::text,
+        verified_chat_id = destination_chat_id,
+        last_test_at = now(),
+        updated_at = now()
+      WHERE id = 1
+        ${revisionFilter}
+        ${destinationFilter}
+      RETURNING *
+    `);
 
-    return updated;
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+
+    if (rows.length === 0) {
+      throw new RabetDataError(
+        "CONFIGURATION_CHANGED",
+        "Notification settings were updated or destination changed while verification was in flight.",
+      );
+    }
+
+    return mapSettingRow(rows[0]);
   } catch (err) {
     throw mapDatabaseError(err);
   }
@@ -306,7 +366,7 @@ export async function recordVerificationSuccess(
 
 /**
  * Toggles the enabled state of seller notifications.
- * Refuses enabling unless the current bot identity matches the verified bot,
+ * Atomically verifies that the current bot identity matches the verified bot,
  * destination matches the verified destination, and verifiedAt is present.
  */
 export async function setSellerNotificationEnabled(
@@ -319,78 +379,190 @@ export async function setSellerNotificationEnabled(
     throw new RabetDataError("SCHEMA_UPGRADE_REQUIRED", cap.reason ?? "Schema upgrade required.");
   }
 
-  const existing = await readSellerNotificationConfig(db);
-  if (!existing) {
-    throw new RabetDataError("NOT_FOUND", "Notification settings not found. Please configure settings first.");
-  }
-
-  if (enabled) {
-    if (!existing.destinationChatId) {
-      throw new RabetDataError("INVALID_INPUT", "Cannot enable notifications: destination chat ID is not configured.");
-    }
-    if (!existing.verifiedAt || !existing.verifiedBotId || existing.verifiedChatId !== existing.destinationChatId) {
-      throw new RabetDataError(
-        "INVALID_INPUT",
-        "Cannot enable notifications: destination has not been verified. Send a successful test notification first.",
-      );
-    }
-    if (currentBotId !== undefined && existing.verifiedBotId !== currentBotId) {
-      throw new RabetDataError(
-        "INVALID_INPUT",
-        "Cannot enable notifications: configured bot token belongs to a different bot than was verified. Run a new test notification first.",
-      );
-    }
-  }
-
   try {
-    const [updated] = await db
-      .update(sellerNotificationSetting)
-      .set({
-        enabled,
-        updatedAt: new Date(),
-      })
-      .where(eq(sellerNotificationSetting.id, 1))
-      .returning();
+    if (enabled) {
+      const result = await db.execute(sql`
+        UPDATE ${sellerNotificationSetting}
+        SET
+          enabled = true,
+          updated_at = now()
+        WHERE id = 1
+          AND destination_chat_id IS NOT NULL
+          AND verified_at IS NOT NULL
+          AND verified_bot_id IS NOT NULL
+          AND verified_chat_id = destination_chat_id
+          AND (
+            ${currentBotId ?? null}::bigint IS NULL
+            OR verified_bot_id = ${currentBotId ?? null}::bigint
+          )
+        RETURNING *
+      `);
 
-    return updated;
+      const rawRows: unknown = Array.isArray(result)
+        ? result
+        : (result as { rows?: unknown[] })?.rows;
+      const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+
+      if (rows.length === 0) {
+        const current = await readSellerNotificationConfig(db);
+        if (!current?.destinationChatId) {
+          throw new RabetDataError("INVALID_INPUT", "Cannot enable notifications: destination chat ID is not configured.");
+        }
+        if (!current.verifiedAt || !current.verifiedBotId || current.verifiedChatId !== current.destinationChatId) {
+          throw new RabetDataError(
+            "INVALID_INPUT",
+            "Cannot enable notifications: destination has not been verified. Send a successful test notification first.",
+          );
+        }
+        if (currentBotId !== undefined && current.verifiedBotId !== currentBotId) {
+          throw new RabetDataError(
+            "INVALID_INPUT",
+            "Cannot enable notifications: configured bot token belongs to a different bot than was verified. Run a new test notification first.",
+          );
+        }
+        throw new RabetDataError("INVALID_INPUT", "Cannot enable notifications: settings are not verified.");
+      }
+
+      return mapSettingRow(rows[0]);
+    } else {
+      const result = await db.execute(sql`
+        UPDATE ${sellerNotificationSetting}
+        SET
+          enabled = false,
+          updated_at = now()
+        WHERE id = 1
+        RETURNING *
+      `);
+
+      const rawRows: unknown = Array.isArray(result)
+        ? result
+        : (result as { rows?: unknown[] })?.rows;
+      const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+      if (rows.length === 0) {
+        throw new RabetDataError("NOT_FOUND", "Notification settings not found.");
+      }
+      return mapSettingRow(rows[0]);
+    }
   } catch (err) {
     throw mapDatabaseError(err);
   }
 }
 
 /**
- * Server-side rate limiter / cooldown for test operations.
- * Returns true if test is allowed; returns false if still within cooldown period.
+ * Server-side atomic rate limiter / cooldown for test operations.
+ * Atomically updates last_test_at only if current time is outside cooldown.
+ * Only one concurrent call can succeed; persistence failure blocks test send.
  */
-export async function checkAndRecordTestCooldown(
+export async function claimTestCooldown(
   db: Database,
   cooldownSeconds = 5,
-): Promise<{ allowed: boolean; remainingSeconds?: number }> {
-  const setting = await readSellerNotificationConfig(db);
-  if (!setting) return { allowed: true };
-
-  if (setting.lastTestAt) {
-    const elapsedMs = Date.now() - setting.lastTestAt.getTime();
-    const cooldownMs = cooldownSeconds * 1000;
-    if (elapsedMs < cooldownMs) {
-      const remainingSeconds = Math.ceil((cooldownMs - elapsedMs) / 1000);
-      return { allowed: false, remainingSeconds };
-    }
+): Promise<{ allowed: boolean; remainingSeconds?: number; reason?: string }> {
+  const cap = await checkSellerNotificationCapability(db);
+  if (!cap.supported) {
+    throw new RabetDataError("SCHEMA_UPGRADE_REQUIRED", cap.reason ?? "Schema upgrade required.");
   }
 
   try {
-    await db
-      .update(sellerNotificationSetting)
-      .set({ lastTestAt: new Date(), updatedAt: new Date() })
-      .where(eq(sellerNotificationSetting.id, 1));
-    return { allowed: true };
-  } catch {
-    return { allowed: true };
+    const result = await db.execute(sql`
+      INSERT INTO ${sellerNotificationSetting} (
+        id,
+        enabled,
+        language,
+        revision,
+        last_test_at,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        1,
+        false,
+        'ar',
+        1,
+        now(),
+        now(),
+        now()
+      )
+      ON CONFLICT (id) DO UPDATE
+      SET
+        last_test_at = now(),
+        updated_at = now()
+      WHERE seller_notification_setting.last_test_at IS NULL
+         OR seller_notification_setting.last_test_at <= now() - (${cooldownSeconds} || ' seconds')::interval
+      RETURNING last_test_at
+    `);
+
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+
+    if (rows.length > 0) {
+      return { allowed: true };
+    }
+
+    // Determine why claim failed: missing configuration or active cooldown/rate-limit
+    const check = await db.execute(sql`
+      SELECT
+        id,
+        last_test_at,
+        extract(epoch from (
+          greatest(last_test_at, now()) + (${cooldownSeconds} * interval '1 second') - now()
+        ))::int AS remaining_seconds,
+        extract(epoch from (last_test_at - now()))::int AS future_seconds
+      FROM ${sellerNotificationSetting}
+      WHERE id = 1
+      LIMIT 1
+    `);
+
+    const checkRows = (Array.isArray(check) ? check : (check as { rows?: unknown[] })?.rows || []) as Record<string, unknown>[];
+    if (checkRows.length === 0) {
+      return { allowed: false, reason: "missing_configuration" };
+    }
+
+    const row = checkRows[0];
+    const futureSec = Math.max(0, Number(row.future_seconds ?? 0));
+    const remainingSec = Math.max(1, futureSec > 0 ? futureSec : Number(row.remaining_seconds ?? cooldownSeconds));
+
+    return {
+      allowed: false,
+      remainingSeconds: remainingSec,
+      reason: futureSec > 0 ? "rate_limited" : "cooldown_active",
+    };
+  } catch (err) {
+    throw mapDatabaseError(err);
   }
+}
+
+export async function recordTestRateLimited(
+  db: Database,
+  retryAfterSeconds: number,
+): Promise<void> {
+  const cap = await checkSellerNotificationCapability(db);
+  if (!cap.supported) return;
+
+  try {
+    await db.execute(sql`
+      UPDATE ${sellerNotificationSetting}
+      SET
+        last_test_at = now() + (${retryAfterSeconds} || ' seconds')::interval,
+        updated_at = now()
+      WHERE id = 1
+    `);
+  } catch (err) {
+    throw mapDatabaseError(err);
+  }
+}
+
+export async function checkAndRecordTestCooldown(
+  db: Database,
+  cooldownSeconds = 5,
+): Promise<{ allowed: boolean; remainingSeconds?: number; reason?: string }> {
+  return claimTestCooldown(db, cooldownSeconds);
 }
 
 /**
  * Lists recent seller notification deliveries for the dashboard.
+ * Recovers any expired sending records to 'unknown' before listing.
  */
 export async function listSellerNotificationDeliveries(
   db: Database,
@@ -400,6 +572,9 @@ export async function listSellerNotificationDeliveries(
   if (!cap.supported) return [];
 
   try {
+    // Atomically recover any expired sending leases to 'unknown'
+    await recoverExpiredSendingDeliveries(db);
+
     const rows = await db
       .select()
       .from(sellerNotificationDelivery)
@@ -468,25 +643,44 @@ function mapDeliveryRow(row: Record<string, unknown>): SellerNotificationDeliver
   };
 }
 
+export interface ClaimDeliveryAttemptOptions {
+  attemptId?: string;
+  leaseMs?: number;
+  acknowledgeUnknownRisk?: boolean;
+}
+
+export type ClaimDeliveryResult =
+  | { claimed: true; record: SellerNotificationDeliveryRecord }
+  | {
+      claimed: false;
+      reason:
+        | "not_found"
+        | "already_sent"
+        | "cancelled"
+        | "in_flight"
+        | "requires_duplicate_acknowledgment"
+        | "rate_limited";
+      retryAfterSeconds?: number;
+      retryAfterUntil?: Date;
+      messageId?: number;
+      errorCategory?: string;
+    };
+
 /**
  * Atomically claims a delivery record for sending.
- * Only pending, failed, unknown (with ack), or stale sending records (lease expired) can be claimed.
+ * Follows strict safety rules:
+ * - Expired sending leases are recovered to 'unknown' with category 'lease_expired'.
+ * - Records in 'unknown' require explicit acknowledgeUnknownRisk: true to be claimed.
+ * - Records in 'sending' with active lease return 'in_flight'.
+ * - Records in 'sent' or 'cancelled' cannot be claimed.
  */
-export async function claimDeliveryAttempt(
+export async function claimDeliveryAttemptDetailed(
   db: Database,
   deliveryId: string,
-  attemptIdOrOptions?:
-    | string
-    | {
-        attemptId?: string;
-        leaseMs?: number;
-        acknowledgeUnknownRisk?: boolean;
-      },
+  attemptIdOrOptions?: string | ClaimDeliveryAttemptOptions,
   leaseMsArg = 60_000,
-  optionsArg?: {
-    acknowledgeUnknownRisk?: boolean;
-  },
-): Promise<SellerNotificationDeliveryRecord | null> {
+  optionsArg?: { acknowledgeUnknownRisk?: boolean },
+): Promise<ClaimDeliveryResult> {
   let effectiveAttemptId: string;
   let effectiveLeaseMs: number;
   let acknowledgeUnknownRisk: boolean;
@@ -502,13 +696,11 @@ export async function claimDeliveryAttempt(
   }
 
   try {
-    const existing = await getSellerNotificationDelivery(db, deliveryId);
-    if (!existing) return null;
-    if (existing.status === "sent" || existing.status === "cancelled") return null;
-    if (existing.status === "unknown" && !acknowledgeUnknownRisk) return null;
-    if (existing.retryAfterUntil && existing.retryAfterUntil.getTime() > Date.now()) return null;
+    // 1. Recover expired sending for this delivery if any
+    await recoverExpiredSendingDeliveries(db, deliveryId);
 
-    const result = await db.execute<SellerNotificationDeliveryRecord>(sql`
+    // 2. Attempt atomic claim
+    const result = await db.execute(sql`
       UPDATE ${sellerNotificationDelivery}
       SET
         status = 'sending',
@@ -521,8 +713,8 @@ export async function claimDeliveryAttempt(
           status = 'pending'
           OR status = 'failed'
           OR (status = 'unknown' AND ${acknowledgeUnknownRisk}::boolean = true)
-          OR (status = 'sending' AND (claim_expires_at IS NULL OR claim_expires_at < now()))
         )
+        AND (retry_after_until IS NULL OR retry_after_until <= now())
       RETURNING *
     `);
 
@@ -530,10 +722,54 @@ export async function claimDeliveryAttempt(
       ? result
       : (result as { rows?: unknown[] })?.rows;
     const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
-    return rows.length > 0 ? mapDeliveryRow(rows[0]) : null;
+
+    if (rows.length > 0) {
+      return { claimed: true, record: mapDeliveryRow(rows[0]) };
+    }
+
+    // 3. Inspect why claim failed
+    const existing = await getSellerNotificationDelivery(db, deliveryId);
+    if (!existing) {
+      return { claimed: false, reason: "not_found" };
+    }
+    if (existing.status === "sent") {
+      return { claimed: false, reason: "already_sent" };
+    }
+    if (existing.status === "cancelled") {
+      return { claimed: false, reason: "cancelled" };
+    }
+    if (existing.status === "unknown") {
+      return { claimed: false, reason: "requires_duplicate_acknowledgment" };
+    }
+    if (existing.status === "sending") {
+      return { claimed: false, reason: "in_flight" };
+    }
+    if (existing.retryAfterUntil && existing.retryAfterUntil.getTime() > Date.now()) {
+      const remaining = Math.ceil((existing.retryAfterUntil.getTime() - Date.now()) / 1000);
+      return { claimed: false, reason: "rate_limited", retryAfterSeconds: remaining };
+    }
+
+    return { claimed: false, reason: "in_flight" };
   } catch (err) {
     throw mapDatabaseError(err);
   }
+}
+
+export async function claimDeliveryAttempt(
+  db: Database,
+  deliveryId: string,
+  attemptIdOrOptions?: string | ClaimDeliveryAttemptOptions,
+  leaseMsArg = 60_000,
+  optionsArg?: { acknowledgeUnknownRisk?: boolean },
+): Promise<SellerNotificationDeliveryRecord | null> {
+  const outcome = await claimDeliveryAttemptDetailed(
+    db,
+    deliveryId,
+    attemptIdOrOptions,
+    leaseMsArg,
+    optionsArg,
+  );
+  return outcome.claimed ? outcome.record : null;
 }
 
 export async function markDeliverySent(
@@ -542,7 +778,7 @@ export async function markDeliverySent(
     | string
     | {
         deliveryId: string;
-        claimAttemptId?: string;
+        claimAttemptId: string;
         telegramMessageId: number;
       },
   attemptIdArg?: string,
@@ -562,8 +798,11 @@ export async function markDeliverySent(
     messageId = telegramMessageIdArg!;
   }
 
+  if (!attemptId) {
+    throw new RabetDataError("INVALID_INPUT", "markDeliverySent requires an active claimAttemptId.");
+  }
+
   try {
-    const attemptFilter = attemptId ? sql`AND claim_attempt_id = ${attemptId}::text` : sql``;
     const result = await db.execute(sql`
       UPDATE ${sellerNotificationDelivery}
       SET
@@ -575,11 +814,16 @@ export async function markDeliverySent(
         error_category = NULL,
         updated_at = now()
       WHERE id = ${deliveryId}::uuid
-        ${attemptFilter}
+        AND status = 'sending'
+        AND claim_attempt_id = ${attemptId}::text
+      RETURNING id
     `);
 
-    const count = (result as { rowCount?: number })?.rowCount ?? (Array.isArray(result) ? result.length : 0);
-    return count > 0;
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+    return rows.length > 0;
   } catch (err) {
     throw mapDatabaseError(err);
   }
@@ -591,7 +835,7 @@ export async function markDeliveryFailed(
     | string
     | {
         deliveryId: string;
-        claimAttemptId?: string;
+        claimAttemptId: string;
         errorCategory: string;
         errorSummary?: string;
         retryAfterSeconds?: number;
@@ -600,7 +844,7 @@ export async function markDeliveryFailed(
   attemptIdArg?: string,
   errorCategoryArg?: string,
   retryAfterSecondsArg?: number,
-): Promise<{ status: "failed"; errorCategory: string }> {
+): Promise<{ status: "failed"; errorCategory: string; applied: boolean }> {
   let deliveryId: string;
   let attemptId: string | undefined;
   let errorCategory: string;
@@ -620,6 +864,10 @@ export async function markDeliveryFailed(
     retryAfterSeconds = retryAfterSecondsArg;
   }
 
+  if (!attemptId) {
+    throw new RabetDataError("INVALID_INPUT", "markDeliveryFailed requires an active claimAttemptId.");
+  }
+
   try {
     const retryAfterSql = retryAfterDate
       ? sql`${retryAfterDate.toISOString()}::timestamptz`
@@ -627,9 +875,7 @@ export async function markDeliveryFailed(
       ? sql`now() + (${retryAfterSeconds} || ' seconds')::interval`
       : sql`NULL`;
 
-    const attemptFilter = attemptId ? sql`AND claim_attempt_id = ${attemptId}::text` : sql``;
-
-    await db.execute(sql`
+    const result = await db.execute(sql`
       UPDATE ${sellerNotificationDelivery}
       SET
         status = 'failed',
@@ -640,10 +886,16 @@ export async function markDeliveryFailed(
         claim_expires_at = NULL,
         updated_at = now()
       WHERE id = ${deliveryId}::uuid
-        ${attemptFilter}
+        AND status = 'sending'
+        AND claim_attempt_id = ${attemptId}::text
+      RETURNING id
     `);
 
-    return { status: "failed", errorCategory };
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+    return { status: "failed", errorCategory, applied: rows.length > 0 };
   } catch (err) {
     throw mapDatabaseError(err);
   }
@@ -655,13 +907,13 @@ export async function markDeliveryUnknown(
     | string
     | {
         deliveryId: string;
-        claimAttemptId?: string;
+        claimAttemptId: string;
         errorCategory?: string;
         errorSummary?: string;
       },
   attemptIdArg?: string,
   errorCategoryArg = "timeout",
-): Promise<{ status: "unknown"; errorCategory: string }> {
+): Promise<{ status: "unknown"; errorCategory: string; applied: boolean }> {
   let deliveryId: string;
   let attemptId: string | undefined;
   let errorCategory: string;
@@ -676,10 +928,12 @@ export async function markDeliveryUnknown(
     errorCategory = errorCategoryArg;
   }
 
-  try {
-    const attemptFilter = attemptId ? sql`AND claim_attempt_id = ${attemptId}::text` : sql``;
+  if (!attemptId) {
+    throw new RabetDataError("INVALID_INPUT", "markDeliveryUnknown requires an active claimAttemptId.");
+  }
 
-    await db.execute(sql`
+  try {
+    const result = await db.execute(sql`
       UPDATE ${sellerNotificationDelivery}
       SET
         status = 'unknown',
@@ -689,10 +943,166 @@ export async function markDeliveryUnknown(
         claim_expires_at = NULL,
         updated_at = now()
       WHERE id = ${deliveryId}::uuid
-        ${attemptFilter}
+        AND status = 'sending'
+        AND claim_attempt_id = ${attemptId}::text
+      RETURNING id
     `);
 
-    return { status: "unknown", errorCategory };
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+    return { status: "unknown", errorCategory, applied: rows.length > 0 };
+  } catch (err) {
+    throw mapDatabaseError(err);
+  }
+}
+
+export async function markDeliveryCancelledByWorker(
+  db: Database,
+  paramsOrId:
+    | {
+        deliveryId: string;
+        claimAttemptId: string;
+        reason: string;
+      }
+    | string,
+  attemptIdArg?: string,
+  reasonArg?: string,
+): Promise<boolean> {
+  const deliveryId = typeof paramsOrId === "string" ? paramsOrId : paramsOrId.deliveryId;
+  const claimAttemptId =
+    typeof paramsOrId === "string" ? attemptIdArg ?? "" : paramsOrId.claimAttemptId;
+  const reason = typeof paramsOrId === "string" ? reasonArg ?? "cancelled" : paramsOrId.reason;
+
+  try {
+    const result = await db.execute(sql`
+      UPDATE ${sellerNotificationDelivery}
+      SET
+        status = 'cancelled',
+        error_category = ${reason}::text,
+        claim_attempt_id = NULL,
+        claim_expires_at = NULL,
+        updated_at = now()
+      WHERE id = ${deliveryId}::uuid
+        AND status = 'sending'
+        AND claim_attempt_id = ${claimAttemptId}::text
+      RETURNING id
+    `);
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+    return rows.length > 0;
+  } catch (err) {
+    throw mapDatabaseError(err);
+  }
+}
+
+export async function releaseDeliveryClaim(
+  db: Database,
+  paramsOrDeliveryId:
+    | string
+    | {
+        deliveryId: string;
+        claimAttemptId: string;
+        targetStatus?: "pending" | "failed";
+      },
+  claimAttemptIdArg?: string,
+  targetStatusArg?: "pending" | "failed",
+): Promise<boolean> {
+  const deliveryId =
+    typeof paramsOrDeliveryId === "string"
+      ? paramsOrDeliveryId
+      : paramsOrDeliveryId.deliveryId;
+  const claimAttemptId =
+    typeof paramsOrDeliveryId === "string"
+      ? (claimAttemptIdArg ?? "")
+      : paramsOrDeliveryId.claimAttemptId;
+  const target =
+    typeof paramsOrDeliveryId === "string"
+      ? (targetStatusArg ?? "pending")
+      : (paramsOrDeliveryId.targetStatus ?? "pending");
+
+  try {
+    const result = await db.execute(sql`
+      UPDATE ${sellerNotificationDelivery}
+      SET
+        status = ${target}::text,
+        claim_attempt_id = NULL,
+        claim_expires_at = NULL,
+        updated_at = now()
+      WHERE id = ${deliveryId}::uuid
+        AND status = 'sending'
+        AND claim_attempt_id = ${claimAttemptId}::text
+      RETURNING id
+    `);
+    const count = (result as { rowCount?: number })?.rowCount ?? (Array.isArray(result) ? result.length : 0);
+    return count > 0;
+  } catch (err) {
+    throw mapDatabaseError(err);
+  }
+}
+
+export async function cancelObsoleteDeliveriesForRevision(
+  db: Database,
+  currentRevision: number,
+): Promise<number> {
+  const cap = await checkSellerNotificationCapability(db);
+  if (!cap.supported) return 0;
+
+  try {
+    const result = await db.execute(sql`
+      UPDATE ${sellerNotificationDelivery}
+      SET
+        status = 'cancelled',
+        error_category = 'incompatible_configuration',
+        claim_attempt_id = NULL,
+        claim_expires_at = NULL,
+        updated_at = now()
+      WHERE revision < ${currentRevision}
+        AND status != 'sent'
+        AND status != 'cancelled'
+      RETURNING id
+    `);
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+    return rows.length;
+  } catch (err) {
+    throw mapDatabaseError(err);
+  }
+}
+
+export async function recoverExpiredSendingDeliveries(
+  db: Database,
+  deliveryId?: string,
+): Promise<number> {
+  const cap = await checkSellerNotificationCapability(db);
+  if (!cap.supported) return 0;
+
+  try {
+    const idFilter = deliveryId ? sql`AND id = ${deliveryId}::uuid` : sql``;
+    const result = await db.execute(sql`
+      UPDATE ${sellerNotificationDelivery}
+      SET
+        status = 'unknown',
+        error_category = 'lease_expired',
+        claim_attempt_id = NULL,
+        claim_expires_at = NULL,
+        failed_at = coalesce(failed_at, now()),
+        updated_at = now()
+      WHERE status = 'sending'
+        AND (claim_expires_at IS NULL OR claim_expires_at < now())
+        ${idFilter}
+      RETURNING id
+    `);
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+    return rows.length;
   } catch (err) {
     throw mapDatabaseError(err);
   }
@@ -713,10 +1123,15 @@ export async function markDeliveryCancelled(
         claim_expires_at = NULL,
         updated_at = now()
       WHERE id = ${deliveryId}::uuid
+        AND status != 'sent'
+      RETURNING id
     `);
 
-    const count = (result as { rowCount?: number })?.rowCount ?? (Array.isArray(result) ? result.length : 0);
-    return count > 0;
+    const rawRows: unknown = Array.isArray(result)
+      ? result
+      : (result as { rows?: unknown[] })?.rows;
+    const rows = (Array.isArray(rawRows) ? rawRows : []) as Record<string, unknown>[];
+    return rows.length > 0;
   } catch (err) {
     throw mapDatabaseError(err);
   }

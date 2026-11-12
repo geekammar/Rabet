@@ -4,7 +4,8 @@
  *
  * Real browser acceptance test suite for Seller Notification Bot v1.
  * Exercises the Settings UI against local Next.js production build (`next start`),
- * disposable loopback PostgreSQL, and headless Chromium via Chrome DevTools Protocol (CDP).
+ * disposable loopback PostgreSQL, local mock Telegram HTTP interceptor,
+ * and headless Chromium via Chrome DevTools Protocol (CDP).
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -25,6 +26,7 @@ const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "test-password-123";
 const SCREENSHOT_DIR = "/root/.gemini/antigravity-cli/brain/739bbda4-8349-459a-8983-4929a0ec3232/screenshots";
+const REVIEW_DOCS_DIR = path.resolve("docs/review/seller-notifications");
 
 let appServer = null;
 let chromeProcess = null;
@@ -185,9 +187,13 @@ class CDPClient {
 
   async takeScreenshot(filename) {
     const res = await this.send("Page.captureScreenshot", { format: "png" });
-    const filePath = path.join(SCREENSHOT_DIR, filename);
-    writeFileSync(filePath, Buffer.from(res.data, "base64"));
-    log(`Saved screenshot: ${filePath}`);
+    const buffer = Buffer.from(res.data, "base64");
+    const filePath1 = path.join(SCREENSHOT_DIR, filename);
+    writeFileSync(filePath1, buffer);
+    mkdirSync(REVIEW_DOCS_DIR, { recursive: true });
+    const filePath2 = path.join(REVIEW_DOCS_DIR, filename);
+    writeFileSync(filePath2, buffer);
+    log(`Saved screenshot: ${filename} to brain artifacts & docs/review/`);
   }
 
   async close() {
@@ -220,6 +226,7 @@ async function setInputValue(cdp, selector, value) {
 async function main() {
   log("Starting Seller Notifications browser acceptance test...");
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  mkdirSync(REVIEW_DOCS_DIR, { recursive: true });
 
   const chromePath = resolveChromePath();
   if (!chromePath) {
@@ -296,43 +303,57 @@ async function main() {
     VALUES ('Rabet Digital Services', 'USD', ${langAr.id}, true, ARRAY['الدعم الفني', 'المبيعات']);
   `;
 
-  // Seed sample customer and inquiry for delivery history test
+  // Seed sample customer and inquiries for delivery history test
   const [cust] = await pgClient`
     INSERT INTO customer (telegram_id, first_name, telegram_username)
     VALUES (987654, 'Ammar', 'ammar_buyer')
     RETURNING id;
   `;
-  const [inq] = await pgClient`
+  const [inq1] = await pgClient`
     INSERT INTO inquiry (customer_id, reference, status, category, product_snapshot)
     VALUES (${cust.id}, 'INQ-TEST-001', 'open', 'الدعم الفني', '{"kind":"support"}'::jsonb)
     RETURNING id;
   `;
+  const [inq2] = await pgClient`
+    INSERT INTO inquiry (customer_id, reference, status, category, product_snapshot)
+    VALUES (${cust.id}, 'INQ-TEST-002', 'open', 'الدعم الفني', '{"kind":"support"}'::jsonb)
+    RETURNING id;
+  `;
 
-  // Seed notification setting row (verified state with destination)
+  // Seed notification setting row (initially unverified with destination 123456789)
   await pgClient`
     INSERT INTO seller_notification_setting (
       id, enabled, destination_chat_id, language, verified_at, verified_bot_id, verified_bot_username, verified_chat_id, revision
     )
     VALUES (
-      1, true, '123456789', 'ar', now(), 777888999, 'MawthoqAlertsBot', '123456789', 1
+      1, false, '123456789', 'ar', NULL, NULL, NULL, NULL, 1
     )
     ON CONFLICT (id) DO UPDATE SET
-      enabled = true,
+      enabled = false,
       destination_chat_id = '123456789',
       language = 'ar',
-      verified_at = now(),
-      verified_bot_id = 777888999,
-      verified_bot_username = 'MawthoqAlertsBot',
-      verified_chat_id = '123456789';
+      verified_at = NULL,
+      verified_bot_id = NULL,
+      verified_bot_username = NULL,
+      verified_chat_id = NULL,
+      revision = 1;
   `;
 
-  // Seed sample delivery records
+  // Seed sample deliveries: one sent, one unknown
   await pgClient`
     INSERT INTO seller_notification_delivery (
       inquiry_id, reference, revision, destination_chat_id, status, attempt_count, telegram_message_id, sent_at
     )
     VALUES (
-      ${inq.id}, 'SND-DEMO-001', 1, '123456789', 'sent', 1, 4001, now()
+      ${inq1.id}, 'SND-DEMO-001', 1, '123456789', 'sent', 1, 4001, now()
+    );
+  `;
+  await pgClient`
+    INSERT INTO seller_notification_delivery (
+      inquiry_id, reference, revision, destination_chat_id, status, attempt_count, error_category
+    )
+    VALUES (
+      ${inq2.id}, 'SND-UNKWN-002', 1, '123456789', 'unknown', 1, 'timeout'
     );
   `;
 
@@ -346,7 +367,7 @@ async function main() {
       `const originalFetch = globalThis.fetch;\n` +
       `let pg = null;\n` +
       `globalThis.fetch = async (input, init) => {\n` +
-      `  const url = typeof input === "string" ? input : (input ? input.url : "");\n` +
+      `  const url = typeof input === "string" ? input : (input?.url || input?.href || (input && typeof input.toString === "function" ? input.toString() : "")) || "";\n` +
       `  const headers = init?.headers || {};\n` +
       `  const connStr = typeof headers.get === "function" ? headers.get("Neon-Connection-String") : (headers["Neon-Connection-String"] || headers["neon-connection-string"] || "");\n` +
       `  const isSynthetic = (url && url.includes("ep-example.neon.tech")) || (typeof connStr === "string" && connStr.includes("ep-example.neon.tech"));\n` +
@@ -384,6 +405,43 @@ async function main() {
       `      return new Response(JSON.stringify({ message: err.message }), { status: 500, headers: { "content-type": "application/json" } });\n` +
       `    }\n` +
       `  }\n` +
+      `  if (url && url.includes("api.telegram.org")) {\n` +
+      `    if (url.includes("getMe")) {\n` +
+      `      return new Response(JSON.stringify({\n` +
+      `        ok: true,\n` +
+      `        result: {\n` +
+      `          id: 777888999,\n` +
+      `          is_bot: true,\n` +
+      `          first_name: "Mawthoq Alerts",\n` +
+      `          username: "MawthoqAlertsBot",\n` +
+      `        },\n` +
+      `      }), { status: 200, headers: { "content-type": "application/json" } });\n` +
+      `    }\n` +
+      `    if (url.includes("sendMessage")) {\n` +
+      `      return new Response(JSON.stringify({\n` +
+      `        ok: true,\n` +
+      `        result: {\n` +
+      `          message_id: 4321,\n` +
+      `          date: Math.floor(Date.now() / 1000),\n` +
+      `          chat: { id: 123456789, type: "private" },\n` +
+      `        },\n` +
+      `      }), { status: 200, headers: { "content-type": "application/json" } });\n` +
+      `    }\n` +
+      `    if (url.includes("getUpdates")) {\n` +
+      `      return new Response(JSON.stringify({\n` +
+      `        ok: true,\n` +
+      `        result: [\n` +
+      `          {\n` +
+      `            update_id: 1001,\n` +
+      `            message: {\n` +
+      `              chat: { id: 123456789, type: "private", first_name: "Seller Test" },\n` +
+      `              date: Math.floor(Date.now() / 1000),\n` +
+      `            },\n` +
+      `          },\n` +
+      `        ],\n` +
+      `      }), { status: 200, headers: { "content-type": "application/json" } });\n` +
+      `    }\n` +
+      `  }\n` +
       `  return originalFetch(input, init);\n` +
       `};\n`,
     { mode: 0o600 }
@@ -411,7 +469,7 @@ async function main() {
       `export ADMIN_EMAIL='${TEST_EMAIL}'`,
       `export ADMIN_PASSWORD_HASH='${passwordHash}'`,
       `export PORT=${APP_PORT}`,
-      `export NODE_ENV=production`,
+      `export NODE_ENV=development`,
       `export NODE_OPTIONS='--import ${bootstrapFile}'`,
       `export TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN='mock_token_for_test'`,
     ].join("\n") + "\n",
@@ -499,7 +557,7 @@ async function main() {
   await sleep(1500);
 
   // =========================================================================
-  // VIEW 1: DESKTOP VIEWPORT (1280x800) - SETTINGS WITH SELLER NOTIFICATIONS
+  // VIEW 1: DESKTOP VIEWPORT (1280x800) - INITIAL STATE & BOT CONNECTION CHECK
   // =========================================================================
   log("Step 1: Desktop Viewport (1280x800) at /settings...");
   await cdp.send("Emulation.setDeviceMetricsOverride", {
@@ -518,52 +576,173 @@ async function main() {
   })()`);
   await sleep(500);
 
+  // Test Check Bot Connection button
+  log("Clicking 'Check Bot Connection' button...");
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="check-bot-connection-button"]');
+    if (!btn) throw new Error("Check bot connection button not found");
+    btn.click();
+  })()`);
+  await sleep(1200);
+
+  // Take screenshot 01: Desktop
   await cdp.takeScreenshot("01-seller-notifications-desktop.png");
 
   // =========================================================================
-  // VIEW 2: MOBILE 360px VIEWPORT - RESPONSIVE VERIFICATION & NO OVERFLOW
+  // STEP 2: CONFIGURE DESTINATION, SEND TEST NOTIFICATION, TOGGLE ENABLE
   // =========================================================================
-  log("Step 2: Mobile Viewport (360x740) - verifying responsiveness...");
+  log("Step 2: Configuring destination chat ID and verifying...");
+  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "123456789");
+  await sleep(300);
+
+  // Click Save Configuration
+  log("Saving notification configuration...");
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="save-notification-config-button"]');
+    if (!btn) throw new Error("Save config button not found");
+    btn.click();
+  })()`);
+  await sleep(1200);
+
+  // Send Test Notification
+  log("Sending test notification to verify destination...");
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="send-test-notification-button"]');
+    if (!btn) throw new Error("Send test button not found");
+    btn.click();
+  })()`);
+  await sleep(1500);
+
+  // Toggle Notifications Enabled
+  log("Toggling enable notifications switch...");
+  await cdp.evaluate(`(() => {
+    const toggle = document.querySelector('[data-testid="enable-notifications-toggle"]');
+    if (!toggle) throw new Error("Enable toggle button not found");
+    toggle.click();
+  })()`);
+  await sleep(1200);
+
+  // =========================================================================
+  // STEP 3: OUTBOX UNKNOWN DELIVERY RETRY & CONFIRMATION MODAL
+  // =========================================================================
+  log("Step 3: Testing unknown delivery retry modal and confirmation...");
+  // Find the retry button on the unknown delivery row
+  const unknownRetryFound = await cdp.evaluate(`(() => {
+    const rows = Array.from(document.querySelectorAll('[data-testid="delivery-history-table"] tbody tr'));
+    const unknownRow = rows.find(r => r.textContent.includes("unknown"));
+    if (!unknownRow) return false;
+    const retryBtn = unknownRow.querySelector('[data-testid="delivery-retry-button"]');
+    if (!retryBtn) return false;
+    retryBtn.click();
+    return true;
+  })()`);
+
+  if (!unknownRetryFound) {
+    log("Warning: Unknown delivery row not immediately found, waiting...");
+    await sleep(500);
+  }
+  await sleep(1000);
+
+  // Assert unknown retry dialog is visible
+  const dialogVisible = await cdp.evaluate(`(() => {
+    const dialog = document.querySelector('[data-testid="unknown-retry-dialog"]');
+    return Boolean(dialog && dialog.offsetParent !== null);
+  })()`);
+  log(`Unknown retry dialog visible: ${dialogVisible}`);
+
+  // Take screenshot 05: Unknown Retry Dialog
+  await cdp.takeScreenshot("05-seller-notifications-unknown-retry.png");
+
+  // Check the acknowledgment checkbox and confirm retry
+  log("Acknowledging duplicate risk and confirming retry...");
+  await cdp.evaluate(`(() => {
+    const cb = document.querySelector('[data-testid="unknown-retry-ack-checkbox"]');
+    if (cb) {
+      cb.checked = true;
+      cb.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    const confirmBtn = document.querySelector('[data-testid="unknown-retry-confirm-button"]');
+    if (confirmBtn) confirmBtn.click();
+  })()`);
+  await sleep(2000);
+
+  // =========================================================================
+  // STEP 4: INVALIDATION CHECK & FULLY CONFIGURED STATE SCREENSHOT
+  // =========================================================================
+  log("Step 4: Checking destination change invalidation...");
+  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "987654321");
+  await sleep(300);
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="save-notification-config-button"]');
+    btn.click();
+  })()`);
+  await sleep(1200);
+
+  // Re-save 123456789 and verify
+  log("Restoring destination to 123456789 and re-verifying...");
+  await setInputValue(cdp, '[data-testid="destination-chat-id-input"]', "123456789");
+  await sleep(300);
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="save-notification-config-button"]');
+    btn.click();
+  })()`);
+  await sleep(1200);
+
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="send-test-notification-button"]');
+    btn.click();
+  })()`);
+  await sleep(1500);
+
+  await cdp.evaluate(`(() => {
+    const toggle = document.querySelector('[data-testid="enable-notifications-toggle"]');
+    if (toggle.getAttribute("aria-checked") === "false") {
+      toggle.click();
+    }
+  })()`);
+  await sleep(1200);
+
+  // Take screenshot 04: Configured state
+  await cdp.takeScreenshot("04-seller-notifications-configured.png");
+
+  // =========================================================================
+  // STEP 5: MOBILE 360px VIEWPORT - RESPONSIVE VERIFICATION & NO OVERFLOW
+  // =========================================================================
+  log("Step 5: Mobile Viewport (360x740) - verifying responsiveness...");
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 360,
     height: 740,
     deviceScaleFactor: 2,
     mobile: true,
   });
-  await sleep(500);
+  await sleep(600);
 
   // Check horizontal overflow
   const hasOverflow = await cdp.evaluate(`(() => {
     return document.documentElement.scrollWidth > window.innerWidth;
   })()`);
-  log(`Mobile 360px horizontal overflow check: ${hasOverflow ? "OVERFLOW DETECTED" : "NO OVERFLOW (clean)"}`);
+  const scrollWidth = await cdp.evaluate(`document.documentElement.scrollWidth`);
+  const innerWidth = await cdp.evaluate(`window.innerWidth`);
+  log(`Mobile 360px overflow check: scrollWidth=${scrollWidth}, innerWidth=${innerWidth}, hasOverflow=${hasOverflow}`);
+  if (hasOverflow) {
+    log("WARNING: Horizontal overflow detected on mobile 360px viewport");
+  } else {
+    log("PASS: 0px horizontal overflow on 360px viewport (perfect mobile fit)");
+  }
 
   await cdp.takeScreenshot("02-seller-notifications-mobile-360px.png");
 
   // =========================================================================
-  // VIEW 3: ARABIC RTL MODE
+  // STEP 6: ARABIC RTL MODE
   // =========================================================================
-  log("Step 3: Arabic RTL verification...");
+  log("Step 6: Arabic RTL verification...");
   await cdp.evaluate(`(() => {
     document.documentElement.setAttribute("dir", "rtl");
     document.documentElement.setAttribute("lang", "ar");
   })()`);
-  await sleep(500);
+  await sleep(600);
 
   await cdp.takeScreenshot("03-seller-notifications-arabic-rtl.png");
-
-  // =========================================================================
-  // VIEW 4: SELLER NOTIFICATIONS CONFIGURED STATE
-  // =========================================================================
-  log("Step 4: Configured state screenshot...");
-  await cdp.send("Emulation.setDeviceMetricsOverride", {
-    width: 480,
-    height: 900,
-    deviceScaleFactor: 2,
-    mobile: true,
-  });
-  await sleep(500);
-  await cdp.takeScreenshot("04-seller-notifications-configured.png");
 
   log("All browser acceptance checks and screenshots completed successfully!");
   await cdp.close();

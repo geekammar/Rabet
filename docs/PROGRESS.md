@@ -1174,3 +1174,10 @@ Related: [SELLER_NOTIFICATIONS_HANDOFF.md](./SELLER_NOTIFICATIONS_HANDOFF.md) fo
    - Additive migration `drizzle/0003_seller_notifications.sql`.
    - Pre-migration capability checks (`checkSellerNotificationCapability`) gracefully present upgrade guidance without querying missing tables.
    - Disposable PostgreSQL upgrade and no-op verification in test suites.
+
+### PR #23 Review Repairs (Completed)
+- **Delivery Retry Path:** Threaded `acknowledgeUnknownRisk` through server action -> service -> DAL `claimDeliveryAttemptDetailed`. Atomically recover expired sending records to `unknown` with duplicate-risk acknowledgment required before re-sending. Worker finalization requires active `attemptId` and expected state.
+- **Uncertain Network Handling:** Bounded identity checks and `sendMessage` by execution deadline budget (>2000ms threshold). Releasing claims before send without marking `unknown`. Uncertain responses recorded as `unknown` with stable delivery reference.
+- **Atomic Cooldown & CAS Persistence:** Replaced read-then-write cooldown with atomic database check-and-set using `last_test_at`. CAS verification success verifies destination snapshot before marking verified.
+- **URL & Network Security:** Enforce HTTPS and strictly forbid localhost/loopback in production environment (`getTrustedDashboardInquiryUrl`).
+- **Real Browser Acceptance Suite:** Automated CDP acceptance runner (`scripts/test-seller-notifications-browser-acceptance.mjs`) verifies desktop connection check, destination invalidation, mobile 360px (0px overflow), Arabic RTL, and unknown delivery duplicate-risk retry modal. Screenshots published in `docs/review/seller-notifications/`.

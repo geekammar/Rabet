@@ -191,10 +191,10 @@ When deploying to Production (to be executed only after Ammar's independent revi
 
 | Check | Tool / Scope | Result | Details |
 |---|---|---|---|
-| **Unit Tests** | `vitest run` | **Passed** (40 test files, 635 tests) | Setup, security, formatting, capability detection |
-| **DB Integration Tests** | `npm run test:db` (disposable PostgreSQL) | **Passed** (22 test files, 357 tests) | Atomic batches, outbox claims, cooldown, migrations 0000..0003 |
-| **Seller Notifications DB Tests** | `tests/db/seller-notifications.test.ts` | **Passed** (20 tests) | Fencing, receipt replay, 429 backoff, revision invalidation |
+| **Unit Tests** | `vitest run` | **Passed** (40 test files, 637 tests) | Setup, security, formatting, capability detection |
+| **DB Integration Tests** | `npm run test:db` (disposable PostgreSQL) | **Passed** (22 test files, 360 tests) | Atomic batches, outbox claims, cooldown, migrations 0000..0003 |
+| **Seller Notifications DB Tests** | `tests/db/seller-notifications.test.ts` | **Passed** (23 tests) | Fencing, receipt replay, 429 backoff, revision invalidation, atomic cooldown, expired sending recovery |
 | **Typecheck** | `npm run typecheck` (`tsc --noEmit`) | **Passed** | 0 type errors |
 | **Lint** | `npm run lint` (`eslint`) | **Passed** | 0 errors, 0 warnings |
 | **Next.js Production Build** | `npm run build` | **Passed** | All 17 routes compiled cleanly |
-| **Browser Acceptance** | `scripts/test-seller-notifications-browser-acceptance.mjs` | **Passed** | Real headless Chromium, mobile 360px (no overflow), desktop, Arabic RTL |
+| **Browser Acceptance** | `scripts/test-seller-notifications-browser-acceptance.mjs` | **Passed** | Real headless Chromium CDP, 0px horizontal overflow on 360px mobile, Arabic RTL, unknown delivery retry confirmation modal |

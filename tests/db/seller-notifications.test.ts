@@ -27,15 +27,18 @@ import {
   checkAndRecordTestCooldown,
   checkSellerNotificationCapability,
   claimDeliveryAttempt,
+  claimTestCooldown,
   createOrResumeProductInquiry,
   createOrResumeSupportInquiry,
   generateDeliveryReference,
   getSellerNotificationDelivery,
   getVerifiedNotificationConfig,
   markDeliveryFailed,
+  markDeliverySent,
   markDeliveryUnknown,
   readSellerNotificationConfig,
   recordVerificationSuccess,
+  recoverExpiredSendingDeliveries,
   routeAndAppendCustomerText,
   saveSellerNotificationConfig,
   setSellerNotificationEnabled,
@@ -783,7 +786,7 @@ describe.skipIf(!shouldRun)("Seller Notification Bot v1 — Database Integration
       expect(blockedClaim).toBeNull();
     });
 
-    it("Test 25: Stale sending claim (older than 30s) allows recovery attempt by next worker", async () => {
+    it("Test 25: Expired sending claim recovery to unknown without re-sending", async () => {
       if (!testDb) return;
       const db = testDb.db;
       const appDb = asAppDb(db);
@@ -805,11 +808,54 @@ describe.skipIf(!shouldRun)("Seller Notification Bot v1 — Database Integration
         })
         .returning();
 
-      // A new worker claims the delivery
-      const reclaimed = await claimDeliveryAttempt(appDb, del.id);
-      expect(reclaimed).not.toBeNull();
-      expect(reclaimed?.claimAttemptId).not.toBe("stale-worker-guid");
-      expect(reclaimed?.attemptCount).toBe(2);
+      // 1. Recovery transitions expired sending to unknown with lease_expired
+      const recoveredCount = await recoverExpiredSendingDeliveries(appDb);
+      expect(recoveredCount).toBeGreaterThanOrEqual(1);
+
+      const recoveredRec = await getSellerNotificationDelivery(appDb, del.id);
+      expect(recoveredRec?.status).toBe("unknown");
+      expect(recoveredRec?.errorCategory).toBe("lease_expired");
+
+      // 2. Claiming without duplicate acknowledgment fails
+      const unackClaim = await claimDeliveryAttempt(appDb, del.id, {
+        acknowledgeUnknownRisk: false,
+      });
+      expect(unackClaim).toBeNull();
+
+      // 3. Claiming with duplicate acknowledgment succeeds
+      const ackClaim = await claimDeliveryAttempt(appDb, del.id, {
+        acknowledgeUnknownRisk: true,
+      });
+      expect(ackClaim).not.toBeNull();
+      expect(ackClaim?.status).toBe("sending");
+      expect(ackClaim?.claimAttemptId).not.toBe("stale-worker-guid");
+
+      // 4. Also verify inline recovery: a new worker directly claiming an unrecovered expired sending
+      // record without prior manual recovery automatically recovers it to unknown and rejects claim
+      const inq2Id = await createTestInquiryRow(db, fixtureCustomerId);
+      const [del2] = await db
+        .insert(sellerNotificationDelivery)
+        .values({
+          inquiryId: inq2Id,
+          destinationChatId: "123456789",
+          revision: 1,
+          reference: generateDeliveryReference(),
+          eventType: "new_inquiry",
+          status: "sending",
+          claimAttemptId: "stale-worker-2",
+          claimExpiresAt: staleTime,
+          attemptCount: 1,
+        })
+        .returning();
+
+      const inlineRecoveryClaim = await claimDeliveryAttempt(appDb, del2.id, {
+        acknowledgeUnknownRisk: false,
+      });
+      expect(inlineRecoveryClaim).toBeNull();
+
+      const del2State = await getSellerNotificationDelivery(appDb, del2.id);
+      expect(del2State?.status).toBe("unknown");
+      expect(del2State?.errorCategory).toBe("lease_expired");
     });
 
     it("Test 26: Destination change between inquiry and retry cancels obsolete pending delivery", async () => {
@@ -843,6 +889,112 @@ describe.skipIf(!shouldRun)("Seller Notification Bot v1 — Database Integration
       const fresh = await getSellerNotificationDelivery(appDb, del.id);
       expect(fresh?.status).toBe("cancelled");
       expect(fakeTransport.sentMessages.length).toBe(0);
+    });
+
+    it("Test 27A: Concurrent cooldown claims: exactly one succeeds", async () => {
+      if (!testDb) return;
+      const appDb = asAppDb(testDb.db);
+
+      // Reset last_test_at so both callers start from an eligible baseline
+      await testDb.db.update(sellerNotificationSetting).set({ lastTestAt: null });
+
+      // Attempt two concurrent cooldown claims
+      const [res1, res2] = await Promise.all([
+        claimTestCooldown(appDb, 10),
+        claimTestCooldown(appDb, 10),
+      ]);
+
+      const successCount = [res1, res2].filter((r) => r.allowed).length;
+      expect(successCount).toBe(1);
+    });
+
+    it("Test 27B: Destination change during in-flight test rejects stale verification with CONFIGURATION_CHANGED", async () => {
+      if (!testDb) return;
+      const appDb = asAppDb(testDb.db);
+
+      // Save initial config: revision 10
+      await saveSellerNotificationConfig(appDb, {
+        destinationChatId: "111111111",
+        language: "ar",
+      });
+      const initial = await readSellerNotificationConfig(appDb);
+      const expRevision = initial!.revision;
+
+      // In flight, destination changes to 222222222, bumping revision
+      await saveSellerNotificationConfig(appDb, {
+        destinationChatId: "222222222",
+        language: "ar",
+      });
+
+      // Stale test attempts to verify using old revision and destination
+      await expect(
+        recordVerificationSuccess(appDb, {
+          botId: 999,
+          botUsername: "test_bot",
+          expectedRevision: expRevision,
+          expectedDestination: "111111111",
+        }),
+      ).rejects.toThrowError(
+        expect.objectContaining({
+          code: "CONFIGURATION_CHANGED",
+        }),
+      );
+
+      // Current destination must remain 222222222 and unverified
+      const fresh = await readSellerNotificationConfig(appDb);
+      expect(fresh?.destinationChatId).toBe("222222222");
+      expect(fresh?.verifiedAt).toBeNull();
+    });
+
+    it("Test 27C: Stale worker finalization matches 0 rows and cannot overwrite newer state", async () => {
+      if (!testDb) return;
+      const db = testDb.db;
+      const appDb = asAppDb(db);
+
+      const inqId = await createTestInquiryRow(db, fixtureCustomerId);
+      const [del] = await db
+        .insert(sellerNotificationDelivery)
+        .values({
+          inquiryId: inqId,
+          destinationChatId: "123456789",
+          revision: 1,
+          reference: generateDeliveryReference(),
+          eventType: "new_inquiry",
+          status: "pending",
+        })
+        .returning();
+
+      // Worker 1 claims delivery
+      const claim1 = await claimDeliveryAttempt(appDb, del.id);
+      expect(claim1).not.toBeNull();
+      const attempt1Id = claim1!.claimAttemptId!;
+
+      // Worker 1 times out; state is marked unknown
+      await markDeliveryUnknown(appDb, del.id, attempt1Id, "timeout");
+
+      // Worker 2 claims delivery with acknowledgeUnknownRisk
+      const claim2 = await claimDeliveryAttempt(appDb, del.id, {
+        acknowledgeUnknownRisk: true,
+      });
+      expect(claim2).not.toBeNull();
+      const attempt2Id = claim2!.claimAttemptId!;
+
+      // Stale worker 1 attempts to mark sent using old attempt1Id
+      const staleSentResult = await markDeliverySent(appDb, del.id, attempt1Id, 99999);
+      expect(staleSentResult).toBe(false);
+
+      // Current delivery must still belong to Worker 2 and not be sent
+      const fresh = await getSellerNotificationDelivery(appDb, del.id);
+      expect(fresh?.status).toBe("sending");
+      expect(fresh?.claimAttemptId).toBe(attempt2Id);
+
+      // Worker 2 finalizes successfully
+      const worker2SentResult = await markDeliverySent(appDb, del.id, attempt2Id, 12345);
+      expect(worker2SentResult).toBe(true);
+
+      const finalDel = await getSellerNotificationDelivery(appDb, del.id);
+      expect(finalDel?.status).toBe("sent");
+      expect(finalDel?.telegramMessageId).toBe(12345);
     });
   });
 

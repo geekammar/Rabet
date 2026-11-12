@@ -71,6 +71,8 @@ export function SellerNotificationsCard({
   const [notificationLanguage, setNotificationLanguage] = useState<"ar" | "en">(
     config?.language === "en" ? "en" : "ar"
   );
+  const [hasEditedChatId, setHasEditedChatId] = useState(false);
+  const [hasEditedLanguage, setHasEditedLanguage] = useState(false);
 
   // Connected Bot check state
   const [botIdentity, setBotIdentity] = useState<BotIdentity | null>(
@@ -119,14 +121,20 @@ export function SellerNotificationsCard({
       setIsTokenConfigured(Boolean(fresh.isTokenConfigured));
       setConfig(fresh.config ?? null);
       if (fresh.config) {
-        setDestinationChatId(fresh.config.destinationChatId ?? "");
-        setNotificationLanguage(fresh.config.language === "en" ? "en" : "ar");
-        if (fresh.config.verifiedBotUsername) {
+        if (!hasEditedChatId) {
+          setDestinationChatId(fresh.config.destinationChatId ?? "");
+        }
+        if (!hasEditedLanguage) {
+          setNotificationLanguage(fresh.config.language === "en" ? "en" : "ar");
+        }
+        if (fresh.config.verifiedBotUsername && fresh.config.verifiedAt) {
           setBotIdentity({
             id: fresh.config.verifiedBotId ?? 0,
             username: fresh.config.verifiedBotUsername,
             firstName: "Notification Bot",
           });
+        } else if (!fresh.config.verifiedAt) {
+          setBotIdentity(null);
         }
       }
       setRecentDeliveries(fresh.recentDeliveries ?? []);
@@ -199,6 +207,8 @@ export function SellerNotificationsCard({
         return;
       }
 
+      setHasEditedChatId(false);
+      setHasEditedLanguage(false);
       await refreshState();
       setFeedback({
         type: "success",
@@ -309,7 +319,7 @@ export function SellerNotificationsCard({
   );
 
   return (
-    <Card className="w-full">
+    <Card id="seller-notifications-section" data-testid="seller-notifications-card" className="w-full">
       <CardHeader>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-2">
@@ -427,6 +437,7 @@ export function SellerNotificationsCard({
               size="sm"
               disabled={isCheckingBot || !supported}
               onClick={handleCheckBot}
+              data-testid="check-bot-connection-button"
               className="gap-2 shrink-0 self-start sm:self-center"
             >
               {isCheckingBot ? (
@@ -469,6 +480,7 @@ export function SellerNotificationsCard({
                   type="button"
                   onClick={handleDetectChats}
                   disabled={isDetectingChats || !supported || !isTokenConfigured}
+                  data-testid="detect-chats-button"
                   className="text-xs text-primary hover:underline flex items-center gap-1 disabled:opacity-50"
                 >
                   {isDetectingChats ? (
@@ -488,7 +500,11 @@ export function SellerNotificationsCard({
                 required
                 pattern="^-?[0-9]{1,20}$"
                 value={destinationChatId}
-                onChange={(e) => setDestinationChatId(e.target.value.trim())}
+                onChange={(e) => {
+                  setDestinationChatId(e.target.value.trim());
+                  setHasEditedChatId(true);
+                }}
+                data-testid="destination-chat-id-input"
                 placeholder="e.g. 123456789"
                 disabled={!supported}
                 className="flex min-h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 font-mono"
@@ -510,9 +526,11 @@ export function SellerNotificationsCard({
                 id="seller-notification-lang"
                 name="notificationLanguage"
                 value={notificationLanguage}
-                onChange={(e) =>
-                  setNotificationLanguage(e.target.value as "ar" | "en")
-                }
+                onChange={(e) => {
+                  setNotificationLanguage(e.target.value as "ar" | "en");
+                  setHasEditedLanguage(true);
+                }}
+                data-testid="notification-language-select"
                 disabled={!supported}
                 className="flex min-h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
               >
@@ -557,6 +575,7 @@ export function SellerNotificationsCard({
                       className="h-7 text-xs px-2.5"
                       onClick={() => {
                         setDestinationChatId(c.chatId);
+                        setHasEditedChatId(true);
                         setShowHelper(false);
                       }}
                     >
@@ -580,6 +599,7 @@ export function SellerNotificationsCard({
               type="submit"
               size="sm"
               disabled={isSavingConfig || !supported}
+              data-testid="save-notification-config-button"
               className="gap-2 self-start sm:self-auto"
             >
               {isSavingConfig ? (
@@ -636,6 +656,7 @@ export function SellerNotificationsCard({
                   !config?.destinationChatId
                 }
                 onClick={handleSendTest}
+                data-testid="send-test-notification-button"
                 className="gap-2"
               >
                 {isSendingTest ? (
@@ -661,6 +682,7 @@ export function SellerNotificationsCard({
                   (!isVerified && !config?.enabled)
                 }
                 onClick={handleToggleEnabled}
+                data-testid="enable-notifications-toggle"
                 className="gap-2"
               >
                 {isTogglingEnabled ? (
@@ -680,6 +702,7 @@ export function SellerNotificationsCard({
           <div
             role="dialog"
             aria-modal="true"
+            data-testid="unknown-retry-dialog"
             className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 space-y-3"
           >
             <div className="flex items-start gap-3">
@@ -698,6 +721,7 @@ export function SellerNotificationsCard({
                     type="checkbox"
                     checked={acknowledgedUnknownRisk}
                     onChange={(e) => setAcknowledgedUnknownRisk(e.target.checked)}
+                    data-testid="unknown-retry-ack-checkbox"
                     className="size-4 rounded border-input accent-primary"
                   />
                   <label
@@ -716,6 +740,7 @@ export function SellerNotificationsCard({
                 variant="ghost"
                 size="sm"
                 onClick={() => setPendingUnknownRetry(null)}
+                data-testid="unknown-retry-cancel-button"
               >
                 Cancel
               </Button>
@@ -727,6 +752,7 @@ export function SellerNotificationsCard({
                 onClick={() =>
                   executeRetry(pendingUnknownRetry.id, acknowledgedUnknownRisk)
                 }
+                data-testid="unknown-retry-confirm-button"
                 className="gap-2"
               >
                 {isRetryingDelivery ? (
@@ -762,7 +788,7 @@ export function SellerNotificationsCard({
               No new-inquiry notification delivery events recorded yet.
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-xl border">
+            <div data-testid="delivery-history-table" className="overflow-x-auto rounded-xl border">
               <table className="w-full text-left text-xs">
                 <thead className="bg-muted/50 border-b text-muted-foreground">
                   <tr>
@@ -838,6 +864,7 @@ export function SellerNotificationsCard({
                               variant="outline"
                               disabled={isRetrying || isRetryingDelivery}
                               onClick={() => handleInitiateRetry(delivery)}
+                              data-testid="delivery-retry-button"
                               className="h-7 text-xs px-2.5 gap-1"
                             >
                               {isRetrying ? (

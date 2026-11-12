@@ -157,8 +157,8 @@ export const EXPECTED_INDEXES = [
   "seller_notification_delivery_created_at_idx",
 ];
 
-/** CHECK constraints the wizard requires (domain rules the schema enforces). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
+export const CRITICAL_CONSTRAINTS_V2 = [
   "bot_setting_singleton_check",
   "bot_setting_currency_allowlist_check",
   "category_no_self_parent_check",
@@ -171,6 +171,24 @@ export const CRITICAL_CONSTRAINTS = [
   "inquiry_message_body_length_check",
   "message_translation_body_length_check",
   "product_action_translation_label_length_check",
+];
+
+export const CRITICAL_CONSTRAINTS_V1 = CRITICAL_CONSTRAINTS_V2;
+
+/** CHECK and domain constraints the wizard requires (domain rules the schema enforces). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V2,
+  "seller_notification_setting_singleton_check",
+  "seller_notification_setting_language_check",
+  "seller_notification_setting_destination_check",
+  "seller_notification_delivery_status_check",
+  "seller_notification_delivery_inquiry_id_fk",
+];
+
+/** Notification update triggers created by migration 0003. */
+export const EXPECTED_NOTIFICATION_TRIGGERS = [
+  "seller_notification_setting_touch_updated_at",
+  "seller_notification_delivery_touch_updated_at",
 ];
 
 /** The two self-referencing foreign keys — proof both recursive trees exist. */
@@ -610,6 +628,8 @@ export const QUERIES = {
     "select conname as name, contype as type from pg_constraint where connamespace = 'public'::regnamespace",
   treeFks:
     "select conname as name, conrelid::regclass::text as table_name from pg_constraint where contype = 'f' and conrelid = confrelid",
+  triggers:
+    "select tgname as name from pg_trigger where not tgisinternal and tgrelid in (select oid from pg_class where relnamespace = 'public'::regnamespace)",
 };
 
 const ROWCOUNT_MARKER = "/* rabet:rowcount */";
