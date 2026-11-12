@@ -17,6 +17,7 @@
     "test:browser:actions": "node scripts/test-product-actions-browser-acceptance.mjs",
     "test:browser:payments": "node scripts/test-payment-methods-browser-acceptance.mjs",
     "test:browser:inbox": "node scripts/test-seller-inbox-browser-acceptance.mjs",
+    "test:browser:notifications": "node scripts/test-seller-notifications-browser-acceptance.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:check": "drizzle-kit check",
