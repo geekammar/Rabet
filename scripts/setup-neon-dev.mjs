@@ -77,7 +77,7 @@ import postgres from "postgres";
 
 const WIZARD = "rabet db:setup:dev";
 
-/** The fourteen domain tables created by the committed chain. */
+/** The eighteen domain tables created by the committed chain. */
 export const EXPECTED_TABLES = [
   "bot_setting",
   "category",
@@ -94,6 +94,8 @@ export const EXPECTED_TABLES = [
   "product_action",
   "product_action_translation",
   "product_translation",
+  "seller_notification_delivery",
+  "seller_notification_setting",
   "telegram_update",
 ];
 
@@ -102,40 +104,21 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0000_initial_schema",
   "0001_tree_and_snapshot_integrity",
   "0002_payment_methods",
+  "0003_seller_notifications",
 ];
 
+/** The sixteen domain tables created by the 0000+0001+0002 schema (Phase 11 baseline). */
+export const EXPECTED_TABLES_V2 = EXPECTED_TABLES.filter(
+  (t) => t !== "seller_notification_delivery" && t !== "seller_notification_setting",
+);
+
 /** The fourteen domain tables created by the 0000+0001 schema (prior release baseline). */
-export const EXPECTED_TABLES_V1 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V1 = EXPECTED_TABLES_V2.filter(
   (t) => t !== "payment_method" && t !== "payment_method_translation",
 );
 
-/** The seventeen indexes present in the 0000+0001 schema (prior release baseline). */
-export const EXPECTED_INDEXES_V1 = [
-  "category_sibling_sort_order_idx",
-  "category_root_sort_order_idx",
-  "product_action_sibling_sort_order_idx",
-  "product_action_root_sort_order_idx",
-  "inquiry_active_per_customer_product_idx",
-  "category_slug_unique",
-  "product_slug_unique",
-  "language_code_unique",
-  "message_template_key_unique",
-  "customer_telegram_id_unique",
-  "telegram_update_update_id_unique",
-  "inquiry_reference_unique",
-  "inquiry_message_telegram_message_idx",
-  "category_translation_category_language_idx",
-  "product_translation_product_language_idx",
-  "product_action_translation_action_language_idx",
-  "message_translation_template_language_idx",
-];
-
-/**
- * Indexes the wizard requires. The five partial unique indexes carry the
- * integrity rules, the business-key indexes protect the natural unique keys,
- * and the composite translation indexes protect the per-language uniqueness.
- */
-export const EXPECTED_INDEXES = [
+/** The eighteen indexes present in the 0000..0002 schema (Phase 11 baseline). */
+export const EXPECTED_INDEXES_V2 = [
   "category_sibling_sort_order_idx",
   "category_root_sort_order_idx",
   "product_action_sibling_sort_order_idx",
@@ -156,8 +139,26 @@ export const EXPECTED_INDEXES = [
   "payment_method_translation_method_language_idx",
 ];
 
-/** CHECK constraints the wizard requires (domain rules the schema enforces). */
-export const CRITICAL_CONSTRAINTS = [
+/** The seventeen indexes present in the 0000+0001 schema (prior release baseline). */
+export const EXPECTED_INDEXES_V1 = EXPECTED_INDEXES_V2.filter(
+  (i) => i !== "payment_method_translation_method_language_idx",
+);
+
+/**
+ * Indexes the wizard requires. The five partial unique indexes carry the
+ * integrity rules, the business-key indexes protect the natural unique keys,
+ * and the composite translation indexes protect the per-language uniqueness.
+ */
+export const EXPECTED_INDEXES = [
+  ...EXPECTED_INDEXES_V2,
+  "seller_notification_delivery_event_inquiry_idx",
+  "seller_notification_delivery_reference_unique",
+  "seller_notification_delivery_status_idx",
+  "seller_notification_delivery_created_at_idx",
+];
+
+/** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
+export const CRITICAL_CONSTRAINTS_V2 = [
   "bot_setting_singleton_check",
   "bot_setting_currency_allowlist_check",
   "category_no_self_parent_check",
@@ -170,6 +171,24 @@ export const CRITICAL_CONSTRAINTS = [
   "inquiry_message_body_length_check",
   "message_translation_body_length_check",
   "product_action_translation_label_length_check",
+];
+
+export const CRITICAL_CONSTRAINTS_V1 = CRITICAL_CONSTRAINTS_V2;
+
+/** CHECK and domain constraints the wizard requires (domain rules the schema enforces). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V2,
+  "seller_notification_setting_singleton_check",
+  "seller_notification_setting_language_check",
+  "seller_notification_setting_destination_check",
+  "seller_notification_delivery_status_check",
+  "seller_notification_delivery_inquiry_id_fk",
+];
+
+/** Notification update triggers created by migration 0003. */
+export const EXPECTED_NOTIFICATION_TRIGGERS = [
+  "seller_notification_setting_touch_updated_at",
+  "seller_notification_delivery_touch_updated_at",
 ];
 
 /** The two self-referencing foreign keys — proof both recursive trees exist. */
@@ -609,6 +628,8 @@ export const QUERIES = {
     "select conname as name, contype as type from pg_constraint where connamespace = 'public'::regnamespace",
   treeFks:
     "select conname as name, conrelid::regclass::text as table_name from pg_constraint where contype = 'f' and conrelid = confrelid",
+  triggers:
+    "select tgname as name from pg_trigger where not tgisinternal and tgrelid in (select oid from pg_class where relnamespace = 'public'::regnamespace)",
 };
 
 const ROWCOUNT_MARKER = "/* rabet:rowcount */";
@@ -2438,7 +2459,14 @@ async function runValidate(ctx) {
   const unknown = tables.filter((name) => !EXPECTED_TABLES.includes(name));
   const tablesOk = missing.length === 0 && unknown.length === 0;
 
-  record(ctx, "tables", tablesOk, missing.length ? `missing ${missing.join(", ")}` : "14/14");
+  record(
+    ctx,
+    "tables",
+    tablesOk,
+    missing.length
+      ? `missing ${missing.join(", ")}`
+      : `${EXPECTED_TABLES.length}/${EXPECTED_TABLES.length}`,
+  );
 
   // The applied hashes must equal the committed files' sha256 values, in order.
   const appliedRows = await sql.query(QUERIES.drizzleMigrations).catch(() => []);

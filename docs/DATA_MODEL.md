@@ -1843,3 +1843,45 @@ schema already accommodates either answer.
 - **Scalability:** the model targets one admin, one bot and one seller; indexed query paths
   are listed in §13; both recursions are unbounded in schema with documented runtime guards
   (§11.3) and a documented scale-up path (§11.4).
+
+---
+
+## 21. Phase 12 / Migration 0003: Outbound Seller Telegram Notifications
+
+### 21.1 Overview & Architecture
+An outbound-only Telegram notification integration for notifying the seller when a genuinely new customer inquiry is opened.
+- Bot token: Read strictly from `TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN` in the server environment (never stored in DB columns, never exposed to clients, never falling back to customer bot).
+- Separate singleton settings table `seller_notification_setting` to ensure dual-schema pre-migration compatibility.
+- Durable transactional outbox `seller_notification_delivery` coupled in the same atomic database transaction/batch as the inquiry creation.
+
+### 21.2 Schema Additions
+1. **`seller_notification_setting`**
+   - `id`: smallint primary key default 1 with check constraint `id = 1` (singleton).
+   - `enabled`: boolean default false.
+   - `destination_chat_id`: text (decimal string, check regex `^[1-9][0-9]{4,19}$`).
+   - `language`: char(2) default 'ar', check `language IN ('ar', 'en')`.
+   - `verified_at`: timestamptz (null until successful test notification).
+   - `verified_bot_id`: bigint.
+   - `verified_bot_username`: text.
+   - `verified_chat_id`: text.
+   - `revision`: integer default 1 (incremented on destination change or test verification).
+   - `last_test_at`: timestamptz (persisted rate limiter / cooldown).
+   - `created_at`, `updated_at`: timestamptz with `_touch_updated_at` trigger.
+
+2. **`seller_notification_delivery`**
+   - `id`: uuid primary key default gen_random_uuid().
+   - `event_type`: text not null default 'new_inquiry'.
+   - `inquiry_id`: uuid not null references `inquiry(id)` on delete cascade.
+   - `reference`: text not null unique (format `SND-XXXXXX`).
+   - `revision`: integer not null default 1.
+   - `destination_chat_id`: text not null.
+   - `status`: text check in `('pending', 'sending', 'sent', 'failed', 'unknown', 'cancelled')`.
+   - `claim_attempt_id`: text (lease ID for atomic worker claims).
+   - `claim_expires_at`: timestamptz.
+   - `attempt_count`: integer not null default 0.
+   - `telegram_message_id`: bigint.
+   - `error_category`: text (safe allowlisted category, no sensitive tokens or payload prose).
+   - `retry_after_until`: timestamptz (for Telegram 429 backoff).
+   - `sent_at`, `failed_at`, `created_at`, `updated_at`: timestamptz with `_touch_updated_at` trigger.
+   - Unique partial index: `UNIQUE (event_type, inquiry_id)` guaranteeing exactly one logical notification event per inquiry.
+

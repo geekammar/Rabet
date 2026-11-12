@@ -47,6 +47,8 @@ export type DataErrorCode =
   | "NOT_FOUND"
   /** A unique key is already taken. */
   | "CONFLICT"
+  /** The configuration was modified concurrently. */
+  | "CONFIGURATION_CHANGED"
   /** A database-level rule rejected the value (singleton, allowlist, length). */
   | "CONSTRAINT_VIOLATION"
   /** The `bot_setting` singleton has not been initialized yet. */
@@ -179,6 +181,10 @@ function isConnectionFailure(error: unknown): boolean {
  * never the raw one.
  */
 export function mapDatabaseError(error: unknown): RabetDataError {
+  if (error instanceof RabetDataError) {
+    return error;
+  }
+
   const code = sqlState(error);
 
   switch (code) {

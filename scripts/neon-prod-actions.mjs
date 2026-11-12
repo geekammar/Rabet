@@ -71,10 +71,15 @@ import postgres from "postgres";
 
 import {
   CRITICAL_CONSTRAINTS,
+  CRITICAL_CONSTRAINTS_V1,
+  CRITICAL_CONSTRAINTS_V2,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
+  EXPECTED_INDEXES_V2,
+  EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
+  EXPECTED_TABLES_V2,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -583,7 +588,13 @@ export async function validateTarget(ctx, options = {}) {
   const { sql } = ctx;
   const expectedTables = options.expectedTables ?? EXPECTED_TABLES;
   const expectedIndexes = options.expectedIndexes ?? EXPECTED_INDEXES;
-  const expectedConstraints = options.expectedConstraints ?? CRITICAL_CONSTRAINTS;
+  const expectedConstraints =
+    options.expectedConstraints ??
+    (expectedTables === EXPECTED_TABLES_V1
+      ? CRITICAL_CONSTRAINTS_V1
+      : expectedTables === EXPECTED_TABLES_V2
+        ? CRITICAL_CONSTRAINTS_V2
+        : CRITICAL_CONSTRAINTS);
   const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
 
   const prefixCount = options.expectedHashes
@@ -766,6 +777,27 @@ export async function validateTarget(ctx, options = {}) {
     );
   } catch (error) {
     record(ctx, "recursive-trees", false, `query error: ${redact(String(error.message ?? error))}`);
+  }
+
+  // 6. Notification triggers check (if migration 0003 included)
+  if (expectedEntries.some((e) => e.tag === "0003_seller_notifications")) {
+    try {
+      const triggerRows = await sql.query(QUERIES.triggers);
+      const triggerSet = new Set(triggerRows.map((row) => String(row.name)));
+      const missingTriggers = EXPECTED_NOTIFICATION_TRIGGERS.filter(
+        (name) => !triggerSet.has(name),
+      );
+      record(
+        ctx,
+        "notification-triggers",
+        missingTriggers.length === 0,
+        missingTriggers.length
+          ? `missing ${missingTriggers.join(", ")}`
+          : `${EXPECTED_NOTIFICATION_TRIGGERS.length}/${EXPECTED_NOTIFICATION_TRIGGERS.length}`,
+      );
+    } catch (error) {
+      record(ctx, "notification-triggers", false, `query error: ${redact(String(error.message ?? error))}`);
+    }
   }
 
   // 6. Select 1 probe
@@ -1333,14 +1365,36 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 3 &&
+        inspected.state.pending[0] === "0003_seller_notifications"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V2,
+          expectedIndexes: EXPECTED_INDEXES_V2,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V2,
+          expectedHashes: ctx.committedHashes.slice(0, 3).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 3 migrations recorded, " +
+              "but live schema does not match the supported prior release (0002_payment_methods).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 2 &&
-        inspected.state.pending.length === 1 &&
         inspected.state.pending[0] === "0002_payment_methods"
       ) {
         header("Validating prior release schema on target (read-only)");
         const validated = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V1,
           expectedIndexes: EXPECTED_INDEXES_V1,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V1,
           expectedHashes: ctx.committedHashes.slice(0, 2).map((e) => e.hash),
         });
         if (!validated) {
@@ -1385,16 +1439,45 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
-      const isKnownPriorRelease =
+      const isKnownPriorReleaseV2 =
+        inspected.state.appliedCount === 3 &&
+        inspected.state.pending[0] === "0003_seller_notifications";
+      const isKnownPriorReleaseV1 =
         inspected.state.appliedCount === 2 &&
-        inspected.state.pending.length === 1 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorRelease) {
+      if (isKnownPriorReleaseV2) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V2,
+          expectedIndexes: EXPECTED_INDEXES_V2,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V2,
+          expectedHashes: ctx.committedHashes.slice(0, 3).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0002_payment_methods). " +
+              "Proceeding with migration to 0003_seller_notifications.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV1) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V1,
           expectedIndexes: EXPECTED_INDEXES_V1,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V1,
           expectedHashes: ctx.committedHashes.slice(0, 2).map((e) => e.hash),
         });
 
@@ -1403,7 +1486,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0001_tree_and_snapshot_integrity). " +
-              "Proceeding with migration to 0002_payment_methods.",
+              "Proceeding with migration to pending migrations.",
           );
         } else {
           io.line("");

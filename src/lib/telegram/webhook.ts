@@ -453,6 +453,7 @@ export async function handleTelegramWebhookRequest(
       updateId: update.update_id,
       attemptId,
       receipt: (claim.row.payload as { receipt?: TelegramBusinessReceipt } | null)?.receipt,
+      deadline,
     };
 
     if (validatedData.updateType === "message") {

@@ -4,6 +4,7 @@ import { DatabaseSetupRequired } from "@/components/dashboard/settings/database-
 import { DatabaseUnavailable } from "@/components/dashboard/settings/database-unavailable";
 import { OnboardingForm } from "@/components/dashboard/settings/onboarding-form";
 import { SettingsEditForm } from "@/components/dashboard/settings/settings-edit-form";
+import { loadSellerNotificationStateAction, type SellerNotificationActionResult } from "@/app/actions/seller-notifications";
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
 import {
@@ -36,6 +37,7 @@ type SettingsViewData =
       languages: LanguageRow[];
       defaultLanguage: ResolvedLanguage | null;
       hasCatalogPrices: boolean;
+      sellerNotifications: SellerNotificationActionResult;
     };
 
 async function loadSettingsViewData(): Promise<SettingsViewData> {
@@ -57,11 +59,13 @@ async function loadSettingsViewData(): Promise<SettingsViewData> {
       return { kind: "onboarding" };
     }
 
-    const [languages, defaultLanguage, hasPrices] = await Promise.all([
-      listLanguages(db),
-      resolveDefaultLanguage(db),
-      hasCatalogPrices(db),
-    ]);
+    const [languages, defaultLanguage, hasPrices, sellerNotifications] =
+      await Promise.all([
+        listLanguages(db),
+        resolveDefaultLanguage(db),
+        hasCatalogPrices(db),
+        loadSellerNotificationStateAction(),
+      ]);
 
     return {
       kind: "edit",
@@ -69,6 +73,7 @@ async function loadSettingsViewData(): Promise<SettingsViewData> {
       languages,
       defaultLanguage,
       hasCatalogPrices: hasPrices,
+      sellerNotifications,
     };
   } catch (error) {
     return {
@@ -98,6 +103,7 @@ export default async function SettingsPage() {
           languages={data.languages}
           defaultLanguage={data.defaultLanguage}
           hasCatalogPrices={data.hasCatalogPrices}
+          sellerNotifications={data.sellerNotifications}
         />
       );
   }

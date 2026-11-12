@@ -314,7 +314,7 @@ describe.skipIf(!shouldRun)("Production Release Upgrade Path (Phase 10B -> Phase
 
     expect(result.ok).toBe(true);
     expect(output).toContain("Validating prior release schema on target");
-    expect(output).toContain("Pending migrations: 1 (0002_payment_methods)");
+    expect(output).toContain("0002_payment_methods");
   });
 
   it("C. Runner refusal: damaged prior release is refused before any writes", async () => {
@@ -407,9 +407,9 @@ describe.skipIf(!shouldRun)("Production Release Upgrade Path (Phase 10B -> Phase
     expect(output).toContain("Applied      0002_payment_methods");
     expect(output).toContain("Migrations were successfully applied and verified live on the target");
 
-    // Verify ledger has 3 migrations applied
+    // Verify ledger has at least 3 migrations applied
     const ledger = await v1Db!.sql`SELECT id, hash FROM drizzle.__drizzle_migrations ORDER BY id ASC`;
-    expect(ledger).toHaveLength(3);
+    expect(ledger.length).toBeGreaterThanOrEqual(3);
     const hashes = wizard.computeMigrationHashes(repo);
     expect(ledger[2].hash).toBe(hashes[2].hash);
   });

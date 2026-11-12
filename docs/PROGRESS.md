@@ -1139,3 +1139,49 @@ Key deliverables & repairs across all review findings (A through E):
      - `03_disabled_method_reference_retained.png`: Disabled method with button reference retained.
    - All screenshot evidence inspected to confirm zero credentials, real customer data, or financial information.
    - Preserved deployment order: compatible code deployment -> read-only inspect -> approved manual migration -> live verification -> payment features activated.
+
+---
+
+## Phase 12 — Outbound Seller Telegram Notification Bot v1
+
+Related: [SELLER_NOTIFICATIONS_HANDOFF.md](./SELLER_NOTIFICATIONS_HANDOFF.md) for full operator and architecture handoff.
+
+### Delivered Scope
+1. **Outbound Notification Bot Integration:**
+   - Standalone outbound-only bot using dedicated server secret `TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN`.
+   - Never exposes secret in client props, database columns, or error messages.
+   - Preserves customer bot `@Mawthoqbot` webhook, tokens, journeys, and authentication.
+2. **Atomic Inquiry Notification Events:**
+   - In `createOrResumeProductInquiry`, `createOrResumeSupportInquiry`, and `routeAndAppendCustomerText`:
+     notification outbox record is inserted in the exact same CTE query that creates the inquiry.
+   - Resume actions, duplicate Telegram updates, replayed business receipts, and stale fenced attempts create 0 events.
+   - Database uniqueness constraint `UNIQUE (event_type, inquiry_id)` guarantees at-most-once event emission.
+3. **Delivery Outbox & Durable Recovery:**
+   - States: `pending`, `sending`, `sent`, `failed`, `unknown`, `cancelled`.
+   - Atomic worker claiming with attempt ID and lease expiry.
+   - Telegram network timeouts / aborted requests record `unknown`, requiring explicit duplicate-risk acknowledgment before manual resending.
+   - Rate limiting (HTTP 429) records `retry_after_until`.
+   - Destination or bot identity change automatically cancels obsolete delivery records.
+4. **Settings Dashboard Experience:**
+   - Token configured/not configured status banner.
+   - "Check bot connection" via `getMe`.
+   - Safe operator helper to discover numeric private chat ID via recent bot messages.
+   - Send test notification (`[TEST]` tagged) with 5-second server-persisted cooldown.
+   - Explicit enable/disable toggle.
+   - Recent deliveries table with live statuses and manual retry buttons.
+   - Full 360px mobile responsiveness and Arabic RTL support.
+5. **Dual-Schema Compatibility & Migration 0003:**
+   - Additive migration `drizzle/0003_seller_notifications.sql`.
+   - Pre-migration capability checks (`checkSellerNotificationCapability`) gracefully present upgrade guidance without querying missing tables.
+   - Disposable PostgreSQL upgrade and no-op verification in test suites.
+
+### PR #23 Review Repairs (Completed)
+- **Delivery Retry Path:** Threaded `acknowledgeUnknownRisk` through server action -> service -> DAL `claimDeliveryAttemptDetailed`. Atomically recover expired sending records to `unknown` with duplicate-risk acknowledgment required before re-sending. Worker finalization requires active `attemptId` and expected state.
+- **Uncertain Network Handling:** Bounded identity checks and `sendMessage` by execution deadline budget (>2000ms threshold). Releasing claims before send without marking `unknown`. Uncertain responses recorded as `unknown` with stable delivery reference.
+- **Atomic Cooldown & CAS Persistence:** Replaced read-then-write cooldown with atomic database check-and-set using `last_test_at`. CAS verification success verifies destination snapshot before marking verified.
+- **Bot Identity Revision Binding:** Verifying a different bot atomically increments configuration revision, disables notifications, and cancels obsolete pending/failed deliveries, preventing events from sending through an incompatible bot. Repeating a test for the same bot preserves revision and pending deliveries.
+- **Pre-Dispatch Revalidation & Fencing:** Authoritative check executed immediately before `sendMessage` validates current `enabled` state, configuration `revision`, `destinationChatId`, `verifiedBotId`, record status (`sending`), and active `attemptId` lease. Fences stale workers and releases/cancels claims truthfully without network calls inside a DB transaction.
+- **Truthful Response Classification & Persistence:** Distinguishes HTTP 200 with invalid/missing `message_id` as `unknown` (`ambiguous_telegram_response`); HTTP 429 as `failed` (`rate_limited`); HTTP 4xx as `failed`; HTTP 5xx / timeouts / drops as `unknown`. Checks applied rows on `markDeliverySent` and records `unknown` (`persistence_mismatch`) if persistence fails without fabricating success.
+- **URL & Network Security:** Enforce HTTPS and strictly forbid localhost/loopback in production environment (`getTrustedDashboardInquiryUrl`).
+- **Real Browser Acceptance Suite & CI Integration:** Automated CDP acceptance runner (`scripts/test-seller-notifications-browser-acceptance.mjs`) verifies desktop connection check, destination invalidation, mobile 360px (0px overflow), Arabic RTL, unknown delivery duplicate-risk retry modal, and expired sending lease recovery. Screenshots published in `docs/review/seller-notifications/`. Integrated into `.github/workflows/ci.yml` browser acceptance job.
+- **Operator Migration Handoff:** Standardized production migration procedures in `docs/SELLER_NOTIFICATIONS_HANDOFF.md` around the established GitHub Actions manual workflow (`.github/workflows/neon-prod-migrate.yml`) with strict `inspect` and `migrate` (phrase `MIGRATE_RABET_PROD`) phases.

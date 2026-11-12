@@ -20,17 +20,21 @@ import type { BotSettings, Currency, LanguageRow, ResolvedLanguage } from "./typ
 import { CurrencyPicker } from "./currency-picker";
 import { LanguageSettingsCard } from "./language-settings-card";
 import { SupportCategoryManager } from "./support-category-manager";
+import { SellerNotificationsCard } from "./seller-notifications-card";
+import type { SellerNotificationActionResult } from "@/app/actions/seller-notifications";
 
 export function SettingsEditForm({
   settings,
   languages,
   defaultLanguage,
   hasCatalogPrices,
+  sellerNotifications,
 }: {
   settings: BotSettings;
   languages: LanguageRow[];
   defaultLanguage: ResolvedLanguage | null;
   hasCatalogPrices: boolean;
+  sellerNotifications?: SellerNotificationActionResult;
 }) {
   const [state, formAction, isPending] = useActionState<
     SettingsActionResult,
@@ -235,6 +239,11 @@ export function SettingsEditForm({
         languages={languages}
         defaultLanguage={defaultLanguage}
       />
+
+      {/* Seller Outbound Telegram Notifications */}
+      {sellerNotifications && (
+        <SellerNotificationsCard initialState={sellerNotifications} />
+      )}
     </div>
   );
 }

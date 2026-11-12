@@ -8,6 +8,7 @@ import {
   customer,
   inquiry,
   inquiryMessage,
+  sellerNotificationDelivery,
   telegramUpdate,
 } from "@/db/schema";
 import { executeAtomicBatch, toBatchable } from "./catalog";
@@ -15,6 +16,32 @@ import { mapDatabaseError } from "./errors";
 
 export type InquiryRecord = typeof inquiry.$inferSelect;
 export type InquiryMessageRecord = typeof inquiryMessage.$inferSelect;
+
+export interface InquiryNotificationIntent {
+  deliveryId: string;
+  reference: string;
+  revision: number;
+  destinationChatId: string;
+}
+
+/**
+ * Reads a single inquiry record by ID.
+ */
+export async function getInquiryRecord(
+  db: Database,
+  inquiryId: string,
+): Promise<InquiryRecord | null> {
+  try {
+    const [row] = await db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.id, inquiryId))
+      .limit(1);
+    return row ?? null;
+  } catch (err) {
+    throw mapDatabaseError(err);
+  }
+}
 
 /** Active inquiry statuses participating in customer routing. */
 export const ACTIVE_INQUIRY_STATUSES = ["open", "waiting_on_customer"] as const;
@@ -107,11 +134,13 @@ export interface CreateOrResumeProductInquiryInput {
   selectedOptions?: string[] | null;
   updateId: number;
   attemptId: string;
+  notificationEvent?: InquiryNotificationIntent | null;
 }
 
 export interface CreateOrResumeProductInquiryResult {
   inquiry: InquiryRecord;
   isResume: boolean;
+  notificationDeliveryId?: string | null;
 }
 
 /**
@@ -233,9 +262,33 @@ export async function createOrResumeProductInquiry(
           AND payload->>'attemptId' = ${input.attemptId}::text
           AND EXISTS (SELECT 1 FROM resolved_inquiry)
         RETURNING update_id
-      )
+      )${
+        input.notificationEvent
+          ? sql`,
+      delivery_insert AS (
+        INSERT INTO ${sellerNotificationDelivery} (
+          id, event_type, inquiry_id, reference, revision, destination_chat_id, status, created_at, updated_at
+        )
+        SELECT
+          ${input.notificationEvent.deliveryId}::uuid,
+          'new_inquiry',
+          id,
+          ${input.notificationEvent.reference}::text,
+          ${input.notificationEvent.revision}::int,
+          ${input.notificationEvent.destinationChatId}::text,
+          'pending',
+          now(),
+          now()
+        FROM inserted_inquiry
+        WHERE EXISTS (SELECT 1 FROM locked_attempt)
+        ON CONFLICT (event_type, inquiry_id) DO NOTHING
+        RETURNING id
+      )`
+          : sql``
+      }
       SELECT
-        r.*
+        r.*,
+        ${input.notificationEvent ? sql`(SELECT id FROM delivery_insert)` : sql`NULL`} AS notification_delivery_id
       FROM resolved_inquiry r;
     `,
     );
@@ -270,6 +323,7 @@ export async function createOrResumeProductInquiry(
       created_at: string | Date;
       updated_at: string | Date;
       is_resumed: boolean;
+      notification_delivery_id?: string | null;
     };
 
     if (!row) {
@@ -293,6 +347,7 @@ export async function createOrResumeProductInquiry(
         updatedAt: new Date(row.updated_at),
       },
       isResume: Boolean(row.is_resumed),
+      notificationDeliveryId: row.notification_delivery_id ?? null,
     };
   } catch (error) {
     throw mapDatabaseError(error);
@@ -304,11 +359,13 @@ export interface CreateOrResumeSupportInquiryInput {
   category?: string | null;
   updateId: number;
   attemptId: string;
+  notificationEvent?: InquiryNotificationIntent | null;
 }
 
 export interface CreateOrResumeSupportInquiryResult {
   inquiry: InquiryRecord;
   isResume: boolean;
+  notificationDeliveryId?: string | null;
 }
 
 /**
@@ -422,9 +479,33 @@ export async function createOrResumeSupportInquiry(
           AND payload->>'attemptId' = ${input.attemptId}::text
           AND EXISTS (SELECT 1 FROM resolved_inquiry)
         RETURNING update_id
-      )
+      )${
+        input.notificationEvent
+          ? sql`,
+      delivery_insert AS (
+        INSERT INTO ${sellerNotificationDelivery} (
+          id, event_type, inquiry_id, reference, revision, destination_chat_id, status, created_at, updated_at
+        )
+        SELECT
+          ${input.notificationEvent.deliveryId}::uuid,
+          'new_inquiry',
+          id,
+          ${input.notificationEvent.reference}::text,
+          ${input.notificationEvent.revision}::int,
+          ${input.notificationEvent.destinationChatId}::text,
+          'pending',
+          now(),
+          now()
+        FROM inserted_inquiry
+        WHERE EXISTS (SELECT 1 FROM locked_attempt)
+        ON CONFLICT (event_type, inquiry_id) DO NOTHING
+        RETURNING id
+      )`
+          : sql``
+      }
       SELECT
-        r.*
+        r.*,
+        ${input.notificationEvent ? sql`(SELECT id FROM delivery_insert)` : sql`NULL`} AS notification_delivery_id
       FROM resolved_inquiry r;
     `,
     );
@@ -459,6 +540,7 @@ export async function createOrResumeSupportInquiry(
       created_at: string | Date;
       updated_at: string | Date;
       is_resumed: boolean;
+      notification_delivery_id?: string | null;
     };
 
     if (!row) {
@@ -482,6 +564,7 @@ export async function createOrResumeSupportInquiry(
         updatedAt: new Date(row.updated_at),
       },
       isResume: Boolean(row.is_resumed),
+      notificationDeliveryId: row.notification_delivery_id ?? null,
     };
   } catch (error) {
     throw mapDatabaseError(error);
@@ -740,6 +823,7 @@ export interface RouteAndAppendCustomerTextInput {
   telegramMessageId: number;
   updateId: number;
   attemptId: string;
+  notificationEvent?: InquiryNotificationIntent | null;
 }
 
 export type RouteAndAppendCustomerTextResult =
@@ -749,6 +833,7 @@ export type RouteAndAppendCustomerTextResult =
       message: InquiryMessageRecord;
       isNewSupport: boolean;
       isDuplicate: boolean;
+      notificationDeliveryId?: string | null;
     }
   | {
       status: "ambiguous";
@@ -939,7 +1024,30 @@ export async function routeAndAppendCustomerText(
           AND payload->>'attemptId' = ${input.attemptId}::text
           AND (SELECT cnt FROM active_count) > 1
         RETURNING update_id
-      )
+      )${
+        input.notificationEvent
+          ? sql`,
+      delivery_insert AS (
+        INSERT INTO ${sellerNotificationDelivery} (
+          id, event_type, inquiry_id, reference, revision, destination_chat_id, status, created_at, updated_at
+        )
+        SELECT
+          ${input.notificationEvent.deliveryId}::uuid,
+          'new_inquiry',
+          id,
+          ${input.notificationEvent.reference}::text,
+          ${input.notificationEvent.revision}::int,
+          ${input.notificationEvent.destinationChatId}::text,
+          'pending',
+          now(),
+          now()
+        FROM created_support
+        WHERE EXISTS (SELECT 1 FROM locked_attempt)
+        ON CONFLICT (event_type, inquiry_id) DO NOTHING
+        RETURNING id
+      )`
+          : sql``
+      }
       SELECT
         (SELECT cnt FROM active_count) AS active_count,
         m.id AS msg_id,
@@ -965,7 +1073,8 @@ export async function routeAndAppendCustomerText(
         i.closed_at AS inq_closed_at,
         i.created_at AS inq_created_at,
         i.updated_at AS inq_updated_at,
-        t.is_new AS inq_is_new
+        t.is_new AS inq_is_new,
+        ${input.notificationEvent ? sql`(SELECT id FROM delivery_insert)` : sql`NULL`} AS notification_delivery_id
       FROM final_message m
       JOIN resolved_inquiry i ON i.id = m.inquiry_id
       JOIN target_inquiry t ON t.id = i.id
@@ -995,7 +1104,8 @@ export async function routeAndAppendCustomerText(
         NULL AS inq_closed_at,
         NULL AS inq_created_at,
         NULL AS inq_updated_at,
-        false AS inq_is_new
+        false AS inq_is_new,
+        NULL AS notification_delivery_id
       WHERE (SELECT cnt FROM active_count) > 1
         AND EXISTS (SELECT 1 FROM ambiguous_receipt_update);
     `,
@@ -1042,6 +1152,7 @@ export async function routeAndAppendCustomerText(
       inq_created_at?: string | Date | null;
       inq_updated_at?: string | Date | null;
       inq_is_new?: boolean | null;
+      notification_delivery_id?: string | null;
     };
 
     if (!row) {
@@ -1089,6 +1200,7 @@ export async function routeAndAppendCustomerText(
       },
       isNewSupport: Boolean(row.inq_is_new),
       isDuplicate: Boolean(row.is_duplicate),
+      notificationDeliveryId: row.notification_delivery_id ?? null,
     };
   } catch (error) {
     throw mapDatabaseError(error);
