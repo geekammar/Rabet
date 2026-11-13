@@ -493,7 +493,9 @@ async function renderRootCatalog(
   const ui = getLocalizedUiStrings(langContext.isRtl);
 
   // Resolve welcome text
-  let welcomeBody = `Welcome to ${settings.displayName}!`;
+  let welcomeBody = (langContext.isRtl || langContext.code === "ar")
+    ? `مرحبًا بك في ${settings.displayName}!`
+    : `Welcome to ${settings.displayName}!`;
   try {
     const resolved = await resolveMessageText(db, {
       templateKey: "bot_welcome",

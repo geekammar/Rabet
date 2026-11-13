@@ -1185,3 +1185,51 @@ Related: [SELLER_NOTIFICATIONS_HANDOFF.md](./SELLER_NOTIFICATIONS_HANDOFF.md) fo
 - **URL & Network Security:** Enforce HTTPS and strictly forbid localhost/loopback in production environment (`getTrustedDashboardInquiryUrl`).
 - **Real Browser Acceptance Suite & CI Integration:** Automated CDP acceptance runner (`scripts/test-seller-notifications-browser-acceptance.mjs`) verifies desktop connection check, destination invalidation, mobile 360px (0px overflow), Arabic RTL, unknown delivery duplicate-risk retry modal, and expired sending lease recovery. Screenshots published in `docs/review/seller-notifications/`. Integrated into `.github/workflows/ci.yml` browser acceptance job.
 - **Operator Migration Handoff:** Standardized production migration procedures in `docs/SELLER_NOTIFICATIONS_HANDOFF.md` around the established GitHub Actions manual workflow (`.github/workflows/neon-prod-migrate.yml`) with strict `inspect` and `migrate` (phrase `MIGRATE_RABET_PROD`) phases.
+
+---
+
+## Final Launch Hardening — Login Abuse Protection, Localized Fallback, and QA-18 Investigation
+
+### 1. Login Abuse Protection Audit & Platform Suitability
+- **Real Credential Submission Paths:**
+  1. `POST /login`: Next.js Server Action `login` (`src/app/actions/auth.ts`) called from `<LoginForm />`, invoking Auth.js `signIn("credentials")` and Argon2id verification.
+  2. `POST /api/auth/callback/credentials`: Auth.js route handler (`src/app/api/auth/[...nextauth]/route.ts`) receiving direct credentials callbacks.
+  Both routes invoke `verifyAdminCredentials` (`src/lib/auth/credentials.ts`).
+- **Live Vercel State & Plan Inspection:**
+  - Read-only inspection (`vercel whoami`, `vercel firewall status`, `vercel firewall rules list`, `vercel firewall diff`) confirmed:
+    - Active team: `ammarj1` (`Hobby` plan).
+    - Custom firewall rules: 0 (clean, no active or draft rules).
+  - Vercel WAF capability on Hobby plan includes **1 free custom rate-limiting rule** per project with a 60-second fixed window.
+- **Rule Specification (`protect-admin-login`):**
+  - **Condition:** Request Method equals `POST` AND Path matches regex `^/(login|api/auth/callback/credentials)$`.
+  - **Action:** Rate Limit (HTTP 429 Too Many Requests).
+  - **Settings:** Key: Client IP (`ip.src`), Threshold: 5 requests, Window: 60 seconds.
+  - **Blast Radius & Exclusions:**
+    - Telegram webhook (`POST /api/telegram/webhook`) is strictly excluded and unaffected.
+    - Public `/login` page loads (HTTP `GET`) and normal dashboard actions (POST to `/catalog`, `/settings`, etc.) are unaffected.
+  - **Decision:** The platform edge rule is completely suitable and available on the current Hobby tier. Redundant in-memory rate limiting was deliberately rejected because in-memory state is unreliable across serverless instances and external infrastructure (e.g. Upstash/Redis) is not justified.
+- **Concrete Owner Activation Steps:**
+  1. Open Vercel Dashboard -> Project `rabet` -> Settings -> **Security** / **Firewall**.
+  2. Under **Custom Rules**, click **Add Rule**.
+  3. Set Name: `protect-admin-login`.
+  4. Set Condition: If `Request Method` equals `POST` AND `Path` `matches regex` `^/(login|api/auth/callback/credentials)$`.
+  5. Set Action: `Rate Limit`, Threshold: `5` requests, Window: `60` seconds, Key: `IP Address`.
+  6. Save and publish rule during live cutover.
+
+### 2. Welcome Fallback Localization Defect Fix
+- **Defect:** In `src/lib/telegram/catalog-journey.ts`, when `bot_welcome` translation was missing or unresolved, the fallback greeting defaulted to English (`Welcome to ${settings.displayName}!`) even for customers whose effective language is Arabic (`langContext.isRtl || langContext.code === "ar"`).
+- **Remediation:**
+  - Updated missing-template fallback in `renderRootCatalog` to evaluate `(langContext.isRtl || langContext.code === "ar") ? "مرحبًا بك في " + settings.displayName + "!" : "Welcome to " + settings.displayName + "!"`.
+  - Configured-template precedence is preserved: existing translations in the DB continue to take precedence via `interpolateTemplate`.
+  - Customer language preference resolution (`resolveCustomerLanguageContext`) and saved preferences remain intact.
+  - Added targeted test in `tests/db/telegram-journey.test.ts`.
+  - **Production Reminder:** Production `bot_welcome` Arabic content still needs to be saved through the dashboard; no database content is seeded or overwritten.
+
+### 3. QA-18 Investigation & Isolation Reproduction
+- **Report & Evidence Check:** No QA-18 issue, file, or report artifact exists in the repository or git history.
+- **Isolated Reproduction Matrix:** Tested all potential boundary violations through `validateTemplateBody` and the `saveBotContentTranslation` Server Action:
+  1. *Malformed braces:* unclosed `{{store_name`, stray closing `store_name}}`, triple braces `{{{store_name}}}`, empty braces `{{}}`, spaces `{{ store_name }}`.
+  2. *Unknown identifiers:* `{{customer_name}}`, `{{user_id}}`, `{{admin_email}}`, `{{unknown}}`.
+  3. *Disallowed placeholders:* `{{product_name}}` in `bot_welcome` (where only `store_name` is permitted).
+- **Observed Results:** Every single malformed or unauthorized case was strictly rejected at the validation boundary and returned `{ success: false, code: "INVALID_INPUT", message: ... }` with **zero database writes**.
+- **Conclusion:** The QA-18 failure claim is unproven/stale. The validation logic is operating correctly according to specification. Working code was preserved without unnecessary changes, and regression tests were added in `src/app/actions/__tests__/bot-content.test.ts`.

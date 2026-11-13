@@ -890,6 +890,104 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
         })
         .where(eq(botSetting.id, 1));
     });
+
+    it("falls back to localized Arabic welcome greeting when bot_welcome translation is missing for Arabic customer", async () => {
+      const db = testDb!.db;
+      const fakeTransport = createFakeTelegramTransport();
+      const customerTelegramId = 777666556;
+
+      // Update store settings to default to Arabic and askForLanguage = false
+      const [arLang] = await db
+        .select()
+        .from(language)
+        .where(eq(language.code, "ar"))
+        .limit(1);
+
+      await db
+        .update(botSetting)
+        .set({
+          defaultLanguageId: arLang.id,
+          askForLanguage: false,
+        })
+        .where(eq(botSetting.id, 1));
+
+      // Temporarily remove Arabic translation for bot_welcome
+      const [tpl] = await db
+        .select()
+        .from(messageTemplate)
+        .where(eq(messageTemplate.key, "bot_welcome"))
+        .limit(1);
+
+      const [existingArTranslation] = await db
+        .select()
+        .from(messageTranslation)
+        .where(
+          and(
+            eq(messageTranslation.templateId, tpl.id),
+            eq(messageTranslation.languageId, arLang.id),
+          ),
+        );
+
+      if (existingArTranslation) {
+        await db
+          .delete(messageTranslation)
+          .where(eq(messageTranslation.id, existingArTranslation.id));
+      }
+
+      try {
+        // Customer sends /start
+        const req = createWebhookRequest(
+          {
+            update_id: 2002,
+            message: {
+              message_id: 2,
+              chat: { id: customerTelegramId, type: "private" },
+              from: { id: customerTelegramId, is_bot: false, first_name: "Fatima" },
+              text: "/start",
+            },
+          },
+          TEST_WEBHOOK_SECRET,
+        );
+
+        const res = await handleTelegramWebhookRequest(req, {
+          db: asAppDb(testDb!.db),
+          transport: fakeTransport,
+          botToken: TEST_BOT_TOKEN,
+          webhookSecret: TEST_WEBHOOK_SECRET,
+        });
+        expect(res.status).toBe(200);
+
+        // Fallback welcome message should respect the effective customer language (Arabic)
+        expect(fakeTransport.sentMessages).toHaveLength(1);
+        const msg = fakeTransport.sentMessages[0];
+        expect(msg.text).toContain("مرحبًا بك في Acme Digital Store!");
+        expect(msg.text).not.toContain("Welcome to Acme Digital Store!");
+      } finally {
+        // Restore translation
+        if (existingArTranslation) {
+          await db.insert(messageTranslation).values({
+            id: existingArTranslation.id,
+            templateId: existingArTranslation.templateId,
+            languageId: existingArTranslation.languageId,
+            body: existingArTranslation.body,
+          });
+        }
+
+        // Revert store settings
+        const [enLang] = await db
+          .select()
+          .from(language)
+          .where(eq(language.code, "en"))
+          .limit(1);
+        await db
+          .update(botSetting)
+          .set({
+            defaultLanguageId: enLang.id,
+            askForLanguage: true,
+          })
+          .where(eq(botSetting.id, 1));
+      }
+    });
   });
 
   describe("Ancestry and Inactivity Safeguards", () => {
