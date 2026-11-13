@@ -829,7 +829,7 @@ async function main() {
   await sleep(500);
 
   // 1. Verify inline error appears BEFORE Save is clicked
-  const inlineErrorState = await cdp.evaluate(`{
+  const inlineErrorState = await cdp.evaluate(`(() => {
     const card = document.querySelector('[data-template-card="bot_welcome"]');
     const errorEl = card ? card.querySelector('[data-draft-error]') : null;
     const textarea = card ? card.querySelector('textarea') : null;
@@ -846,7 +846,7 @@ async function main() {
       isSaveDisabled: Boolean(saveBtn && saveBtn.disabled),
       networkCalls: window.__actionNetworkCalls,
     };
-  }`);
+  })()`);
 
   if (!inlineErrorState.hasErrorEl) {
     await fail("Flow 5: Expected inline validation error [data-draft-error] to appear while typing invalid draft.");
@@ -863,16 +863,26 @@ async function main() {
   if (inlineErrorState.networkCalls !== 0) {
     await fail(`Flow 5: Expected 0 save action network requests while typing, recorded: ${inlineErrorState.networkCalls}`);
   }
+
+  // Verify DB translation remains strictly untouched while typing invalid draft
+  const [storedEnWhileTyping] = await pgClient`
+    SELECT mt.body FROM message_translation mt
+    JOIN language l ON l.id = mt.language_id
+    WHERE l.code = 'en';
+  `;
+  if (storedEnWhileTyping.body !== storedEnBefore.body) {
+    await fail("Flow 5: Database translation changed while typing invalid draft!");
+  }
   log("Flow 5: Verified inline error appears before Save, Save is disabled, textarea is accessibly invalid, 0 network requests triggered by typing.");
 
   // 2. Verify preview does not imply that invalid draft is ready to send
-  const previewState = await cdp.evaluate(`{
+  const previewState = await cdp.evaluate(`(() => {
     const card = document.querySelector('[data-template-card="bot_welcome"]');
     const cardText = card ? card.innerText : "";
     return {
       hasNotReadyWarning: cardText.includes("Invalid draft — not ready to send") || cardText.includes("Draft contains syntax errors"),
     };
-  }`);
+  })()`);
   if (!previewState.hasNotReadyWarning) {
     await fail("Flow 5: Expected live preview to indicate invalid draft is not ready to send.");
   }
@@ -920,7 +930,7 @@ async function main() {
   }`);
   await sleep(500);
 
-  const afterResetState = await cdp.evaluate(`{
+  const afterResetState = await cdp.evaluate(`(() => {
     const card = document.querySelector('[data-template-card="bot_welcome"]');
     const errorEl = card.querySelector('[data-draft-error]');
     const textarea = card.querySelector('textarea');
@@ -928,7 +938,7 @@ async function main() {
       hasError: Boolean(errorEl),
       val: textarea ? textarea.value : null,
     };
-  }`);
+  })()`);
   if (afterResetState.hasError) {
     await fail("Flow 5: Expected validation error to clear after Reset.");
   }
@@ -961,7 +971,7 @@ async function main() {
   }`);
   await sleep(500);
 
-  const afterCorrectionState = await cdp.evaluate(`{
+  const afterCorrectionState = await cdp.evaluate(`(() => {
     const card = document.querySelector('[data-template-card="bot_welcome"]');
     const errorEl = card.querySelector('[data-draft-error]');
     const saveBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
@@ -971,7 +981,7 @@ async function main() {
       isSaveEnabled: Boolean(saveBtn && !saveBtn.disabled),
       ariaInvalid: textarea ? textarea.getAttribute('aria-invalid') : null,
     };
-  }`);
+  })()`);
 
   if (afterCorrectionState.hasError) {
     await fail("Flow 5: Error did not clear after correcting the draft.");
