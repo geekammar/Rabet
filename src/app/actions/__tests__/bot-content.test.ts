@@ -142,6 +142,33 @@ describe("saveBotContentTranslation Server Action", () => {
     expect(mockSaveTranslation).not.toHaveBeenCalled();
   });
 
+  it("QA-18 regression: rejects malformed braces (stray closing, triple, whitespace) with zero database writes", async () => {
+    const cases = [
+      "Welcome to store_name}}!",
+      "Welcome to {{{store_name}}}!",
+      "Welcome to {{}}!",
+      "Welcome to {{ store_name }}!",
+    ];
+
+    for (const body of cases) {
+      mockGetDb.mockClear();
+      mockCreateTemplate.mockClear();
+      mockSaveTranslation.mockClear();
+
+      const result = await saveBotContentTranslation({
+        templateKey: "bot_welcome",
+        languageCode: "en",
+        body,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.code).toBe("INVALID_INPUT");
+      expect(mockGetDb).not.toHaveBeenCalled();
+      expect(mockCreateTemplate).not.toHaveBeenCalled();
+      expect(mockSaveTranslation).not.toHaveBeenCalled();
+    }
+  });
+
   it("rejects unsupported languages before database access", async () => {
     const result = await saveBotContentTranslation({
       templateKey: "bot_welcome",
