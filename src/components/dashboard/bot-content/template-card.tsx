@@ -128,6 +128,27 @@ export function TemplateCard({
     [settings.displayName]
   );
 
+  // Derive live draft validity using existing validateTemplateBody and preview context
+  const draftValidation = useMemo(() => {
+    // Do not show intrusive errors for untouched empty initial fields
+    if (currentDraft.trim().length === 0) {
+      return { valid: false, error: null };
+    }
+    const result = validateTemplateBody(
+      currentDraft,
+      definition.key,
+      previewContext
+    );
+    if (!result.valid) {
+      return { valid: false, error: result.error };
+    }
+    return { valid: true, error: null };
+  }, [currentDraft, definition.key, previewContext]);
+
+  const isDraftValid = draftValidation.valid;
+  const draftError = draftValidation.error;
+  const draftErrorId = `${textareaId}-draft-error`;
+
   // Live preview text
   const previewText = useMemo(
     () => interpolateTemplate(currentDraft, previewContext),
@@ -391,15 +412,34 @@ export function TemplateCard({
             }}
             rows={4}
             dir={isRtl ? "rtl" : "ltr"}
+            aria-invalid={draftError ? "true" : undefined}
+            aria-describedby={draftError ? draftErrorId : undefined}
             placeholder={
               currentLang === "ar"
                 ? "أدخل نص الرسالة هنا..."
                 : "Enter message text here..."
             }
-            className={`flex w-full rounded-lg border border-input bg-background p-3 text-sm shadow-xs outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 ${
+            className={`flex w-full rounded-lg border bg-background p-3 text-sm shadow-xs outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-3 ${
+              draftError
+                ? "border-destructive focus-visible:border-destructive focus-visible:ring-destructive/20"
+                : "border-input focus-visible:border-ring focus-visible:ring-ring/50"
+            } ${
               isRtl ? "font-sans leading-relaxed text-right" : "text-left"
             }`}
           />
+
+          {/* Inline live draft validation feedback */}
+          {draftError && (
+            <div
+              id={draftErrorId}
+              role="alert"
+              data-draft-error
+              className="flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-xs text-destructive"
+            >
+              <AlertCircle className="size-3.5 shrink-0 mt-0.5" />
+              <span>{draftError}</span>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
             {/* Allowed placeholders helper chips */}
@@ -432,24 +472,46 @@ export function TemplateCard({
         </div>
 
         {/* Live Preview Box */}
-        <div className="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+        <div
+          className={`space-y-1.5 rounded-lg border p-3 transition-colors ${
+            draftError
+              ? "border-destructive/30 bg-destructive/5"
+              : "border-border bg-muted/20"
+          }`}
+        >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">
               Live Preview (Sample Context)
             </span>
-            <span className="text-[11px] text-muted-foreground italic">
-              Plain text & line breaks preserved
-            </span>
+            {draftError ? (
+              <span className="text-[11px] font-medium text-destructive">
+                Invalid draft — not ready to send
+              </span>
+            ) : (
+              <span className="text-[11px] text-muted-foreground italic">
+                Plain text & line breaks preserved
+              </span>
+            )}
           </div>
 
           <div
             data-template-preview
             dir={isRtl ? "rtl" : "ltr"}
-            className={`min-h-12 rounded-md border bg-background/80 p-3 text-sm text-foreground whitespace-pre-wrap break-words ${
-              isRtl ? "text-right leading-relaxed" : "text-left"
-            }`}
+            className={`min-h-12 rounded-md border p-3 text-sm whitespace-pre-wrap break-words ${
+              draftError
+                ? "border-destructive/20 bg-background/50 text-muted-foreground"
+                : "border bg-background/80 text-foreground"
+            } ${isRtl ? "text-right leading-relaxed" : "text-left"}`}
           >
-            {previewText.trim().length > 0 ? (
+            {draftError ? (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1 text-xs font-medium text-destructive">
+                  <AlertCircle className="size-3 shrink-0" />
+                  <span>Draft contains syntax errors — will not be sent</span>
+                </div>
+                <div className="opacity-75">{previewText}</div>
+              </div>
+            ) : previewText.trim().length > 0 ? (
               previewText
             ) : (
               <span className="text-xs text-muted-foreground italic">
@@ -501,7 +563,11 @@ export function TemplateCard({
           <Button
             type="button"
             onClick={handleSave}
-            disabled={isPending || currentDraft.trim().length === 0}
+            disabled={
+              isPending ||
+              currentDraft.trim().length === 0 ||
+              !isDraftValid
+            }
             className="min-h-11 w-full sm:w-auto px-5 text-sm font-medium gap-2"
           >
             {isPending ? (

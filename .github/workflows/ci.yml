@@ -213,7 +213,7 @@ jobs:
           echo "No production or Neon database was contacted."
 
   browser:
-    name: Browser acceptance — seller inbox and seller notifications CDP test suites
+    name: Browser acceptance — bot content, seller inbox, and seller notifications CDP test suites
     runs-on: ubuntu-latest
 
     services:
@@ -287,6 +287,12 @@ jobs:
         env:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run build
+
+      - name: Run Bot Content browser acceptance suite
+        env:
+          RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
+        run: npm run test:browser:bot-content
 
       - name: Run Seller Inbox browser acceptance suite
         env:
