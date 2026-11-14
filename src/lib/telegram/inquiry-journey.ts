@@ -361,7 +361,9 @@ export type SupportActionRow = {
 };
 
 /**
- * Handles START_INQUIRY inline action button tap.
+ * Handles a product inquiry from a START_INQUIRY action or an explicit
+ * product-scoped contact fallback. The fallback has no source action and
+ * therefore freezes an empty option path rather than fabricating one.
  */
 export async function handleProductInquiryCallback(
   db: Database,
@@ -370,7 +372,7 @@ export async function handleProductInquiryCallback(
     chatId: number | string;
     messageId: number;
     user: TelegramUser;
-    actionRow: SupportActionRow;
+    actionRow?: SupportActionRow;
     productRow: typeof product.$inferSelect;
     langContext: ResolvedLanguageContext;
     ui: ReturnType<typeof getLocalizedUiStrings>;
@@ -416,36 +418,39 @@ export async function handleProductInquiryCallback(
   const keyboard: TelegramInlineKeyboardButton[][] = [
     [{ text: ui.back, callback_data: backTarget }],
   ];
-  if (actionRow.parentActionId) {
+  if (actionRow?.parentActionId) {
     keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
   }
   keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
 
-  // 3. Resolve ancestors root-to-leaf for option path
-  const ancestorsCheck = await getActionAncestorsRootToLeaf(db, actionRow.id);
-  if (!ancestorsCheck.valid || !ancestorsCheck.ancestors) {
-    await editOrThrow(transport, {
-      chatId,
-      messageId,
-      text: ui.optionUnavailable,
-      replyMarkup: { inline_keyboard: keyboard },
-    });
-    return;
-  }
-
   const selectedOptions: string[] = [];
-  for (const ancestor of ancestorsCheck.ancestors) {
-    const translations = await db
-      .select({
-        languageId: productActionTranslation.languageId,
-        label: productActionTranslation.label,
-      })
-      .from(productActionTranslation)
-      .where(eq(productActionTranslation.actionId, ancestor.id));
 
-    const preferred = translations.find((t) => t.languageId === langContext.id);
-    const fallback = translations.find((t) => t.languageId === defaultLangId);
-    selectedOptions.push(preferred?.label ?? fallback?.label ?? "Option");
+  if (actionRow) {
+    // 3. Resolve ancestors root-to-leaf for option path
+    const ancestorsCheck = await getActionAncestorsRootToLeaf(db, actionRow.id);
+    if (!ancestorsCheck.valid || !ancestorsCheck.ancestors) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    for (const ancestor of ancestorsCheck.ancestors) {
+      const translations = await db
+        .select({
+          languageId: productActionTranslation.languageId,
+          label: productActionTranslation.label,
+        })
+        .from(productActionTranslation)
+        .where(eq(productActionTranslation.actionId, ancestor.id));
+
+      const preferred = translations.find((t) => t.languageId === langContext.id);
+      const fallback = translations.find((t) => t.languageId === defaultLangId);
+      selectedOptions.push(preferred?.label ?? fallback?.label ?? "Option");
+    }
   }
 
   // The manual-payment prototype appends the selected method context to the

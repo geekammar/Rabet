@@ -67,6 +67,9 @@ export interface WebhookHandlerOptions {
   now?: () => number;
   /** Explicit test/deployment override for the synthetic manual-payment channel. */
   manualPaymentPrototypeEnabled?: boolean;
+  /** Test seam for seller-notification delivery; never set by production callers. */
+  notificationTransport?: TelegramTransport;
+  notificationBotToken?: string;
 }
 
 export type ValidatedUpdate =
@@ -457,6 +460,8 @@ export async function handleTelegramWebhookRequest(
       attemptId,
       receipt: (claim.row.payload as { receipt?: TelegramBusinessReceipt } | null)?.receipt,
       deadline,
+      notificationTransport: options?.notificationTransport,
+      notificationBotToken: options?.notificationBotToken,
     };
 
     if (validatedData.updateType === "message") {

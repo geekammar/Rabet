@@ -25,11 +25,17 @@ import {
   getCustomerByTelegramId,
   initializeSettings,
   readProductAction,
+  recordVerificationSuccess,
+  saveSellerNotificationConfig,
   setCustomerSelectedLanguage,
+  setSellerNotificationEnabled,
   togglePaymentMethodActive,
   upsertCustomer,
 } from "@/lib/data";
-import { createFakeTelegramTransport } from "@/lib/telegram/transport";
+import {
+  createFakeTelegramTransport,
+  validatePayloadLimits,
+} from "@/lib/telegram/transport";
 import { handleTelegramWebhookRequest } from "@/lib/telegram/webhook";
 import { tokens } from "@/lib/telegram/tokens";
 import { isManualPaymentPrototypeEnabled } from "@/lib/payment-methods/prototype";
@@ -37,6 +43,10 @@ import {
   listEligiblePaymentMethodsForProduct,
   resolvePaymentMethodForAction,
 } from "@/lib/payment-methods/journey";
+import {
+  MAX_PAYMENT_INSTRUCTIONS_LENGTH,
+} from "@/lib/payment-methods/constants";
+import { validatePaymentInstructions } from "@/lib/payment-methods/validation";
 
 const shouldRun = hasTestCluster();
 
@@ -77,6 +87,7 @@ async function sendCallback(params: {
   enabled: boolean;
   updateIdOverride?: number;
   messageId?: number;
+  notificationTransport?: ReturnType<typeof createFakeTelegramTransport>;
 }) {
   const transport = createFakeTelegramTransport();
   const id = params.updateIdOverride ?? nextUpdateId();
@@ -106,6 +117,7 @@ async function sendCallback(params: {
         transport,
         botToken: TEST_BOT_TOKEN,
         webhookSecret: TEST_WEBHOOK_SECRET,
+        notificationTransport: params.notificationTransport,
       },
     );
     return { res, transport, updateId: id };
@@ -288,12 +300,92 @@ async function seedRootSupportAction(productId: string): Promise<string> {
   return created.actionId;
 }
 
+async function seedNoEligibleMethodsProduct(options?: {
+  withConfiguredContact?: boolean;
+  arabicMenu?: boolean;
+}): Promise<{
+  categoryId: string;
+  productId: string;
+  menuId: string;
+  inactiveActionId: string;
+  configuredContactActionId: string | null;
+}> {
+  const { categoryId, productId } = await seedProduct();
+  const inactiveMethodId = await seedMethod({
+    adminLabel: "Inactive prototype method",
+    enTitle: "Inactive prototype method",
+    isActive: false,
+  });
+  const menuId = await seedMenu({
+    productId,
+    ...(options?.arabicMenu
+      ? {
+          arLabel: "الشراء",
+          arMenuText: "اختر طريقة الدفع:",
+        }
+      : {}),
+  });
+  const inactiveActionId = await seedPaymentAction({
+    productId,
+    parentActionId: menuId,
+    methodId: inactiveMethodId,
+    enLabel: "Inactive method option",
+  });
+  const configuredContactActionId = options?.withConfiguredContact
+    ? await seedRootSupportAction(productId)
+    : null;
+
+  return {
+    categoryId,
+    productId,
+    menuId,
+    inactiveActionId,
+    configuredContactActionId,
+  };
+}
+
 function latestEdited(transport: ReturnType<typeof createFakeTelegramTransport>) {
   return transport.editedMessages[transport.editedMessages.length - 1];
 }
 
 function flatButtons(transport: ReturnType<typeof createFakeTelegramTransport>) {
   return (latestEdited(transport)?.replyMarkup?.inline_keyboard ?? []).flat();
+}
+
+function allDeliveredChunks(
+  transport: ReturnType<typeof createFakeTelegramTransport>,
+) {
+  return [...transport.editedMessages, ...transport.sentMessages];
+}
+
+async function enableSyntheticNotifications(): Promise<string> {
+  const appDb = asAppDb(testDb!.db);
+  const destinationChatId = "700123456";
+  await saveSellerNotificationConfig(appDb, {
+    destinationChatId,
+    language: "en",
+  });
+  await recordVerificationSuccess(appDb, {
+    botId: 9001001,
+    botUsername: "synthetic_notification_bot",
+    destinationChatId,
+  });
+  await setSellerNotificationEnabled(appDb, true);
+  return destinationChatId;
+}
+
+function buildMaxLengthArabicInstructions(tailMarker: string): string {
+  const prefix = "تعليمات الدفع التجريبية بالعربية:\n";
+  const suffix = `\n${tailMarker} 🚀`;
+  const filler = "خطوة تحقق عربية 😀 ";
+  let body = prefix + filler.repeat(300);
+  while (Array.from(body).length + Array.from(suffix).length < MAX_PAYMENT_INSTRUCTIONS_LENGTH) {
+    body += "😀";
+  }
+  body = Array.from(body)
+    .slice(0, MAX_PAYMENT_INSTRUCTIONS_LENGTH - Array.from(suffix).length)
+    .join("");
+  return body + suffix;
 }
 
 beforeAll(async () => {
@@ -1045,7 +1137,7 @@ describe.skipIf(!shouldRun)("manual-payment journey acceptance", () => {
     expect(resumedInquiries[0].selectedOptions).toEqual(first.selectedOptions);
   });
 
-  it("does not duplicate an inquiry or notification on a redelivered update", async () => {
+  it("deduplicates a replayed update and creates no notification event while notifications are not enabled", async () => {
     const { productId } = await seedProduct();
     const methodId = await seedMethod({ adminLabel: "Duplicate-safe method" });
     const menuId = await seedMenu({ productId });
@@ -1318,4 +1410,567 @@ describe.skipIf(!shouldRun)("manual-payment journey acceptance", () => {
     expect(firstInquiries[0].productId).toBe(productId);
     expect(secondInquiries[0].productId).toBe(productId);
   });
+
+  it("preserves an existing configured root contact route on the no-methods screen", async () => {
+    const fixture = await seedNoEligibleMethodsProduct({
+      withConfiguredContact: true,
+    });
+    const telegramId = nextTelegramId();
+
+    const menuStep = await sendCallback({
+      telegramId,
+      data: tokens.action(fixture.menuId),
+      enabled: true,
+    });
+    const buttons = flatButtons(menuStep.transport);
+    expect(latestEdited(menuStep.transport).text).toContain(
+      "No payment methods are currently available",
+    );
+    expect(
+      buttons.some(
+        (button) =>
+          button.callback_data === tokens.action(fixture.configuredContactActionId!),
+      ),
+    ).toBe(true);
+    expect(
+      buttons.some((button) => button.callback_data === tokens.productInquiry(fixture.productId)),
+    ).toBe(false);
+
+    const contact = await sendCallback({
+      telegramId,
+      data: tokens.action(fixture.configuredContactActionId!),
+      enabled: true,
+    });
+    expect(contact.res.status).toBe(200);
+    expect(latestEdited(contact.transport).text).toContain("Thank you for your inquiry");
+
+    const customerRecord = await getCustomerByTelegramId(
+      asAppDb(testDb!.db),
+      telegramId,
+    );
+    const inquiries = await testDb!.db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.customerId, customerRecord!.id));
+    expect(inquiries).toHaveLength(1);
+    expect(inquiries[0].productId).toBe(fixture.productId);
+  });
+
+  it("renders and executes a guaranteed product-inquiry fallback when no contact action exists", async () => {
+    const fixture = await seedNoEligibleMethodsProduct();
+    const telegramId = nextTelegramId();
+
+    const menuStep = await sendCallback({
+      telegramId,
+      data: tokens.action(fixture.menuId),
+      enabled: true,
+    });
+    const buttons = flatButtons(menuStep.transport);
+    const fallback = buttons.find(
+      (button) => button.callback_data === tokens.productInquiry(fixture.productId),
+    );
+    expect(fallback).toBeDefined();
+    expect(fallback?.text).toBe("💬 Contact seller about this product");
+
+    const customerRecord = await getCustomerByTelegramId(
+      asAppDb(testDb!.db),
+      telegramId,
+    );
+    expect(
+      await testDb!.db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.customerId, customerRecord!.id)),
+    ).toHaveLength(0);
+    expect(await testDb!.db.select().from(sellerNotificationDelivery)).toHaveLength(0);
+
+    const firstContact = await sendCallback({
+      telegramId,
+      data: tokens.productInquiry(fixture.productId),
+      enabled: true,
+    });
+    expect(firstContact.res.status).toBe(200);
+    expect(latestEdited(firstContact.transport).text).toContain(
+      "Thank you for your inquiry",
+    );
+
+    const firstInquiries = await testDb!.db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.customerId, customerRecord!.id));
+    expect(firstInquiries).toHaveLength(1);
+    expect(firstInquiries[0].productId).toBe(fixture.productId);
+    expect(firstInquiries[0].selectedOptions).toBeNull();
+    const originalReference = firstInquiries[0].reference;
+
+    const resumedContact = await sendCallback({
+      telegramId,
+      data: tokens.productInquiry(fixture.productId),
+      enabled: true,
+    });
+    expect(latestEdited(resumedContact.transport).text).toContain(originalReference);
+
+    const resumedInquiries = await testDb!.db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.customerId, customerRecord!.id));
+    expect(resumedInquiries).toHaveLength(1);
+    expect(resumedInquiries[0].id).toBe(firstInquiries[0].id);
+  });
+
+  it("deduplicates a replayed product-inquiry fallback update", async () => {
+    const fixture = await seedNoEligibleMethodsProduct();
+    const telegramId = nextTelegramId();
+    const fallbackUpdateId = nextUpdateId();
+
+    const first = await sendCallback({
+      telegramId,
+      data: tokens.productInquiry(fixture.productId),
+      enabled: true,
+      updateIdOverride: fallbackUpdateId,
+    });
+    expect(first.res.status).toBe(200);
+
+    const duplicate = await sendCallback({
+      telegramId,
+      data: tokens.productInquiry(fixture.productId),
+      enabled: true,
+      updateIdOverride: fallbackUpdateId,
+    });
+    expect((await duplicate.res.json()) as { status?: string }).toMatchObject({
+      status: "already_processed",
+    });
+    expect(duplicate.transport.editedMessages).toHaveLength(0);
+
+    const customerRecord = await getCustomerByTelegramId(
+      asAppDb(testDb!.db),
+      telegramId,
+    );
+    const inquiries = await testDb!.db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.customerId, customerRecord!.id));
+    expect(inquiries).toHaveLength(1);
+  });
+
+  it("rejects the product-inquiry fallback safely when capability is OFF or the product hierarchy is disabled", async () => {
+    const fixture = await seedNoEligibleMethodsProduct();
+    const telegramId = nextTelegramId();
+
+    const off = await sendCallback({
+      telegramId,
+      data: tokens.productInquiry(fixture.productId),
+      enabled: false,
+    });
+    expect(latestEdited(off.transport).text).toContain(
+      "This option is no longer available.",
+    );
+
+    await testDb!.db
+      .update(product)
+      .set({ isActive: false })
+      .where(eq(product.id, fixture.productId));
+    const inactiveProduct = await sendCallback({
+      telegramId,
+      data: tokens.productInquiry(fixture.productId),
+      enabled: true,
+    });
+    expect(latestEdited(inactiveProduct.transport).text).toContain(
+      "This product is no longer available.",
+    );
+    await testDb!.db
+      .update(product)
+      .set({ isActive: true })
+      .where(eq(product.id, fixture.productId));
+
+    await testDb!.db
+      .update(category)
+      .set({ isActive: false })
+      .where(eq(category.id, fixture.categoryId));
+    const inactiveCategory = await sendCallback({
+      telegramId,
+      data: tokens.productInquiry(fixture.productId),
+      enabled: true,
+    });
+    expect(latestEdited(inactiveCategory.transport).text).toContain(
+      "This product is no longer available.",
+    );
+    await testDb!.db
+      .update(category)
+      .set({ isActive: true })
+      .where(eq(category.id, fixture.categoryId));
+
+    const customerRecord = await getCustomerByTelegramId(
+      asAppDb(testDb!.db),
+      telegramId,
+    );
+    expect(
+      await testDb!.db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.customerId, customerRecord!.id)),
+    ).toHaveLength(0);
+  });
+
+  it("renders the guaranteed fallback and resumes the inquiry in Arabic", async () => {
+    const fixture = await seedNoEligibleMethodsProduct({ arabicMenu: true });
+    const telegramId = nextTelegramId();
+    const appDb = asAppDb(testDb!.db);
+
+    await upsertCustomer(appDb, {
+      telegramId,
+      telegramUsername: null,
+      firstName: "Arabic",
+      lastName: "Customer",
+      languageCode: "ar",
+    });
+    await setCustomerSelectedLanguage(appDb, telegramId, arLangId);
+
+    const menuStep = await sendCallback({
+      telegramId,
+      data: tokens.action(fixture.menuId),
+      enabled: true,
+    });
+    expect(latestEdited(menuStep.transport).text).toContain(
+      "لا توجد طرق دفع متاحة حالياً لهذا المنتج.",
+    );
+    const fallback = flatButtons(menuStep.transport).find(
+      (button) => button.callback_data === tokens.productInquiry(fixture.productId),
+    );
+    expect(fallback?.text).toBe("💬 تواصل مع البائع بخصوص هذا المنتج");
+
+    const contact = await sendCallback({
+      telegramId,
+      data: tokens.productInquiry(fixture.productId),
+      enabled: true,
+    });
+    expect(latestEdited(contact.transport).text).toContain("منتج تجريبي");
+  });
+
+  it("splits maximum-length Arabic/emoji instructions without losing content, controls, or surrogate pairs", async () => {
+    const tailMarker = "PAYMENT_LONG_TAIL_778899";
+    const instructions = buildMaxLengthArabicInstructions(tailMarker);
+    expect(Array.from(instructions).length).toBe(MAX_PAYMENT_INSTRUCTIONS_LENGTH);
+    expect(validatePaymentInstructions(instructions, "ar")).toMatchObject({
+      success: true,
+    });
+
+    const { productId } = await seedProduct();
+    const methodId = await seedMethod({
+      adminLabel: "Long Arabic instructions method",
+      enTitle: "Long instruction method 🚀",
+      enInstructions: instructions,
+      arTitle: "طريقة تعليمات طويلة 🚀",
+      arInstructions: instructions,
+    });
+    const menuId = await seedMenu({
+      productId,
+      enLabel: "Purchase",
+      arLabel: "الشراء",
+    });
+    const actionId = await seedPaymentAction({
+      productId,
+      parentActionId: menuId,
+      methodId,
+      enLabel: "Long payment option",
+      arLabel: "خيار دفع طويل",
+    });
+
+    const telegramId = nextTelegramId();
+    const appDb = asAppDb(testDb!.db);
+    await upsertCustomer(appDb, {
+      telegramId,
+      telegramUsername: null,
+      firstName: "Long",
+      lastName: "Instructions",
+      languageCode: "ar",
+    });
+    await setCustomerSelectedLanguage(appDb, telegramId, arLangId);
+
+    const step = await sendCallback({
+      telegramId,
+      data: tokens.action(actionId),
+      enabled: true,
+    });
+    expect(step.res.status).toBe(200);
+
+    const chunks = allDeliveredChunks(step.transport);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(4096);
+      expect(validatePayloadLimits(chunk.text, chunk.replyMarkup).ok).toBe(true);
+
+      const firstCode = chunk.text.charCodeAt(0);
+      const lastCode = chunk.text.charCodeAt(chunk.text.length - 1);
+      expect(firstCode >= 0xdc00 && firstCode <= 0xdfff).toBe(false);
+      expect(lastCode >= 0xd800 && lastCode <= 0xdbff).toBe(false);
+    }
+
+    const reconstructed = chunks.map((chunk) => chunk.text).join("");
+    expect(reconstructed).toContain(instructions);
+    expect(reconstructed).toContain(tailMarker);
+    expect(reconstructed).toContain("طريقة تعليمات طويلة 🚀");
+    expect(reconstructed).toContain("نسخة تجريبية فقط");
+    expect(reconstructed.indexOf("منتج تجريبي")).toBeLessThan(
+      reconstructed.indexOf("طريقة تعليمات طويلة 🚀"),
+    );
+    expect(reconstructed.indexOf("طريقة تعليمات طويلة 🚀")).toBeLessThan(
+      reconstructed.indexOf(instructions),
+    );
+    expect(reconstructed.indexOf(instructions)).toBeLessThan(
+      reconstructed.indexOf("نسخة تجريبية فقط"),
+    );
+
+    for (let index = 0; index < chunks.length - 1; index += 1) {
+      expect(chunks[index].replyMarkup).toBeUndefined();
+    }
+    const finalChunk = chunks[chunks.length - 1];
+    const finalButtons = (finalChunk.replyMarkup?.inline_keyboard ?? []).flat();
+    const contactButton = finalButtons.find(
+      (button) => button.callback_data === tokens.paymentContact(actionId),
+    );
+    expect(contactButton?.text).toBe("💬 تواصل مع البائع بخصوص هذه الطريقة");
+    expect(
+      finalButtons.some(
+        (button) => button.callback_data === tokens.product(productId),
+      ),
+    ).toBe(true);
+    expect(
+      finalButtons.some((button) => button.callback_data === tokens.home()),
+    ).toBe(true);
+
+    const customerRecord = await getCustomerByTelegramId(appDb, telegramId);
+    expect(
+      await testDb!.db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.customerId, customerRecord!.id)),
+    ).toHaveLength(0);
+    expect(await testDb!.db.select().from(sellerNotificationDelivery)).toHaveLength(0);
+
+    const contact = await sendCallback({
+      telegramId,
+      data: contactButton!.callback_data!,
+      enabled: true,
+    });
+    expect(contact.res.status).toBe(200);
+    expect(latestEdited(contact.transport).text).toContain("المرجع: INQ-");
+
+    const inquiries = await testDb!.db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.customerId, customerRecord!.id));
+    expect(inquiries).toHaveLength(1);
+    expect(inquiries[0].productId).toBe(productId);
+  });
+
+  it("creates no inquiry or notification for a no-methods screen even when notifications are enabled", async () => {
+    await enableSyntheticNotifications();
+    const fixture = await seedNoEligibleMethodsProduct();
+    const telegramId = nextTelegramId();
+
+    const menuStep = await sendCallback({
+      telegramId,
+      data: tokens.action(fixture.menuId),
+      enabled: true,
+    });
+    expect(latestEdited(menuStep.transport).text).toContain(
+      "No payment methods are currently available",
+    );
+
+    const customerRecord = await getCustomerByTelegramId(
+      asAppDb(testDb!.db),
+      telegramId,
+    );
+    expect(
+      await testDb!.db
+        .select()
+        .from(inquiry)
+        .where(eq(inquiry.customerId, customerRecord!.id)),
+    ).toHaveLength(0);
+    expect(await testDb!.db.select().from(sellerNotificationDelivery)).toHaveLength(0);
+  });
+
+  it("creates exactly one enabled new-inquiry notification and protects it from replay/resume", async () => {
+    const destinationChatId = await enableSyntheticNotifications();
+    const { productId } = await seedProduct();
+    const methodId = await seedMethod({
+      adminLabel: "Notification method",
+      enTitle: "Notification method",
+      enInstructions: "Synthetic notification instructions",
+    });
+    const menuId = await seedMenu({ productId });
+    const actionId = await seedPaymentAction({
+      productId,
+      parentActionId: menuId,
+      methodId,
+      enLabel: "Notification option",
+    });
+
+    const notificationTransport = createFakeTelegramTransport();
+    const telegramId = nextTelegramId();
+    const contactUpdateId = nextUpdateId();
+
+    const first = await sendCallback({
+      telegramId,
+      data: tokens.paymentContact(actionId),
+      enabled: true,
+      updateIdOverride: contactUpdateId,
+      notificationTransport,
+    });
+    expect(first.res.status).toBe(200);
+
+    const customerRecord = await getCustomerByTelegramId(
+      asAppDb(testDb!.db),
+      telegramId,
+    );
+    const inquiries = await testDb!.db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.customerId, customerRecord!.id));
+    expect(inquiries).toHaveLength(1);
+
+    const deliveries = await testDb!.db
+      .select()
+      .from(sellerNotificationDelivery)
+      .where(eq(sellerNotificationDelivery.inquiryId, inquiries[0].id));
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].eventType).toBe("new_inquiry");
+    expect(deliveries[0].destinationChatId).toBe(destinationChatId);
+    expect(deliveries[0].status).toBe("sent");
+    expect(notificationTransport.sentMessages).toHaveLength(1);
+
+    const originalDelivery = deliveries[0];
+    const originalReference = originalDelivery.reference;
+    const originalInquiryReference = inquiries[0].reference;
+    const originalTelegramMessageId = originalDelivery.telegramMessageId;
+
+    const replay = await sendCallback({
+      telegramId,
+      data: tokens.paymentContact(actionId),
+      enabled: true,
+      updateIdOverride: contactUpdateId,
+      notificationTransport,
+    });
+    expect((await replay.res.json()) as { status?: string }).toMatchObject({
+      status: "already_processed",
+    });
+    expect(notificationTransport.sentMessages).toHaveLength(1);
+
+    const afterReplay = await testDb!.db
+      .select()
+      .from(sellerNotificationDelivery)
+      .where(eq(sellerNotificationDelivery.inquiryId, inquiries[0].id));
+    expect(afterReplay).toHaveLength(1);
+    expect(afterReplay[0].id).toBe(originalDelivery.id);
+    expect(afterReplay[0].reference).toBe(originalReference);
+    expect(afterReplay[0].telegramMessageId).toBe(originalTelegramMessageId);
+
+    const resume = await sendCallback({
+      telegramId,
+      data: tokens.paymentContact(actionId),
+      enabled: true,
+      notificationTransport,
+    });
+    expect(latestEdited(resume.transport).text).toContain(originalInquiryReference);
+    expect(notificationTransport.sentMessages).toHaveLength(1);
+
+    const afterResume = await testDb!.db
+      .select()
+      .from(sellerNotificationDelivery)
+      .where(eq(sellerNotificationDelivery.inquiryId, inquiries[0].id));
+    expect(afterResume).toHaveLength(1);
+    expect(afterResume[0].id).toBe(originalDelivery.id);
+    expect(afterResume[0].reference).toBe(originalReference);
+  });
+
+  it("resumes the original inquiry and preserves the Method A snapshot when contacting Method B", async () => {
+    await enableSyntheticNotifications();
+    const { productId } = await seedProduct();
+    const methodAId = await seedMethod({
+      adminLabel: "Resume method A",
+      enTitle: "Method A",
+      enInstructions: "Method A synthetic instructions",
+    });
+    const methodBId = await seedMethod({
+      adminLabel: "Resume method B",
+      enTitle: "Method B",
+      enInstructions: "Method B synthetic instructions",
+    });
+    const menuId = await seedMenu({ productId });
+    const actionAId = await seedPaymentAction({
+      productId,
+      parentActionId: menuId,
+      methodId: methodAId,
+      enLabel: "Pay with Method A",
+    });
+    const actionBId = await seedPaymentAction({
+      productId,
+      parentActionId: menuId,
+      methodId: methodBId,
+      enLabel: "Pay with Method B",
+    });
+
+    const notificationTransport = createFakeTelegramTransport();
+    const telegramId = nextTelegramId();
+
+    const contactA = await sendCallback({
+      telegramId,
+      data: tokens.paymentContact(actionAId),
+      enabled: true,
+      notificationTransport,
+    });
+    expect(contactA.res.status).toBe(200);
+    expect(notificationTransport.sentMessages).toHaveLength(1);
+
+    const customerRecord = await getCustomerByTelegramId(
+      asAppDb(testDb!.db),
+      telegramId,
+    );
+    const firstInquiries = await testDb!.db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.customerId, customerRecord!.id));
+    expect(firstInquiries).toHaveLength(1);
+    const originalSnapshot = firstInquiries[0].selectedOptions;
+    expect(originalSnapshot).toEqual(["Purchase", "Pay with Method A", "Method A"]);
+
+    const originalDeliveries = await testDb!.db
+      .select()
+      .from(sellerNotificationDelivery)
+      .where(eq(sellerNotificationDelivery.inquiryId, firstInquiries[0].id));
+    expect(originalDeliveries).toHaveLength(1);
+    const originalDeliveryId = originalDeliveries[0].id;
+    const originalDeliveryReference = originalDeliveries[0].reference;
+
+    const contactB = await sendCallback({
+      telegramId,
+      data: tokens.paymentContact(actionBId),
+      enabled: true,
+      notificationTransport,
+    });
+    expect(contactB.res.status).toBe(200);
+    expect(latestEdited(contactB.transport).text).toContain(
+      firstInquiries[0].reference,
+    );
+    expect(notificationTransport.sentMessages).toHaveLength(1);
+
+    const resumedInquiries = await testDb!.db
+      .select()
+      .from(inquiry)
+      .where(eq(inquiry.customerId, customerRecord!.id));
+    expect(resumedInquiries).toHaveLength(1);
+    expect(resumedInquiries[0].id).toBe(firstInquiries[0].id);
+    expect(resumedInquiries[0].selectedOptions).toEqual(originalSnapshot);
+    expect(resumedInquiries[0].selectedOptions).not.toContain("Method B");
+
+    const afterDelivery = await testDb!.db
+      .select()
+      .from(sellerNotificationDelivery)
+      .where(eq(sellerNotificationDelivery.inquiryId, firstInquiries[0].id));
+    expect(afterDelivery).toHaveLength(1);
+    expect(afterDelivery[0].id).toBe(originalDeliveryId);
+    expect(afterDelivery[0].reference).toBe(originalDeliveryReference);
+  });
+
 });

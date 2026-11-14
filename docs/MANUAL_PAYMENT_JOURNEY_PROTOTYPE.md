@@ -71,10 +71,14 @@ intact. If an active inquiry already exists for the same customer and product, i
 with its historical snapshot; the newly selected method is not written into that existing
 snapshot. This preserves historical conversation context rather than rewriting it.
 
-When no eligible method resolves, the prototype shows a localized no-methods message and
-offers an existing product inquiry/support action when one is configured. Method-disabled,
-deleted, inactive, cross-product, or forged references produce a localized unavailable
-response with working navigation.
+When no eligible method resolves, the prototype shows a localized no-methods message. It
+preserves an existing configured root `START_INQUIRY` / `OPEN_SUPPORT` contact route when
+one exists; otherwise it renders a guaranteed product-scoped contact fallback
+(`pi:<productUuid>`). The fallback revalidates the product/category hierarchy, creates or
+resumes the existing product inquiry with no source action and an empty option path, and
+never attaches an unavailable payment method. Merely rendering the screen creates no
+inquiry. Method-disabled, deleted, inactive, cross-product, or forged references produce a
+localized unavailable response with working navigation.
 
 ## 5. Capability OFF
 
@@ -90,9 +94,11 @@ With the capability off (the default and the deployed customer behavior):
 
 - Database acceptance: `tests/db/manual-payment-journey.test.ts` runs against disposable
   PostgreSQL with mocked Telegram transport. It covers single/multiple/root/nested methods,
-  language fallback, disabled/deleted/inactive/forged references, empty menus, navigation,
-  no inquiry on view, contact/resume context, duplicate updates, capability OFF/ON, and
-  central-edit propagation.
+  language fallback, disabled/deleted/inactive/forged references, empty menus, the guaranteed
+  `pi:` contact fallback, configured-contact preservation, navigation, no inquiry on view,
+  contact/resume context, enabled seller-notification deduplication, different-method resume,
+  maximum-length split instructions and surrogate safety, duplicate updates, capability
+  OFF/ON, and central-edit propagation.
 - Existing suites: `tests/db/payment-methods.test.ts`, `tests/db/telegram-journey.test.ts`,
   and the inquiry/notification suites continue to cover the default-off behavior.
 - Browser: `npm run test:browser:payments` checks the relevant dashboard screens at 360 px

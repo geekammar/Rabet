@@ -1368,3 +1368,27 @@ no order/paid state, no Telegram Stars, no production capability activation.
 
 See [MANUAL_PAYMENT_JOURNEY_PROTOTYPE.md](./MANUAL_PAYMENT_JOURNEY_PROTOTYPE.md). Future
 channels and SaaS remain future direction only, not implemented capabilities.
+
+### Follow-up: guaranteed contact fallback, notification dedup evidence, and long-instruction acceptance
+
+- **Guaranteed product contact:** when a no-eligible-methods screen has no configured root
+  inquiry/support action, it now renders a localized product-scoped `pi:<productUuid>`
+  fallback. The callback is capability-gated, revalidates the live product/category
+  hierarchy, and reuses the existing product-inquiry create-or-resume path with no source
+  action and an empty option path. Displaying the screen creates no inquiry; the explicit
+  action does.
+- **Notification evidence:** added an integration case with synthetic verified/enabled
+  seller-notification settings and a mocked notification transport. It proves one enabled
+  new-inquiry delivery event for the first contact, no additional event or dispatch on a
+  replayed update, and no new-inquiry event when a later callback resumes the same inquiry.
+  Event creation and mock message dispatch are asserted separately.
+- **Long instructions:** added a webhook-through-mocked-transport test at the maximum 4096
+  permitted instructions with Arabic and non-BMP emoji content. It verifies bounded payloads,
+  full ordered reconstruction, intact surrogate pairs, controls on the final chunk, contact
+  from that chunk, and no inquiry/notification while merely viewing the split instructions.
+- **Different-method resume:** added a focused case proving Method B contact resumes the
+  original Method A inquiry and leaves the historical Method A option snapshot unchanged,
+  with no duplicate inquiry or new-inquiry notification.
+- **Accurate webhook reporting:** `src/lib/telegram/webhook.ts` is a source change in this PR
+  (capability import, optional handler fields, and passing capability/notification test seams
+  into the journey). No live webhook registration, URL, route, or secret change was performed.

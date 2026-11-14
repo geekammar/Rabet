@@ -572,6 +572,11 @@ Integrity constraint: `UNIQUE (payment_method_id, language_id)`.
    - When enabled in an isolated test deployment, only currently eligible configured actions
      render. The screen carries a localized prototype notice and never shows “Paid”,
      “Payment verified”, or an “I paid” control.
+   - When no eligible method resolves, the no-methods screen preserves an existing configured
+     root inquiry/support action when available; otherwise it renders a product-scoped
+     `pi:<productUuid>` fallback. Displaying the screen creates no inquiry, and the explicit
+     fallback revalidates the product/category before reusing the existing create-or-resume
+     inquiry path with an empty option path.
    - Unknown or future channels default to unavailable; the shared resolver has no Telegram
      transport types.
 3. **Reference binding & edit propagation:**
@@ -741,6 +746,7 @@ time from facts the server already holds, and each one names exactly what it doe
 | `<actionUuid>` | 36 | Resolve and execute that action (§8.2). |
 | `b:<actionUuid>` | 38 | **Back** — render the *parent menu* of `<actionUuid>` (the active children of its parent). At a root button (parent is null) → the product card. |
 | `pm:<actionUuid>` | 39 | **Prototype contact** — explicitly start/resume the product inquiry for the selected eligible `PAYMENT_METHOD` action. Rejected safely unless the isolated manual-payment capability is enabled. |
+| `pi:<productUuid>` | 39 | **Prototype product-inquiry fallback** — guaranteed contact when a no-methods screen has no configured root inquiry/support action. Revalidates the product hierarchy, uses an empty option path, and is rejected safely unless the isolated capability is enabled. |
 | `m:<actionUuid>` | 38 | **Menu** — render page 1 of `<actionUuid>`'s own active children. |
 | `m:<actionUuid>:<n>` | 38–42 | Render page `n` of that menu (§8.3 pagination). |
 | `p:<productUuid>` | 38 | **Product** — render that product's card and its root buttons ("return to product"). |

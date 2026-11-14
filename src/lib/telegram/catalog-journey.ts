@@ -93,6 +93,7 @@ export function getLocalizedUiStrings(isRtl: boolean) {
         "نسخة تجريبية فقط — لا يلزم إجراء تحويل أو دفع حقيقي. لا تؤكد هذه الشاشة أي عملية دفع ولا تسجلها.",
       contactSellerAboutMethod: "💬 تواصل مع البائع بخصوص هذه الطريقة",
       contactSeller: "💬 تواصل مع البائع",
+      contactSellerAboutProduct: "💬 تواصل مع البائع بخصوص هذا المنتج",
       noPaymentMethods: "لا توجد طرق دفع متاحة حالياً لهذا المنتج.",
       noPaymentInstructions:
         "لم يضف البائع تعليمات تفصيلية لهذه الطريقة. يمكنك التواصل مع البائع للاستفسار.",
@@ -120,6 +121,7 @@ export function getLocalizedUiStrings(isRtl: boolean) {
       "Prototype only — no real transfer or charge is required. This screen does not confirm or record a payment.",
     contactSellerAboutMethod: "💬 Contact seller about this method",
     contactSeller: "💬 Contact seller",
+    contactSellerAboutProduct: "💬 Contact seller about this product",
     noPaymentMethods: "No payment methods are currently available for this product.",
     noPaymentInstructions:
       "The seller has not added detailed instructions for this method. You can contact the seller to ask.",
@@ -875,6 +877,63 @@ export async function handleCallbackQuery(
     return;
   }
 
+  // 4.5. Guaranteed product-inquiry fallback: pi:<productId>
+  if (parsed.type === "productInquiry") {
+    if (!manualPaymentPrototypeEnabled) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    const productCheck = await isProductHierarchyActive(db, parsed.productId);
+    if (!productCheck.valid || !productCheck.productRow) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.productUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    const productTarget = tokens.product(parsed.productId);
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.paymentContactUnavailable,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: ui.returnToProduct, callback_data: productTarget }],
+            [{ text: ui.home, callback_data: tokens.home() }],
+          ],
+        },
+      });
+      return;
+    }
+
+    await handleProductInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      productRow: productCheck.productRow,
+      langContext,
+      ui,
+      backTarget: productTarget,
+      returnToProductTarget: productTarget,
+      options: journeyOptions,
+    });
+    return;
+  }
+
   // 5. Back from action: b:<actionId>
   if (parsed.type === "back") {
     const [act] = await db
@@ -1438,6 +1497,16 @@ async function handleActionExecution(
           {
             text: contactRoute.label,
             callback_data: tokens.action(contactRoute.actionId),
+          },
+        ]);
+      } else {
+        // Guaranteed product-scoped contact fallback. This does not invent a
+        // source action or attach a payment method; the callback revalidates
+        // the live product hierarchy before reusing the inquiry journey.
+        keyboard.push([
+          {
+            text: ui.contactSellerAboutProduct,
+            callback_data: tokens.productInquiry(actRow.productId),
           },
         ]);
       }
