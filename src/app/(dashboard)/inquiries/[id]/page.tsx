@@ -72,7 +72,7 @@ export default async function ThreadPage({
 
   if (dbError || !thread || !messagesResult) {
     return (
-      <div className="space-y-6 max-w-4xl min-w-0 w-full overflow-x-hidden">
+      <div className="space-y-6 max-w-4xl min-w-0 w-full overflow-x-clip">
         <div>
           <Link
             href="/inquiries"
@@ -103,7 +103,7 @@ export default async function ThreadPage({
       : `Customer ${customer.telegramId}`);
 
   return (
-    <div className="space-y-6 max-w-4xl min-w-0 w-full overflow-x-hidden">
+    <div className="space-y-6 max-w-4xl min-w-0 w-full overflow-x-clip">
       {/* Back to Inbox */}
       <div>
         <Link

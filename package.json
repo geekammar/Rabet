@@ -18,6 +18,7 @@
     "test:browser:payments": "node scripts/test-payment-methods-browser-acceptance.mjs",
     "test:browser:inbox": "node scripts/test-seller-inbox-browser-acceptance.mjs",
     "test:browser:notifications": "node scripts/test-seller-notifications-browser-acceptance.mjs",
+    "test:browser:touch": "node scripts/test-android-touch-scrolling.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:check": "drizzle-kit check",

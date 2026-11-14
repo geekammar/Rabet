@@ -53,11 +53,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased overflow-x-hidden`}
+      className={`${geistSans.variable} ${geistMono.variable} antialiased overflow-x-clip`}
     >
       {/* dvh keeps the shell sized against the mobile dynamic viewport so the
           on-screen chrome (address bar) cannot push content out of view. */}
-      <body className="flex min-h-dvh flex-col overflow-x-hidden max-w-full">{children}</body>
+      <body className="flex min-h-dvh flex-col overflow-x-clip max-w-full">{children}</body>
     </html>
   );
 }

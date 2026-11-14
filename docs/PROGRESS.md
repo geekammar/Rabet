@@ -1247,3 +1247,88 @@ Related: [SELLER_NOTIFICATIONS_HANDOFF.md](./SELLER_NOTIFICATIONS_HANDOFF.md) fo
   6. *Draft & Separation Integrity:* English and Arabic drafts remain independently preserved across tab switching, suggestion loading, placeholder insertion, and Reset.
   7. *Automatic Recovery:* Correcting the draft immediately clears the error, removes `aria-invalid`, restores normal preview, and re-enables Save.
 - **Verification:** Verified via automated CDP browser acceptance suite (`npm run test:browser:bot-content`) testing the exact original QA input (`Hello {{unknown_thing}} and {{store_name`), zero typing network calls, inline error appearance, Save disablement, tab separation, Reset, and corrected draft persistence.
+
+## Mobile Single-Finger Scrolling Repair (Android Launch-Blocker)
+
+### 1. Defect Symptom & Owner Confirmation
+- **Owner Report:**
+  - On real Android mobile devices, Rabet dashboard pages could not be scrolled using a single finger.
+  - Two-finger scrolling functioned normally.
+  - Other websites scrolled properly in the exact same mobile browser.
+  - Direct URL load and browser refresh did not resolve the freeze.
+
+### 2. Diagnosis & Explanation
+
+#### A. CSS Specification & Computed Styles (Supported by Evidence)
+- Under CSS Overflow Module Level 3 (§3.3), `overflow-x: hidden` coupled with default vertical overflow forces `overflow-y` to compute to `auto`.
+- In the pre-repair layout:
+  - `html` had `h-full` (`height: 100%`) and `overflow-x: hidden` $\rightarrow$ computed to `overflow-x: hidden; overflow-y: auto`.
+  - `body` had `overflow-x: hidden` $\rightarrow$ computed to `overflow-x: hidden; overflow-y: auto`.
+  - `<main id="main">` had `overflow-x: hidden` $\rightarrow$ computed to `overflow-x: hidden; overflow-y: auto`.
+  - `body` declared `overscroll-behavior-y: none;` unconditionally in `src/app/globals.css`.
+- Replacing `overflow-x: hidden` with `overflow-x: clip` resolves axis coupling: `overflow-x` is `clip` and `overflow-y` remains `visible`. No accidental intermediate scroll containers are created.
+
+#### B. Chromium Input Engine Inferences (Hypothesized / Unproven Internals)
+- The hypothesis that Chromium's hit-testing targets inner `overflow-y: auto` containers (`<main>` and `<body>`) and deadlocks scroll chaining due to `overscroll-behavior-y: none`, while multi-touch gestures bypass element scroll targets via the Visual Viewport recognizer, is a reasoned inference from Blink architecture documentation and web standards. However, internal engine gesture state transitions are not directly logged by web-level APIs and remain an unproven explanation of the two-finger disparity.
+
+### 3. Changes Made
+1. **CSS Overflow Upgrade to `overflow-x: clip`:**
+   - Replaced `overflow-x: hidden` with `overflow-x: clip` on `html` and `body` in `src/app/globals.css` and `src/app/layout.tsx`.
+   - Replaced `overflow-x-hidden` with `min-w-0 overflow-x-clip` on `<main id="main">` in `src/app/(dashboard)/layout.tsx`.
+   - Replaced `overflow-x-hidden` with `overflow-x-clip` on `<header>` in `src/components/dashboard/header.tsx` and content wrappers in `inquiries/[id]`, `catalog-editor`, and `product-action-editor`.
+   - Unlike `hidden`, `overflow-x: clip` prevents horizontal overflow without creating an independent scroll container or forcing `overflow-y` to `auto`.
+2. **Removed Rigid Root Height:**
+   - Removed `h-full` (`height: 100%`) from `html` in `src/app/layout.tsx`. `body` retains `min-h-dvh` to ensure full viewport height for short pages while allowing the root document to expand naturally.
+3. **Scoped `overscroll-behavior-y: none` to Standalone PWA Mode:**
+   - Scoped `overscroll-behavior-y: none` inside `@media (display-mode: standalone)` in `src/app/globals.css`.
+4. **Explicit Body Scroll Lock During Modals:**
+   - Added `body[data-scroll-locked] { overflow: hidden !important; overscroll-behavior: contain; }` in `src/app/globals.css` to guarantee background scroll locking while sheets/dialogs are open, releasing immediately upon dismissal.
+
+### 4. Verification & Automated Test Evidence
+
+#### A. Baseline Native Touch Inspection (Pre-Repair Commit 0eb0dc3)
+- An isolated CI job (`baseline-touch`) compiles and tests the exact unmodified base commit `0eb0dc3b9780ca79776b1794fa0c3228da8d91e7` with real single-pointer touch swipes (`Input.dispatchTouchEvent`):
+  - Records route, browser version, viewport, starting position, scroll container, final scroll position, and delta.
+  - Distinguishes environment setup from scrolling outcomes and reports numerical observations without artificial assertions.
+
+#### B. Repaired Build Automated Acceptance Suite (`scripts/test-android-touch-scrolling.mjs`)
+- **Direct Load /bot-content (390x844):**
+  - Computed styles: `htmlOverflowX: "clip"`, `htmlOverflowY: "visible"`, `bodyOverflowX: "clip"`, `bodyOverflowY: "visible"`, `mainOverflowX: "clip"`, `mainOverflowY: "visible"`.
+  - Single-finger swipe up: verified positive scroll delta (`+571px` $\ge 100\text{px}$).
+  - Single-finger swipe down: verified reduction in scroll position (`77px`).
+- **Compact Viewport /settings (360x740):**
+  - Layout width: `bodyWidth === viewportWidth === 360px` (zero horizontal overflow blowout).
+  - Single-finger swipe up: verified positive scroll delta (`+534px` $\ge 100\text{px}$).
+- **Complete Scroll-Lock Lifecycle:**
+  - *Backdrop Dismissal:* Background remains strictly locked during open drawer (`scrollY` delta = 0); tapping backdrop dismisses drawer, removes `data-scroll-locked`, and subsequent single-pointer swipe produces `delta >= 100px`.
+  - *Close-Button Dismissal:* Tapping close button dismisses drawer, removes `data-scroll-locked`, and subsequent single-pointer swipe produces `delta >= 100px`.
+  - *Drawer-Internal Scrolling:* Under a short viewport descriptor (`360x320`) where drawer content overflows (`scrollHeight > clientHeight`), swiping inside drawer scrolls drawer content (`scrollTop` delta `> 20px`) while background `window.scrollY` remains completely stationary.
+- **Navigated Page Touch Scrolling (Repaired Positive Delta Assertion):**
+  - Tapping "Bot Content" navigates to exact destination path `/bot-content`.
+  - Asserts drawer content and overlay are completely closed/absent.
+  - Asserts `data-scroll-locked` is removed.
+  - Starting position reset to `0px` with verified headroom (`docHeight > viewportHeight + 200`).
+  - Native single-pointer swipe produces verified positive scroll delta (`delta >= 100px`), preventing false-positive assertions from retained pre-navigation scroll offsets.
+- **Standalone Display-Mode Evaluation:**
+  - Evaluates `window.matchMedia('(display-mode: standalone)').matches`.
+  - Reports status explicitly: in headless Chromium, standalone display-mode cannot be established natively (`matches: false`), so automated runner reports standalone PWA mode as unverified, necessitating real-device physical acceptance.
+
+### 5. Remaining Owner Actions & Real-Phone Acceptance
+- **Automated mobile touch emulation does not substitute for physical Android phone acceptance.**
+- **Physical Device Acceptance Steps for Ammar:**
+  1. Open the preview deployment link on a physical Android phone in Google Chrome.
+  2. Navigate directly to a long page (e.g. `/bot-content` or `/settings`).
+  3. Place **one finger** on normal card content (outside editable fields) and swipe up:
+     - *Expected:* Page scrolls down smoothly with a single finger.
+  4. Swipe down:
+     - *Expected:* Page scrolls back up smoothly.
+  5. Tap the hamburger menu button to open the mobile navigation drawer:
+     - *Expected:* Drawer slides open. Swiping on the darkened backdrop does not scroll the page behind it.
+  6. Tap the darkened backdrop:
+     - *Expected:* Drawer closes. Swiping with one finger scrolls the page immediately.
+  7. Open drawer again, tap the close button ('X'):
+     - *Expected:* Drawer closes. Swiping with one finger scrolls the page immediately.
+  8. Open drawer and tap "Settings":
+     - *Expected:* Page navigates to `/settings`, drawer closes, and the new page scrolls smoothly with one finger.
+  9. (If testing as installed PWA / Home Screen web app): Verify scrolling functions identically when launched from home screen.
+
