@@ -887,7 +887,7 @@ export function ProductActionEditor({
   };
 
   return (
-    <div className="space-y-6 w-full min-w-0 overflow-x-hidden" data-testid="product-action-editor">
+    <div className="space-y-6 w-full min-w-0 overflow-x-clip" data-testid="product-action-editor">
       {/* Top Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b pb-4">
         <div className="space-y-1">

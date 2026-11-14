@@ -1247,3 +1247,65 @@ Related: [SELLER_NOTIFICATIONS_HANDOFF.md](./SELLER_NOTIFICATIONS_HANDOFF.md) fo
   6. *Draft & Separation Integrity:* English and Arabic drafts remain independently preserved across tab switching, suggestion loading, placeholder insertion, and Reset.
   7. *Automatic Recovery:* Correcting the draft immediately clears the error, removes `aria-invalid`, restores normal preview, and re-enables Save.
 - **Verification:** Verified via automated CDP browser acceptance suite (`npm run test:browser:bot-content`) testing the exact original QA input (`Hello {{unknown_thing}} and {{store_name`), zero typing network calls, inline error appearance, Save disablement, tab separation, Reset, and corrected draft persistence.
+
+## Mobile Single-Finger Scrolling Repair (Android Launch-Blocker)
+
+### 1. Defect Symptom & Owner Confirmation
+- **Owner Report:**
+  - On real Android mobile devices, Rabet dashboard pages could not be scrolled using a single finger.
+  - Two-finger scrolling functioned normally.
+  - Other websites scrolled properly in the exact same mobile browser.
+  - Direct URL load and browser refresh did not resolve the freeze.
+
+### 2. Root Cause Diagnosis & Evidence
+- **Mechanism of Failure in Chromium/Blink:**
+  1. *Implicit Axis Coupling & Accidental Nested Scroll Containers:* Under CSS Overflow Module Level 3 (§3.3), applying `overflow-x: hidden` to an element forces `overflow-y` to compute to `auto` (or non-visible).
+     - `html` had `h-full` (`height: 100%`) and `overflow-x: hidden` -> computed to `overflow-x: hidden; overflow-y: auto`.
+     - `body` had `overflow-x: hidden` -> computed to `overflow-x: hidden; overflow-y: auto`.
+     - `<main id="main">` had `overflow-x: hidden` -> computed to `overflow-x: hidden; overflow-y: auto`.
+  2. *Scroll Chaining Deadlock from `overscroll-behavior-y: none`:* `body` declared `overscroll-behavior-y: none;` unconditionally in `globals.css`.
+     - When single-finger vertical touch began, Chromium hit-tested the DOM tree and identified `<main>` and `<body>` as scroll containers.
+     - However, `<main>` and `<body>` expanded to content height (`min-h-dvh`), leaving no scrollable delta within those containers.
+     - Because `body` had `overscroll-behavior-y: none;`, Chromium's gesture engine strictly prohibited scroll chaining from bubbling up to the document root / window viewport.
+     - Result: Single-finger vertical gestures were completely deadlocked (scrolled 0px).
+  3. *Why Two Fingers Worked:* Chromium handles multi-touch gestures (two-finger pinch/pan) via a separate visual viewport gesture recognizer (`VisualViewport::ScrollBy`), completely bypassing element-level scroll targeting and nested `overscroll-behavior` constraints.
+  4. *Radix Sheet & Scroll-Lock Lifecycle:* When the mobile nav drawer (Radix Sheet) opened, `react-remove-scroll` properly applied `data-scroll-locked="1"` to `body`. However, because the normal state already had nested `overflow-x: hidden` and `overscroll-behavior-y: none`, the page was frozen on direct page load prior to ever interacting with the drawer.
+
+### 3. Changes Made
+1. **CSS Overflow Upgrade to `overflow-x: clip`:**
+   - Replaced `overflow-x: hidden` with `overflow-x: clip` on `html` and `body` in `src/app/globals.css` and `src/app/layout.tsx`.
+   - Replaced `overflow-x-hidden` with `min-w-0 overflow-x-clip` on `<main id="main">` in `src/app/(dashboard)/layout.tsx`.
+   - Replaced `overflow-x-hidden` with `overflow-x-clip` on `<header>` in `src/components/dashboard/header.tsx` and content wrappers in `inquiries/[id]`, `catalog-editor`, and `product-action-editor`.
+   - *Why `clip` works:* Unlike `hidden`, `overflow-x: clip` clips horizontal overflow cleanly without establishing an independent scroll container and without forcing `overflow-y` to `auto` (`overflow-y` remains `visible`).
+2. **Removed Rigid Root Height:**
+   - Removed `h-full` (`height: 100%`) from `html` in `src/app/layout.tsx`. `body` retains `min-h-dvh` to ensure full viewport height for short pages while allowing the root viewport to grow naturally with document content.
+3. **Scoped `overscroll-behavior-y: none` to Standalone PWA Mode:**
+   - Scoped `overscroll-behavior-y: none` inside `@media (display-mode: standalone)` in `src/app/globals.css`. Normal browser tabs retain standard scrolling and gesture propagation.
+4. **Explicit Body Scroll Lock During Modals:**
+   - Added `body[data-scroll-locked] { overflow: hidden !important; overscroll-behavior: contain; }` in `src/app/globals.css` to guarantee background scroll locking while sheets/dialogs are open, releasing immediately upon dismissal.
+
+### 4. Verification Evidence
+- **Automated Native CDP Touch Test Suite:** Added `scripts/test-android-touch-scrolling.mjs` running via `npm run test:browser:touch`:
+  - Uses native browser touch input (`Input.dispatchTouchEvent` with `touchStart`, series of `touchMove`s, `touchEnd`) across mobile viewports: `390x844` and `360x740`.
+  - **Before Fix:** Single-finger swipe produced `windowScrollY: 0px` (completely frozen).
+  - **After Fix:** Single-finger swipe produced `windowScrollY: 524px` on swipe up and `30px` on swipe down (fluid native scrolling).
+  - **Mobile Drawer Lifecycle:**
+    - Background scrolling remains locked while drawer is open (`scrollDuringModal === drawerStateOpen.currentScrollY`).
+    - Dismissing drawer removes `data-scroll-locked` and restores page scrollability immediately (`scrollY > 100px`).
+    - Navigating to `/bot-content` via drawer links closes drawer and preserves normal single-finger touch scrolling on the destination page.
+  - **Horizontal Stability:** Verified `body.scrollWidth === window.innerWidth` (zero horizontal overflow blowout on 360px viewport).
+
+### 5. Real-Phone Acceptance Steps for Ammar
+1. Open the preview deployment on an Android mobile device in Chrome.
+2. Navigate directly to a long page (e.g. `/bot-content` or `/settings`).
+3. Place **one finger** on normal card content (outside text inputs) and swipe up.
+   - *Expected:* Page scrolls down smoothly with a single finger.
+4. Swipe down.
+   - *Expected:* Page scrolls up smoothly with a single finger.
+5. Tap the top-left menu button (hamburger icon) to open the mobile navigation drawer.
+   - *Expected:* Drawer slides open. Swiping the background overlay does not scroll the background.
+6. Tap the close button (or tap the darkened backdrop).
+   - *Expected:* Drawer closes. Swiping with one finger scrolls the page immediately.
+7. Open drawer again, tap a navigation link (e.g., "Bot Content").
+   - *Expected:* Navigation occurs, drawer closes, and the new page scrolls smoothly with one finger.
+

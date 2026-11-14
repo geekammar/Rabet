@@ -123,13 +123,23 @@
   }
   body {
     @apply bg-background text-foreground;
-    /* App-like feel in standalone mode: no rubber-banding or pull-to-refresh. */
-    overscroll-behavior-y: none;
-    overflow-x: hidden;
+    /* Clip horizontal overflow safely without creating an accidental vertical scroll container. */
+    overflow-x: clip;
+  }
+  /* In standalone PWA mode, suppress pull-to-refresh rubber-banding without breaking normal browser scrolling. */
+  @media (display-mode: standalone) {
+    body {
+      overscroll-behavior-y: none;
+    }
+  }
+  /* Explicitly lock body scrolling only when a modal or sheet is open. */
+  body[data-scroll-locked] {
+    overflow: hidden !important;
+    overscroll-behavior: contain;
   }
   html {
     @apply font-sans;
-    overflow-x: hidden;
+    overflow-x: clip;
     /* Remove the default mobile tap highlight so touch states read from the
        component styles instead of a grey system flash. */
     -webkit-tap-highlight-color: transparent;
