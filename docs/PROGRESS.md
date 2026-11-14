@@ -1392,3 +1392,52 @@ channels and SaaS remain future direction only, not implemented capabilities.
 - **Accurate webhook reporting:** `src/lib/telegram/webhook.ts` is a source change in this PR
   (capability import, optional handler fields, and passing capability/notification test seams
   into the journey). No live webhook registration, URL, route, or secret change was performed.
+
+## Phase 28 — Default Storefront Experience
+
+**Status:** implemented on `feat/default-storefront-experience`; open for reviewer
+inspection, not merged or deployed.
+
+- **Virtual default activation:** `/start`, `home`, and the legacy `c:root`
+  navigation now derive the storefront entirely from the existing
+  `bot_setting`, `language`, `category`, and `product` rows. No storefront table,
+  activation flag, seeded content, migration, or Production data update was
+  added.
+- **Storefront home:** the configured `bot_welcome` text is preserved and the
+  home keyboard exposes Browse Products, Browse Categories (only when eligible
+  products exist), Contact Support, Change Language (only with two or more
+  enabled languages), and My Inquiries. Opening the home screen writes nothing
+  except the existing customer registration/upsert.
+- **Direct product browsing:** `prods[:page]` lists active, non-deleted products
+  whose full category ancestry is active and non-deleted. Ordering is stable
+  across the existing category/product sort fields with id tie-breakers, using
+  the established 10-item page size. Product taps reuse the existing product-card
+  renderer and action tree. Stale or out-of-range pages clamp safely.
+- **Shared eligibility read:** `src/lib/catalog/storefront.ts` performs the
+  channel-independent catalog query and batch name resolution, so the home,
+  product list, and category-entry decision share one eligibility definition.
+- **Categories:** the recursive category model and `c:<uuid>[:page]` callback
+  contract are unchanged. The storefront simply omits the Browse Categories
+  entry point when no eligible product exists.
+- **Support:** `support` is an explicit storefront callback that reuses the
+  existing general support create-or-resume inquiry path. It invents no product
+  or product action, is idempotent by update/attempt ownership, preserves
+  customer ownership, and keeps the existing seller-notification outbox
+  deduplication.
+- **Language:** `langs` lists enabled languages only; selection still uses
+  `lang:<code>` and the existing customer preference write, then returns to the
+  storefront in the chosen language. Stale selections for disabled languages
+  change nothing and render through the normal fallback path.
+- **My Inquiries:** `myinq[:page]` is a read-only overview of the same active
+  inquiry set used by inbound routing; it never mutates inquiry state.
+- **Compatibility:** existing product callbacks, action trees, category
+  callbacks, inquiry flows, seller notifications, and `bot_welcome` content are
+  preserved. `MANUAL_PAYMENT_PROTOTYPE_ENABLED` remains disabled by default and
+  no payment capability was activated.
+- **Verification:** targeted PostgreSQL integration coverage lives in
+  `tests/db/storefront-journey.test.ts` (home/no-write behavior, zero/one/many
+  products, pagination boundaries and stale pages, hierarchy eligibility,
+  support idempotency and notifications, language switching and stale-language
+  safety, customer isolation, and long localized welcome chunking). Existing
+  Telegram journey and token suites were updated for the new home and extended
+  callback grammar.

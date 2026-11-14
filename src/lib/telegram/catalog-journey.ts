@@ -19,7 +19,12 @@ import {
   isProductHierarchyActive,
 } from "@/lib/catalog/eligibility";
 import {
+  hasEligibleStorefrontProducts,
+  listEligibleStorefrontProducts,
+} from "@/lib/catalog/storefront";
+import {
   getCustomerByTelegramId,
+  listEnabledLanguages,
   readSettings,
   resolveMessageText,
   setCustomerSelectedLanguage,
@@ -30,6 +35,7 @@ import {
   handleSupportInquiryCallback,
   recoverAndRenderCommittedInquiryCallback,
   renderCustomerInquiriesList,
+  renderCustomerInquiriesOverview,
   type InquiryJourneyOptions,
 } from "./inquiry-journey";
 import { parseToken, tokens, UUID_REGEX, type ParsedToken } from "./tokens";
@@ -71,6 +77,17 @@ export interface ChannelJourneyOptions {
   manualPaymentPrototypeEnabled?: boolean;
 }
 
+function orderEnabledLanguages<T extends { id: string; code: string }>(
+  languages: T[],
+  defaultLanguageId: string,
+): T[] {
+  return [...languages].sort((a, b) => {
+    if (a.id === defaultLanguageId) return -1;
+    if (b.id === defaultLanguageId) return 1;
+    return a.code < b.code ? -1 : a.code > b.code ? 1 : 0;
+  });
+}
+
 export function getLocalizedUiStrings(isRtl: boolean) {
   if (isRtl) {
     return {
@@ -87,6 +104,17 @@ export function getLocalizedUiStrings(isRtl: boolean) {
       actionNotSupported: "هذا الإجراء غير مدعوم حالياً في هذا الإصدار.",
       storeUnavailable: "المتجر غير متاح حالياً.",
       selectLanguagePrompt: "يرجى اختيار اللغة / Please select your language:",
+      browseProducts: "🛍 تصفح المنتجات",
+      browseCategories: "🗂 تصفح الأقسام",
+      contactSupport: "💬 تواصل مع الدعم",
+      changeLanguage: "🌐 تغيير اللغة",
+      myInquiries: "📨 استفساراتي",
+      noProducts: "لا توجد منتجات متاحة حالياً.",
+      pageInfo: "الصفحة",
+      noActiveInquiries: "ليس لديك استفسارات نشطة.",
+      activeInquiriesTitle: "استفساراتك النشطة:",
+      inquiriesReplyHint:
+        "للرد، أرسل رسالتك هنا أو استخدم /reply <المرجع> <رسالتك>.",
       openLink: "🌐 فتح الرابط",
       customerFallback: "عميلنا العزيز",
       paymentPrototypeNotice:
@@ -115,6 +143,17 @@ export function getLocalizedUiStrings(isRtl: boolean) {
     actionNotSupported: "This action is not yet supported in this version.",
     storeUnavailable: "This store is currently unavailable.",
     selectLanguagePrompt: "Please select your language / يرجى اختيار اللغة:",
+    browseProducts: "🛍 Browse Products",
+    browseCategories: "🗂 Browse Categories",
+    contactSupport: "💬 Contact Support",
+    changeLanguage: "🌐 Change Language",
+    myInquiries: "📨 My Inquiries",
+    noProducts: "No products are available right now.",
+    pageInfo: "Page",
+    noActiveInquiries: "You have no active inquiries.",
+    activeInquiriesTitle: "Your active inquiries:",
+    inquiriesReplyHint:
+      "To reply, send a message here or use /reply <reference> <message>.",
     openLink: "🌐 Open link",
     customerFallback: "Customer",
     paymentPrototypeNotice:
@@ -345,10 +384,103 @@ export async function editOrThrow(
   }
 }
 
+async function resolveWelcomeBody(
+  db: Database,
+  settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>,
+  langContext: ResolvedLanguageContext,
+): Promise<string> {
+  let welcomeBody = (langContext.isRtl || langContext.code === "ar")
+    ? `مرحبًا بك في ${settings.displayName}!`
+    : `Welcome to ${settings.displayName}!`;
+  try {
+    const resolved = await resolveMessageText(db, {
+      templateKey: "bot_welcome",
+      languageCode: langContext.code,
+    });
+    if (resolved.status === "resolved") {
+      welcomeBody = interpolateTemplate(resolved.body, {
+        store_name: settings.displayName,
+      });
+    }
+  } catch {
+    // Fall back to simple greeting
+  }
+  return welcomeBody;
+}
+
 /**
- * Renders the Root Catalog view (Welcome message + root categories).
+ * Renders the virtual default storefront home derived from the configured
+ * settings and the live catalog. Nothing is persisted and opening it creates no
+ * inquiry.
  */
-async function renderRootCatalog(
+async function renderStorefrontHome(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  user: TelegramUser,
+  messageIdToEdit?: number,
+): Promise<void> {
+  const settings = await readSettings(db);
+  if (!settings) {
+    await sendOrThrow(transport, {
+      chatId,
+      text: "This store is currently unavailable.",
+    });
+    return;
+  }
+
+  const langContext = await resolveCustomerLanguageContext(
+    db,
+    user.id,
+    settings.defaultLanguageId,
+  );
+  const ui = getLocalizedUiStrings(langContext.isRtl);
+  const welcomeBody = await resolveWelcomeBody(db, settings, langContext);
+
+  const [hasProducts, enabledLanguages] = await Promise.all([
+    hasEligibleStorefrontProducts(db),
+    listEnabledLanguages(db),
+  ]);
+
+  const keyboard: TelegramInlineKeyboardButton[][] = [
+    [{ text: ui.browseProducts, callback_data: tokens.products() }],
+  ];
+
+  if (hasProducts) {
+    keyboard.push([
+      { text: ui.browseCategories, callback_data: tokens.rootCategory() },
+    ]);
+  }
+
+  keyboard.push([{ text: ui.contactSupport, callback_data: tokens.support() }]);
+
+  if (enabledLanguages.length > 1) {
+    keyboard.push([{ text: ui.changeLanguage, callback_data: tokens.languages() }]);
+  }
+
+  keyboard.push([{ text: ui.myInquiries, callback_data: tokens.myInquiries() }]);
+
+  if (messageIdToEdit) {
+    await editOrThrow(transport, {
+      chatId,
+      messageId: messageIdToEdit,
+      text: welcomeBody,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+  } else {
+    await sendOrThrow(transport, {
+      chatId,
+      text: welcomeBody,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+  }
+}
+
+/**
+ * Renders the legacy root-category listing. The `c:root[:page]` callback
+ * contract is preserved for previously rendered keyboards.
+ */
+async function renderRootCategories(
   db: Database,
   transport: TelegramTransport,
   chatId: number | string,
@@ -371,24 +503,7 @@ async function renderRootCatalog(
     settings.defaultLanguageId,
   );
   const ui = getLocalizedUiStrings(langContext.isRtl);
-
-  // Resolve welcome text
-  let welcomeBody = (langContext.isRtl || langContext.code === "ar")
-    ? `مرحبًا بك في ${settings.displayName}!`
-    : `Welcome to ${settings.displayName}!`;
-  try {
-    const resolved = await resolveMessageText(db, {
-      templateKey: "bot_welcome",
-      languageCode: langContext.code,
-    });
-    if (resolved.status === "resolved") {
-      welcomeBody = interpolateTemplate(resolved.body, {
-        store_name: settings.displayName,
-      });
-    }
-  } catch {
-    // Fall back to simple greeting
-  }
+  const bodyText = await resolveWelcomeBody(db, settings, langContext);
 
   // Read root categories with deterministic tie-breaking
   const rootCategories = await db
@@ -454,19 +569,118 @@ async function renderRootCatalog(
     keyboard.push(navButtons);
   }
 
-  const replyMarkup: TelegramInlineKeyboardMarkup = { inline_keyboard: keyboard };
+  keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
 
   if (messageIdToEdit) {
     await editOrThrow(transport, {
       chatId,
       messageId: messageIdToEdit,
-      text: welcomeBody,
-      replyMarkup,
+      text: bodyText,
+      replyMarkup: { inline_keyboard: keyboard },
     });
   } else {
-    await sendOrThrow(transport, { chatId, text: welcomeBody, replyMarkup });
+    await sendOrThrow(transport, {
+      chatId,
+      text: bodyText,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
   }
 }
+
+/**
+ * Renders direct, paginated product discovery across the eligible catalog.
+ */
+async function renderStorefrontProducts(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+  settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>,
+  langContext: ResolvedLanguageContext,
+  ui: ReturnType<typeof getLocalizedUiStrings>,
+  page = 1,
+): Promise<void> {
+  const result = await listEligibleStorefrontProducts(db, {
+    languageId: langContext.id,
+    defaultLanguageId: settings.defaultLanguageId,
+    page,
+    pageSize: TELEGRAM_MENU_PAGE_SIZE,
+  });
+
+  const keyboard: TelegramInlineKeyboardButton[][] = result.items.map((item) => [
+    { text: item.name, callback_data: tokens.product(item.id) },
+  ]);
+
+  if (result.totalPages > 1) {
+    const navButtons: TelegramInlineKeyboardButton[] = [];
+    if (result.page > 1) {
+      navButtons.push({
+        text: ui.prevPage,
+        callback_data: tokens.products(result.page - 1),
+      });
+    }
+    if (result.page < result.totalPages) {
+      navButtons.push({
+        text: ui.nextPage,
+        callback_data: tokens.products(result.page + 1),
+      });
+    }
+    keyboard.push(navButtons);
+  }
+
+  keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+  const bodyText =
+    result.totalCount === 0
+      ? ui.noProducts
+      : result.totalPages > 1
+        ? `${ui.browseProducts}\n\n${ui.pageInfo} ${result.page}/${result.totalPages}`
+        : ui.browseProducts;
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: bodyText,
+    replyMarkup: { inline_keyboard: keyboard },
+  });
+}
+
+/**
+ * Renders the explicit language menu. With a single enabled language the menu
+ * is not offered and the storefront home is shown instead.
+ */
+async function renderLanguageMenu(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+  user: TelegramUser,
+  defaultLanguageId: string,
+): Promise<void> {
+  const enabledLanguages = orderEnabledLanguages(
+    await listEnabledLanguages(db),
+    defaultLanguageId,
+  );
+  if (enabledLanguages.length <= 1) {
+    await renderStorefrontHome(db, transport, chatId, user, messageId);
+    return;
+  }
+
+  const langKeyboard: TelegramInlineKeyboardButton[][] = enabledLanguages.map((l) => [
+    {
+      text: l.label,
+      callback_data: tokens.lang(l.code),
+    },
+  ]);
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: "Please select your language / يرجى اختيار اللغة:",
+    replyMarkup: { inline_keyboard: langKeyboard },
+  });
+}
+
 
 /**
  * Handles /start command in a private chat.
@@ -499,14 +713,10 @@ export async function handleStartCommand(
   }
 
   // Get all enabled languages
-  const enabledLanguages = await db
-    .select({
-      id: language.id,
-      code: language.code,
-      label: language.label,
-    })
-    .from(language)
-    .where(eq(language.isEnabled, true));
+  const enabledLanguages = orderEnabledLanguages(
+    await listEnabledLanguages(db),
+    settings.defaultLanguageId,
+  );
 
   if (enabledLanguages.length === 0) {
     await sendOrThrow(transport, {
@@ -537,8 +747,8 @@ export async function handleStartCommand(
     return;
   }
 
-  // Otherwise, proceed to root catalog
-  await renderRootCatalog(db, transport, message.chat.id, from);
+  // Otherwise, proceed to the virtual default storefront home
+  await renderStorefrontHome(db, transport, message.chat.id, from);
 }
 
 /**
@@ -766,7 +976,20 @@ export async function handleCallbackQuery(
     throw new Error("Unrecognized callback token");
   }
 
-  // 1. Language selection callback: lang:<code>
+  // 1. Language menu callback: langs
+  if (parsed.type === "languages") {
+    await renderLanguageMenu(
+      db,
+      transport,
+      chatId,
+      messageId,
+      user,
+      settings.defaultLanguageId,
+    );
+    return;
+  }
+
+  // 1.1. Language selection callback: lang:<code>
   if (parsed.type === "lang") {
     const [targetLang] = await db
       .select({ id: language.id, isEnabled: language.isEnabled })
@@ -778,7 +1001,9 @@ export async function handleCallbackQuery(
       await setCustomerSelectedLanguage(db, user.id, targetLang.id);
     }
 
-    await renderRootCatalog(db, transport, chatId, user, messageId);
+    // A stale selection for a now-disabled language changes nothing and safely
+    // returns to the storefront in the effective fallback language.
+    await renderStorefrontHome(db, transport, chatId, user, messageId);
     return;
   }
 
@@ -820,14 +1045,72 @@ export async function handleCallbackQuery(
     return;
   }
 
+  // My Inquiries overview callback: myinq[:<page>]
+  if (parsed.type === "myInquiries") {
+    await renderCustomerInquiriesOverview(
+      db,
+      transport,
+      chatId,
+      messageId,
+      customerRecord.id,
+      parsed.page,
+      langContext,
+      ui,
+    );
+    return;
+  }
+
+  // Direct storefront product discovery: prods[:<page>]
+  if (parsed.type === "products") {
+    await renderStorefrontProducts(
+      db,
+      transport,
+      chatId,
+      messageId,
+      settings,
+      langContext,
+      ui,
+      parsed.page,
+    );
+    return;
+  }
+
+  // Explicit storefront support entry point. There is no source product action;
+  // the explicit tap reuses the existing general support create-or-resume path.
+  if (parsed.type === "support") {
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    await handleSupportInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      langContext,
+      ui,
+      backTarget: tokens.home(),
+      returnToProductTarget: tokens.home(),
+      options: journeyOptions,
+    });
+    return;
+  }
+
   // 2. Home or Root callback
   if (parsed.type === "home") {
-    await renderRootCatalog(db, transport, chatId, user, messageId, 1);
+    await renderStorefrontHome(db, transport, chatId, user, messageId);
     return;
   }
 
   if (parsed.type === "root") {
-    await renderRootCatalog(db, transport, chatId, user, messageId, parsed.page);
+    await renderRootCategories(db, transport, chatId, user, messageId, parsed.page);
     return;
   }
 
@@ -947,7 +1230,7 @@ export async function handleCallbackQuery(
       .limit(1);
 
     if (!act) {
-      await renderRootCatalog(db, transport, chatId, user, messageId);
+      await renderStorefrontHome(db, transport, chatId, user, messageId);
       return;
     }
 
@@ -1117,7 +1400,7 @@ export async function handleCallbackQuery(
   }
 
   // Fallback for unknown tokens
-  await renderRootCatalog(db, transport, chatId, user, messageId);
+  await renderStorefrontHome(db, transport, chatId, user, messageId);
 }
 
 async function findProductContactRoute(
