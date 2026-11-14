@@ -455,24 +455,24 @@ async function main() {
   const csrfRes = await fetch(`${BASE_URL}/api/auth/csrf`);
   const csrfData = await csrfRes.json();
   const csrfToken = csrfData.csrfToken;
-  const csrfCookies = csrfRes.headers.get("set-cookie") || "";
+  const initialCookies = csrfRes.headers.get("set-cookie") || "";
 
   const signinBody = new URLSearchParams({
+    csrfToken,
     email: TEST_EMAIL,
     password: TEST_PASSWORD,
-    csrfToken,
     callbackUrl: `${BASE_URL}/bot-content`,
-    redirect: "false",
     json: "true",
   });
 
-  const signinRes = await fetch(`${BASE_URL}/api/auth/callback/credentials?`, {
+  const signinRes = await fetch(`${BASE_URL}/api/auth/callback/credentials`, {
     method: "POST",
     headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      cookie: csrfCookies,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: initialCookies,
     },
     body: signinBody.toString(),
+    redirect: "manual",
   });
 
   const authCookies = signinRes.headers.get("set-cookie") || "";
