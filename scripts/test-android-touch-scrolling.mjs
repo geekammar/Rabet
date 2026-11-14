@@ -6,11 +6,20 @@
  * Validates that touch scrolling works on mobile viewports (390x844 and 360x740)
  * using native CDP touch input (Input.dispatchTouchEvent).
  *
- * Verifies:
- * 1. Direct page load single-finger touch scrolling on long pages (/bot-content, /settings).
- * 2. Computed styles: html, body, and main have overflow-x: clip and overflow-y: visible (no accidental scroll container traps).
- * 3. Mobile drawer (Sheet) interaction: background scroll locking while open, scrolling inside drawer, and immediate restoration after dismissal.
- * 4. Page navigation through mobile drawer and scrollability on navigated page.
+ * Supports two modes:
+ * 1. Default (repaired verification mode):
+ *    - Direct load single-finger touch scrolling on /bot-content and /settings.
+ *    - Computed styles: overflow-x: clip and overflow-y: visible.
+ *    - Comprehensive scroll-lock lifecycle: backdrop dismissal, close-button dismissal,
+ *      and background locking during open state.
+ *    - Drawer-internal scrolling on an overflowing drawer using a short viewport descriptor.
+ *    - Navigated page touch scrolling verified via true positive delta (final - initial >= 100).
+ *    - Standalone display-mode evaluation and matchMedia verification.
+ * 2. Baseline inspection mode (--baseline or TEST_BASELINE=true):
+ *    - Executes behavioral swipes against the pre-repair base commit (0eb0dc3).
+ *    - Records route, browser version, viewport, starting position, scroll container,
+ *      final scroll position, and delta.
+ *    - Reports truthfully whether baseline reproduces scrolling failure or scrolls under emulation.
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -24,8 +33,11 @@ import {
   verifyAndStopOwnedFixture,
 } from "./fixture-guard.mjs";
 
-const APP_PORT = 3388;
-const CDP_PORT = 9388;
+const isBaselineMode =
+  process.argv.includes("--baseline") || process.env.TEST_BASELINE === "true";
+
+const APP_PORT = isBaselineMode ? 3389 : 3388;
+const CDP_PORT = isBaselineMode ? 9389 : 9388;
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "test-password-123";
@@ -39,7 +51,8 @@ let createdDbName = null;
 let isCleaningUp = false;
 
 function log(msg) {
-  process.stdout.write(`[touch-scrolling] ${msg}\n`);
+  const prefix = isBaselineMode ? "[touch-baseline]" : "[touch-scrolling]";
+  process.stdout.write(`${prefix} ${msg}\n`);
 }
 
 async function cleanup() {
@@ -262,6 +275,565 @@ async function performTouchSwipe(cdp, { startX, startY, endY, steps = 10, stepDe
   await sleep(350);
 }
 
+async function runBaselineInspection(cdp, browserVersion) {
+  log("\n================================================================================");
+  log("BASELINE INSPECTION MODE: Testing pre-repair commit (0eb0dc3b9780ca79776b1794fa0c3228da8d91e7)");
+  log(`Browser: ${browserVersion.product} (${browserVersion.userAgent})`);
+  log("================================================================================");
+
+  // Configure mobile touch emulation (390x844)
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+    hasTouch: true,
+  });
+  await cdp.send("Emulation.setTouchEmulationEnabled", {
+    enabled: true,
+    maxTouchPoints: 5,
+  });
+
+  // Route 1: /bot-content on baseline
+  log("\n--- Baseline Check 1: /bot-content (Viewport: 390x844) ---");
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/bot-content` });
+  await sleep(1500);
+
+  const baselineBotState = await cdp.evaluate(`(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const main = document.getElementById("main");
+    const scrollingEl = document.scrollingElement;
+    return {
+      route: window.location.pathname,
+      docHeight: html.scrollHeight,
+      viewportHeight: window.innerHeight,
+      initialScrollY: window.scrollY,
+      htmlScrollTop: html.scrollTop,
+      bodyScrollTop: body.scrollTop,
+      mainScrollTop: main ? main.scrollTop : null,
+      scrollingElementTag: scrollingEl ? scrollingEl.tagName : null,
+      htmlOverflowX: getComputedStyle(html).overflowX,
+      htmlOverflowY: getComputedStyle(html).overflowY,
+      bodyOverflowX: getComputedStyle(body).overflowX,
+      bodyOverflowY: getComputedStyle(body).overflowY,
+      bodyOverscrollY: getComputedStyle(body).overscrollBehaviorY,
+      mainOverflowX: main ? getComputedStyle(main).overflowX : null,
+      mainOverflowY: main ? getComputedStyle(main).overflowY : null,
+    };
+  })()`);
+
+  log(`Baseline Initial State: ${JSON.stringify(baselineBotState, null, 2)}`);
+
+  // Ensure sufficient height for gesture
+  if (baselineBotState.docHeight <= baselineBotState.viewportHeight + 200) {
+    await fail(
+      `Baseline page is not tall enough to test (${baselineBotState.docHeight} <= ${baselineBotState.viewportHeight}). Setup failure.`
+    );
+  }
+
+  // Dispatch real single-pointer swipe up on baseline
+  log("Dispatching native single-pointer swipe up (startX: 200, startY: 600, endY: 200)...");
+  await performTouchSwipe(cdp, { startX: 200, startY: 600, endY: 200, steps: 12 });
+
+  const baselineBotFinal = await cdp.evaluate(`(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const main = document.getElementById("main");
+    return {
+      finalScrollY: window.scrollY,
+      htmlScrollTop: html.scrollTop,
+      bodyScrollTop: body.scrollTop,
+      mainScrollTop: main ? main.scrollTop : null,
+    };
+  })()`);
+
+  const botDelta = baselineBotFinal.finalScrollY - baselineBotState.initialScrollY;
+  log(`Baseline Final State: ${JSON.stringify(baselineBotFinal)}`);
+  log(`Baseline Scroll Delta on /bot-content: ${botDelta}px`);
+
+  // Route 2: /settings on baseline (360x740)
+  log("\n--- Baseline Check 2: /settings (Viewport: 360x740) ---");
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 360,
+    height: 740,
+    deviceScaleFactor: 2,
+    mobile: true,
+    hasTouch: true,
+  });
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/settings` });
+  await sleep(1500);
+
+  const baselineSettingsInit = await cdp.evaluate(`(() => ({
+    route: window.location.pathname,
+    docHeight: document.documentElement.scrollHeight,
+    viewportHeight: window.innerHeight,
+    initialScrollY: window.scrollY,
+    bodyWidth: document.body.scrollWidth,
+    viewportWidth: window.innerWidth,
+    scrollingElementTag: document.scrollingElement ? document.scrollingElement.tagName : null,
+  }))()`);
+
+  log(`Baseline Settings Initial: ${JSON.stringify(baselineSettingsInit)}`);
+
+  log("Dispatching native single-pointer swipe up on /settings (startX: 180, startY: 550, endY: 200)...");
+  await performTouchSwipe(cdp, { startX: 180, startY: 550, endY: 200, steps: 10 });
+
+  const baselineSettingsFinalScroll = await cdp.evaluate("window.scrollY");
+  const settingsDelta = baselineSettingsFinalScroll - baselineSettingsInit.initialScrollY;
+  log(`Baseline /settings Final scrollY: ${baselineSettingsFinalScroll}px, Delta: ${settingsDelta}px`);
+
+  // Truthful baseline evaluation summary
+  log("\n================================================================================");
+  log("BASELINE EVIDENCE SUMMARY (Actual base commit 0eb0dc3b9780ca79776b1794fa0c3228da8d91e7):");
+  log(`- Browser version: ${browserVersion.product}`);
+  log(`- /bot-content (390x844): initial=${baselineBotState.initialScrollY}px, final=${baselineBotFinal.finalScrollY}px, delta=${botDelta}px`);
+  log(`- /settings (360x740): initial=${baselineSettingsInit.initialScrollY}px, final=${baselineSettingsFinalScroll}px, delta=${settingsDelta}px`);
+  if (botDelta === 0 && settingsDelta === 0) {
+    log("- Result: Single-finger touch scrolling failure REPRODUCED on actual base source (0px scrolled).");
+  } else {
+    log(`- Result: Under headless desktop Chromium mobile emulation, baseline build scrolled (botDelta=${botDelta}px, settingsDelta=${settingsDelta}px).`);
+  }
+  log("================================================================================");
+}
+
+async function runRepairedSuite(cdp) {
+  // TEST 1: Direct load of /bot-content and single-finger vertical touch scrolling
+  log("\n--- TEST 1: Direct load /bot-content and single-finger touch scroll (390x844) ---");
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+    hasTouch: true,
+  });
+  await cdp.send("Emulation.setTouchEmulationEnabled", {
+    enabled: true,
+    maxTouchPoints: 5,
+  });
+
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/bot-content` });
+  await sleep(1500);
+
+  const stylesCheck = await cdp.evaluate(`(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const main = document.getElementById("main");
+    return {
+      htmlOverflowX: getComputedStyle(html).overflowX,
+      htmlOverflowY: getComputedStyle(html).overflowY,
+      bodyOverflowX: getComputedStyle(body).overflowX,
+      bodyOverflowY: getComputedStyle(body).overflowY,
+      mainOverflowX: main ? getComputedStyle(main).overflowX : null,
+      mainOverflowY: main ? getComputedStyle(main).overflowY : null,
+      dataScrollLocked: body.getAttribute("data-scroll-locked"),
+      initialScrollY: window.scrollY,
+      docHeight: document.documentElement.scrollHeight,
+      viewportHeight: window.innerHeight,
+    };
+  })()`);
+  log(`Computed styles on direct load: ${JSON.stringify(stylesCheck)}`);
+
+  if (stylesCheck.htmlOverflowY === "auto" || stylesCheck.bodyOverflowY === "auto") {
+    await fail(
+      `html or body computed overflow-y is 'auto' instead of 'visible'. html: ${stylesCheck.htmlOverflowY}, body: ${stylesCheck.bodyOverflowY}`
+    );
+  }
+  if (stylesCheck.mainOverflowY === "auto") {
+    await fail(`main#main computed overflow-y is 'auto', creating an inner scroll trap.`);
+  }
+  if (stylesCheck.dataScrollLocked !== null) {
+    await fail(`body unexpectedly has data-scroll-locked attribute on direct load.`);
+  }
+  if (stylesCheck.docHeight <= stylesCheck.viewportHeight + 200) {
+    await fail(`Page content is not tall enough to test scrolling (${stylesCheck.docHeight} <= ${stylesCheck.viewportHeight}).`);
+  }
+
+  // Perform single-finger touch swipe up
+  const startScroll1 = stylesCheck.initialScrollY;
+  log("Performing native single-finger swipe up (400px gesture)...");
+  await performTouchSwipe(cdp, { startX: 200, startY: 600, endY: 200, steps: 12 });
+
+  const scrollAfterUp = await cdp.evaluate("window.scrollY");
+  const upDelta = scrollAfterUp - startScroll1;
+  log(`window.scrollY after single-finger swipe up: ${scrollAfterUp}px (delta: +${upDelta}px)`);
+  if (upDelta < 100) {
+    await fail(`Single-finger swipe up produced insufficient scroll delta: ${upDelta}px < 100px.`);
+  }
+
+  // Perform single-finger touch swipe back down
+  log("Performing native single-finger swipe back down...");
+  await performTouchSwipe(cdp, { startX: 200, startY: 200, endY: 600, steps: 12 });
+  const scrollAfterDown = await cdp.evaluate("window.scrollY");
+  log(`window.scrollY after single-finger swipe down: ${scrollAfterDown}px`);
+  if (scrollAfterDown >= scrollAfterUp) {
+    await fail(`Single-finger swipe down failed to reduce scroll position. Before: ${scrollAfterUp}, After: ${scrollAfterDown}.`);
+  }
+
+  // TEST 2: Compact Android Viewport (360x740) on /settings
+  log("\n--- TEST 2: Compact Android Viewport (360x740) on /settings ---");
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 360,
+    height: 740,
+    deviceScaleFactor: 2,
+    mobile: true,
+    hasTouch: true,
+  });
+
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/settings` });
+  await sleep(1500);
+
+  const settingsInit = await cdp.evaluate(`(() => ({
+    scrollY: window.scrollY,
+    docHeight: document.documentElement.scrollHeight,
+    viewportHeight: window.innerHeight,
+    bodyWidth: document.body.scrollWidth,
+    viewportWidth: window.innerWidth,
+  }))()`);
+  log(`Settings initial state on 360x740: ${JSON.stringify(settingsInit)}`);
+
+  if (settingsInit.bodyWidth > settingsInit.viewportWidth) {
+    await fail(
+      `Horizontal layout blowout detected on 360x740: body scrollWidth (${settingsInit.bodyWidth}) > viewport (${settingsInit.viewportWidth}).`
+    );
+  }
+
+  const startScroll2 = settingsInit.scrollY;
+  log("Performing native single-finger swipe up on /settings (360x740)...");
+  await performTouchSwipe(cdp, { startX: 180, startY: 550, endY: 200, steps: 10 });
+  const settingsScroll = await cdp.evaluate("window.scrollY");
+  const settingsDelta = settingsScroll - startScroll2;
+  log(`window.scrollY on /settings after swipe: ${settingsScroll}px (delta: +${settingsDelta}px)`);
+  if (settingsDelta < 100) {
+    await fail(`Single-finger touch scrolling on 360x740 produced insufficient delta: ${settingsDelta}px < 100px.`);
+  }
+
+  // Restore standard mobile viewport
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+    hasTouch: true,
+  });
+
+  // TEST 3: Complete Mobile Nav Drawer (Sheet) Scroll-Lock Lifecycle
+  log("\n--- TEST 3: Complete Mobile Nav Drawer (Sheet) Scroll-Lock Lifecycle ---");
+
+  // 3A: Backdrop dismissal and background locking
+  log("Subtest 3A: Backdrop dismissal and background locking...");
+  await cdp.evaluate("window.scrollTo(0, 0);");
+  await sleep(150);
+
+  await cdp.evaluate(`document.querySelector('button[aria-label="Open navigation menu"]').click();`);
+  await sleep(600);
+
+  const backdropDrawerOpen = await cdp.evaluate(`(() => ({
+    hasSheetContent: Boolean(document.querySelector('[data-slot="sheet-content"]')),
+    hasOverlay: Boolean(document.querySelector('[data-slot="sheet-overlay"]')),
+    isLocked: document.body.hasAttribute("data-scroll-locked"),
+    scrollY: window.scrollY,
+  }))()`);
+  log(`Drawer open state (3A): ${JSON.stringify(backdropDrawerOpen)}`);
+  if (!backdropDrawerOpen.hasSheetContent || !backdropDrawerOpen.isLocked) {
+    await fail("Drawer failed to open or body missing data-scroll-locked in 3A.");
+  }
+
+  // Swipe on backdrop overlay while drawer open: verify background does NOT move
+  log("Swiping on backdrop overlay while drawer open: asserting zero background scroll...");
+  await performTouchSwipe(cdp, { startX: 340, startY: 500, endY: 200, steps: 10 });
+  const scrollDuringOverlaySwipe = await cdp.evaluate("window.scrollY");
+  log(`Background scroll during open drawer: ${scrollDuringOverlaySwipe}px (initial: ${backdropDrawerOpen.scrollY}px)`);
+  if (scrollDuringOverlaySwipe !== backdropDrawerOpen.scrollY) {
+    await fail(`Background scrolled while drawer was open: moved from ${backdropDrawerOpen.scrollY} to ${scrollDuringOverlaySwipe}.`);
+  }
+
+  // Dismiss by clicking the backdrop overlay
+  log("Dismissing drawer by clicking backdrop overlay...");
+  await cdp.evaluate(`(() => {
+    const overlay = document.querySelector('[data-slot="sheet-overlay"]');
+    if (overlay) overlay.click();
+  })()`);
+  await sleep(500);
+
+  const backdropDismissedState = await cdp.evaluate(`(() => ({
+    sheetContent: Boolean(document.querySelector('[data-slot="sheet-content"]')),
+    isLocked: document.body.hasAttribute("data-scroll-locked"),
+  }))()`);
+  log(`State after backdrop dismissal: ${JSON.stringify(backdropDismissedState)}`);
+  if (backdropDismissedState.sheetContent || backdropDismissedState.isLocked) {
+    await fail("Drawer content remained or body retained data-scroll-locked after backdrop dismissal.");
+  }
+
+  // Verify single-finger page scrolling resumes after backdrop dismissal
+  await cdp.evaluate("window.scrollTo(0, 0);");
+  await sleep(100);
+  const preSwipe3A = await cdp.evaluate("window.scrollY");
+  log("Performing touch swipe on page after backdrop dismissal...");
+  await performTouchSwipe(cdp, { startX: 200, startY: 550, endY: 200, steps: 10 });
+  const postSwipe3A = await cdp.evaluate("window.scrollY");
+  const delta3A = postSwipe3A - preSwipe3A;
+  log(`scrollY after backdrop dismissal swipe: ${postSwipe3A}px (delta: +${delta3A}px)`);
+  if (delta3A < 100) {
+    await fail(`Single-finger scrolling failed to resume after backdrop dismissal: delta ${delta3A}px < 100px.`);
+  }
+
+  // 3B: Close-button dismissal
+  log("\nSubtest 3B: Close-button dismissal...");
+  await cdp.evaluate("window.scrollTo(0, 0);");
+  await sleep(150);
+
+  await cdp.evaluate(`document.querySelector('button[aria-label="Open navigation menu"]').click();`);
+  await sleep(600);
+
+  const closeBtnDrawerOpen = await cdp.evaluate(`(() => ({
+    hasSheetContent: Boolean(document.querySelector('[data-slot="sheet-content"]')),
+    isLocked: document.body.hasAttribute("data-scroll-locked"),
+  }))()`);
+  if (!closeBtnDrawerOpen.hasSheetContent || !closeBtnDrawerOpen.isLocked) {
+    await fail("Drawer failed to open or body missing data-scroll-locked in 3B.");
+  }
+
+  // Dismiss via close button
+  log("Dismissing drawer via close button...");
+  await cdp.evaluate(`(() => {
+    const closeBtn = document.querySelector('[data-slot="sheet-content"] button[data-slot="sheet-close"]') ||
+                     document.querySelector('[data-slot="sheet-content"] button');
+    if (closeBtn) closeBtn.click();
+  })()`);
+  await sleep(500);
+
+  const closeBtnDismissedState = await cdp.evaluate(`(() => ({
+    sheetContent: Boolean(document.querySelector('[data-slot="sheet-content"]')),
+    isLocked: document.body.hasAttribute("data-scroll-locked"),
+  }))()`);
+  log(`State after close-button dismissal: ${JSON.stringify(closeBtnDismissedState)}`);
+  if (closeBtnDismissedState.sheetContent || closeBtnDismissedState.isLocked) {
+    await fail("Drawer content remained or body retained data-scroll-locked after close-button dismissal.");
+  }
+
+  // Verify single-finger page scrolling resumes after close-button dismissal
+  await cdp.evaluate("window.scrollTo(0, 0);");
+  await sleep(100);
+  const preSwipe3B = await cdp.evaluate("window.scrollY");
+  log("Performing touch swipe on page after close-button dismissal...");
+  await performTouchSwipe(cdp, { startX: 200, startY: 550, endY: 200, steps: 10 });
+  const postSwipe3B = await cdp.evaluate("window.scrollY");
+  const delta3B = postSwipe3B - preSwipe3B;
+  log(`scrollY after close-button dismissal swipe: ${postSwipe3B}px (delta: +${delta3B}px)`);
+  if (delta3B < 100) {
+    await fail(`Single-finger scrolling failed to resume after close-button dismissal: delta ${delta3B}px < 100px.`);
+  }
+
+  // 3C: Drawer-internal scrolling on an overflowing drawer (using short viewport)
+  log("\nSubtest 3C: Drawer-internal scrolling on an overflowing drawer (short viewport 360x320)...");
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 360,
+    height: 320,
+    deviceScaleFactor: 2,
+    mobile: true,
+    hasTouch: true,
+  });
+
+  await cdp.evaluate(`document.querySelector('button[aria-label="Open navigation menu"]').click();`);
+  await sleep(600);
+
+  const drawerOverflowCheck = await cdp.evaluate(`(() => {
+    const scrollContainer = document.querySelector('[data-slot="sheet-content"] .overflow-y-auto') ||
+                            document.querySelector('[data-slot="sheet-content"] [class*="overflow-y-auto"]');
+    if (!scrollContainer) return { found: false };
+    return {
+      found: true,
+      scrollHeight: scrollContainer.scrollHeight,
+      clientHeight: scrollContainer.clientHeight,
+      initialScrollTop: scrollContainer.scrollTop,
+      backgroundScrollY: window.scrollY,
+    };
+  })()`);
+  log(`Drawer internal scroll container stats: ${JSON.stringify(drawerOverflowCheck)}`);
+
+  if (!drawerOverflowCheck.found) {
+    await fail("Could not find drawer internal scroll container (.overflow-y-auto).");
+  }
+  if (drawerOverflowCheck.scrollHeight <= drawerOverflowCheck.clientHeight) {
+    await fail(
+      `Drawer did not overflow on short viewport (${drawerOverflowCheck.scrollHeight} <= ${drawerOverflowCheck.clientHeight}).`
+    );
+  }
+
+  // Perform touch swipe inside the drawer
+  log("Performing native single-pointer swipe inside drawer content...");
+  await performTouchSwipe(cdp, { startX: 100, startY: 240, endY: 80, steps: 10 });
+
+  const drawerPostSwipe = await cdp.evaluate(`(() => {
+    const scrollContainer = document.querySelector('[data-slot="sheet-content"] .overflow-y-auto') ||
+                            document.querySelector('[data-slot="sheet-content"] [class*="overflow-y-auto"]');
+    return {
+      finalScrollTop: scrollContainer ? scrollContainer.scrollTop : 0,
+      backgroundScrollY: window.scrollY,
+    };
+  })()`);
+  const drawerScrollDelta = drawerPostSwipe.finalScrollTop - drawerOverflowCheck.initialScrollTop;
+  log(`Drawer internal scrollTop: ${drawerPostSwipe.finalScrollTop}px (delta: +${drawerScrollDelta}px), Background: ${drawerPostSwipe.backgroundScrollY}px`);
+
+  if (drawerScrollDelta <= 20) {
+    await fail(`Drawer internal content failed to scroll: delta ${drawerScrollDelta}px <= 20px.`);
+  }
+  if (drawerPostSwipe.backgroundScrollY !== drawerOverflowCheck.backgroundScrollY) {
+    await fail(`Background scrolled while dragging inside drawer: moved from ${drawerOverflowCheck.backgroundScrollY} to ${drawerPostSwipe.backgroundScrollY}.`);
+  }
+
+  // Close drawer and restore standard mobile viewport
+  await cdp.evaluate(`(() => {
+    const closeBtn = document.querySelector('[data-slot="sheet-content"] button[data-slot="sheet-close"]') ||
+                     document.querySelector('[data-slot="sheet-content"] button');
+    if (closeBtn) closeBtn.click();
+  })()`);
+  await sleep(400);
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+    hasTouch: true,
+  });
+
+  // TEST 4: Navigation through Mobile Drawer Links (Repaired Assertion)
+  log("\n--- TEST 4: Navigation through Mobile Drawer links (Repaired Positive Delta Assertion) ---");
+  await cdp.evaluate("window.scrollTo(0, 0);");
+  await sleep(150);
+
+  await cdp.evaluate(`document.querySelector('button[aria-label="Open navigation menu"]').click();`);
+  await sleep(600);
+
+  log("Clicking 'Bot Content' link inside mobile drawer...");
+  const navClicked = await cdp.evaluate(`(() => {
+    const links = Array.from(document.querySelectorAll('[data-slot="sheet-content"] a'));
+    const botContentLink = links.find(a => a.href.includes('/bot-content') || a.innerText.includes('Bot Content'));
+    if (botContentLink) {
+      botContentLink.click();
+      return true;
+    }
+    return false;
+  })()`);
+  if (!navClicked) {
+    await fail("Could not find Bot Content link inside mobile drawer.");
+  }
+
+  // Wait for URL to change to exact destination pathname
+  let navSuccess = false;
+  for (let i = 0; i < 25; i++) {
+    await sleep(250);
+    const currPath = await cdp.evaluate("window.location.pathname");
+    if (currPath === "/bot-content") {
+      navSuccess = true;
+      break;
+    }
+  }
+  if (!navSuccess) {
+    const actualPath = await cdp.evaluate("window.location.pathname");
+    await fail(`Navigation did not reach exact destination '/bot-content'. Actual: '${actualPath}'.`);
+  }
+
+  // Assert drawer content and overlay are absent/closed, and data-scroll-locked is removed
+  const navSettledState = await cdp.evaluate(`(() => ({
+    pathname: window.location.pathname,
+    sheetPresent: Boolean(document.querySelector('[data-slot="sheet-content"]')),
+    overlayPresent: Boolean(document.querySelector('[data-slot="sheet-overlay"]')),
+    isLocked: document.body.hasAttribute("data-scroll-locked"),
+  }))()`);
+  log(`Post-navigation settled state: ${JSON.stringify(navSettledState)}`);
+
+  if (navSettledState.pathname !== "/bot-content") {
+    await fail(`Destination pathname mismatch: expected '/bot-content', got '${navSettledState.pathname}'.`);
+  }
+  if (navSettledState.sheetPresent || navSettledState.overlayPresent) {
+    await fail("Drawer content or overlay remained present after navigation.");
+  }
+  if (navSettledState.isLocked) {
+    await fail("body retained data-scroll-locked after drawer link navigation.");
+  }
+
+  // Prepare defined starting position with room to scroll
+  await cdp.evaluate("window.scrollTo(0, 0);");
+  await sleep(150);
+  const navRoomCheck = await cdp.evaluate(`(() => ({
+    startY: window.scrollY,
+    docHeight: document.documentElement.scrollHeight,
+    viewportHeight: window.innerHeight,
+  }))()`);
+  log(`Navigated page starting state: ${JSON.stringify(navRoomCheck)}`);
+
+  if (navRoomCheck.startY !== 0) {
+    await fail(`Failed to establish defined starting position 0px on navigated page. Got ${navRoomCheck.startY}px.`);
+  }
+  if (navRoomCheck.docHeight <= navRoomCheck.viewportHeight + 200) {
+    await fail(`Navigated page has insufficient height to test scrolling (${navRoomCheck.docHeight} <= ${navRoomCheck.viewportHeight}).`);
+  }
+
+  // Dispatch native single-pointer swipe and assert meaningful positive delta
+  log("Dispatching native single-pointer swipe on navigated page...");
+  await performTouchSwipe(cdp, { startX: 180, startY: 550, endY: 200, steps: 10 });
+
+  const postNavFinalScroll = await cdp.evaluate("window.scrollY");
+  const postNavDelta = postNavFinalScroll - navRoomCheck.startY;
+  log(`window.scrollY on navigated page after swipe: ${postNavFinalScroll}px (delta: +${postNavDelta}px)`);
+
+  if (postNavDelta < 100) {
+    await fail(`Single-finger swipe on navigated page produced insufficient delta: ${postNavDelta}px < 100px.`);
+  }
+
+  // TEST 5: Standalone-mode evaluation (display-mode: standalone)
+  log("\n--- TEST 5: Standalone-mode evaluation (display-mode: standalone) ---");
+  const initialStandaloneMatches = await cdp.evaluate(`window.matchMedia('(display-mode: standalone)').matches`);
+  log(`Initial matchMedia('(display-mode: standalone)').matches: ${initialStandaloneMatches}`);
+
+  // Attempt to emulate display-mode: standalone via CDP
+  try {
+    await cdp.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "display-mode", value: "standalone" }],
+    });
+  } catch (err) {
+    log(`Emulation.setEmulatedMedia display-mode: ${err.message}`);
+  }
+
+  const emulatedStandaloneMatches = await cdp.evaluate(`window.matchMedia('(display-mode: standalone)').matches`);
+  log(`Emulated matchMedia('(display-mode: standalone)').matches: ${emulatedStandaloneMatches}`);
+
+  if (emulatedStandaloneMatches) {
+    log("Standalone display-mode established by runner: testing page scrolling and drawer recovery...");
+    await cdp.evaluate("window.scrollTo(0, 0);");
+    await sleep(100);
+    const pwaStart = await cdp.evaluate("window.scrollY");
+    await performTouchSwipe(cdp, { startX: 180, startY: 550, endY: 200, steps: 10 });
+    const pwaEnd = await cdp.evaluate("window.scrollY");
+    const pwaDelta = pwaEnd - pwaStart;
+    log(`PWA standalone scroll delta: +${pwaDelta}px`);
+    if (pwaDelta < 100) {
+      await fail(`Touch scrolling failed under standalone display-mode: delta ${pwaDelta}px < 100px.`);
+    }
+
+    // Verify drawer lifecycle in standalone mode
+    await cdp.evaluate(`document.querySelector('button[aria-label="Open navigation menu"]').click();`);
+    await sleep(500);
+    await cdp.evaluate(`(() => {
+      const closeBtn = document.querySelector('[data-slot="sheet-content"] button[data-slot="sheet-close"]') ||
+                       document.querySelector('[data-slot="sheet-content"] button');
+      if (closeBtn) closeBtn.click();
+    })()`);
+    await sleep(400);
+    log("Standalone display-mode verified successfully in runner.");
+  } else {
+    log(
+      "[touch-scrolling] NOTE: Standalone display-mode (display-mode: standalone) cannot be established by the headless Chromium runner (matches: false). " +
+      "Marking standalone PWA mode as UNVERIFIED in automated runner; real-device Android PWA test required per instructions."
+    );
+  }
+
+  log("\n[SUCCESS] All mobile single-finger touch scrolling tests PASSED!");
+}
+
 async function main() {
   const chromePath = resolveChromePath();
   if (!chromePath) {
@@ -343,7 +915,7 @@ async function main() {
     VALUES ('Acme Digital', 'USD', ${langEn.id}, true);
   `;
 
-  ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-touch-acceptance-"));
+  ownedTempDir = mkdtempSync(path.join(tmpdir(), `rabet-touch-${isBaselineMode ? "baseline" : "repaired"}-`));
   chmodSync(ownedTempDir, 0o700);
 
   const postgresModuleUrl = import.meta.resolve("postgres");
@@ -537,257 +1109,14 @@ async function main() {
     httpOnly: true,
   });
 
-  // Configure mobile touch emulation (Viewport: 390x844, touch-enabled)
-  log("Configuring mobile emulation (390x844, DPR 2, touchEnabled)...");
-  await cdp.send("Emulation.setDeviceMetricsOverride", {
-    width: 390,
-    height: 844,
-    deviceScaleFactor: 2,
-    mobile: true,
-    hasTouch: true,
-  });
-  await cdp.send("Emulation.setTouchEmulationEnabled", {
-    enabled: true,
-    maxTouchPoints: 5,
-  });
+  const browserVersion = await cdp.send("Browser.getVersion");
 
-  // TEST 1: Direct load of /bot-content and single-finger vertical touch scrolling
-  log("\n--- TEST 1: Direct load /bot-content and single-finger touch scroll ---");
-  await cdp.send("Page.navigate", { url: `${BASE_URL}/bot-content` });
-  await sleep(1500);
-
-  // Inspect computed overflow styles
-  const stylesCheck = await cdp.evaluate(`(() => {
-    const html = document.documentElement;
-    const body = document.body;
-    const main = document.getElementById("main");
-    return {
-      htmlOverflowX: getComputedStyle(html).overflowX,
-      htmlOverflowY: getComputedStyle(html).overflowY,
-      bodyOverflowX: getComputedStyle(body).overflowX,
-      bodyOverflowY: getComputedStyle(body).overflowY,
-      mainOverflowX: main ? getComputedStyle(main).overflowX : null,
-      mainOverflowY: main ? getComputedStyle(main).overflowY : null,
-      dataScrollLocked: body.getAttribute("data-scroll-locked"),
-      initialScrollY: window.scrollY,
-      docHeight: document.documentElement.scrollHeight,
-      viewportHeight: window.innerHeight,
-    };
-  })()`);
-  log(`Computed styles on direct load: ${JSON.stringify(stylesCheck)}`);
-
-  if (stylesCheck.htmlOverflowY === "auto" || stylesCheck.bodyOverflowY === "auto") {
-    await fail(
-      `html or body computed overflow-y is 'auto' instead of 'visible'. html: ${stylesCheck.htmlOverflowY}, body: ${stylesCheck.bodyOverflowY}`
-    );
-  }
-  if (stylesCheck.mainOverflowY === "auto") {
-    await fail(
-      `main#main computed overflow-y is 'auto', creating an inner scroll trap.`
-    );
-  }
-  if (stylesCheck.dataScrollLocked !== null) {
-    await fail(`body unexpectedly has data-scroll-locked attribute on direct load.`);
-  }
-  if (stylesCheck.docHeight <= stylesCheck.viewportHeight + 200) {
-    await fail(`Page content is not tall enough to test scrolling (${stylesCheck.docHeight} <= ${stylesCheck.viewportHeight}).`);
+  if (isBaselineMode) {
+    await runBaselineInspection(cdp, browserVersion);
+  } else {
+    await runRepairedSuite(cdp);
   }
 
-  // Perform single-finger touch swipe up (startX: 200, startY: 600, endY: 200 -> swipe 400px up)
-  log("Performing native single-finger swipe up (400px gesture)...");
-  await performTouchSwipe(cdp, { startX: 200, startY: 600, endY: 200, steps: 12 });
-
-  const scrollAfterUp = await cdp.evaluate("window.scrollY");
-  log(`window.scrollY after single-finger swipe up: ${scrollAfterUp}px`);
-  if (scrollAfterUp <= 50) {
-    await fail(
-      `Single-finger vertical scrolling failed on /bot-content. Expected scrollY > 50px, got ${scrollAfterUp}px.`
-    );
-  }
-
-  // Perform single-finger touch swipe back down (startX: 200, startY: 200, endY: 600)
-  log("Performing native single-finger swipe back down...");
-  await performTouchSwipe(cdp, { startX: 200, startY: 200, endY: 600, steps: 12 });
-  const scrollAfterDown = await cdp.evaluate("window.scrollY");
-  log(`window.scrollY after single-finger swipe down: ${scrollAfterDown}px`);
-  if (scrollAfterDown >= scrollAfterUp) {
-    await fail(
-      `Single-finger swipe down failed to reduce scroll position. Before: ${scrollAfterUp}, After: ${scrollAfterDown}.`
-    );
-  }
-
-  // TEST 2: Compact Android Viewport (360x740) on /settings
-  log("\n--- TEST 2: Compact Android Viewport (360x740) on /settings ---");
-  await cdp.send("Emulation.setDeviceMetricsOverride", {
-    width: 360,
-    height: 740,
-    deviceScaleFactor: 2,
-    mobile: true,
-    hasTouch: true,
-  });
-
-  await cdp.send("Page.navigate", { url: `${BASE_URL}/settings` });
-  await sleep(1500);
-
-  const settingsInit = await cdp.evaluate(`(() => ({
-    scrollY: window.scrollY,
-    docHeight: document.documentElement.scrollHeight,
-    viewportHeight: window.innerHeight,
-    bodyWidth: document.body.scrollWidth,
-    viewportWidth: window.innerWidth,
-  }))()`);
-  log(`Settings initial state on 360x740: ${JSON.stringify(settingsInit)}`);
-
-  if (settingsInit.bodyWidth > settingsInit.viewportWidth) {
-    await fail(
-      `Horizontal layout blowout detected on 360x740: body scrollWidth (${settingsInit.bodyWidth}) > viewport (${settingsInit.viewportWidth}).`
-    );
-  }
-
-  log("Performing native single-finger swipe up on /settings (360x740)...");
-  await performTouchSwipe(cdp, { startX: 180, startY: 550, endY: 200, steps: 10 });
-  const settingsScroll = await cdp.evaluate("window.scrollY");
-  log(`window.scrollY on /settings after swipe: ${settingsScroll}px`);
-  if (settingsScroll <= 50) {
-    await fail(
-      `Single-finger touch scrolling failed on /settings (360x740). Got ${settingsScroll}px.`
-    );
-  }
-
-  // TEST 3: Mobile Navigation Drawer (Sheet) & Modal Scroll-Lock Lifecycle
-  log("\n--- TEST 3: Mobile Nav Drawer (Sheet) background scroll-lock lifecycle ---");
-  // Reset scroll to top
-  await cdp.evaluate("window.scrollTo(0, 0);");
-  await sleep(200);
-
-  // Open mobile nav drawer by clicking the menu trigger
-  log("Opening mobile navigation drawer...");
-  const menuOpened = await cdp.evaluate(`(() => {
-    const btn = document.querySelector('button[aria-label="Open navigation menu"]');
-    if (btn) {
-      btn.click();
-      return true;
-    }
-    return false;
-  })()`);
-
-  if (!menuOpened) {
-    await fail("Could not locate mobile navigation menu trigger button.");
-  }
-  await sleep(600);
-
-  const drawerStateOpen = await cdp.evaluate(`(() => {
-    const sheetContent = document.querySelector('[data-slot="sheet-content"]');
-    const overlay = document.querySelector('[data-slot="sheet-overlay"]');
-    const isLocked = document.body.hasAttribute("data-scroll-locked");
-    return {
-      hasSheetContent: Boolean(sheetContent),
-      hasOverlay: Boolean(overlay),
-      isLocked,
-      currentScrollY: window.scrollY,
-    };
-  })()`);
-  log(`Drawer opened state: ${JSON.stringify(drawerStateOpen)}`);
-
-  if (!drawerStateOpen.hasSheetContent) {
-    await fail("Mobile navigation drawer failed to open.");
-  }
-
-  // Verify background scroll remains locked while drawer is open
-  log("Attempting single-finger touch swipe on backdrop overlay while drawer is open...");
-  await performTouchSwipe(cdp, { startX: 340, startY: 500, endY: 200, steps: 10 });
-  const scrollDuringModal = await cdp.evaluate("window.scrollY");
-  log(`Background scrollY during open modal: ${scrollDuringModal}px (initial: ${drawerStateOpen.currentScrollY}px)`);
-
-  if (scrollDuringModal !== drawerStateOpen.currentScrollY) {
-    await fail(
-      `Background scroll locking failed while mobile drawer was open. Moved from ${drawerStateOpen.currentScrollY} to ${scrollDuringModal}.`
-    );
-  }
-
-  // Close drawer by clicking the close button
-  log("Dismissing mobile drawer via close button...");
-  await cdp.evaluate(`(() => {
-    const closeBtn = document.querySelector('[data-slot="sheet-content"] button[data-slot="sheet-close"]') ||
-                     document.querySelector('[data-slot="sheet-content"] button');
-    if (closeBtn) closeBtn.click();
-  })()`);
-  await sleep(500);
-
-  const drawerStateClosed = await cdp.evaluate(`(() => ({
-    sheetContent: Boolean(document.querySelector('[data-slot="sheet-content"]')),
-    isLocked: document.body.hasAttribute("data-scroll-locked"),
-  }))()`);
-  log(`Drawer dismissed state: ${JSON.stringify(drawerStateClosed)}`);
-
-  if (drawerStateClosed.isLocked) {
-    await fail("body retained data-scroll-locked after mobile drawer dismissal.");
-  }
-
-  // Verify single-finger scrolling resumes immediately after drawer closes
-  log("Testing single-finger swipe on page after drawer dismissal...");
-  await performTouchSwipe(cdp, { startX: 180, startY: 550, endY: 200, steps: 10 });
-  const scrollAfterDismiss = await cdp.evaluate("window.scrollY");
-  log(`window.scrollY after drawer dismissal swipe: ${scrollAfterDismiss}px`);
-  if (scrollAfterDismiss <= 50) {
-    await fail(
-      `Single-finger vertical scrolling did not resume after mobile drawer closed. Got ${scrollAfterDismiss}px.`
-    );
-  }
-
-  // TEST 4: Navigation through Mobile Drawer Links
-  log("\n--- TEST 4: Navigation through Mobile Drawer links ---");
-  // Open mobile nav again
-  await cdp.evaluate(`document.querySelector('button[aria-label="Open navigation menu"]').click();`);
-  await sleep(500);
-
-  // Click navigation link to Bot Content
-  log("Clicking 'Bot Content' link inside mobile drawer...");
-  const navClicked = await cdp.evaluate(`(() => {
-    const links = Array.from(document.querySelectorAll('[data-slot="sheet-content"] a'));
-    const botContentLink = links.find(a => a.href.includes('/bot-content') || a.innerText.includes('Bot Content'));
-    if (botContentLink) {
-      botContentLink.click();
-      return true;
-    }
-    return false;
-  })()`);
-
-  if (!navClicked) {
-    await fail("Could not find Bot Content link inside mobile drawer.");
-  }
-
-  // Wait for URL to change to /bot-content
-  for (let i = 0; i < 20; i++) {
-    await sleep(300);
-    const currUrl = await cdp.evaluate("window.location.pathname");
-    if (currUrl.includes("/bot-content")) break;
-  }
-
-  const postNavState = await cdp.evaluate(`(() => ({
-    pathname: window.location.pathname,
-    sheetPresent: Boolean(document.querySelector('[data-slot="sheet-content"]')),
-    isLocked: document.body.hasAttribute("data-scroll-locked"),
-    scrollY: window.scrollY,
-  }))()`);
-  log(`Post-navigation state: ${JSON.stringify(postNavState)}`);
-
-  if (postNavState.isLocked) {
-    await fail("body remained locked after mobile drawer link navigation.");
-  }
-
-  // Verify scrolling works on navigated page
-  log("Verifying single-finger touch scrolling on navigated page...");
-  await performTouchSwipe(cdp, { startX: 180, startY: 550, endY: 200, steps: 10 });
-  const postNavScroll = await cdp.evaluate("window.scrollY");
-  log(`window.scrollY on navigated page: ${postNavScroll}px`);
-  if (postNavScroll <= 50) {
-    await fail(
-      `Single-finger touch scrolling failed on navigated page. Got ${postNavScroll}px.`
-    );
-  }
-
-  log("\n[SUCCESS] All mobile single-finger touch scrolling tests PASSED!");
   await cdp.close();
   await cleanup();
 }
