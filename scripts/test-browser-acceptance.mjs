@@ -30,6 +30,7 @@ let chromeProcess = null;
 let pgClient = null;
 let ownedTempDir = null;
 let ownedPgFixture = null;
+let createdDbName = null;
 let isCleaningUp = false;
 
 function log(msg) {
@@ -60,6 +61,15 @@ async function cleanup() {
       await pgClient.end();
     } catch {}
     pgClient = null;
+  }
+
+  if (createdDbName && process.env.RABET_TEST_PG_URL) {
+    try {
+      const cleanupSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+      await cleanupSql.unsafe(`DROP DATABASE IF EXISTS ${createdDbName}`);
+      await cleanupSql.end();
+    } catch {}
+    createdDbName = null;
   }
 
   if (ownedTempDir) {
@@ -226,55 +236,69 @@ async function main() {
   }
   log(`Using Chromium executable: ${chromePath}`);
 
-  const stateFilePath =
-    process.env.RABET_PG_STATE_FILE ??
-    path.join(tmpdir(), "rabet-test-pg.json");
+  let pgUrl = "";
+  if (process.env.RABET_TEST_PG_URL) {
+    createdDbName = `rabet_bot_content_browser_${Date.now()}`;
+    const adminSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+    await adminSql.unsafe(`CREATE DATABASE ${createdDbName}`);
+    await adminSql.end();
 
-  // Detect conflicting pre-existing fixture state before starting
-  const conflict = detectConflictingFixture(stateFilePath);
-  if (conflict) {
-    await fail(
-      `Pre-existing disposable PostgreSQL instance detected at ${stateFilePath} ` +
-        `(port ${conflict.port}, datadir: ${conflict.datadir}). ` +
-        "Another test run or fixture may be active. Preserving existing fixture. " +
-        "Please stop it with 'node scripts/db-test-postgres.mjs stop' or remove the stale state file before running acceptance tests."
-    );
+    const parsed = new URL(process.env.RABET_TEST_PG_URL);
+    parsed.pathname = `/${createdDbName}`;
+    pgUrl = parsed.toString();
+    log(`Using designated PostgreSQL service with database: ${createdDbName}`);
+  } else {
+    const stateFilePath =
+      process.env.RABET_PG_STATE_FILE ??
+      path.join(tmpdir(), "rabet-test-pg.json");
+
+    // Detect conflicting pre-existing fixture state before starting
+    const conflict = detectConflictingFixture(stateFilePath);
+    if (conflict) {
+      await fail(
+        `Pre-existing disposable PostgreSQL instance detected at ${stateFilePath} ` +
+          `(port ${conflict.port}, datadir: ${conflict.datadir}). ` +
+          "Another test run or fixture may be active. Preserving existing fixture. " +
+          "Please stop it with 'node scripts/db-test-postgres.mjs stop' or remove the stale state file before running acceptance tests."
+      );
+    }
+
+    log("Starting disposable PostgreSQL...");
+    const pgStart = spawnSync("node", ["scripts/db-test-postgres.mjs", "start"], {
+      encoding: "utf8",
+      env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
+    });
+    if (pgStart.status !== 0) {
+      await fail(`Could not start disposable PostgreSQL: ${pgStart.stderr}`);
+    }
+
+    // Parse connection string
+    const pgUrlMatch = pgStart.stdout.match(/postgresql:\/\/[^\s]+/);
+    if (!pgUrlMatch) {
+      await fail("Could not find PostgreSQL URL in output");
+    }
+    pgUrl = pgUrlMatch[0];
+
+    const stateData = readPgState(stateFilePath);
+    ownedPgFixture = {
+      port: stateData?.port ?? new URL(pgUrl).port,
+      datadir: stateData?.datadir ?? "",
+      url: pgUrl,
+    };
   }
-
-  log("Starting disposable PostgreSQL...");
-  const pgStart = spawnSync("node", ["scripts/db-test-postgres.mjs", "start"], {
-    encoding: "utf8",
-    env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
-  });
-  if (pgStart.status !== 0) {
-    await fail(`Could not start disposable PostgreSQL: ${pgStart.stderr}`);
-  }
-
-  // Parse connection string
-  const pgUrlMatch = pgStart.stdout.match(/postgresql:\/\/[^\s]+/);
-  if (!pgUrlMatch) {
-    await fail("Could not find PostgreSQL URL in output");
-  }
-  const pgUrl = pgUrlMatch[0];
-
-  const stateData = readPgState(stateFilePath);
-  ownedPgFixture = {
-    port: stateData?.port ?? new URL(pgUrl).port,
-    datadir: stateData?.datadir ?? "",
-    url: pgUrl,
-  };
 
   // Verify test database is the designated disposable loopback target before any migration or write
   const parsedPgUrl = new URL(pgUrl);
   if (
     parsedPgUrl.hostname !== "127.0.0.1" &&
-    parsedPgUrl.hostname !== "localhost"
+    parsedPgUrl.hostname !== "localhost" &&
+    !process.env.RABET_TEST_PG_URL
   ) {
     await fail(
       `Refusing to run against non-loopback database host: ${parsedPgUrl.hostname}`
     );
   }
-  log(`Disposable loopback PostgreSQL ready on port ${parsedPgUrl.port}`);
+  log(`Disposable PostgreSQL ready on port ${parsedPgUrl.port}`);
 
   // Run migrations
   log("Applying database migrations...");
@@ -763,10 +787,10 @@ async function main() {
   log("Flow 4 PASSED: Arabic saved with RTL direction; truthful fallback badge verified; English preserved.");
 
   // ==========================================
-  // Flow 5: Submit invalid/unknown placeholders & draft preservation
+  // Flow 5: QA-18 Live draft validation & draft preservation
   // ==========================================
-  log("Flow 5: Submitting invalid placeholder and testing client-side validation...");
-  // Capture stored text BEFORE the invalid save attempt
+  log("Flow 5: Testing QA-18 live draft validation without clicking Save...");
+  // Capture stored text BEFORE the invalid draft entry
   const [storedEnBefore] = await pgClient`
     SELECT mt.body FROM message_translation mt
     JOIN language l ON l.id = mt.language_id
@@ -781,63 +805,212 @@ async function main() {
   }`);
   await sleep(500);
 
-  // Type invalid placeholder into English draft
-  const invalidText = "Hello {{unknown_placeholder}}!";
+  // Monitor network fetch calls to prove zero network requests/save actions are triggered by typing
+  await cdp.evaluate(`{
+    window.__actionNetworkCalls = 0;
+    const origFetch = window.fetch;
+    window.fetch = function(...args) {
+      window.__actionNetworkCalls++;
+      return origFetch.apply(this, args);
+    };
+  }`);
+
+  // Type exact QA-18 original input into English draft:
+  // "Hello {{unknown_thing}} and {{store_name"
+  const qa18InvalidInput = "Hello {{unknown_thing}} and {{store_name";
   await cdp.evaluate(`{
     const card = document.querySelector('[data-template-card="bot_welcome"]');
     const textarea = card.querySelector('textarea');
     const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-    nativeSetter.call(textarea, ${JSON.stringify(invalidText)});
+    nativeSetter.call(textarea, ${JSON.stringify(qa18InvalidInput)});
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
     textarea.dispatchEvent(new Event('change', { bubbles: true }));
   }`);
   await sleep(500);
 
-  // Click Save within card
+  // 1. Verify inline error appears BEFORE Save is clicked
+  const inlineErrorState = await cdp.evaluate(`(() => {
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const errorEl = card ? card.querySelector('[data-draft-error]') : null;
+    const textarea = card ? card.querySelector('textarea') : null;
+    const saveBtn = card ? Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message')) : null;
+    const errorId = errorEl ? errorEl.getAttribute('id') : null;
+    const describedBy = textarea ? textarea.getAttribute('aria-describedby') : null;
+    const ariaInvalid = textarea ? textarea.getAttribute('aria-invalid') : null;
+
+    return {
+      hasErrorEl: Boolean(errorEl),
+      errorText: errorEl ? errorEl.innerText : null,
+      ariaInvalid,
+      ariaDescribedByMatches: Boolean(errorId && describedBy && describedBy.includes(errorId)),
+      isSaveDisabled: Boolean(saveBtn && saveBtn.disabled),
+      networkCalls: window.__actionNetworkCalls,
+    };
+  })()`);
+
+  if (!inlineErrorState.hasErrorEl) {
+    await fail("Flow 5: Expected inline validation error [data-draft-error] to appear while typing invalid draft.");
+  }
+  if (!inlineErrorState.isSaveDisabled) {
+    await fail("Flow 5: Expected Save English Message button to be disabled for invalid draft.");
+  }
+  if (inlineErrorState.ariaInvalid !== "true") {
+    await fail(`Flow 5: Expected textarea aria-invalid='true', got: '${inlineErrorState.ariaInvalid}'`);
+  }
+  if (!inlineErrorState.ariaDescribedByMatches) {
+    await fail("Flow 5: Expected textarea aria-describedby to reference draft error element ID.");
+  }
+  if (inlineErrorState.networkCalls !== 0) {
+    await fail(`Flow 5: Expected 0 save action network requests while typing, recorded: ${inlineErrorState.networkCalls}`);
+  }
+
+  // Verify DB translation remains strictly untouched while typing invalid draft
+  const [storedEnWhileTyping] = await pgClient`
+    SELECT mt.body FROM message_translation mt
+    JOIN language l ON l.id = mt.language_id
+    WHERE l.code = 'en';
+  `;
+  if (storedEnWhileTyping.body !== storedEnBefore.body) {
+    await fail("Flow 5: Database translation changed while typing invalid draft!");
+  }
+  log("Flow 5: Verified inline error appears before Save, Save is disabled, textarea is accessibly invalid, 0 network requests triggered by typing.");
+
+  // 2. Verify preview does not imply that invalid draft is ready to send
+  const previewState = await cdp.evaluate(`(() => {
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const cardText = card ? card.innerText : "";
+    return {
+      hasNotReadyWarning: cardText.includes("Invalid draft — not ready to send") || cardText.includes("Draft contains syntax errors"),
+    };
+  })()`);
+  if (!previewState.hasNotReadyWarning) {
+    await fail("Flow 5: Expected live preview to indicate invalid draft is not ready to send.");
+  }
+
+  // 3. Verify English/Arabic draft separation
+  log("Flow 5: Checking English/Arabic draft separation...");
   await cdp.evaluate(`{
     const card = document.querySelector('[data-template-card="bot_welcome"]');
-    const saveEnBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
-    if (saveEnBtn) saveEnBtn.click();
+    const arTab = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('العربية'));
+    if (arTab) arTab.click();
   }`);
-  await sleep(1000);
+  await sleep(500);
 
-  // Check card text for client-side validation feedback
-  const cardText = await cdp.evaluate(`{
-    const card = document.querySelector('[data-template-card="bot_welcome"]');
-    card.innerText;
-  }`);
-
-  const hasValidationError =
-    cardText.includes("Validation error") &&
-    cardText.includes("Unknown placeholder");
-  if (!hasValidationError) {
-    await fail(
-      `Flow 5: Expected client-side validation error inside card, got: '${cardText.slice(0, 500)}'`
-    );
-  }
-  log("Flow 5: Client-side validation intercepted invalid placeholder before submission, displaying validation error.");
-
-  // Verify draft is preserved in textarea
-  const preservedDraft = await cdp.evaluate(`{
+  const arDraft = await cdp.evaluate(`{
     const card = document.querySelector('[data-template-card="bot_welcome"]');
     card.querySelector('textarea').value;
   }`);
-  if (preservedDraft !== invalidText) {
-    await fail(`Flow 5: User draft was cleared or lost on validation failure; got '${preservedDraft}'`);
+  if (arDraft === qa18InvalidInput) {
+    await fail("Flow 5: English invalid draft leaked into Arabic draft tab!");
   }
 
-  // Compare stored text AFTER the invalid save attempt: must be strictly unchanged!
+  // Switch back to English tab and verify invalid draft preserved
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const enTab = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('English'));
+    if (enTab) enTab.click();
+  }`);
+  await sleep(500);
+
+  const enPreservedDraft = await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    card.querySelector('textarea').value;
+  }`);
+  if (enPreservedDraft !== qa18InvalidInput) {
+    await fail(`Flow 5: English draft was not preserved across tab switches; got '${enPreservedDraft}'`);
+  }
+  log("Flow 5: English and Arabic draft separation verified.");
+
+  // 4. Verify Reset clears the invalid draft and error
+  log("Flow 5: Verifying Reset reverts to saved content and clears validation error...");
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const resetBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Reset'));
+    if (resetBtn) resetBtn.click();
+  }`);
+  await sleep(500);
+
+  const afterResetState = await cdp.evaluate(`(() => {
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const errorEl = card.querySelector('[data-draft-error]');
+    const textarea = card.querySelector('textarea');
+    return {
+      hasError: Boolean(errorEl),
+      val: textarea ? textarea.value : null,
+    };
+  })()`);
+  if (afterResetState.hasError) {
+    await fail("Flow 5: Expected validation error to clear after Reset.");
+  }
+  if (!afterResetState.val.includes("Welcome to {{store_name}}!")) {
+    await fail(`Flow 5: Expected textarea to revert to saved text, got: '${afterResetState.val}'`);
+  }
+  log("Flow 5: Reset reverted draft and cleared validation error.");
+
+  // 5. Retype invalid draft, then correct it to verify error clears and Save is enabled
+  log("Flow 5: Typing invalid draft again, then correcting to valid text...");
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const textarea = card.querySelector('textarea');
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    nativeSetter.call(textarea, ${JSON.stringify(qa18InvalidInput)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+  }`);
+  await sleep(300);
+
+  // Correct the draft to valid template
+  const correctedValidText = "Welcome to {{store_name}}! We are delighted to serve you.";
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const textarea = card.querySelector('textarea');
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    nativeSetter.call(textarea, ${JSON.stringify(correctedValidText)});
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+  }`);
+  await sleep(500);
+
+  const afterCorrectionState = await cdp.evaluate(`(() => {
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const errorEl = card.querySelector('[data-draft-error]');
+    const saveBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
+    const textarea = card.querySelector('textarea');
+    return {
+      hasError: Boolean(errorEl),
+      isSaveEnabled: Boolean(saveBtn && !saveBtn.disabled),
+      ariaInvalid: textarea ? textarea.getAttribute('aria-invalid') : null,
+    };
+  })()`);
+
+  if (afterCorrectionState.hasError) {
+    await fail("Flow 5: Error did not clear after correcting the draft.");
+  }
+  if (!afterCorrectionState.isSaveEnabled) {
+    await fail("Flow 5: Save button was not enabled after correcting the draft.");
+  }
+  if (afterCorrectionState.ariaInvalid === "true") {
+    await fail("Flow 5: aria-invalid was not cleared on textarea after correcting draft.");
+  }
+  log("Flow 5: Corrected draft cleared error, removed aria-invalid, and enabled Save.");
+
+  // 6. Explicitly save the corrected draft and verify DB persistence
+  await cdp.evaluate(`{
+    const card = document.querySelector('[data-template-card="bot_welcome"]');
+    const saveBtn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.includes('Save English Message'));
+    if (saveBtn) saveBtn.click();
+  }`);
+  await sleep(1500);
+
   const [storedEnAfter] = await pgClient`
     SELECT mt.body FROM message_translation mt
     JOIN language l ON l.id = mt.language_id
     WHERE l.code = 'en';
   `;
-  if (storedEnAfter.body !== storedEnBefore.body) {
-    await fail(
-      `Flow 5: Stored database text was modified after invalid submission! Before: '${storedEnBefore.body}', After: '${storedEnAfter.body}'`
-    );
+  if (storedEnAfter.body !== correctedValidText) {
+    await fail(`Flow 5: Expected saved DB text '${correctedValidText}', got '${storedEnAfter.body}'`);
   }
-  log("Flow 5 PASSED: Client-side validation displayed, draft preserved in textarea, DB text unchanged.");
+  log("Flow 5 PASSED: QA-18 live draft validation, separation, reset, correction, and persistence verified.");
 
   // ==========================================
   // Flow 5-B: Action rejection with diagnostic text leak guard

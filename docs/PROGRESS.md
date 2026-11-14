@@ -1233,3 +1233,17 @@ Related: [SELLER_NOTIFICATIONS_HANDOFF.md](./SELLER_NOTIFICATIONS_HANDOFF.md) fo
   3. *Disallowed placeholders:* `{{product_name}}` in `bot_welcome` (where only `store_name` is permitted).
 - **Observed Results:** Every single malformed or unauthorized case was strictly rejected at the validation boundary and returned `{ success: false, code: "INVALID_INPUT", message: ... }` with **zero database writes**.
 - **Conclusion:** The QA-18 failure claim is unproven/stale. The validation logic is operating correctly according to specification. Working code was preserved without unnecessary changes, and regression tests were added in `src/app/actions/__tests__/bot-content.test.ts`.
+
+### 4. QA-18 UI Resolution: Live Draft Validation vs. Save Protection Boundary
+- **Architectural Distinction:**
+  - **Save Protection (Authoritative):** Enforced on the server inside `saveBotContentTranslation` (`src/app/actions/bot-content.ts`) and on explicit submission in `handleSave` (`src/components/dashboard/bot-content/template-card.tsx`). This boundary strictly protects persistence, guarantees zero database writes for invalid inputs, and blocks malformed data.
+  - **Draft Feedback (Live UI/UX):** Derived reactively from `currentDraft` via `useMemo` using the existing `validateTemplateBody` and `previewContext`.
+- **Live Draft Feedback Behaviors:**
+  1. *Immediate Inline Validation:* As the user types, invalid syntax (malformed braces, unclosed tags, unknown placeholders, or disallowed variables) surfaces a clear inline error message under the textarea before Save is clicked.
+  2. *Untouched Fields:* Empty initial fields (`currentDraft.trim().length === 0`) do not show intrusive error banners.
+  3. *Save Button Guard:* Save is disabled for invalid drafts (`disabled={isPending || currentDraft.trim().length === 0 || !isDraftValid}`), while retaining internal `handleSave` client check and server action validation.
+  4. *Accessible State:* Textarea receives `aria-invalid="true"` and `aria-describedby` linking to the error alert container.
+  5. *Live Preview Caution:* Live preview header indicates `Invalid draft — not ready to send`, styling reflects validation failure, and warning note clarifies the draft will not be sent.
+  6. *Draft & Separation Integrity:* English and Arabic drafts remain independently preserved across tab switching, suggestion loading, placeholder insertion, and Reset.
+  7. *Automatic Recovery:* Correcting the draft immediately clears the error, removes `aria-invalid`, restores normal preview, and re-enables Save.
+- **Verification:** Verified via automated CDP browser acceptance suite (`npm run test:browser:bot-content`) testing the exact original QA input (`Hello {{unknown_thing}} and {{store_name`), zero typing network calls, inline error appearance, Save disablement, tab separation, Reset, and corrected draft persistence.
