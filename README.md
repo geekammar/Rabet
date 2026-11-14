@@ -425,6 +425,11 @@ digital-product catalog with displayed prices and **seller inquiries**.
 - Rabet integrates **no** payment gateway, no Binance API, no Vodafone Cash API, no
   financial webhooks, no payment-proof workflow and no settlement engine. Nothing is wired
   up and no payment entity exists in the data model.
+- Central payment methods can be configured and previewed, and an **isolated,
+  disabled-by-default synthetic prototype** can show their localized instructions on
+  Telegram and link to the inquiry journey. It performs no transfer, charge, verification,
+  receipt upload, or order creation. See
+  [docs/MANUAL_PAYMENT_JOURNEY_PROTOTYPE.md](./docs/MANUAL_PAYMENT_JOURNEY_PROTOTYPE.md).
 - **Telegram Stars guardrail.** Rabet offers digital services, and Telegram requires
   [Telegram Stars](https://core.telegram.org/bots/payments-stars) for **real digital
   goods/services sold inside bots and Mini Apps — including where an external payment page

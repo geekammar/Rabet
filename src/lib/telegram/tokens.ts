@@ -59,6 +59,12 @@ export const tokens = {
     }
     return assertValidCallbackData(`a:${actionId}`);
   },
+  paymentContact: (actionId: string): string => {
+    if (!UUID_REGEX.test(actionId)) {
+      throw new Error(`Invalid action UUID: "${actionId}"`);
+    }
+    return assertValidCallbackData(`pm:${actionId}`);
+  },
   submenu: (actionId: string, page?: number): string => {
     if (!UUID_REGEX.test(actionId)) {
       throw new Error(`Invalid action UUID: "${actionId}"`);
@@ -91,6 +97,7 @@ export type ParsedToken =
   | { type: "category"; categoryId: string; page: number }
   | { type: "product"; productId: string }
   | { type: "action"; actionId: string }
+  | { type: "paymentContact"; actionId: string }
   | { type: "submenu"; actionId: string; page: number }
   | { type: "back"; actionId: string }
   | { type: "inquiries"; page: number }
@@ -173,6 +180,14 @@ export function parseToken(data?: string): ParsedToken {
       return { type: "unknown", raw: data };
     }
     return { type: "action", actionId };
+  }
+
+  if (data.startsWith("pm:")) {
+    const actionId = data.slice(3);
+    if (!UUID_REGEX.test(actionId)) {
+      return { type: "unknown", raw: data };
+    }
+    return { type: "paymentContact", actionId };
   }
 
   if (data.startsWith("m:")) {

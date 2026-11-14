@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import { loadPaymentMethodsAction } from "@/app/actions/payment-methods";
+import { resolvePaymentMethodContent } from "@/lib/payment-methods/presentation";
 import { GuardedPaymentMethodsLoader } from "@/lib/product-actions/payment-methods-loader";
 import {
   createProductActionAction,
@@ -1481,12 +1482,17 @@ export function ProductActionEditor({
                         );
                       }
 
-                      const direct = selectedMethod.translations[activeLangTab];
-                      const fallback = selectedMethod.translations[defaultLangCode];
-                      const isFallback = !direct?.title && Boolean(fallback?.title);
-                      const displayedTrans = (direct?.title ? direct : fallback) ?? null;
-                      const title = displayedTrans?.title ?? "";
-                      const instructions = displayedTrans?.instructions ?? "";
+                      const requestedLanguage = languages.find(
+                        (l) => l.code === activeLangTab,
+                      );
+                      const content = resolvePaymentMethodContent(
+                        Object.values(selectedMethod.translations),
+                        requestedLanguage?.id,
+                        defaultLanguage?.id,
+                      );
+                      const isFallback = content?.usedFallback ?? false;
+                      const title = content?.title ?? "";
+                      const instructions = content?.instructions ?? "";
                       const displayedDir: "ltr" | "rtl" = isFallback
                         ? ((languages.find((l) => l.code === defaultLangCode)?.textDirection === "rtl" || defaultLangCode === "ar") ? "rtl" : "ltr")
                         : activeLangDir;
@@ -1530,8 +1536,10 @@ export function ProductActionEditor({
                             </div>
                           </div>
                           <p className="text-[11px] text-muted-foreground">
-                            Telegram customer channel is currently unavailable for payment method buttons. This button is for dashboard preparation and preview only.
-                            {!selectedMethod.isActive && " Method is disabled. Button reference is preserved."}
+                            Saved configuration preview only. Customer availability additionally requires the
+                            disabled-by-default manual-payment prototype capability in an isolated test deployment.
+                            This preview never processes, confirms, or records a payment.
+                            {!selectedMethod.isActive && " This method is disabled; the button reference is preserved."}
                           </p>
                         </div>
                       );
@@ -2147,11 +2155,13 @@ export function ProductActionEditor({
                       return null;
                     }
 
-                    const trans =
-                      selectedMethod.translations[defaultLangCode] ??
-                      selectedMethod.translations["en"];
-                    const title = trans?.title ?? "";
-                    const instructions = trans?.instructions ?? "";
+                    const content = resolvePaymentMethodContent(
+                      Object.values(selectedMethod.translations),
+                      defaultLanguage?.id,
+                      defaultLanguage?.id,
+                    );
+                    const title = content?.title ?? "";
+                    const instructions = content?.instructions ?? "";
 
                     return (
                       <div className="rounded-xl border bg-muted/30 p-2.5 space-y-1.5">
@@ -2179,7 +2189,9 @@ export function ProductActionEditor({
                           </div>
                         </div>
                         <p className="text-[11px] text-muted-foreground">
-                          Telegram customer channel is currently unavailable for payment method buttons. This button is for dashboard preparation and preview only.
+                          Saved configuration preview only. The manual-payment customer journey is disabled by default
+                          and, when enabled for an isolated prototype, only shows instructions — it never processes or
+                          verifies a payment.
                         </p>
                       </div>
                     );

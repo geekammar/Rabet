@@ -35,17 +35,20 @@ import {
   MAX_PAYMENT_INSTRUCTIONS_LENGTH,
   MAX_PAYMENT_TITLE_LENGTH,
 } from "@/lib/payment-methods/constants";
+import { resolvePaymentMethodContent } from "@/lib/payment-methods/presentation";
 
 interface PaymentMethodsManagerProps {
   initialMethods: PaymentMethodRecord[];
   defaultLanguage: ResolvedLanguage | null;
   languages: LanguageRow[];
+  prototypeEnabled?: boolean;
 }
 
 export function PaymentMethodsManager({
   initialMethods,
   defaultLanguage,
   languages,
+  prototypeEnabled = false,
 }: PaymentMethodsManagerProps) {
   const [methods, setMethods] = useState<PaymentMethodRecord[]>(initialMethods);
   const [isPending, startTransition] = useTransition();
@@ -288,34 +291,25 @@ export function PaymentMethodsManager({
     });
   };
 
-  // Resolve preview content for a given method and language
+  // Resolve preview content with the same fallback chain as the customer journey.
   const resolvePreviewContent = (
     method: PaymentMethodRecord,
     langCode: string,
   ) => {
-    const direct = method.translations[langCode.toLowerCase()];
-    if (direct && direct.title.trim().length > 0) {
-      return {
-        title: direct.title,
-        instructions: direct.instructions ?? null,
-        isFallback: false,
-        langCode: langCode.toLowerCase(),
-      };
-    }
-    const fallback = method.translations[defaultLangCode];
-    if (fallback && fallback.title.trim().length > 0) {
-      return {
-        title: fallback.title,
-        instructions: fallback.instructions ?? null,
-        isFallback: true,
-        langCode: defaultLangCode,
-      };
-    }
+    const requestedLanguage = languages.find(
+      (languageRow) => languageRow.code.toLowerCase() === langCode.toLowerCase(),
+    );
+    const content = resolvePaymentMethodContent(
+      Object.values(method.translations),
+      requestedLanguage?.id,
+      defaultLanguage?.id,
+    );
+
     return {
-      title: method.adminLabel,
-      instructions: null,
-      isFallback: false,
-      langCode: defaultLangCode,
+      title: content?.title ?? "",
+      instructions: content?.instructions ?? null,
+      isFallback: content?.usedFallback ?? false,
+      langCode: content?.languageCode?.toLowerCase() ?? langCode.toLowerCase(),
     };
   };
 
@@ -325,7 +319,7 @@ export function PaymentMethodsManager({
         <div>
           <PageHeader
             title="Payment Methods"
-            description="Define payment methods once, bind them to product buttons, and preview customer instructions."
+            description="Define payment methods once, bind them to product buttons, and preview localized instructions. Configuration is not checkout."
           />
         </div>
 
@@ -383,10 +377,12 @@ export function PaymentMethodsManager({
         <CardContent className="p-4 flex items-start gap-3 text-xs text-muted-foreground">
           <CreditCard className="size-4 shrink-0 text-primary/70 mt-0.5" />
           <div>
-            <p className="font-semibold text-foreground">Future Channel Preparation (No Live Checkout)</p>
+            <p className="font-semibold text-foreground">Configuration &amp; Preview Only — No Live Checkout</p>
             <p>
-              Payment methods defined here provide centralized instructions and button binding for future channels.
-              They do not enable live checkout, store financial credentials, or create orders. Customer-facing Telegram currently excludes payment method buttons.
+              Saving a method or activating a bound button does not process a payment, create an order, or make the method
+              available to customers. The synthetic Telegram manual-payment journey is a separate, disabled-by-default
+              prototype capability and is {prototypeEnabled ? "enabled for this isolated deployment" : "disabled in this deployment"}.
+              Actual checkout remains unimplemented.
             </p>
           </div>
         </CardContent>
@@ -418,7 +414,7 @@ export function PaymentMethodsManager({
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {methods.map((method) => {
               const defaultTrans = method.translations[defaultLangCode];
-              const customerTitle = defaultTrans?.title || method.adminLabel;
+              const customerTitle = defaultTrans?.title || "(No customer-facing title)";
               const hasInstructions = Boolean(defaultTrans?.instructions?.trim());
 
               return (
@@ -447,7 +443,7 @@ export function PaymentMethodsManager({
                         }
                         data-testid="method-status-badge"
                       >
-                        {method.isActive ? "Enabled" : "Disabled"}
+                        {method.isActive ? "Enabled (config)" : "Disabled"}
                       </Badge>
                     </div>
                   </CardHeader>
@@ -611,10 +607,10 @@ export function PaymentMethodsManager({
                 <div className="flex items-center justify-between rounded-lg border p-3 bg-muted/10">
                   <div className="space-y-0.5">
                     <span className="text-xs font-semibold">
-                      Status: {createIsActive ? "Enabled (Preview ready)" : "Disabled (Default)"}
+                      Status: {createIsActive ? "Enabled (saved configuration)" : "Disabled (default)"}
                     </span>
                     <p className="text-[11px] text-muted-foreground">
-                      Methods start disabled until you choose to activate them. Buttons referencing disabled methods show status clearly to admins.
+                      This is saved configuration only. It does not enable actual payment processing or customer-channel availability.
                     </p>
                   </div>
                   <Button
@@ -857,10 +853,11 @@ export function PaymentMethodsManager({
                 <div className="flex items-center justify-between rounded-lg border p-3 bg-muted/10">
                   <div className="space-y-0.5">
                     <span className="text-xs font-semibold">
-                      Status: {editIsActive ? "Enabled (Preview ready)" : "Disabled"}
+                      Status: {editIsActive ? "Enabled (saved configuration)" : "Disabled"}
                     </span>
                     <p className="text-[11px] text-muted-foreground">
                       Disabling keeps existing button bindings intact while marking the method as disabled in dashboard previews.
+                      This toggle never enables checkout or customer-channel availability.
                     </p>
                   </div>
                   <Button
@@ -1071,8 +1068,8 @@ export function PaymentMethodsManager({
                   }
                 >
                   {selectedPreviewMethod.isActive
-                    ? "Enabled (Preview ready — Telegram channel unavailable)"
-                    : "Disabled (Draft)"}
+                    ? `Enabled (saved configuration — prototype ${prototypeEnabled ? "enabled" : "disabled"})`
+                    : "Disabled (saved configuration)"}
                 </Badge>
               </div>
 
@@ -1090,7 +1087,11 @@ export function PaymentMethodsManager({
                     <div className="flex items-center gap-2">
                       <CreditCard className="size-4 text-primary shrink-0" />
                       <h4 className="text-sm font-bold text-foreground">
-                        {previewContent.title}
+                        {previewContent.title || (
+                          <span className="italic text-muted-foreground">
+                            No customer-facing title
+                          </span>
+                        )}
                       </h4>
                       {previewContent.isFallback && (
                         <Badge variant="outline" className="text-[10px] shrink-0 text-muted-foreground">
@@ -1108,6 +1109,10 @@ export function PaymentMethodsManager({
                         No instructions provided for this method.
                       </p>
                     )}
+                    <p className="text-[11px] text-muted-foreground border-t pt-2">
+                      Saved-content preview only. It does not indicate customer availability and it never records or
+                      verifies a payment.
+                    </p>
                   </div>
                 );
               })()}

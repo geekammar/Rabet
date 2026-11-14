@@ -36,8 +36,11 @@ bot; the merchant interacts only with the dashboard.
 > arbitrarily deep catalog, interact with **configurable recursive button trees** per
 > product, and **open inquiries** — tracked conversations with the seller. The MVP does
 > **not** handle payments: no checkout, no payment gateway, no order and no invoice. An
-> inquiry is a conversation, not a purchase. See ADR-013 and
-> [DATA_MODEL.md](./DATA_MODEL.md).
+> inquiry is a conversation, not a purchase. Central payment methods can be configured and
+> previewed; an isolated, disabled-by-default synthetic prototype may show their localized
+> instructions on Telegram and link to the inquiry journey, but it processes and verifies
+> nothing. See ADR-013, [DATA_MODEL.md](./DATA_MODEL.md) §5.6, and
+> [MANUAL_PAYMENT_JOURNEY_PROTOTYPE.md](./MANUAL_PAYMENT_JOURNEY_PROTOTYPE.md).
 
 ## 2. Tech stack
 
@@ -303,7 +306,10 @@ is being invented or promised.
 **Consequences.** Payment-specific code will stay behind a small modular
 boundary so a provider can be added or replaced without reworking order flows,
 and payment and fulfillment statuses remain separate in the data model
-(see ADR-004). No payment code exists, and none is scheduled for the MVP.
+(see ADR-004). No real payment integration or checkout exists. The only current
+payment-adjacent runtime behavior is a synthetic, instructions-only manual-payment
+prototype behind a disabled-by-default channel capability, scoped outside
+Production. It processes and verifies nothing.
 
 ### ADR-006 — English first, Arabic optional
 

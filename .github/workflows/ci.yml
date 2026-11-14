@@ -308,6 +308,16 @@ jobs:
           TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN: test-seller-bot-token-synthetic-browser
         run: npm run test:browser:notifications
 
+      # Dashboard configuration/preview and 360px overflow coverage for the
+      # manual-payment prototype. The customer renderer itself is exercised by
+      # the mocked-Telegram database acceptance suite; this job uses real
+      # headless Chromium against the built dashboard.
+      - name: Run Payment Methods and manual-payment dashboard browser acceptance suite
+        env:
+          RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
+        run: npm run test:browser:payments
+
       - name: Run Android Mobile Touch Scrolling browser acceptance suite
         env:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres

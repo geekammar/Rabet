@@ -377,6 +377,7 @@ export async function handleProductInquiryCallback(
     backTarget: string;
     returnToProductTarget: string;
     options: InquiryJourneyOptions;
+    selectedOptionSuffix?: string[];
   },
 ): Promise<void> {
   const {
@@ -390,6 +391,7 @@ export async function handleProductInquiryCallback(
     backTarget,
     returnToProductTarget,
     options,
+    selectedOptionSuffix,
   } = params;
 
   // 1. Ensure customer is upserted
@@ -444,6 +446,16 @@ export async function handleProductInquiryCallback(
     const preferred = translations.find((t) => t.languageId === langContext.id);
     const fallback = translations.find((t) => t.languageId === defaultLangId);
     selectedOptions.push(preferred?.label ?? fallback?.label ?? "Option");
+  }
+
+  // The manual-payment prototype appends the selected method context to the
+  // same frozen option path. It never rewrites an existing snapshot: the
+  // create-or-resume query keeps historical selectedOptions write-once.
+  for (const suffix of selectedOptionSuffix ?? []) {
+    const value = suffix.trim();
+    if (value.length > 0 && selectedOptions[selectedOptions.length - 1] !== value) {
+      selectedOptions.push(value);
+    }
   }
 
   // 4. Resolve category path root-to-leaf

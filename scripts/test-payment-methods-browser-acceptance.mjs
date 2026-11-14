@@ -26,13 +26,16 @@ const CDP_PORT = 9339;
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "test-password-123";
-const SCREENSHOT_DIR = "/root/.gemini/antigravity-cli/brain/ec9cad45-96fd-4b75-bcf2-013541dce6c5/screenshots";
+const SCREENSHOT_DIR =
+  process.env.SCREENSHOT_DIR ||
+  path.join(tmpdir(), "rabet-payment-browser-screenshots");
 
 let appServer = null;
 let chromeProcess = null;
 let pgClient = null;
 let ownedTempDir = null;
 let ownedPgFixture = null;
+let createdDbName = null;
 let isCleaningUp = false;
 
 function log(msg) {
@@ -69,6 +72,16 @@ async function cleanup() {
     pgClient = null;
   }
 
+  if (createdDbName && process.env.RABET_TEST_PG_URL) {
+    try {
+      const adminSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+      await adminSql.unsafe(`DROP DATABASE IF EXISTS ${createdDbName}`);
+      await adminSql.end();
+      log(`Dropped designated test database: ${createdDbName}`);
+    } catch {}
+    createdDbName = null;
+  }
+
   if (ownedPgFixture?.port) {
     log(`Stopping owned disposable PostgreSQL fixture (port ${ownedPgFixture.port})...`);
     verifyAndStopOwnedFixture(ownedPgFixture);
@@ -101,8 +114,9 @@ function resolveChromePath() {
   if (process.env.CHROME_BIN && existsSync(process.env.CHROME_BIN)) {
     return process.env.CHROME_BIN;
   }
-  const defaultHeadless = "/root/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell";
-  if (existsSync(defaultHeadless)) return defaultHeadless;
+  if (process.env.CHROME_PATH && existsSync(process.env.CHROME_PATH)) {
+    return process.env.CHROME_PATH;
+  }
 
   const pwDirs = [
     "/root/.cache/ms-playwright",
@@ -118,9 +132,23 @@ function resolveChromePath() {
             const candidate = path.join(pwDir, entry, "chrome-headless-shell-linux64/chrome-headless-shell");
             if (existsSync(candidate)) return candidate;
           }
+          if (entry.startsWith("chromium-")) {
+            const candidate = path.join(pwDir, entry, "chrome-linux64/chrome");
+            if (existsSync(candidate)) return candidate;
+          }
         }
       } catch {}
     }
+  }
+
+  const systemPaths = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ];
+  for (const candidate of systemPaths) {
+    if (existsSync(candidate)) return candidate;
   }
 
   return null;
@@ -189,6 +217,23 @@ class CDPClient {
   }
 }
 
+async function assertNoHorizontalPageOverflow(cdp, label) {
+  const metrics = await cdp.evaluate(`(() => ({
+    viewportWidth: window.innerWidth,
+    documentWidth: document.documentElement.scrollWidth,
+    bodyWidth: document.body.scrollWidth,
+  }))()`);
+  const widest = Math.max(metrics.documentWidth, metrics.bodyWidth);
+  if (widest > metrics.viewportWidth + 1) {
+    await fail(
+      `${label}: horizontal page overflow at ${metrics.viewportWidth}px (document=${metrics.documentWidth}px, body=${metrics.bodyWidth}px)`
+    );
+  }
+  log(
+    `${label}: no horizontal page overflow at ${metrics.viewportWidth}px (document=${metrics.documentWidth}px, body=${metrics.bodyWidth}px).`
+  );
+}
+
 async function setInputValue(cdp, selector, value) {
   await cdp.evaluate(`(() => {
     const el = document.querySelector(${JSON.stringify(selector)});
@@ -214,49 +259,61 @@ async function main() {
 
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
-  const stateFilePath = path.join(tmpdir(), "rabet-pm-test-pg.json");
-  process.env.RABET_PG_STATE_FILE = stateFilePath;
-  const conflicting = detectConflictingFixture(stateFilePath);
-  if (conflicting) {
-    log(`Cleaning up stale fixture on port ${conflicting.port}...`);
-    spawnSync("node", ["scripts/db-test-postgres.mjs", "stop"], {
-      env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
-      encoding: "utf8",
-    });
-  }
-
-  log("Starting disposable PostgreSQL instance...");
-  const pgStartOutput = spawnSync(
-    "node",
-    ["scripts/db-test-postgres.mjs", "start"],
-    {
-      env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
-      encoding: "utf8",
-    }
-  );
-
-  if (pgStartOutput.status !== 0) {
-    await fail(`Failed to start disposable PostgreSQL: ${pgStartOutput.stderr || pgStartOutput.stdout}`);
-  }
-
-  const startLines = (pgStartOutput.stdout || "").split("\n");
   let pgUrl = "";
-  for (const line of startLines) {
-    if (line.startsWith("postgresql://")) {
-      pgUrl = line.trim();
-      break;
-    }
-  }
+  if (process.env.RABET_TEST_PG_URL) {
+    createdDbName = `rabet_payment_browser_${Date.now()}`;
+    const adminSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+    await adminSql.unsafe(`CREATE DATABASE ${createdDbName}`);
+    await adminSql.end();
 
-  if (!pgUrl) {
-    const savedState = readPgState(stateFilePath);
-    if (savedState?.port) {
-      pgUrl = `postgresql://rabet@127.0.0.1:${savedState.port}/postgres`;
+    const parsed = new URL(process.env.RABET_TEST_PG_URL);
+    parsed.pathname = `/${createdDbName}`;
+    pgUrl = parsed.toString();
+    log(`Using designated PostgreSQL service with database: ${createdDbName}`);
+  } else {
+    const stateFilePath = path.join(tmpdir(), "rabet-pm-test-pg.json");
+    process.env.RABET_PG_STATE_FILE = stateFilePath;
+    const conflicting = detectConflictingFixture(stateFilePath);
+    if (conflicting) {
+      log(`Cleaning up stale fixture on port ${conflicting.port}...`);
+      spawnSync("node", ["scripts/db-test-postgres.mjs", "stop"], {
+        env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
+        encoding: "utf8",
+      });
     }
-  }
 
-  ownedPgFixture = readPgState(stateFilePath);
-  log(`Disposable PostgreSQL started at: ${pgUrl}`);
+    log("Starting disposable PostgreSQL instance...");
+    const pgStartOutput = spawnSync(
+      "node",
+      ["scripts/db-test-postgres.mjs", "start"],
+      {
+        env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
+        encoding: "utf8",
+      }
+    );
+
+    if (pgStartOutput.status !== 0) {
+      await fail(`Failed to start disposable PostgreSQL: ${pgStartOutput.stderr || pgStartOutput.stdout}`);
+    }
+
+    const startLines = (pgStartOutput.stdout || "").split("\n");
+    for (const line of startLines) {
+      if (line.startsWith("postgresql://")) {
+        pgUrl = line.trim();
+        break;
+      }
+    }
+
+    if (!pgUrl) {
+      const savedState = readPgState(stateFilePath);
+      if (savedState?.port) {
+        pgUrl = `postgresql://rabet@127.0.0.1:${savedState.port}/postgres`;
+      }
+    }
+
+    ownedPgFixture = readPgState(stateFilePath);
+    log(`Disposable PostgreSQL started at: ${pgUrl}`);
+  }
 
   log("Applying database migrations (0000 -> 0001 -> 0002)...");
   const migrate = spawnSync("npm", ["run", "db:migrate"], {
@@ -944,6 +1001,45 @@ async function main() {
     await fail(`Expected exactly 1 English translation row, got: ${JSON.stringify(codTransRows)}`);
   }
   log("Verified in DB: Exactly 1 English translation persisted, optional Arabic was untouched.");
+
+  // =========================================================================
+  // STEP 7: 360px HORIZONTAL OVERFLOW ON RELEVANT SCREENS
+  // =========================================================================
+  log("Step 7: Verifying 360px horizontal page overflow on relevant screens...");
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 360,
+    height: 740,
+    deviceScaleFactor: 2,
+    mobile: true,
+  });
+  await sleep(500);
+
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/payment-methods` });
+  await sleep(1500);
+  await assertNoHorizontalPageOverflow(cdp, "Payment Methods list");
+
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="preview-method-btn"]');
+    if (btn) btn.click();
+  })()`);
+  await sleep(600);
+  await assertNoHorizontalPageOverflow(cdp, "Payment method preview modal");
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('button[aria-label="Close preview"]');
+    if (btn) btn.click();
+  })()`);
+  await sleep(300);
+
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/catalog` });
+  await sleep(1500);
+  await assertNoHorizontalPageOverflow(cdp, "Catalog list");
+
+  await cdp.evaluate(`(() => {
+    const btn = document.querySelector('[data-testid="product-buttons-btn-devops-license"]');
+    if (btn) btn.click();
+  })()`);
+  await sleep(1000);
+  await assertNoHorizontalPageOverflow(cdp, "Product action editor");
 
   log("\n=======================================================");
   log("ALL PAYMENT METHOD ACCEPTANCE SCENARIOS PASSED!");
