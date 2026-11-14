@@ -42,6 +42,7 @@ import {
   listEligiblePaymentMethodsForProduct,
   resolvePaymentMethodForAction,
 } from "@/lib/payment-methods/journey";
+import { isManualPaymentPrototypeEnabled } from "@/lib/payment-methods/prototype";
 import {
   TELEGRAM_MAX_MESSAGE_CHARS,
 } from "./transport";
@@ -715,7 +716,8 @@ export async function handleCallbackQuery(
   channelOptions?: ChannelJourneyOptions,
 ): Promise<void> {
   const manualPaymentPrototypeEnabled =
-    channelOptions?.manualPaymentPrototypeEnabled ?? false;
+    channelOptions?.manualPaymentPrototypeEnabled ??
+    isManualPaymentPrototypeEnabled();
   // Acknowledge callback immediately to clear loading indicator
   const ack = await transport.answerCallbackQuery({ callbackQueryId: callbackQuery.id });
   if (!ack.ok) {

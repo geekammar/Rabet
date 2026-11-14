@@ -80,32 +80,42 @@ async function sendCallback(params: {
 }) {
   const transport = createFakeTelegramTransport();
   const id = params.updateIdOverride ?? nextUpdateId();
-  const res = await handleTelegramWebhookRequest(
-    createWebhookRequest({
-      update_id: id,
-      callback_query: {
-        id: `cb_${id}`,
-        from: {
-          id: params.telegramId,
-          is_bot: false,
-          first_name: "Synthetic Customer",
+  const previousCapability = process.env.MANUAL_PAYMENT_PROTOTYPE_ENABLED;
+  process.env.MANUAL_PAYMENT_PROTOTYPE_ENABLED = params.enabled ? "true" : "false";
+
+  try {
+    const res = await handleTelegramWebhookRequest(
+      createWebhookRequest({
+        update_id: id,
+        callback_query: {
+          id: `cb_${id}`,
+          from: {
+            id: params.telegramId,
+            is_bot: false,
+            first_name: "Synthetic Customer",
+          },
+          message: {
+            message_id: params.messageId ?? 10,
+            chat: { id: params.telegramId, type: "private" },
+          },
+          data: params.data,
         },
-        message: {
-          message_id: params.messageId ?? 10,
-          chat: { id: params.telegramId, type: "private" },
-        },
-        data: params.data,
+      }),
+      {
+        db: asAppDb(testDb!.db),
+        transport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
       },
-    }),
-    {
-      db: asAppDb(testDb!.db),
-      transport,
-      botToken: TEST_BOT_TOKEN,
-      webhookSecret: TEST_WEBHOOK_SECRET,
-      manualPaymentPrototypeEnabled: params.enabled,
-    },
-  );
-  return { res, transport, updateId: id };
+    );
+    return { res, transport, updateId: id };
+  } finally {
+    if (previousCapability === undefined) {
+      delete process.env.MANUAL_PAYMENT_PROTOTYPE_ENABLED;
+    } else {
+      process.env.MANUAL_PAYMENT_PROTOTYPE_ENABLED = previousCapability;
+    }
+  }
 }
 
 async function seedProduct(): Promise<{ categoryId: string; productId: string }> {
