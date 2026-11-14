@@ -27,6 +27,7 @@ import {
   formatSafeDiagnostic,
   StandardExecutionDeadline,
 } from "./transport";
+import { isManualPaymentPrototypeEnabled } from "@/lib/payment-methods/prototype";
 import type {
   ExecutionDeadline,
   TelegramCallbackQuery,
@@ -64,6 +65,11 @@ export interface WebhookHandlerOptions {
   executionBudgetMs?: number;
   deadline?: ExecutionDeadline;
   now?: () => number;
+  /** Explicit test/deployment override for the synthetic manual-payment channel. */
+  manualPaymentPrototypeEnabled?: boolean;
+  /** Test seam for seller-notification delivery; never set by production callers. */
+  notificationTransport?: TelegramTransport;
+  notificationBotToken?: string;
 }
 
 export type ValidatedUpdate =
@@ -454,6 +460,8 @@ export async function handleTelegramWebhookRequest(
       attemptId,
       receipt: (claim.row.payload as { receipt?: TelegramBusinessReceipt } | null)?.receipt,
       deadline,
+      notificationTransport: options?.notificationTransport,
+      notificationBotToken: options?.notificationBotToken,
     };
 
     if (validatedData.updateType === "message") {
@@ -473,6 +481,11 @@ export async function handleTelegramWebhookRequest(
         validatedData.callbackQuery,
         validatedData.parsedToken,
         journeyOptions,
+        {
+          manualPaymentPrototypeEnabled:
+            options?.manualPaymentPrototypeEnabled ??
+            isManualPaymentPrototypeEnabled(),
+        },
       );
     }
 

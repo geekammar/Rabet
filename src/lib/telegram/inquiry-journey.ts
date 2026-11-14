@@ -361,7 +361,9 @@ export type SupportActionRow = {
 };
 
 /**
- * Handles START_INQUIRY inline action button tap.
+ * Handles a product inquiry from a START_INQUIRY action or an explicit
+ * product-scoped contact fallback. The fallback has no source action and
+ * therefore freezes an empty option path rather than fabricating one.
  */
 export async function handleProductInquiryCallback(
   db: Database,
@@ -370,13 +372,14 @@ export async function handleProductInquiryCallback(
     chatId: number | string;
     messageId: number;
     user: TelegramUser;
-    actionRow: SupportActionRow;
+    actionRow?: SupportActionRow;
     productRow: typeof product.$inferSelect;
     langContext: ResolvedLanguageContext;
     ui: ReturnType<typeof getLocalizedUiStrings>;
     backTarget: string;
     returnToProductTarget: string;
     options: InquiryJourneyOptions;
+    selectedOptionSuffix?: string[];
   },
 ): Promise<void> {
   const {
@@ -390,6 +393,7 @@ export async function handleProductInquiryCallback(
     backTarget,
     returnToProductTarget,
     options,
+    selectedOptionSuffix,
   } = params;
 
   // 1. Ensure customer is upserted
@@ -414,36 +418,49 @@ export async function handleProductInquiryCallback(
   const keyboard: TelegramInlineKeyboardButton[][] = [
     [{ text: ui.back, callback_data: backTarget }],
   ];
-  if (actionRow.parentActionId) {
+  if (actionRow?.parentActionId) {
     keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
   }
   keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
 
-  // 3. Resolve ancestors root-to-leaf for option path
-  const ancestorsCheck = await getActionAncestorsRootToLeaf(db, actionRow.id);
-  if (!ancestorsCheck.valid || !ancestorsCheck.ancestors) {
-    await editOrThrow(transport, {
-      chatId,
-      messageId,
-      text: ui.optionUnavailable,
-      replyMarkup: { inline_keyboard: keyboard },
-    });
-    return;
+  const selectedOptions: string[] = [];
+
+  if (actionRow) {
+    // 3. Resolve ancestors root-to-leaf for option path
+    const ancestorsCheck = await getActionAncestorsRootToLeaf(db, actionRow.id);
+    if (!ancestorsCheck.valid || !ancestorsCheck.ancestors) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    for (const ancestor of ancestorsCheck.ancestors) {
+      const translations = await db
+        .select({
+          languageId: productActionTranslation.languageId,
+          label: productActionTranslation.label,
+        })
+        .from(productActionTranslation)
+        .where(eq(productActionTranslation.actionId, ancestor.id));
+
+      const preferred = translations.find((t) => t.languageId === langContext.id);
+      const fallback = translations.find((t) => t.languageId === defaultLangId);
+      selectedOptions.push(preferred?.label ?? fallback?.label ?? "Option");
+    }
   }
 
-  const selectedOptions: string[] = [];
-  for (const ancestor of ancestorsCheck.ancestors) {
-    const translations = await db
-      .select({
-        languageId: productActionTranslation.languageId,
-        label: productActionTranslation.label,
-      })
-      .from(productActionTranslation)
-      .where(eq(productActionTranslation.actionId, ancestor.id));
-
-    const preferred = translations.find((t) => t.languageId === langContext.id);
-    const fallback = translations.find((t) => t.languageId === defaultLangId);
-    selectedOptions.push(preferred?.label ?? fallback?.label ?? "Option");
+  // The manual-payment prototype appends the selected method context to the
+  // same frozen option path. It never rewrites an existing snapshot: the
+  // create-or-resume query keeps historical selectedOptions write-once.
+  for (const suffix of selectedOptionSuffix ?? []) {
+    const value = suffix.trim();
+    if (value.length > 0 && selectedOptions[selectedOptions.length - 1] !== value) {
+      selectedOptions.push(value);
+    }
   }
 
   // 4. Resolve category path root-to-leaf

@@ -67,8 +67,10 @@ No multi-tenancy, no multi-bot, no multi-vendor marketplace, no employee roles o
 permissions, no advanced analytics, no warehouse, **and no live checkout or payment processing**.
 The system has exactly one bot, one administrator and one seller, and the schema says so by
 construction: there is no `tenant_id`, no `bot_id`, no `seller_id`, no `role` column, and no
-money-flow or checkout table anywhere. Central payment method definitions exist solely for
-merchant configuration and button preview (§5.6).
+money-flow or checkout table anywhere. Central payment method definitions exist for merchant
+configuration, dashboard preview, and an optional **synthetic instructions-only prototype**
+behind a disabled-by-default channel capability (§5.6.3). The prototype performs no transfer,
+charge, verification, order, or receipt workflow.
 
 ### 1.4 Design principles applied
 
@@ -456,7 +458,7 @@ JavaScript, no SQL, no script, no webhook, no general-purpose workflow engine.
 | `OPEN_URL` | No | `url` (HTTPS, validated) | Renders as a Telegram **URL button** — the customer's Telegram client decides in-app vs. external browser; Rabet cannot and does not guarantee which, or that the customer leaves Telegram at all. Information pages only, **never** a payment or checkout redirect (§16, ADR-013). |
 | `OPEN_SUPPORT` | No | optional support category in `action_config` | Creates or resumes a **general** conversation (no product) with a configurable support category. Same messaging system as a product inquiry (§9.4). |
 | `NAVIGATE_CATALOG` | No | `navigate_category_id` **or** `navigate_product_id` (exactly one) | Jumps the customer to another category menu or product card. The targets are real foreign keys, so a moved or deleted catalog node cannot produce a dangling button. |
-| `PAYMENT_METHOD` | No | `payment_method_id` (FK → `payment_method.id`) | Stores a typed reference to a central payment method. Previews customer-facing instructions in the admin dashboard. Excluded from customer Telegram keyboards and rejected safely with `ui.optionUnavailable` at execution. Unknown channels default to unavailable. Does not enable live checkout, payment credentials, or financial secrets. |
+| `PAYMENT_METHOD` | No | `payment_method_id` (FK → `payment_method.id`) | Stores a typed reference to a central payment method. Previews customer-facing instructions in the admin dashboard. On the default deployment it is excluded from customer Telegram keyboards and rejected safely with `ui.optionUnavailable`; when the isolated, disabled-by-default manual-payment prototype capability is enabled, the shared resolver may render it and open localized instructions plus an explicit seller-contact action. Unknown channels default to unavailable. Never enables checkout, payment credentials, automatic verification, or financial secrets. |
 
 **What this deliberately excludes:** arbitrary executable actions, user-defined
 JavaScript/SQL, external automation scripts, webhook dispatch, timed/delayed sequences,
@@ -559,18 +561,37 @@ Integrity constraint: `UNIQUE (payment_method_id, language_id)`.
 
 #### 5.6.3 Architectural and Security Boundaries
 
-1. **Prepares future channels; does NOT enable live checkout:**
-   - No payment provider credentials, API tokens, card/bank secrets, or financial webhooks are stored.
-   - No public payment routes, checkout links, Orders table, payment confirmation, or Stars integration are added.
-2. **Channel isolation & safety rejection:**
-   - The `PAYMENT_METHOD` button is excluded from customer Telegram keyboards using text-safe SQL (`sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'``) to guarantee dual-schema safety without Postgres enum lookup failures.
-   - If invoked directly via Telegram callback query, execution is safely rejected returning `ui.optionUnavailable` ("This option is no longer available.") with Back/Home navigation.
-   - Unknown channels default to unavailable.
+1. **Configuration and preview; does NOT enable live checkout:**
+   - No payment provider credentials, API tokens, card/bank secrets, financial webhooks, orders, receipts, or automatic verification are stored.
+   - No public checkout routes, Orders table, payment confirmation, Stars integration, or real transfer is added.
+2. **Channel isolation & the synthetic prototype:**
+   - On the default deployment the `PAYMENT_METHOD` button is excluded from customer Telegram keyboards and direct callbacks are safely rejected with `ui.optionUnavailable` plus Back/Home navigation.
+   - The customer journey is gated by a separate server-only capability,
+     `MANUAL_PAYMENT_PROTOTYPE_ENABLED`, disabled by default and never set in Vercel
+     Production. The shared resolver and tests are callable without it.
+   - When enabled in an isolated test deployment, only currently eligible configured actions
+     render. The screen carries a localized prototype notice and never shows “Paid”,
+     “Payment verified”, or an “I paid” control.
+   - When no eligible method resolves, the no-methods screen preserves an existing configured
+     root inquiry/support action when available; otherwise it renders a product-scoped
+     `pi:<productUuid>` fallback. Displaying the screen creates no inquiry, and the explicit
+     fallback revalidates the product/category before reusing the existing create-or-resume
+     inquiry path with an empty option path.
+   - Unknown or future channels default to unavailable; the shared resolver has no Telegram
+     transport types.
 3. **Reference binding & edit propagation:**
    - Product buttons store only `payment_method_id` without copying titles/instructions into button rows.
-   - Editing a central method automatically propagates to previews of all buttons referencing it.
-   - Disabling a central method preserves button references and flags disabled status to the admin.
-   - Deleting a central method safely sets `payment_method_id` to `NULL` on referencing buttons (`ON DELETE SET NULL`).
+   - Editing a central method automatically propagates to fresh previews/instructions of all buttons referencing it.
+   - Disabling a central method preserves button references, hides it from fresh prototype menus, and rejects stale instruction callbacks.
+   - Deleting a central method safely sets `payment_method_id` to `NULL` on referencing buttons (`ON DELETE SET NULL`), which the resolver treats as unavailable.
+4. **Viewing is not buying:**
+   - Selecting or viewing instructions creates no inquiry, notification, order, payment, or financial state.
+   - An explicit “Contact seller about this method” action reuses the existing product-inquiry
+     journey and appends the selected method context to the frozen `selected_options`
+     snapshot. Existing inquiry deduplication and write-once snapshots are preserved.
+
+See [MANUAL_PAYMENT_JOURNEY_PROTOTYPE.md](./MANUAL_PAYMENT_JOURNEY_PROTOTYPE.md) for the
+prototype acceptance guide and explicit non-goals.
 
 #### 5.6.4 Deployment Sequence and Schema Compatibility
 
@@ -724,6 +745,8 @@ time from facts the server already holds, and each one names exactly what it doe
 | --- | --- | --- |
 | `<actionUuid>` | 36 | Resolve and execute that action (§8.2). |
 | `b:<actionUuid>` | 38 | **Back** — render the *parent menu* of `<actionUuid>` (the active children of its parent). At a root button (parent is null) → the product card. |
+| `pm:<actionUuid>` | 39 | **Prototype contact** — explicitly start/resume the product inquiry for the selected eligible `PAYMENT_METHOD` action. Rejected safely unless the isolated manual-payment capability is enabled. |
+| `pi:<productUuid>` | 39 | **Prototype product-inquiry fallback** — guaranteed contact when a no-methods screen has no configured root inquiry/support action. Revalidates the product hierarchy, uses an empty option path, and is rejected safely unless the isolated capability is enabled. |
 | `m:<actionUuid>` | 38 | **Menu** — render page 1 of `<actionUuid>`'s own active children. |
 | `m:<actionUuid>:<n>` | 38–42 | Render page `n` of that menu (§8.3 pagination). |
 | `p:<productUuid>` | 38 | **Product** — render that product's card and its root buttons ("return to product"). |

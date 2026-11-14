@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -13,6 +13,11 @@ import {
   productTranslation,
 } from "@/db/schema";
 import { interpolateTemplate } from "@/lib/bot-content/placeholders";
+import {
+  isActionHierarchyActive,
+  isCategoryHierarchyActive,
+  isProductHierarchyActive,
+} from "@/lib/catalog/eligibility";
 import {
   getCustomerByTelegramId,
   readSettings,
@@ -34,6 +39,11 @@ import {
 } from "@/lib/product-actions/templates";
 import { validateHttpsUrl } from "@/lib/product-actions/validation";
 import {
+  listEligiblePaymentMethodsForProduct,
+  resolvePaymentMethodForAction,
+} from "@/lib/payment-methods/journey";
+import { isManualPaymentPrototypeEnabled } from "@/lib/payment-methods/prototype";
+import {
   TELEGRAM_MAX_MESSAGE_CHARS,
 } from "./transport";
 import type {
@@ -47,13 +57,18 @@ import type {
 import { TelegramTransportError } from "./types";
 
 export const TELEGRAM_MENU_PAGE_SIZE = 10;
-export const MAX_SAFEGUARD_DEPTH = 64;
+export { MAX_SAFEGUARD_DEPTH } from "@/lib/catalog/eligibility";
 
 export interface ResolvedLanguageContext {
   id: string;
   code: string;
   label: string;
   isRtl: boolean;
+}
+
+export interface ChannelJourneyOptions {
+  /** Enables the synthetic manual-payment prototype for this channel only. */
+  manualPaymentPrototypeEnabled?: boolean;
 }
 
 export function getLocalizedUiStrings(isRtl: boolean) {
@@ -74,6 +89,16 @@ export function getLocalizedUiStrings(isRtl: boolean) {
       selectLanguagePrompt: "يرجى اختيار اللغة / Please select your language:",
       openLink: "🌐 فتح الرابط",
       customerFallback: "عميلنا العزيز",
+      paymentPrototypeNotice:
+        "نسخة تجريبية فقط — لا يلزم إجراء تحويل أو دفع حقيقي. لا تؤكد هذه الشاشة أي عملية دفع ولا تسجلها.",
+      contactSellerAboutMethod: "💬 تواصل مع البائع بخصوص هذه الطريقة",
+      contactSeller: "💬 تواصل مع البائع",
+      contactSellerAboutProduct: "💬 تواصل مع البائع بخصوص هذا المنتج",
+      noPaymentMethods: "لا توجد طرق دفع متاحة حالياً لهذا المنتج.",
+      noPaymentInstructions:
+        "لم يضف البائع تعليمات تفصيلية لهذه الطريقة. يمكنك التواصل مع البائع للاستفسار.",
+      paymentContactUnavailable:
+        "تعذر فتح محادثة بخصوص طريقة الدفع هذه. يرجى المحاولة مرة أخرى.",
     };
   }
   return {
@@ -92,6 +117,16 @@ export function getLocalizedUiStrings(isRtl: boolean) {
     selectLanguagePrompt: "Please select your language / يرجى اختيار اللغة:",
     openLink: "🌐 Open link",
     customerFallback: "Customer",
+    paymentPrototypeNotice:
+      "Prototype only — no real transfer or charge is required. This screen does not confirm or record a payment.",
+    contactSellerAboutMethod: "💬 Contact seller about this method",
+    contactSeller: "💬 Contact seller",
+    contactSellerAboutProduct: "💬 Contact seller about this product",
+    noPaymentMethods: "No payment methods are currently available for this product.",
+    noPaymentInstructions:
+      "The seller has not added detailed instructions for this method. You can contact the seller to ask.",
+    paymentContactUnavailable:
+      "Could not open a conversation about this payment method. Please try again.",
   };
 }
 
@@ -218,161 +253,6 @@ export function splitMessageText(text: string, maxChunkLength = TELEGRAM_MAX_MES
 export function boundMessageText(text: string, maxLen = 4096): string {
   const [firstChunk] = splitMessageText(text, maxLen);
   return firstChunk ?? "";
-}
-
-/**
- * Checks category existence, active flag, and whether all ancestors are active and not soft-deleted.
- */
-async function isCategoryHierarchyActive(
-  db: Database,
-  categoryId: string,
-): Promise<{ valid: boolean; categoryRow?: typeof category.$inferSelect }> {
-  let currentId: string | null = categoryId;
-  let depth = 0;
-  let targetRow: typeof category.$inferSelect | undefined;
-
-  const visited = new Set<string>();
-
-  while (currentId !== null && depth < MAX_SAFEGUARD_DEPTH) {
-    if (visited.has(currentId)) {
-      return { valid: false }; // Cycle detected
-    }
-    visited.add(currentId);
-
-    const [row] = await db
-      .select()
-      .from(category)
-      .where(and(eq(category.id, currentId), isNull(category.deletedAt)))
-      .limit(1);
-
-    if (!row || !row.isActive) {
-      return { valid: false };
-    }
-
-    if (currentId === categoryId) {
-      targetRow = row;
-    }
-
-    currentId = row.parentId;
-    depth += 1;
-  }
-
-  // If loop exited with depth safeguard while ancestors remain unresolved, fail closed.
-  if (currentId !== null || !targetRow) {
-    return { valid: false };
-  }
-
-  return { valid: true, categoryRow: targetRow };
-}
-
-/**
- * Checks product existence, active flag, and whether its category hierarchy is fully active.
- */
-async function isProductHierarchyActive(
-  db: Database,
-  productId: string,
-): Promise<{ valid: boolean; productRow?: typeof product.$inferSelect }> {
-  const [prod] = await db
-    .select()
-    .from(product)
-    .where(and(eq(product.id, productId), isNull(product.deletedAt)))
-    .limit(1);
-
-  if (!prod || !prod.isActive) {
-    return { valid: false };
-  }
-
-  const categoryCheck = await isCategoryHierarchyActive(db, prod.categoryId);
-  if (!categoryCheck.valid) {
-    return { valid: false };
-  }
-
-  return { valid: true, productRow: prod };
-}
-
-export type ActionHierarchyRow = {
-  id: string;
-  productId: string;
-  parentActionId: string | null;
-  actionType: (typeof productAction.$inferSelect)["actionType"];
-  isActive: boolean;
-  url: string | null;
-  navigateCategoryId: string | null;
-  navigateProductId: string | null;
-  actionConfig: unknown;
-  sortOrder: number;
-};
-
-/**
- * Checks action existence, active flag, ancestor actions active and OPEN_SUBMENU,
- * and product/category hierarchy fully active.
- */
-async function isActionHierarchyActive(
-  db: Database,
-  actionId: string,
-): Promise<{
-  valid: boolean;
-  actionRow?: ActionHierarchyRow;
-  productRow?: typeof product.$inferSelect;
-}> {
-  let currentId: string | null = actionId;
-  let depth = 0;
-  let targetRow: ActionHierarchyRow | undefined;
-
-  const visited = new Set<string>();
-
-  while (currentId !== null && depth < MAX_SAFEGUARD_DEPTH) {
-    if (visited.has(currentId)) {
-      return { valid: false };
-    }
-    visited.add(currentId);
-
-    const [row] = await db
-      .select({
-        id: productAction.id,
-        productId: productAction.productId,
-        parentActionId: productAction.parentActionId,
-        actionType: productAction.actionType,
-        isActive: productAction.isActive,
-        url: productAction.url,
-        navigateCategoryId: productAction.navigateCategoryId,
-        navigateProductId: productAction.navigateProductId,
-        actionConfig: productAction.actionConfig,
-        sortOrder: productAction.sortOrder,
-      })
-      .from(productAction)
-      .where(eq(productAction.id, currentId))
-      .limit(1);
-
-    if (!row || !row.isActive) {
-      return { valid: false };
-    }
-
-    if (currentId === actionId) {
-      targetRow = row;
-    } else {
-      // All ancestors must be OPEN_SUBMENU
-      if (row.actionType !== "OPEN_SUBMENU") {
-        return { valid: false };
-      }
-    }
-
-    currentId = row.parentActionId;
-    depth += 1;
-  }
-
-  // If loop exited with depth safeguard while ancestors remain unresolved, fail closed.
-  if (currentId !== null || !targetRow) {
-    return { valid: false };
-  }
-
-  // Check product hierarchy
-  const productCheck = await isProductHierarchyActive(db, targetRow.productId);
-  if (!productCheck.valid || !productCheck.productRow) {
-    return { valid: false };
-  }
-
-  return { valid: true, actionRow: targetRow, productRow: productCheck.productRow };
 }
 
 export async function sendOrThrow(
@@ -835,7 +715,11 @@ export async function handleCallbackQuery(
   callbackQuery: TelegramCallbackQuery,
   preValidatedToken?: ParsedToken,
   journeyOptions?: InquiryJourneyOptions,
+  channelOptions?: ChannelJourneyOptions,
 ): Promise<void> {
+  const manualPaymentPrototypeEnabled =
+    channelOptions?.manualPaymentPrototypeEnabled ??
+    isManualPaymentPrototypeEnabled();
   // Acknowledge callback immediately to clear loading indicator
   const ack = await transport.answerCallbackQuery({ callbackQueryId: callbackQuery.id });
   if (!ack.ok) {
@@ -988,7 +872,65 @@ export async function handleCallbackQuery(
       settings,
       langContext,
       ui,
+      manualPaymentPrototypeEnabled,
     );
+    return;
+  }
+
+  // 4.5. Guaranteed product-inquiry fallback: pi:<productId>
+  if (parsed.type === "productInquiry") {
+    if (!manualPaymentPrototypeEnabled) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    const productCheck = await isProductHierarchyActive(db, parsed.productId);
+    if (!productCheck.valid || !productCheck.productRow) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.productUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    const productTarget = tokens.product(parsed.productId);
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.paymentContactUnavailable,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: ui.returnToProduct, callback_data: productTarget }],
+            [{ text: ui.home, callback_data: tokens.home() }],
+          ],
+        },
+      });
+      return;
+    }
+
+    await handleProductInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      productRow: productCheck.productRow,
+      langContext,
+      ui,
+      backTarget: productTarget,
+      returnToProductTarget: productTarget,
+      options: journeyOptions,
+    });
     return;
   }
 
@@ -1023,6 +965,7 @@ export async function handleCallbackQuery(
         ui,
         1,
         journeyOptions,
+        manualPaymentPrototypeEnabled,
       );
     } else {
       // Direct navigation to product card (no redundant answerCallbackQuery)
@@ -1036,6 +979,7 @@ export async function handleCallbackQuery(
         settings,
         langContext,
         ui,
+        manualPaymentPrototypeEnabled,
       );
     }
     return;
@@ -1057,7 +1001,99 @@ export async function handleCallbackQuery(
       ui,
       parsed.page,
       journeyOptions,
+      manualPaymentPrototypeEnabled,
     );
+    return;
+  }
+
+  // 6.5. Explicit contact about a selected payment method: pm:<actionId>
+  if (parsed.type === "paymentContact") {
+    if (!manualPaymentPrototypeEnabled) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    const actionCheck = await isActionHierarchyActive(db, parsed.actionId);
+    if (!actionCheck.valid || !actionCheck.actionRow) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    const productTarget = tokens.product(actionCheck.actionRow.productId);
+    const fallbackKeyboard: TelegramInlineKeyboardButton[][] = [
+      [{ text: ui.returnToProduct, callback_data: productTarget }],
+      [{ text: ui.home, callback_data: tokens.home() }],
+    ];
+
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.paymentContactUnavailable,
+        replyMarkup: { inline_keyboard: fallbackKeyboard },
+      });
+      return;
+    }
+
+    const resolved = await resolvePaymentMethodForAction(db, {
+      productId: actionCheck.actionRow.productId,
+      actionId: parsed.actionId,
+      requestedLanguageId: langContext.id,
+      defaultLanguageId: settings.defaultLanguageId,
+    });
+
+    if (resolved.status !== "ok") {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: fallbackKeyboard },
+      });
+      return;
+    }
+
+    const method = resolved.method;
+    const productCheck = await isProductHierarchyActive(db, method.product.id);
+    if (!productCheck.valid || !productCheck.productRow) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.productUnavailable,
+        replyMarkup: { inline_keyboard: fallbackKeyboard },
+      });
+      return;
+    }
+
+    await handleProductInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      actionRow: {
+        id: method.actionId,
+        parentActionId: method.actionParentId,
+      },
+      productRow: productCheck.productRow,
+      langContext,
+      ui,
+      backTarget: tokens.action(method.actionId),
+      returnToProductTarget: tokens.product(method.product.id),
+      options: journeyOptions,
+      selectedOptionSuffix: method.selectionSuffix,
+    });
     return;
   }
 
@@ -1075,12 +1111,70 @@ export async function handleCallbackQuery(
       ui,
       1,
       journeyOptions,
+      manualPaymentPrototypeEnabled,
     );
     return;
   }
 
   // Fallback for unknown tokens
   await renderRootCatalog(db, transport, chatId, user, messageId);
+}
+
+async function findProductContactRoute(
+  db: Database,
+  productId: string,
+  langContext: ResolvedLanguageContext,
+  settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>,
+  ui: ReturnType<typeof getLocalizedUiStrings>,
+): Promise<{ actionId: string; label: string } | null> {
+  const candidates = await db
+    .select({
+      id: productAction.id,
+      actionType: productAction.actionType,
+      sortOrder: productAction.sortOrder,
+    })
+    .from(productAction)
+    .where(
+      and(
+        eq(productAction.productId, productId),
+        isNull(productAction.parentActionId),
+        eq(productAction.isActive, true),
+      ),
+    )
+    .orderBy(asc(productAction.sortOrder), asc(productAction.id));
+
+  for (const candidate of candidates) {
+    if (
+      candidate.actionType !== "START_INQUIRY" &&
+      candidate.actionType !== "OPEN_SUPPORT"
+    ) {
+      continue;
+    }
+
+    const translations = await db
+      .select({
+        languageId: productActionTranslation.languageId,
+        label: productActionTranslation.label,
+      })
+      .from(productActionTranslation)
+      .where(eq(productActionTranslation.actionId, candidate.id));
+
+    const preferred = translations.find((t) => t.languageId === langContext.id);
+    const fallback = translations.find(
+      (t) => t.languageId === settings.defaultLanguageId,
+    );
+    const label = preferred?.label ?? fallback?.label ?? ui.contactSeller;
+    return { actionId: candidate.id, label };
+  }
+
+  return null;
+}
+
+function appendPrototypeNotice(
+  bodyText: string,
+  notice: string,
+): string {
+  return bodyText.trim().length > 0 ? `${bodyText.trim()}\n\n${notice}` : notice;
 }
 
 /**
@@ -1096,6 +1190,7 @@ async function renderProductCard(
   settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>,
   langContext: ResolvedLanguageContext,
   ui: ReturnType<typeof getLocalizedUiStrings>,
+  manualPaymentPrototypeEnabled = false,
 ): Promise<void> {
   const productCheck = await isProductHierarchyActive(db, productId);
   if (!productCheck.valid || !productCheck.productRow) {
@@ -1147,14 +1242,50 @@ async function renderProductCard(
         eq(productAction.productId, prodRow.id),
         isNull(productAction.parentActionId),
         eq(productAction.isActive, true),
-        sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'`,
       ),
     )
     .orderBy(asc(productAction.sortOrder), asc(productAction.id));
 
+  let eligibleRootMethods = new Map<
+    string,
+    { actionId: string; label: string }
+  >();
+  if (
+    manualPaymentPrototypeEnabled &&
+    rootActions.some((action) => action.actionType === "PAYMENT_METHOD")
+  ) {
+    const eligible = await listEligiblePaymentMethodsForProduct(db, {
+      productId: prodRow.id,
+      parentActionId: null,
+      requestedLanguageId: langContext.id,
+      defaultLanguageId: settings.defaultLanguageId,
+    });
+    if (eligible.status === "ok") {
+      eligibleRootMethods = new Map(
+        eligible.methods.map((method) => [
+          method.actionId,
+          { actionId: method.actionId, label: method.label },
+        ]),
+      );
+    }
+  }
+
   const keyboard: TelegramInlineKeyboardButton[][] = [];
 
   for (const act of rootActions) {
+    if (act.actionType === "PAYMENT_METHOD") {
+      if (!manualPaymentPrototypeEnabled) continue;
+      const method = eligibleRootMethods.get(act.id);
+      if (!method) continue;
+      keyboard.push([
+        {
+          text: method.label,
+          callback_data: tokens.action(method.actionId),
+        },
+      ]);
+      continue;
+    }
+
     const trans = await db
       .select({
         languageId: productActionTranslation.languageId,
@@ -1204,6 +1335,7 @@ async function handleActionExecution(
   ui: ReturnType<typeof getLocalizedUiStrings>,
   page = 1,
   journeyOptions?: InquiryJourneyOptions,
+  manualPaymentPrototypeEnabled = false,
 ): Promise<void> {
   const actionCheck = await isActionHierarchyActive(db, actionId);
   if (!actionCheck.valid || !actionCheck.actionRow) {
@@ -1242,33 +1374,68 @@ async function handleActionExecution(
     const label = preferred?.label ?? fallback?.label ?? "Menu";
     const menuText = preferred?.menuText ?? fallback?.menuText ?? null;
 
-    const bodyText = menuText && menuText.trim().length > 0 ? menuText.trim() : label;
+    let bodyText = menuText && menuText.trim().length > 0 ? menuText.trim() : label;
 
-    // Active children with deterministic tie-breaking
-    const children = await db
+    // All configured children in stable order. Eligibility is applied per
+    // child: payment-method children additionally require the shared resolver's
+    // fresh live checks and must stay hidden unless the prototype is enabled.
+    const allChildren = await db
       .select({
         id: productAction.id,
         actionType: productAction.actionType,
+        isActive: productAction.isActive,
         sortOrder: productAction.sortOrder,
       })
       .from(productAction)
-      .where(
-        and(
-          eq(productAction.parentActionId, actRow.id),
-          eq(productAction.isActive, true),
-          sql`${productAction.actionType}::text <> 'PAYMENT_METHOD'`,
-        ),
-      )
+      .where(eq(productAction.parentActionId, actRow.id))
       .orderBy(asc(productAction.sortOrder), asc(productAction.id));
 
-    const totalPages = Math.max(1, Math.ceil(children.length / TELEGRAM_MENU_PAGE_SIZE));
-    const currentPage = Math.min(Math.max(1, page), totalPages);
-    const startIndex = (currentPage - 1) * TELEGRAM_MENU_PAGE_SIZE;
-    const pageChildren = children.slice(startIndex, startIndex + TELEGRAM_MENU_PAGE_SIZE);
+    const configuredPaymentChildren = allChildren.some(
+      (child) => child.actionType === "PAYMENT_METHOD",
+    );
 
-    const keyboard: TelegramInlineKeyboardButton[][] = [];
+    let eligibleChildMethods = new Map<
+      string,
+      { actionId: string; label: string }
+    >();
+    if (manualPaymentPrototypeEnabled && configuredPaymentChildren) {
+      const eligible = await listEligiblePaymentMethodsForProduct(db, {
+        productId: actRow.productId,
+        parentActionId: actRow.id,
+        requestedLanguageId: langContext.id,
+        defaultLanguageId: settings.defaultLanguageId,
+      });
+      if (eligible.status === "ok") {
+        eligibleChildMethods = new Map(
+          eligible.methods.map((method) => [
+            method.actionId,
+            { actionId: method.actionId, label: method.label },
+          ]),
+        );
+      }
+    }
 
-    for (const child of pageChildren) {
+    const children: Array<{
+      id: string;
+      label: string;
+      isPaymentMethod: boolean;
+    }> = [];
+
+    for (const child of allChildren) {
+      if (!child.isActive) continue;
+
+      if (child.actionType === "PAYMENT_METHOD") {
+        if (!manualPaymentPrototypeEnabled) continue;
+        const method = eligibleChildMethods.get(child.id);
+        if (!method) continue;
+        children.push({
+          id: child.id,
+          label: method.label,
+          isPaymentMethod: true,
+        });
+        continue;
+      }
+
       const cTrans = await db
         .select({
           languageId: productActionTranslation.languageId,
@@ -1281,12 +1448,68 @@ async function handleActionExecution(
       const cfTrans = cTrans.find((t) => t.languageId === settings.defaultLanguageId);
       const childLabel = cpTrans?.label ?? cfTrans?.label ?? child.actionType;
 
+      children.push({
+        id: child.id,
+        label: childLabel,
+        isPaymentMethod: false,
+      });
+    }
+
+    const paymentMethodsUnavailable =
+      manualPaymentPrototypeEnabled &&
+      configuredPaymentChildren &&
+      !children.some((child) => child.isPaymentMethod);
+
+    if (manualPaymentPrototypeEnabled && configuredPaymentChildren) {
+      bodyText = appendPrototypeNotice(bodyText, ui.paymentPrototypeNotice);
+    }
+
+    if (paymentMethodsUnavailable) {
+      bodyText = appendPrototypeNotice(bodyText, ui.noPaymentMethods);
+    }
+
+    const totalPages = Math.max(1, Math.ceil(children.length / TELEGRAM_MENU_PAGE_SIZE));
+    const currentPage = Math.min(Math.max(1, page), totalPages);
+    const startIndex = (currentPage - 1) * TELEGRAM_MENU_PAGE_SIZE;
+    const pageChildren = children.slice(startIndex, startIndex + TELEGRAM_MENU_PAGE_SIZE);
+
+    const keyboard: TelegramInlineKeyboardButton[][] = [];
+
+    for (const child of pageChildren) {
       keyboard.push([
         {
-          text: childLabel,
+          text: child.label,
           callback_data: tokens.action(child.id),
         },
       ]);
+    }
+
+    if (paymentMethodsUnavailable) {
+      const contactRoute = await findProductContactRoute(
+        db,
+        actRow.productId,
+        langContext,
+        settings,
+        ui,
+      );
+      if (contactRoute) {
+        keyboard.push([
+          {
+            text: contactRoute.label,
+            callback_data: tokens.action(contactRoute.actionId),
+          },
+        ]);
+      } else {
+        // Guaranteed product-scoped contact fallback. This does not invent a
+        // source action or attach a payment method; the callback revalidates
+        // the live product hierarchy before reusing the inquiry journey.
+        keyboard.push([
+          {
+            text: ui.contactSellerAboutProduct,
+            callback_data: tokens.productInquiry(actRow.productId),
+          },
+        ]);
+      }
     }
 
     // Pagination row
@@ -1598,6 +1821,7 @@ async function handleActionExecution(
         settings,
         langContext,
         ui,
+        manualPaymentPrototypeEnabled,
       );
       return;
     }
@@ -1670,7 +1894,7 @@ async function handleActionExecution(
     return;
   }
 
-  // H. PAYMENT_METHOD: Not supported in customer-facing Telegram; reject safely
+  // H. PAYMENT_METHOD prototype instructions
   if (actRow.actionType === "PAYMENT_METHOD") {
     const keyboard: TelegramInlineKeyboardButton[][] = [
       [{ text: ui.back, callback_data: backTarget }],
@@ -1680,11 +1904,68 @@ async function handleActionExecution(
     }
     keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
 
+    if (!manualPaymentPrototypeEnabled) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    const resolved = await resolvePaymentMethodForAction(db, {
+      productId: actRow.productId,
+      actionId: actRow.id,
+      requestedLanguageId: langContext.id,
+      defaultLanguageId: settings.defaultLanguageId,
+    });
+
+    if (resolved.status !== "ok") {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    const method = resolved.method;
+    const instructions =
+      method.instructions && method.instructions.trim().length > 0
+        ? method.instructions.trim()
+        : ui.noPaymentInstructions;
+
+    const bodyText = [
+      method.product.name,
+      `${ui.priceLabel} ${method.product.price} ${settings.currency}`,
+      method.title,
+      instructions,
+      ui.paymentPrototypeNotice,
+    ].join("\n\n");
+
+    const paymentKeyboard: TelegramInlineKeyboardButton[][] = [
+      [
+        {
+          text: ui.contactSellerAboutMethod,
+          callback_data: tokens.paymentContact(method.actionId),
+        },
+      ],
+      [{ text: ui.back, callback_data: backTarget }],
+    ];
+    if (actRow.parentActionId) {
+      paymentKeyboard.push([
+        { text: ui.returnToProduct, callback_data: returnToProductTarget },
+      ]);
+    }
+    paymentKeyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
     await editOrThrow(transport, {
       chatId,
       messageId,
-      text: ui.optionUnavailable,
-      replyMarkup: { inline_keyboard: keyboard },
+      text: bodyText,
+      replyMarkup: { inline_keyboard: paymentKeyboard },
     });
     return;
   }

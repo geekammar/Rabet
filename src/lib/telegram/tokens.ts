@@ -53,11 +53,23 @@ export const tokens = {
     }
     return assertValidCallbackData(`p:${productId}`);
   },
+  productInquiry: (productId: string): string => {
+    if (!UUID_REGEX.test(productId)) {
+      throw new Error(`Invalid product UUID: "${productId}"`);
+    }
+    return assertValidCallbackData(`pi:${productId}`);
+  },
   action: (actionId: string): string => {
     if (!UUID_REGEX.test(actionId)) {
       throw new Error(`Invalid action UUID: "${actionId}"`);
     }
     return assertValidCallbackData(`a:${actionId}`);
+  },
+  paymentContact: (actionId: string): string => {
+    if (!UUID_REGEX.test(actionId)) {
+      throw new Error(`Invalid action UUID: "${actionId}"`);
+    }
+    return assertValidCallbackData(`pm:${actionId}`);
   },
   submenu: (actionId: string, page?: number): string => {
     if (!UUID_REGEX.test(actionId)) {
@@ -90,7 +102,9 @@ export type ParsedToken =
   | { type: "lang"; code: string }
   | { type: "category"; categoryId: string; page: number }
   | { type: "product"; productId: string }
+  | { type: "productInquiry"; productId: string }
   | { type: "action"; actionId: string }
+  | { type: "paymentContact"; actionId: string }
   | { type: "submenu"; actionId: string; page: number }
   | { type: "back"; actionId: string }
   | { type: "inquiries"; page: number }
@@ -159,6 +173,14 @@ export function parseToken(data?: string): ParsedToken {
     return { type: "unknown", raw: data };
   }
 
+  if (data.startsWith("pi:")) {
+    const productId = data.slice(3);
+    if (!UUID_REGEX.test(productId)) {
+      return { type: "unknown", raw: data };
+    }
+    return { type: "productInquiry", productId };
+  }
+
   if (data.startsWith("p:")) {
     const productId = data.slice(2);
     if (!UUID_REGEX.test(productId)) {
@@ -173,6 +195,14 @@ export function parseToken(data?: string): ParsedToken {
       return { type: "unknown", raw: data };
     }
     return { type: "action", actionId };
+  }
+
+  if (data.startsWith("pm:")) {
+    const actionId = data.slice(3);
+    if (!UUID_REGEX.test(actionId)) {
+      return { type: "unknown", raw: data };
+    }
+    return { type: "paymentContact", actionId };
   }
 
   if (data.startsWith("m:")) {

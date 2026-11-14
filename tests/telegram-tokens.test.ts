@@ -40,7 +40,9 @@ describe("telegram tokens", () => {
     expect(tokens.category(uuid)).toBe(`c:${uuid}`);
     expect(tokens.category(uuid, 2)).toBe(`c:${uuid}:2`);
     expect(tokens.product(uuid)).toBe(`p:${uuid}`);
+    expect(tokens.productInquiry(uuid)).toBe(`pi:${uuid}`);
     expect(tokens.action(uuid)).toBe(`a:${uuid}`);
+    expect(tokens.paymentContact(uuid)).toBe(`pm:${uuid}`);
     expect(tokens.submenu(uuid)).toBe(`m:${uuid}`);
     expect(tokens.submenu(uuid, 3)).toBe(`m:${uuid}:3`);
     expect(tokens.back(uuid)).toBe(`b:${uuid}`);
@@ -54,7 +56,9 @@ describe("telegram tokens", () => {
       tokens.lang("en"),
       tokens.category(uuid, 99),
       tokens.product(uuid),
+      tokens.productInquiry(uuid),
       tokens.action(uuid),
+      tokens.paymentContact(uuid),
       tokens.submenu(uuid, 99),
       tokens.back(uuid),
       tokens.inquiries(),
@@ -73,7 +77,9 @@ describe("telegram tokens", () => {
     expect(() => tokens.category(uuid, 1.5)).toThrow(/Invalid page number/);
 
     expect(() => tokens.product("bad-id")).toThrow(/Invalid product UUID/);
+    expect(() => tokens.productInquiry("bad-id")).toThrow(/Invalid product UUID/);
     expect(() => tokens.action("bad-id")).toThrow(/Invalid action UUID/);
+    expect(() => tokens.paymentContact("bad-id")).toThrow(/Invalid action UUID/);
     expect(() => tokens.submenu("bad-id")).toThrow(/Invalid action UUID/);
     expect(() => tokens.submenu(uuid, 0)).toThrow(/Invalid page number/);
     expect(() => tokens.back("bad-id")).toThrow(/Invalid action UUID/);
@@ -104,8 +110,16 @@ describe("telegram tokens", () => {
       type: "product",
       productId: uuid,
     });
+    expect(parseToken(`pi:${uuid}`)).toEqual({
+      type: "productInquiry",
+      productId: uuid,
+    });
     expect(parseToken(`a:${uuid}`)).toEqual({
       type: "action",
+      actionId: uuid,
+    });
+    expect(parseToken(`pm:${uuid}`)).toEqual({
+      type: "paymentContact",
       actionId: uuid,
     });
     expect(parseToken(`m:${uuid}`)).toEqual({
@@ -158,7 +172,9 @@ describe("telegram tokens", () => {
 
     // Malformed product, action, back, and language tokens
     expect(parseToken("p:invalid-uuid")).toEqual({ type: "unknown", raw: "p:invalid-uuid" });
+    expect(parseToken("pi:invalid-uuid")).toEqual({ type: "unknown", raw: "pi:invalid-uuid" });
     expect(parseToken("a:invalid-uuid")).toEqual({ type: "unknown", raw: "a:invalid-uuid" });
+    expect(parseToken("pm:invalid-uuid")).toEqual({ type: "unknown", raw: "pm:invalid-uuid" });
     expect(parseToken("b:invalid-uuid")).toEqual({ type: "unknown", raw: "b:invalid-uuid" });
     expect(parseToken("lang:invalid!code")).toEqual({
       type: "unknown",

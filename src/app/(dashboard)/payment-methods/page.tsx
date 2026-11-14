@@ -8,6 +8,7 @@ import { DatabaseSetupRequired } from "@/components/dashboard/settings/database-
 import { DatabaseUnavailable } from "@/components/dashboard/settings/database-unavailable";
 import { getDb } from "@/db/client";
 import { requireAdmin } from "@/lib/auth/session";
+import { isManualPaymentPrototypeEnabled } from "@/lib/payment-methods/prototype";
 import {
   checkPaymentMethodsCapability,
   isConfigured,
@@ -161,6 +162,7 @@ export default async function PaymentMethodsPage() {
           initialMethods={result.data.paymentMethods}
           defaultLanguage={result.data.defaultLanguage}
           languages={result.data.languages}
+          prototypeEnabled={isManualPaymentPrototypeEnabled()}
         />
       );
   }
