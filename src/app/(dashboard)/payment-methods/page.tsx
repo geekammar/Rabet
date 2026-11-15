@@ -21,7 +21,7 @@ import {
 
 export const metadata: Metadata = {
   title: "Payment Methods",
-  description: "Central payment methods, instructions, and customer preview.",
+  description: "Configure customer payment instructions and preview them. Configuration only — no live checkout.",
 };
 
 export const instant = false;
@@ -46,7 +46,7 @@ function PaymentMethodsUpgradeRequired({ message }: { message: string }) {
       <div className="space-y-1">
         <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Payment Methods</h1>
         <p className="text-sm text-muted-foreground">
-          Central payment methods, instructions, and customer preview.
+          Configure customer payment instructions and preview them. Configuration only — no live checkout.
         </p>
       </div>
 
@@ -141,14 +141,14 @@ export default async function PaymentMethodsPage() {
       return (
         <DatabaseSetupRequired
           title="Payment Methods"
-          description="Central payment methods, instructions, and customer preview."
+          description="Configure customer payment instructions and preview them. Configuration only — no live checkout."
         />
       );
     case "database_unavailable":
       return (
         <DatabaseUnavailable
           title="Payment Methods"
-          description="Central payment methods, instructions, and customer preview."
+          description="Configure customer payment instructions and preview them. Configuration only — no live checkout."
           message={result.message}
         />
       );

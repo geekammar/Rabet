@@ -568,6 +568,247 @@ async function main() {
   await cdp.evaluate(`document.querySelector('button[type="submit"]').click()`);
   await waitFor(cdp, `!location.pathname.startsWith("/login")`, "login redirect");
 
+  log("Scenario 0: dashboard groups, overview counts and advanced navigation");
+  await navigate(cdp, "/overview", '[data-testid="overview-dashboard"]', "overview");
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="overview-stat-products"]')?.dataset.count === "2"`,
+    "overview product count",
+  );
+  const overviewState = await cdp.evaluate(`(() => {
+    const count = (testId) => document.querySelector('[data-testid="' + testId + '"]')?.dataset.count;
+    const nav = document.querySelector('[data-testid="sidebar-nav"]');
+    const toggle = document.querySelector('[data-testid="nav-group-toggle-advanced-tools"]');
+    const advancedLink = document.querySelector('[data-testid="sidebar-nav"] [data-testid="nav-link-catalog"]');
+    const text = document.querySelector('[data-testid="overview-dashboard"]').innerText;
+    return {
+      products: count("overview-stat-products"),
+      categories: count("overview-stat-categories"),
+      inquiries: count("overview-stat-inquiries"),
+      paymentMethods: count("overview-stat-payment-methods"),
+      navText: nav?.innerText ?? "",
+      expanded: toggle?.getAttribute("aria-expanded"),
+      advancedVisible: Boolean(advancedLink && advancedLink.offsetParent !== null),
+      hasCustomersLink: Boolean(
+        document.querySelector('[data-testid="sidebar-nav"] [data-testid="nav-link-customers"]'),
+      ),
+      text,
+    };
+  })()`);
+  if (
+    overviewState.products !== "2" ||
+    overviewState.categories !== "3" ||
+    overviewState.inquiries !== "0" ||
+    overviewState.paymentMethods !== "0"
+  ) {
+    await fail(`Scenario 0: overview counts are wrong: ${JSON.stringify(overviewState)}`);
+  }
+  const navTextLower = overviewState.navText.toLowerCase();
+  const groupPositions = ["home", "store management", "store setup", "advanced tools"].map(
+    (label) => navTextLower.indexOf(label),
+  );
+  if (
+    groupPositions.some((position) => position < 0) ||
+    groupPositions.some((position, index) => index > 0 && position <= groupPositions[index - 1])
+  ) {
+    await fail(`Scenario 0: navigation group order is wrong: ${JSON.stringify(overviewState.navText)}`);
+  }
+  for (const expected of [
+    "Your store at a glance",
+    "current totals for Simple Catalog Store",
+    "Add product",
+    "Add category",
+    "View inquiries",
+    "Configure storefront",
+    "Manage payment methods",
+    "Telegram diagnostics",
+    "Payment methods are configuration only",
+    "Prototype instructions only. No live payment processing.",
+  ]) {
+    if (!overviewState.text.includes(expected)) {
+      await fail(`Scenario 0: overview is missing '${expected}'.`);
+    }
+  }
+  if (/\btoday\b/i.test(overviewState.text)) {
+    await fail("Scenario 0: overview implies daily activity instead of saved totals.");
+  }
+  if (/coming soon|planned for|will appear here/i.test(overviewState.text)) {
+    await fail("Scenario 0: overview still shows outdated placeholder copy.");
+  }
+  if (navTextLower.includes("customers") || overviewState.hasCustomersLink) {
+    await fail("Scenario 0: unimplemented Customers must not appear in navigation.");
+  }
+  const storeManagementPositions = [
+    "products",
+    "categories",
+    "inquiries",
+    "payment methods",
+  ].map((label) => navTextLower.indexOf(label));
+  if (
+    storeManagementPositions.some((position) => position < 0) ||
+    storeManagementPositions.some(
+      (position, index) => index > 0 && position <= storeManagementPositions[index - 1],
+    )
+  ) {
+    await fail(`Scenario 0: Store Management item order is wrong: ${JSON.stringify(overviewState.navText)}`);
+  }
+  if (overviewState.expanded !== "false" || overviewState.advancedVisible) {
+    await fail(`Scenario 0: Advanced Tools must start collapsed: ${JSON.stringify(overviewState)}`);
+  }
+
+  await cdp.evaluate(`document.querySelector('[data-testid="nav-group-toggle-advanced-tools"]').focus()`);
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "rawKeyDown",
+    key: "Enter",
+    code: "Enter",
+    windowsVirtualKeyCode: 13,
+    nativeVirtualKeyCode: 13,
+  });
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "char",
+    key: "Enter",
+    code: "Enter",
+    text: "\r",
+    unmodifiedText: "\r",
+    windowsVirtualKeyCode: 13,
+    nativeVirtualKeyCode: 13,
+  });
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Enter",
+    code: "Enter",
+    windowsVirtualKeyCode: 13,
+    nativeVirtualKeyCode: 13,
+  });
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="nav-group-toggle-advanced-tools"]').getAttribute("aria-expanded") === "true"`,
+    "keyboard expansion of Advanced Tools",
+  );
+  const expandedByKeyboard = await cdp.evaluate(
+    `document.querySelector('[data-testid="sidebar-nav"] [data-testid="nav-link-catalog"]').offsetParent !== null`,
+  );
+  if (!expandedByKeyboard) {
+    await fail("Scenario 0: keyboard activation did not reveal Advanced Tools links.");
+  }
+  await cdp.evaluate(`document.querySelector('[data-testid="nav-group-toggle-advanced-tools"]').focus()`);
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: " ",
+    code: "Space",
+    text: " ",
+    windowsVirtualKeyCode: 32,
+    nativeVirtualKeyCode: 32,
+  });
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: " ",
+    code: "Space",
+    windowsVirtualKeyCode: 32,
+    nativeVirtualKeyCode: 32,
+  });
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="nav-group-toggle-advanced-tools"]').getAttribute("aria-expanded") === "false"`,
+    "keyboard collapse of Advanced Tools",
+  );
+
+  await navigate(cdp, "/catalog", '[data-testid="catalog-editor"]', "advanced catalog direct URL");
+  const advancedRouteState = await cdp.evaluate(`(() => {
+    const toggle = document.querySelector('[data-testid="nav-group-toggle-advanced-tools"]');
+    const link = document.querySelector('[data-testid="sidebar-nav"] [data-testid="nav-link-catalog"]');
+    return {
+      expanded: toggle?.getAttribute("aria-expanded"),
+      current: link?.getAttribute("aria-current"),
+      visible: Boolean(link && link.offsetParent !== null),
+    };
+  })()`);
+  if (
+    advancedRouteState.expanded !== "true" ||
+    advancedRouteState.current !== "page" ||
+    !advancedRouteState.visible
+  ) {
+    await fail(`Scenario 0: direct advanced URL is not visible/current: ${JSON.stringify(advancedRouteState)}`);
+  }
+
+  await navigate(cdp, "/customers", '[data-testid="customers-page"]', "customers direct URL");
+  const customersPageText = await cdp.evaluate(
+    `document.querySelector('[data-testid="customers-page"]').innerText`,
+  );
+  if (!customersPageText.includes("Customer profiles are not available yet")) {
+    await fail("Scenario 0: the preserved /customers route did not render its honest placeholder.");
+  }
+
+  log("Scenario 0B: mobile drawer navigation closes after following a link");
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 360,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await navigate(cdp, "/overview", '[data-testid="overview-dashboard"]', "overview mobile");
+  await click(cdp, 'button[aria-label="Open navigation menu"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="mobile-nav"]'))`,
+    "mobile drawer",
+  );
+  const mobileDrawerState = await cdp.evaluate(`(() => {
+    const nav = document.querySelector('[data-testid="mobile-nav"]');
+    const toggle = nav.querySelector('[data-testid="nav-group-toggle-advanced-tools"]');
+    const productsLink = nav.querySelector('[data-testid="nav-link-products"]');
+    const undersized = Array.from(nav.querySelectorAll('a[href], button'))
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && (rect.width < 43.5 || rect.height < 43.5);
+      })
+      .map((element) => ({ text: element.innerText.slice(0, 40), height: element.getBoundingClientRect().height }));
+    return {
+      text: nav.innerText,
+      expanded: toggle?.getAttribute("aria-expanded"),
+      productsHeight: productsLink?.getBoundingClientRect().height ?? 0,
+      hasCustomersLink: Boolean(nav.querySelector('[data-testid="nav-link-customers"]')),
+      undersized,
+      navWidth: nav.scrollWidth,
+      navClientWidth: nav.clientWidth,
+    };
+  })()`);
+  if (mobileDrawerState.expanded !== "false") {
+    await fail(`Scenario 0B: mobile Advanced Tools must start collapsed: ${JSON.stringify(mobileDrawerState)}`);
+  }
+  if (mobileDrawerState.text.toLowerCase().includes("customers") || mobileDrawerState.hasCustomersLink) {
+    await fail("Scenario 0B: unimplemented Customers must not appear in the mobile drawer.");
+  }
+  if (mobileDrawerState.undersized.length > 0) {
+    await fail(`Scenario 0B: undersized drawer targets: ${JSON.stringify(mobileDrawerState.undersized)}`);
+  }
+  if (mobileDrawerState.navWidth > mobileDrawerState.navClientWidth + 1) {
+    await fail(`Scenario 0B: drawer overflows horizontally: ${JSON.stringify(mobileDrawerState)}`);
+  }
+  if (mobileDrawerState.productsHeight < 43.5) {
+    await fail(`Scenario 0B: Products link is below 44px: ${mobileDrawerState.productsHeight}`);
+  }
+  await click(cdp, '[data-testid="mobile-nav"] [data-testid="nav-group-toggle-advanced-tools"]');
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="mobile-nav"] [data-testid="nav-group-toggle-advanced-tools"]').getAttribute("aria-expanded") === "true"`,
+    "mobile Advanced Tools expansion",
+  );
+  await click(cdp, '[data-testid="mobile-nav"] [data-testid="nav-link-products"]');
+  await waitFor(cdp, `location.pathname === "/products"`, "mobile drawer link navigation");
+  await waitFor(
+    cdp,
+    `!document.querySelector('[data-testid="mobile-nav"]')`,
+    "mobile drawer closed after navigation",
+  );
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+
   log("Scenario 1: independent product list, fields, status and search");
   await navigate(cdp, "/products", '[data-testid="products-admin"]', "products page");
   await waitFor(
@@ -1628,6 +1869,10 @@ async function main() {
       deviceScaleFactor: 1,
       mobile: true,
     });
+    await navigate(cdp, "/overview", '[data-testid="overview-dashboard"]', `overview at ${width}px`);
+    await assertNoHorizontalOverflow(cdp, width, `overview ${width}px`);
+    await assertTouchTargets(cdp, `overview ${width}px`);
+
     await navigate(cdp, "/products", '[data-testid="products-admin"]', `products at ${width}px`);
     await assertNoHorizontalOverflow(cdp, width, `products ${width}px`);
     await assertTouchTargets(cdp, `products ${width}px`);

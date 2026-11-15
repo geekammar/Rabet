@@ -15,13 +15,14 @@ export function Sidebar() {
           <Logo />
         </Link>
       </div>
-      <DashboardNav className="flex-1 overflow-y-auto p-4" />
+      <DashboardNav
+        variant="sidebar"
+        className="flex-1 overflow-y-auto p-4"
+      />
       <div className="border-t p-4 pb-[max(env(safe-area-inset-bottom),1rem)]">
-        <p className="text-xs text-muted-foreground">
-          Discovery · Dashboard shell
-        </p>
+        <p className="text-xs text-muted-foreground">Rabet merchant dashboard</p>
         <p className="mt-1 text-xs text-muted-foreground/70">
-          Product features coming soon.
+          Products, storefront, and customer conversations in one place.
         </p>
       </div>
     </aside>

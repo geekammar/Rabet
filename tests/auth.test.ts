@@ -401,7 +401,7 @@ describe("unauthenticated access is blocked", () => {
 
   it("does not render dashboard content for /overview", async () => {
     const res = await raw("/overview");
-    expect(res.body).not.toContain("No activity yet");
+    expect(res.body).not.toContain("Quick actions");
   });
 
   it("does not render the dashboard shell sidebar", async () => {
@@ -551,7 +551,14 @@ describe("authenticated access", () => {
     const loginRes = await signIn({});
     const res = await raw("/overview", { jar: loginRes.jar });
     expect(res.status).toBe(200);
-    expect(res.body).toContain("No activity yet");
+    expect(res.body).toContain("Quick actions");
+  });
+
+  it("keeps the unimplemented /customers route reachable for the signed-in admin", async () => {
+    const loginRes = await signIn({});
+    const res = await raw("/customers", { jar: loginRes.jar });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain("Customer profiles are not available yet");
   });
 
   it("returns admin data from the protected route handler", async () => {
@@ -581,14 +588,14 @@ describe("authenticated access", () => {
       .slice(0, -4)
       .concat("AAAA");
     const res = await raw("/overview", { jar: tampered });
-    expect(res.body).not.toContain("No activity yet");
+    expect(res.body).not.toContain("Quick actions");
   });
 
   it("rejects a fabricated session cookie", async () => {
     const res = await raw("/overview", {
       jar: { "__Secure-authjs.session-token": "totally-fabricated-value" },
     });
-    expect(res.body).not.toContain("No activity yet");
+    expect(res.body).not.toContain("Quick actions");
   });
 
   it("rejects a session cookie whose JWT has expired", async () => {
@@ -619,7 +626,7 @@ describe("authenticated access", () => {
     });
     expect([301, 302, 303, 307, 308]).toContain(res.status);
     expect(res.location).toContain("/login");
-    expect(res.body).not.toContain("No activity yet");
+    expect(res.body).not.toContain("Quick actions");
   });
 });
 
@@ -724,7 +731,7 @@ describe("missing admin configuration fails closed", () => {
       });
       expect(overviewRes.headers.get("location")).toContain("/login");
       const body = await overviewRes.text();
-      expect(body).not.toContain("No activity yet");
+      expect(body).not.toContain("Quick actions");
     } finally {
       // Kill the whole process group so the `next-server` grandchild dies and
       // releases port 3211 for future runs.
@@ -737,14 +744,14 @@ describe("logout", () => {
   it("invalidates the session and blocks subsequent access", async () => {
     const loginRes = await signIn({});
     const authed = await raw("/overview", { jar: loginRes.jar });
-    expect(authed.body).toContain("No activity yet");
+    expect(authed.body).toContain("Quick actions");
 
     const out = await signOut(loginRes.jar);
     expect(out.location).toContain("/login");
 
     const after = await raw("/overview", { jar: out.jar });
     // The session cookie is gone, so the dashboard must be unreachable.
-    expect(after.body).not.toContain("No activity yet");
+    expect(after.body).not.toContain("Quick actions");
   });
 
   it("leaves the public landing page reachable", async () => {
