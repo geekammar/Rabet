@@ -1448,3 +1448,71 @@ inspection, not merged or deployed.
   safety, customer isolation, and long localized welcome chunking). Existing
   Telegram journey and token suites were updated for the new home and extended
   callback grammar.
+
+## Phase 29B — Storefront Settings, Menu Customization & Preview
+
+**Status:** implemented on `feat/phase-29b-storefront-settings`; open for reviewer
+inspection, not merged or deployed.
+
+- **Minimal persistence:** one additive migration,
+  `drizzle/0004_storefront_menu.sql`, adds a nullable `bot_setting.storefront_menu`
+  `jsonb` column. `NULL` means "not customized" and resolves to the Phase 28
+  defaults, so existing stores keep all five entries enabled in the original
+  order without any data backfill. No table, product, category or tenant model
+  was added. Settings reads and initialization remain compatible with a
+  pre-0004 database: customer rendering falls back to the defaults until the
+  additive migration is applied, and a save reports a clear upgrade-required
+  message instead of failing the existing settings/Telegram journeys.
+- **Configuration model:** the five fixed entry points are `products`,
+  `categories`, `support`, `languages` and `inquiries`. The stored array order is
+  the merchant's display order; each item carries an `enabled` flag. Writes
+  validate that every key appears exactly once and that at least one entry stays
+  enabled. Malformed stored values fall back safely to the defaults at read time.
+- **Contextual eligibility preserved:** the live renderer still hides Categories
+  when no eligible product exists, and Language switching when fewer than two
+  languages are enabled. If every enabled configured entry is temporarily
+  unavailable, Contact Support is shown as the documented minimal navigation
+  fallback. Hiding an entry never removes its callback, feature or data.
+- **Telegram home:** `renderStorefrontHome` now maps the ordered saved
+  configuration to the existing `prods`, `scats`, `support`, `langs` and `myinq`
+  callbacks. The configured welcome text, saved customer language preference,
+  legacy callback grammar, Back/Home navigation and all catalog, inquiry and
+  support journeys are unchanged. Rendering sends no notification and creates no
+  inquiry.
+- **Dashboard `/storefront`:** a mobile-first settings page with accessible
+  toggles, Up/Down ordering (no drag-and-drop), save/error/success states,
+  unsaved-change protection, a confirmed Reset to Defaults, and a read-only
+  customer preview for both the saved configuration and any pending draft. The
+  preview renders only the buttons that would actually appear in Telegram,
+  resolved by the same shared visibility/fallback function as the live home:
+  disabled and contextually unavailable entries remain visible only in the
+  configuration status list. It preserves configured order and Arabic/English
+  RTL/LTR labels, shows Contact Support when no configured entry is currently
+  visible, distinguishes saved from draft previews, and states clearly that it
+  sends nothing to Telegram and writes nothing.
+- **PM-09 repair:** the simplified Products and Categories forms now derive tabs
+  from every enabled, supported catalog language instead of assuming English or
+  treating Arabic as the only optional language. Arabic-default with English
+  enabled and English-default with Arabic enabled both work, including create
+  and edit. Tabs show accurate Missing/Complete status, switching preserves
+  drafts, and Save submits every changed language atomically while leaving
+  untouched translations alone. The stale "selected tab only" helper text was
+  replaced.
+- **Verification:** unit tests cover the menu configuration, visibility rules,
+  language-tab derivation, Server Action authorization and multilingual create
+  validation. PostgreSQL tests cover default/save/reset/malformed configurations
+  and live Telegram home ordering, hiding, callback compatibility and fallback.
+  The browser acceptance suite adds Arabic-default English/Arabic tab coverage,
+  storefront save/reload/reset/preview checks, saved-vs-draft and fallback
+  preview fidelity, no-write preview checks, and 320/360/390/430 px overflow
+  and touch-target checks.
+- **Release readiness (manual order):** merge the approved PR; verify Vercel
+  Production is READY on the merge SHA; inspect the target database and applied
+  migration state read-only; apply only `0004_storefront_menu.sql` through the
+  authorized GitHub Actions production runner after owner approval and a verified
+  restore point; verify schema and application functionality; then run focused
+  Muse acceptance. The production runner is restricted to manual
+  `workflow_dispatch` on `main` in the fixed `Production` environment with pinned
+  host/database variables and the direct unpooled TLS secret; it rejects pooled,
+  DEV, loopback and unpinned targets. It must not be assumed usable for an
+  arbitrary database. No migration runs automatically from this PR.

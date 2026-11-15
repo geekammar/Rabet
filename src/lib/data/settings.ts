@@ -1,13 +1,20 @@
 import "server-only";
 
-import { eq, isNull } from "drizzle-orm";
+import { eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Database } from "@/db/client";
 import { botSetting, product } from "@/db/schema";
+import {
+  resolveStorefrontMenuConfig,
+  storefrontMenuConfigSchema,
+  type StorefrontMenuConfig,
+  type StorefrontMenuConfigSource,
+} from "@/lib/storefront/menu";
 
 import {
   invalidInput,
+  isUndefinedColumnError,
   mapDatabaseError,
   RabetDataError,
 } from "./errors";
@@ -126,13 +133,28 @@ export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
  * `id` is constrained to `1`, so this is always a single-row lookup.
  */
 export async function readSettings(db: Database): Promise<BotSettings | null> {
+  // Explicit columns keep this read compatible with a database where the
+  // additive storefront-menu migration has not been applied yet. The menu has
+  // its own capability-aware reader below; treating it as `null` here preserves
+  // the Phase 28 defaults for every existing caller.
   const rows = await db
-    .select()
+    .select({
+      id: botSetting.id,
+      defaultLanguageId: botSetting.defaultLanguageId,
+      currency: botSetting.currency,
+      displayName: botSetting.displayName,
+      askForLanguage: botSetting.askForLanguage,
+      supportCategory: botSetting.supportCategory,
+      supportReplyTime: botSetting.supportReplyTime,
+      createdAt: botSetting.createdAt,
+      updatedAt: botSetting.updatedAt,
+    })
     .from(botSetting)
     .where(eq(botSetting.id, 1))
     .limit(1);
 
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row ? { ...row, storefrontMenu: null } : null;
 }
 
 /**
@@ -212,24 +234,42 @@ export async function initializeSettings(
   }
 
   try {
-    const inserted = await db
-      .insert(botSetting)
-      .values({
-        // The singleton: the primary key and the `CHECK (id = 1)` both fix this.
-        id: 1,
-        defaultLanguageId: defaultLanguage.id,
-        currency: parsed.currency,
-        displayName: parsed.displayName,
-        askForLanguage: parsed.askForLanguage,
-        supportCategory: parsed.supportCategory,
-        supportReplyTime: parsed.supportReplyTime ?? null,
-      })
-      // The idempotency site. A conflict here means settings already exist; the
-      // branch below reports it instead of clobbering the owner's configuration.
-      .onConflictDoNothing({ target: botSetting.id })
-      .returning();
+    // Explicit column list, intentionally omitting `storefront_menu`: the
+    // initialization contract must keep working on a database where the
+    // additive storefront-menu migration has not been applied yet. The column
+    // has no default and stays NULL, which is the documented "not customized"
+    // state.
+    const inserted = await db.execute<{ id: number }>(sql`
+      insert into ${botSetting} (
+        "id",
+        "default_language_id",
+        "currency",
+        "display_name",
+        "ask_for_language",
+        "support_category",
+        "support_reply_time"
+      ) values (
+        1,
+        ${defaultLanguage.id},
+        ${parsed.currency},
+        ${parsed.displayName},
+        ${parsed.askForLanguage},
+        ${sql.param(parsed.supportCategory, botSetting.supportCategory)},
+        ${parsed.supportReplyTime ?? null}
+      )
+      on conflict ("id") do nothing
+      returning "id"
+    `);
 
-    if (inserted.length > 0) return inserted[0];
+    const rawRows: unknown = Array.isArray(inserted)
+      ? inserted
+      : (inserted as { rows?: unknown[] })?.rows;
+    const insertedRows = Array.isArray(rawRows) ? rawRows : [];
+
+    if (insertedRows.length > 0) {
+      const settings = await readSettings(db);
+      if (settings) return settings;
+    }
   } catch (error) {
     throw mapDatabaseError(error);
   }
@@ -289,14 +329,140 @@ export async function updateSettings(
         supportReplyTime: parsed.supportReplyTime,
       })
       .where(eq(botSetting.id, 1))
-      .returning();
+      .returning({ id: botSetting.id });
 
-    if (updated.length > 0) return updated[0];
+    if (updated.length > 0) {
+      return requireSettings(db);
+    }
   } catch (error) {
     throw mapDatabaseError(error);
   }
 
   // No row matched the singleton key, so nothing was initialized to update.
+  throw new RabetDataError(
+    "SETTINGS_NOT_INITIALIZED",
+    "Bot settings have not been initialized yet. Complete the initial setup " +
+      "first.",
+  );
+}
+
+export type StorefrontMenuSettings = {
+  config: StorefrontMenuConfig;
+  source: StorefrontMenuConfigSource;
+};
+
+/**
+ * Reads the merchant's storefront menu choices.
+ *
+ * An uninitialized store keeps the `SETTINGS_NOT_INITIALIZED` contract. A
+ * missing value is the backward-compatible Phase 28 default; malformed JSON is
+ * reported as `invalid` but still yields the safe defaults so a bad row cannot
+ * take customer navigation down.
+ */
+export async function readStorefrontMenuSettings(
+  db: Database,
+): Promise<StorefrontMenuSettings> {
+  await requireSettings(db);
+
+  try {
+    const rows = await db
+      .select({ storefrontMenu: botSetting.storefrontMenu })
+      .from(botSetting)
+      .where(eq(botSetting.id, 1))
+      .limit(1);
+
+    return resolveStorefrontMenuConfig(rows[0]?.storefrontMenu);
+  } catch (error) {
+    if (isUndefinedColumnError(error)) {
+      // The additive migration has not been applied yet. Existing stores keep
+      // the Phase 28 behavior instead of failing the customer home.
+      return resolveStorefrontMenuConfig(null);
+    }
+
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Persists a merchant-customized storefront menu.
+ *
+ * The complete ordered configuration is validated before the single settings
+ * row is updated. The write is a no-op path (typed error) when settings have
+ * not been initialized.
+ */
+export async function saveStorefrontMenuConfig(
+  db: Database,
+  input: unknown,
+): Promise<StorefrontMenuConfig> {
+  let parsed: StorefrontMenuConfig;
+
+  try {
+    parsed = storefrontMenuConfigSchema.parse(input);
+  } catch (error) {
+    throw invalidInput(error);
+  }
+
+  try {
+    const updated = await db
+      .update(botSetting)
+      .set({ storefrontMenu: parsed })
+      .where(eq(botSetting.id, 1))
+      .returning({ storefrontMenu: botSetting.storefrontMenu });
+
+    if (updated.length > 0) {
+      return parsed;
+    }
+  } catch (error) {
+    if (isUndefinedColumnError(error)) {
+      throw new RabetDataError(
+        "SCHEMA_UPGRADE_REQUIRED",
+        "The storefront menu database upgrade has not been applied yet.",
+        { cause: error },
+      );
+    }
+
+    throw mapDatabaseError(error);
+  }
+
+  throw new RabetDataError(
+    "SETTINGS_NOT_INITIALIZED",
+    "Bot settings have not been initialized yet. Complete the initial setup " +
+      "first.",
+  );
+}
+
+/**
+ * Restores the Phase 28 default menu by clearing the customization.
+ *
+ * `NULL` is the canonical "not customized" value; reset therefore never writes
+ * a frozen copy of today's defaults, which keeps future default additions
+ * backward compatible.
+ */
+export async function resetStorefrontMenuConfig(
+  db: Database,
+): Promise<StorefrontMenuConfig> {
+  try {
+    const updated = await db
+      .update(botSetting)
+      .set({ storefrontMenu: null })
+      .where(eq(botSetting.id, 1))
+      .returning({ id: botSetting.id });
+
+    if (updated.length > 0) {
+      return resolveStorefrontMenuConfig(null).config;
+    }
+  } catch (error) {
+    if (isUndefinedColumnError(error)) {
+      throw new RabetDataError(
+        "SCHEMA_UPGRADE_REQUIRED",
+        "The storefront menu database upgrade has not been applied yet.",
+        { cause: error },
+      );
+    }
+
+    throw mapDatabaseError(error);
+  }
+
   throw new RabetDataError(
     "SETTINGS_NOT_INITIALIZED",
     "Bot settings have not been initialized yet. Complete the initial setup " +

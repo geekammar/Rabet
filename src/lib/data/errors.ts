@@ -148,6 +148,11 @@ function sqlState(error: unknown): string | undefined {
  * the connection class of SQLSTATE, or one of the network errors the fetch- or
  * socket-based drivers raise before any SQL ran.
  */
+/** True when PostgreSQL reports a referenced column that does not exist (42703). */
+export function isUndefinedColumnError(error: unknown): boolean {
+  return sqlState(error) === "42703";
+}
+
 function isConnectionFailure(error: unknown): boolean {
   const code = sqlState(error);
 

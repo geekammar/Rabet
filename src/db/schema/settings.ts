@@ -3,6 +3,7 @@ import {
   boolean,
   char,
   check,
+  jsonb,
   pgTable,
   smallint,
   text,
@@ -51,6 +52,12 @@ export const botSetting = pgTable(
       .notNull()
       .default(sql`'{}'::text[]`),
     supportReplyTime: text("support_reply_time"),
+    // Ordered merchant choices for the five default storefront entries.
+    // `NULL` means "not customized yet" and preserves the Phase 28 defaults,
+    // which is why this column has no default and no migration seed. The shape
+    // is validated in `src/lib/storefront/menu.ts`; malformed values fall back
+    // safely at read time and never break the customer home.
+    storefrontMenu: jsonb("storefront_menu"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),

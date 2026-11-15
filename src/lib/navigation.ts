@@ -8,6 +8,7 @@ import {
   PackageSearch,
   Send,
   Settings,
+  Store,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -41,6 +42,12 @@ export const navItems: NavItem[] = [
     href: "/categories",
     icon: FolderTree,
     description: "Create and manage root and child categories.",
+  },
+  {
+    label: "Storefront",
+    href: "/storefront",
+    icon: Store,
+    description: "Choose the customer menu entries and their order.",
   },
   {
     label: "Advanced Catalog",

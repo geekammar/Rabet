@@ -39,6 +39,7 @@ import {
 import { buildCategoryHierarchy } from "@/lib/catalog/tree";
 import { createProductEditDraft } from "@/lib/catalog/product-draft";
 import { collectChangedTranslations } from "@/lib/catalog/translation-draft";
+import { getCatalogLanguageTabs, getTranslationStatus } from "@/lib/catalog/language-tabs";
 import type {
   CatalogCategoryRecord,
   CatalogProductRecord,
@@ -142,7 +143,19 @@ export function ProductsAdmin({
     defaultLanguage?.label ?? (defaultLangCode === "ar" ? "العربية" : "English");
   const defaultLangDir =
     defaultLanguage?.textDirection ?? (defaultLangCode === "ar" ? "rtl" : "ltr");
-  const arabicRegistered = languages.some((languageRow) => languageRow.code === "ar");
+  const languageTabs = useMemo(() => {
+    const tabs = getCatalogLanguageTabs(languages, defaultLanguage);
+    if (tabs.length > 0) return tabs;
+
+    return [
+      {
+        code: defaultLangCode,
+        label: defaultLangLabel,
+        isRtl: defaultLangDir === "rtl",
+        isDefault: true,
+      },
+    ];
+  }, [defaultLanguage, defaultLangCode, defaultLangDir, defaultLangLabel, languages]);
 
   const { flattened } = useMemo(
     () =>
@@ -183,11 +196,9 @@ export function ProductsAdmin({
     const translations: Record<
       string,
       { name: string; description: string; details: string }
-    > = {
-      [defaultLangCode]: { name: "", description: "", details: "" },
-    };
-    if (arabicRegistered && defaultLangCode !== "ar") {
-      translations.ar = { name: "", description: "", details: "" };
+    > = {};
+    for (const tab of languageTabs) {
+      translations[tab.code] = { name: "", description: "", details: "" };
     }
 
     const nextForm: ProductFormState = {
@@ -215,9 +226,28 @@ export function ProductsAdmin({
 
   const openEditForm = (product: CatalogProductRecord) => {
     const draft = createProductEditDraft(product);
-    const preferredTab = draft.translations[defaultLangCode]
+    const translations: Record<
+      string,
+      { name: string; description: string; details: string }
+    > = {};
+
+    for (const [code, translation] of Object.entries(draft.translations)) {
+      translations[code] = {
+        name: translation.name ?? "",
+        description: translation.description ?? "",
+        details: translation.details ?? "",
+      };
+    }
+
+    for (const tab of languageTabs) {
+      if (!translations[tab.code]) {
+        translations[tab.code] = { name: "", description: "", details: "" };
+      }
+    }
+
+    const preferredTab = languageTabs.some((tab) => tab.code === defaultLangCode)
       ? defaultLangCode
-      : Object.keys(draft.translations)[0] ?? defaultLangCode;
+      : languageTabs[0]?.code ?? defaultLangCode;
 
     const nextForm: ProductFormState = {
       mode: "edit",
@@ -228,8 +258,8 @@ export function ProductsAdmin({
       isActive: draft.isActive,
       allowInquiry: false,
       activeLangTab: preferredTab,
-      translations: draft.translations,
-      initialTranslations: draft.translations,
+      translations,
+      initialTranslations: { ...translations },
       errors: {},
       initialSnapshot: "",
     };
@@ -290,32 +320,34 @@ export function ProductsAdmin({
     startTransition(async () => {
       try {
         if (form.mode === "create") {
-          const defaultTranslation = form.translations[defaultLangCode] ?? {
-            name: "",
-            description: "",
-            details: "",
-          };
-          const arabicTranslation =
-            arabicRegistered && defaultLangCode !== "ar"
-              ? form.translations.ar
-              : undefined;
+          const translations = languageTabs
+            .map((tab) => {
+              const values = form.translations[tab.code] ?? {
+                name: "",
+                description: "",
+                details: "",
+              };
+              const hasContent =
+                values.name.trim() ||
+                values.description.trim() ||
+                values.details.trim();
+
+              if (tab.code !== defaultLangCode && !hasContent) return null;
+
+              return {
+                languageCode: tab.code,
+                name: values.name,
+                description: values.description,
+                details: values.details,
+              };
+            })
+            .filter((translation) => translation !== null);
 
           const result = await createProductAction({
             categoryId: form.categoryId,
             slug: form.slug,
             price: form.price,
-            name: defaultTranslation.name,
-            description: defaultTranslation.description,
-            details: defaultTranslation.details,
-            arabicName: arabicTranslation?.name.trim()
-              ? arabicTranslation.name
-              : undefined,
-            arabicDescription: arabicTranslation?.description.trim()
-              ? arabicTranslation.description
-              : undefined,
-            arabicDetails: arabicTranslation?.details.trim()
-              ? arabicTranslation.details
-              : undefined,
+            translations,
             allowInquiry: form.allowInquiry,
           });
 
@@ -426,15 +458,29 @@ export function ProductsAdmin({
   if (form) {
     const isDirty = snapshotForm(form) !== form.initialSnapshot;
     const formTitle = form.mode === "create" ? "Add product" : "Edit product";
-    const activeTranslation = form.translations[form.activeLangTab] ?? {
+    const activeLanguageTab =
+      languageTabs.find((tab) => tab.code === form.activeLangTab) ??
+      languageTabs[0];
+    const activeTranslation = form.translations[activeLanguageTab.code] ?? {
       name: "",
       description: "",
       details: "",
     };
-    const translationError = (field: "name" | "description" | "details") =>
-      form.errors[`translations.${form.activeLangTab}.${field}`] ??
-      form.errors[field] ??
-      "";
+    const translationError = (field: "name" | "description" | "details") => {
+      const direct = form.errors[`translations.${activeLanguageTab.code}.${field}`];
+      if (direct) return direct;
+      if (activeLanguageTab.isDefault) return form.errors[field] ?? "";
+      if (activeLanguageTab.code === "ar") {
+        const legacyKey =
+          field === "name"
+            ? "arabicName"
+            : field === "description"
+              ? "arabicDescription"
+              : "arabicDetails";
+        return form.errors[legacyKey] ?? "";
+      }
+      return "";
+    };
     const tabHasError = (languageCode: string) =>
       Object.keys(form.errors).some(
         (key) =>
@@ -619,53 +665,53 @@ export function ProductsAdmin({
             ) : null}
 
             <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  type="button"
-                  variant={
-                    form.activeLangTab === defaultLangCode ? "default" : "outline"
-                  }
-                  onClick={() => updateForm({ activeLangTab: defaultLangCode })}
-                  className="min-h-11"
-                >
-                  {defaultLangLabel} ({defaultLangCode.toUpperCase()})
-                  {tabHasError(defaultLangCode) ? (
-                    <span className="ml-1 text-destructive">!</span>
-                  ) : null}
-                </Button>
-                {arabicRegistered && defaultLangCode !== "ar" ? (
-                  <Button
-                    type="button"
-                    variant={form.activeLangTab === "ar" ? "default" : "outline"}
-                    onClick={() => updateForm({ activeLangTab: "ar" })}
-                    className="min-h-11"
-                  >
-                    العربية (AR)
-                    {tabHasError("ar") ? (
-                      <span className="ml-1 text-destructive">!</span>
-                    ) : null}
-                  </Button>
-                ) : null}
-                <Badge variant="outline" className="text-xs">
-                  {form.translations[form.activeLangTab]?.name?.trim()
-                    ? `Draft (${form.activeLangTab.toUpperCase()})`
-                    : `Missing (${form.activeLangTab.toUpperCase()})`}
-                </Badge>
+              <div className="flex flex-wrap items-center gap-2" role="tablist">
+                {languageTabs.map((tab) => {
+                  const status = getTranslationStatus(form.translations[tab.code]);
+                  const isActive = form.activeLangTab === tab.code;
+
+                  return (
+                    <Button
+                      key={tab.code}
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      variant={isActive ? "default" : "outline"}
+                      onClick={() => updateForm({ activeLangTab: tab.code })}
+                      className="min-h-11 gap-1.5"
+                      data-testid={`language-tab-${tab.code}`}
+                    >
+                      <span>
+                        {tab.label} ({tab.code.toUpperCase()})
+                      </span>
+                      <span
+                        className={`text-xs font-normal ${
+                          isActive ? "opacity-80" : "text-muted-foreground"
+                        }`}
+                      >
+                        {status === "complete" ? "Complete" : "Missing"}
+                      </span>
+                      {tabHasError(tab.code) ? (
+                        <span className="text-destructive">!</span>
+                      ) : null}
+                    </Button>
+                  );
+                })}
               </div>
 
               <p className="text-xs text-muted-foreground">
                 {form.mode === "edit"
-                  ? "Saving applies the selected language tab. Other translations are preserved."
-                  : "Default language content is required. Arabic content is optional when Arabic is registered."}
+                  ? "Save applies all changed language tabs together. Untouched translations are preserved."
+                  : "The default language name is required. Other enabled languages can be filled now or later; blank languages are not created."}
               </p>
 
               <div
                 className="space-y-4"
-                dir={form.activeLangTab === "ar" ? "rtl" : defaultLangDir}
+                dir={activeLanguageTab.isRtl ? "rtl" : "ltr"}
               >
                 <div className="space-y-1.5">
                   <label htmlFor="product-name" className="text-sm font-medium">
-                    Name ({form.activeLangTab.toUpperCase()}){" "}
+                    Name ({activeLanguageTab.code.toUpperCase()}){" "}
                     <span className="text-destructive">*</span>
                   </label>
                   <input
@@ -696,7 +742,7 @@ export function ProductsAdmin({
                     htmlFor="product-description"
                     className="text-sm font-medium"
                   >
-                    Short description ({form.activeLangTab.toUpperCase()})
+                    Short description ({activeLanguageTab.code.toUpperCase()})
                   </label>
                   <input
                     id="product-description"
@@ -723,7 +769,7 @@ export function ProductsAdmin({
 
                 <div className="space-y-1.5">
                   <label htmlFor="product-details" className="text-sm font-medium">
-                    Details ({form.activeLangTab.toUpperCase()})
+                    Details ({activeLanguageTab.code.toUpperCase()})
                   </label>
                   <textarea
                     id="product-details"

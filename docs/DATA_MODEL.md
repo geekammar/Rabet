@@ -355,12 +355,20 @@ so moving a category later never strands its products.
 | `ask_for_language` | `boolean` | `NOT NULL DEFAULT true` | if only one language is enabled the bot skips the language step regardless |
 | `support_category` | `text[]` | `NOT NULL DEFAULT '{}'` | configurable support categories (§9.4) |
 | `support_reply_time` | `text` | nullable | e.g. "within 24 hours", shown in support templates |
+| `storefront_menu` | `jsonb` | nullable | ordered merchant choices for the five default storefront entries (Phase 29B) |
 | `created_at` | `timestamptz` | `NOT NULL DEFAULT now()` | |
 | `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()` | trigger-maintained |
 
 Kept as **one typed row** rather than a key/value map so the schema stays self-documenting
 and the dashboard form is one form. The one exception is `support_category`, which is an
 array because a category *is* just a short editable string at this scale (§2.1).
+
+`storefront_menu` is the other small exception: an ordered JSON array of the five fixed
+customer entry points (`products`, `categories`, `support`, `languages`, `inquiries`) with
+an `enabled` flag each. `NULL` means "not customized" and preserves the Phase 28 default
+menu exactly; it is not a new hierarchy or page-builder model, and it never duplicates
+product or category records. The shape is validated in the write path and read defensively,
+with the existing catalog/language eligibility rules still applied at render time.
 
 > **Localization note (correction).** A plain `text[]` array is **not localizable**: its values
 > are whatever the seller typed, in one language, and the optional Arabic bot (ADR-006) would

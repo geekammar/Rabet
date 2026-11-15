@@ -105,6 +105,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0001_tree_and_snapshot_integrity",
   "0002_payment_methods",
   "0003_seller_notifications",
+  "0004_storefront_menu",
 ];
 
 /** The sixteen domain tables created by the 0000+0001+0002 schema (Phase 11 baseline). */

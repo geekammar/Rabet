@@ -28,6 +28,7 @@ import {
   getCustomerByTelegramId,
   listEnabledLanguages,
   readSettings,
+  readStorefrontMenuSettings,
   resolveMessageText,
   setCustomerSelectedLanguage,
   upsertCustomer,
@@ -51,6 +52,11 @@ import {
   resolvePaymentMethodForAction,
 } from "@/lib/payment-methods/journey";
 import { isManualPaymentPrototypeEnabled } from "@/lib/payment-methods/prototype";
+import {
+  getStorefrontMenuButtonLabels,
+  resolveStorefrontMenuButtons,
+  type StorefrontMenuItemKey,
+} from "@/lib/storefront/menu";
 import {
   TELEGRAM_MAX_MESSAGE_CHARS,
 } from "./transport";
@@ -91,6 +97,8 @@ function orderEnabledLanguages<T extends { id: string; code: string }>(
 }
 
 export function getLocalizedUiStrings(isRtl: boolean) {
+  const menuLabels = getStorefrontMenuButtonLabels(isRtl);
+
   if (isRtl) {
     return {
       back: "◀ رجوع",
@@ -106,11 +114,11 @@ export function getLocalizedUiStrings(isRtl: boolean) {
       actionNotSupported: "هذا الإجراء غير مدعوم حالياً في هذا الإصدار.",
       storeUnavailable: "المتجر غير متاح حالياً.",
       selectLanguagePrompt: "يرجى اختيار اللغة / Please select your language:",
-      browseProducts: "🛍 تصفح المنتجات",
-      browseCategories: "🗂 تصفح الأقسام",
-      contactSupport: "💬 تواصل مع الدعم",
-      changeLanguage: "🌐 تغيير اللغة",
-      myInquiries: "📨 استفساراتي النشطة",
+      browseProducts: menuLabels.products,
+      browseCategories: menuLabels.categories,
+      contactSupport: menuLabels.support,
+      changeLanguage: menuLabels.languages,
+      myInquiries: menuLabels.inquiries,
       noProducts: "لا توجد منتجات متاحة حالياً.",
       pageInfo: "الصفحة",
       noActiveInquiries: "ليس لديك استفسارات نشطة.",
@@ -145,11 +153,11 @@ export function getLocalizedUiStrings(isRtl: boolean) {
     actionNotSupported: "This action is not yet supported in this version.",
     storeUnavailable: "This store is currently unavailable.",
     selectLanguagePrompt: "Please select your language / يرجى اختيار اللغة:",
-    browseProducts: "🛍 Browse Products",
-    browseCategories: "🗂 Browse Categories",
-    contactSupport: "💬 Contact Support",
-    changeLanguage: "🌐 Change Language",
-    myInquiries: "📨 My Active Inquiries",
+    browseProducts: menuLabels.products,
+    browseCategories: menuLabels.categories,
+    contactSupport: menuLabels.support,
+    changeLanguage: menuLabels.languages,
+    myInquiries: menuLabels.inquiries,
     noProducts: "No products are available right now.",
     pageInfo: "Page",
     noActiveInquiries: "You have no active inquiries.",
@@ -410,10 +418,32 @@ async function resolveWelcomeBody(
   return welcomeBody;
 }
 
+function storefrontMenuCallbackData(key: StorefrontMenuItemKey): string {
+  switch (key) {
+    case "products":
+      return tokens.products();
+    case "categories":
+      return tokens.storefrontCategories();
+    case "support":
+      return tokens.support();
+    case "languages":
+      return tokens.languages();
+    case "inquiries":
+      return tokens.myInquiries();
+  }
+}
+
 /**
  * Renders the virtual default storefront home derived from the configured
  * settings and the live catalog. Nothing is persisted and opening it creates no
  * inquiry.
+ *
+ * The merchant's saved menu configuration controls order and visibility. The
+ * existing contextual eligibility still applies on top of it. If every enabled
+ * entry is temporarily unavailable (for example only Categories and Language
+ * remain enabled while the catalog is empty and one language is active), the
+ * home shows Contact Support as the documented minimal navigation fallback so
+ * the customer is never stranded without any action.
  */
 async function renderStorefrontHome(
   db: Database,
@@ -436,7 +466,6 @@ async function renderStorefrontHome(
     user.id,
     settings.defaultLanguageId,
   );
-  const ui = getLocalizedUiStrings(langContext.isRtl);
   const welcomeBody = await resolveWelcomeBody(db, settings, langContext);
 
   const [hasProducts, enabledLanguages] = await Promise.all([
@@ -444,23 +473,19 @@ async function renderStorefrontHome(
     listEnabledLanguages(db),
   ]);
 
-  const keyboard: TelegramInlineKeyboardButton[][] = [
-    [{ text: ui.browseProducts, callback_data: tokens.products() }],
-  ];
+  const menuSettings = await readStorefrontMenuSettings(db);
+  const menuButtons = resolveStorefrontMenuButtons(menuSettings.config, {
+    hasEligibleProducts: hasProducts,
+    enabledLanguageCount: enabledLanguages.length,
+  });
+  const menuLabels = getStorefrontMenuButtonLabels(langContext.isRtl);
 
-  if (hasProducts) {
-    keyboard.push([
-      { text: ui.browseCategories, callback_data: tokens.storefrontCategories() },
-    ]);
-  }
-
-  keyboard.push([{ text: ui.contactSupport, callback_data: tokens.support() }]);
-
-  if (enabledLanguages.length > 1) {
-    keyboard.push([{ text: ui.changeLanguage, callback_data: tokens.languages() }]);
-  }
-
-  keyboard.push([{ text: ui.myInquiries, callback_data: tokens.myInquiries() }]);
+  const keyboard: TelegramInlineKeyboardButton[][] = menuButtons.items.map((item) => [
+    {
+      text: menuLabels[item.key],
+      callback_data: storefrontMenuCallbackData(item.key),
+    },
+  ]);
 
   if (messageIdToEdit) {
     await editOrThrow(transport, {

@@ -156,6 +156,14 @@ async function clearBusinessData(): Promise<void> {
   await db.delete(categoryTranslation);
   await db.delete(category).where(isNotNull(category.parentId));
   await db.delete(category);
+  await db.update(botSetting).set({ storefrontMenu: null }).where(eq(botSetting.id, 1));
+}
+
+async function setStorefrontMenu(items: Array<{ key: string; enabled: boolean }>): Promise<void> {
+  await testDb!.db
+    .update(botSetting)
+    .set({ storefrontMenu: { version: 1, items } })
+    .where(eq(botSetting.id, 1));
 }
 
 async function seedCategory(params: {
@@ -965,6 +973,101 @@ describe.skipIf(!shouldRun)("Default storefront experience", () => {
     });
     expect(customerAView.transport.editedMessages[0].text).toContain(inquiryA.reference);
     expect(await testDb!.db.select().from(inquiry)).toHaveLength(inquiriesBefore.length);
+  });
+
+  it("honors saved menu order and hides disabled entries without breaking their callbacks", async () => {
+    const rootId = await seedCategory({ slug: "configured-root" });
+    await seedProduct({ categoryId: rootId, slug: "configured-product" });
+
+    await setStorefrontMenu([
+      { key: "support", enabled: true },
+      { key: "inquiries", enabled: true },
+      { key: "products", enabled: false },
+      { key: "categories", enabled: true },
+      { key: "languages", enabled: true },
+    ]);
+
+    const telegramId = nextTelegramId();
+    const start = await sendStart(telegramId);
+
+    expect(start.res.status).toBe(200);
+    expect(flatButtons(start.transport)).toEqual([
+      tokens.support(),
+      tokens.myInquiries(),
+      tokens.storefrontCategories(),
+      tokens.languages(),
+    ]);
+    expect(flatButtons(start.transport)).not.toContain(tokens.products());
+    expect(await testDb!.db.select().from(inquiry)).toHaveLength(0);
+
+    const hiddenProductsCallback = await sendCallback({
+      telegramId,
+      data: tokens.products(),
+    });
+    expect(hiddenProductsCallback.res.status).toBe(200);
+    expect(hiddenProductsCallback.transport.editedMessages[0].text).toBe(
+      "🛍 Browse Products",
+    );
+    expect(flatButtons(hiddenProductsCallback.transport)).toContain(
+      tokens.product(
+        (
+          await testDb!.db
+            .select({ id: product.id })
+            .from(product)
+            .where(eq(product.slug, "configured-product"))
+        )[0].id,
+      ),
+    );
+  });
+
+  it("applies contextual eligibility after configuration and keeps a safe support fallback", async () => {
+    await testDb!.db
+      .update(language)
+      .set({ isEnabled: false })
+      .where(eq(language.id, arLangId));
+
+    try {
+      await setStorefrontMenu([
+        { key: "categories", enabled: true },
+        { key: "languages", enabled: true },
+        { key: "products", enabled: false },
+        { key: "support", enabled: false },
+        { key: "inquiries", enabled: false },
+      ]);
+
+      const start = await sendStart(nextTelegramId());
+
+      expect(start.res.status).toBe(200);
+      expect(flatButtons(start.transport)).toEqual([tokens.support()]);
+      expect(await testDb!.db.select().from(inquiry)).toHaveLength(0);
+    } finally {
+      await testDb!.db
+        .update(language)
+        .set({ isEnabled: true })
+        .where(eq(language.id, arLangId));
+    }
+  });
+
+  it("falls back to the default menu when the stored configuration is malformed", async () => {
+    const rootId = await seedCategory({ slug: "malformed-root" });
+    await seedProduct({ categoryId: rootId, slug: "malformed-product" });
+
+    await testDb!.db
+      .update(botSetting)
+      .set({ storefrontMenu: { unexpected: true } })
+      .where(eq(botSetting.id, 1));
+
+    const start = await sendStart(nextTelegramId());
+
+    expect(start.res.status).toBe(200);
+    expect(flatButtons(start.transport)).toEqual([
+      tokens.products(),
+      tokens.storefrontCategories(),
+      tokens.support(),
+      tokens.languages(),
+      tokens.myInquiries(),
+    ]);
+    expect(await testDb!.db.select().from(inquiry)).toHaveLength(0);
   });
 
   it("bounds a long localized welcome into valid Telegram chunks with the menu on the final chunk", async () => {

@@ -29,6 +29,13 @@
       "when": 1794404294308,
       "tag": "0003_seller_notifications",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794716803213,
+      "tag": "0004_storefront_menu",
+      "breakpoints": true
     }
   ]
 }
