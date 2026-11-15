@@ -84,7 +84,9 @@ describe("Overview dashboard content", () => {
     const html = renderOverview(readyData);
 
     expect(html).toContain('data-testid="overview-dashboard"');
-    expect(html).toContain("Rabet Demo Store");
+    expect(html).toContain("Your store at a glance");
+    expect(html).toContain("current totals for Rabet Demo Store");
+    expect(html).not.toMatch(/\btoday\b/i);
     expect(html).toContain('data-count="7"');
     expect(html).toContain('data-count="3"');
     expect(html).toContain('data-count="2"');

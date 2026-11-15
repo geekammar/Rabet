@@ -554,6 +554,13 @@ describe("authenticated access", () => {
     expect(res.body).toContain("Quick actions");
   });
 
+  it("keeps the unimplemented /customers route reachable for the signed-in admin", async () => {
+    const loginRes = await signIn({});
+    const res = await raw("/customers", { jar: loginRes.jar });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain("Customer profiles are not available yet");
+  });
+
   it("returns admin data from the protected route handler", async () => {
     const loginRes = await signIn({});
     const res = await raw("/api/admin", { jar: loginRes.jar });

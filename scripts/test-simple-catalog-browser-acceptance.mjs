@@ -589,6 +589,9 @@ async function main() {
       navText: nav?.innerText ?? "",
       expanded: toggle?.getAttribute("aria-expanded"),
       advancedVisible: Boolean(advancedLink && advancedLink.offsetParent !== null),
+      hasCustomersLink: Boolean(
+        document.querySelector('[data-testid="sidebar-nav"] [data-testid="nav-link-customers"]'),
+      ),
       text,
     };
   })()`);
@@ -611,6 +614,8 @@ async function main() {
     await fail(`Scenario 0: navigation group order is wrong: ${JSON.stringify(overviewState.navText)}`);
   }
   for (const expected of [
+    "Your store at a glance",
+    "current totals for Simple Catalog Store",
     "Add product",
     "Add category",
     "View inquiries",
@@ -624,8 +629,28 @@ async function main() {
       await fail(`Scenario 0: overview is missing '${expected}'.`);
     }
   }
+  if (/\btoday\b/i.test(overviewState.text)) {
+    await fail("Scenario 0: overview implies daily activity instead of saved totals.");
+  }
   if (/coming soon|planned for|will appear here/i.test(overviewState.text)) {
     await fail("Scenario 0: overview still shows outdated placeholder copy.");
+  }
+  if (navTextLower.includes("customers") || overviewState.hasCustomersLink) {
+    await fail("Scenario 0: unimplemented Customers must not appear in navigation.");
+  }
+  const storeManagementPositions = [
+    "products",
+    "categories",
+    "inquiries",
+    "payment methods",
+  ].map((label) => navTextLower.indexOf(label));
+  if (
+    storeManagementPositions.some((position) => position < 0) ||
+    storeManagementPositions.some(
+      (position, index) => index > 0 && position <= storeManagementPositions[index - 1],
+    )
+  ) {
+    await fail(`Scenario 0: Store Management item order is wrong: ${JSON.stringify(overviewState.navText)}`);
   }
   if (overviewState.expanded !== "false" || overviewState.advancedVisible) {
     await fail(`Scenario 0: Advanced Tools must start collapsed: ${JSON.stringify(overviewState)}`);
@@ -706,6 +731,14 @@ async function main() {
     await fail(`Scenario 0: direct advanced URL is not visible/current: ${JSON.stringify(advancedRouteState)}`);
   }
 
+  await navigate(cdp, "/customers", '[data-testid="customers-page"]', "customers direct URL");
+  const customersPageText = await cdp.evaluate(
+    `document.querySelector('[data-testid="customers-page"]').innerText`,
+  );
+  if (!customersPageText.includes("Customer profiles are not available yet")) {
+    await fail("Scenario 0: the preserved /customers route did not render its honest placeholder.");
+  }
+
   log("Scenario 0B: mobile drawer navigation closes after following a link");
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 360,
@@ -734,6 +767,7 @@ async function main() {
       text: nav.innerText,
       expanded: toggle?.getAttribute("aria-expanded"),
       productsHeight: productsLink?.getBoundingClientRect().height ?? 0,
+      hasCustomersLink: Boolean(nav.querySelector('[data-testid="nav-link-customers"]')),
       undersized,
       navWidth: nav.scrollWidth,
       navClientWidth: nav.clientWidth,
@@ -741,6 +775,9 @@ async function main() {
   })()`);
   if (mobileDrawerState.expanded !== "false") {
     await fail(`Scenario 0B: mobile Advanced Tools must start collapsed: ${JSON.stringify(mobileDrawerState)}`);
+  }
+  if (mobileDrawerState.text.toLowerCase().includes("customers") || mobileDrawerState.hasCustomersLink) {
+    await fail("Scenario 0B: unimplemented Customers must not appear in the mobile drawer.");
   }
   if (mobileDrawerState.undersized.length > 0) {
     await fail(`Scenario 0B: undersized drawer targets: ${JSON.stringify(mobileDrawerState.undersized)}`);

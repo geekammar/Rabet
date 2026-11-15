@@ -25,7 +25,6 @@ describe("dashboard navigation groups", () => {
       "Categories",
       "Inquiries",
       "Payment Methods",
-      "Customers",
     ]);
     expect(navGroups[2].items.map((item) => item.label)).toEqual([
       "Storefront",
@@ -48,13 +47,17 @@ describe("dashboard navigation groups", () => {
       "/categories",
       "/inquiries",
       "/payment-methods",
-      "/customers",
       "/storefront",
       "/bot-content",
       "/settings",
       "/catalog",
       "/telegram",
     ]);
+  });
+
+  it("does not show the unimplemented Customers directory in navigation", () => {
+    expect(navItems.map((item) => item.label)).not.toContain("Customers");
+    expect(navItems.map((item) => item.href)).not.toContain("/customers");
   });
 
   it("marks only Advanced Tools as collapsible and closed by default", () => {

@@ -297,7 +297,7 @@ export function OverviewDashboard({ data }: { data: OverviewData }) {
         title="Overview"
         description={
           data.kind === "ready"
-            ? `What is happening in ${data.storeName} today, plus the tasks you do most often.`
+            ? `Your store at a glance: current totals for ${data.storeName}, plus the tasks you do most often.`
             : "Your merchant home for products, customer conversations, and store setup."
         }
       />

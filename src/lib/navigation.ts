@@ -9,7 +9,6 @@ import {
   Settings,
   SlidersHorizontal,
   Store,
-  Users,
   type LucideIcon,
 } from "lucide-react";
 
@@ -82,12 +81,6 @@ export const navGroups: NavGroup[] = [
         href: "/payment-methods",
         icon: CreditCard,
         description: "Configure payment instructions and preview them. Not live checkout.",
-      },
-      {
-        label: "Customers",
-        href: "/customers",
-        icon: Users,
-        description: "People who contact your store through Telegram.",
       },
     ],
   },

@@ -54,6 +54,8 @@ describe("dashboard copy cleanup", () => {
     expect(html).toContain("Store Setup");
     expect(html).toContain("Advanced Tools");
     expect(html).toContain("Rabet merchant dashboard");
+    expect(html).not.toContain("Customers");
+    expect(html).not.toContain('href="/customers"');
     expect(html).not.toMatch(staleCopy);
     expect(html).not.toContain("Discovery");
   });

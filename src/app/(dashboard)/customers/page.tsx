@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 
 export default function CustomersPage() {
   return (
-    <div className="space-y-8">
+    <div className="space-y-8" data-testid="customers-page">
       <PageHeader
         title="Customers"
         description="People who contact your store through Telegram."

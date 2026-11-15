@@ -36,7 +36,7 @@ function renderNav(pathname: string, variant: "sidebar" | "mobile" = "sidebar") 
 }
 
 describe("DashboardNav", () => {
-  it("renders all approved groups in order", () => {
+  it("renders all approved groups in order without the unimplemented Customers link", () => {
     const html = renderNav("/overview");
     const labels = [
       "Home",
@@ -48,6 +48,8 @@ describe("DashboardNav", () => {
     expect(labels.every((index) => index >= 0)).toBe(true);
     expect(labels).toEqual([...labels].sort((a, b) => a - b));
     expect(html).toContain('data-testid="sidebar-nav"');
+    expect(html).not.toContain("Customers");
+    expect(html).not.toContain('href="/customers"');
   });
 
   it("keeps Advanced Tools collapsed by default on Overview", () => {
