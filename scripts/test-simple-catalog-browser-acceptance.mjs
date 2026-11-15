@@ -215,6 +215,7 @@ async function waitFor(cdp, expression, label, timeout = 15000) {
 async function navigate(cdp, pathName, selector, label) {
   await cdp.send("Page.navigate", { url: `${BASE_URL}${pathName}` });
   await waitFor(cdp, `Boolean(document.querySelector(${JSON.stringify(selector)}))`, label ?? pathName);
+  await sleep(900);
 }
 
 async function click(cdp, selector) {
