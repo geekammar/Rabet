@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { category, language, product } from "@/db/schema";
+import { category, inquiry, language, product } from "@/db/schema";
 import {
   asAppDb,
   createTestDatabase,
@@ -17,6 +17,7 @@ import {
   initializeSettings,
   listCatalogCategories,
   listCatalogProducts,
+  listProductActions,
   readCatalogCategory,
   readCatalogProduct,
   saveCatalogCategoryTranslation,
@@ -657,5 +658,201 @@ describe.skipIf(!shouldRun)("catalog persistence & integrity", () => {
     } finally {
       await testDbAr.close();
     }
+  });
+});
+
+describe.skipIf(!shouldRun)("simple catalog administration data operations", () => {
+  it("creates exactly one root START_INQUIRY action in the product creation batch when opted in", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "simple-admin-inquiry",
+      translations: [{ languageId: defaultLangId, name: "Simple Admin Inquiry" }],
+    });
+
+    const created = await createCatalogProduct(appDb, {
+      categoryId: cat.categoryId,
+      slug: "simple-admin-inquiry-product",
+      price: "12.00",
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "Inquiry Product",
+          description: "Ask us",
+          details: "More details",
+        },
+      ],
+      defaultInquiry: {
+        translations: [
+          {
+            languageId: defaultLangId,
+            label: "Ask about this product",
+          },
+        ],
+      },
+    });
+
+    const actions = await listProductActions(appDb, created.productId);
+    expect(actions).toHaveLength(1);
+    expect(actions[0].actionType).toBe("START_INQUIRY");
+    expect(actions[0].parentActionId).toBeNull();
+    expect(actions[0].isActive).toBe(true);
+    expect(actions[0].sortOrder).toBe(0);
+    expect(actions[0].translations.en?.label).toBe("Ask about this product");
+
+    const inquiries = await appDb
+      .select({ id: inquiry.id })
+      .from(inquiry)
+      .where(eq(inquiry.productId, created.productId));
+    expect(inquiries).toHaveLength(0);
+
+    await editCatalogProduct(appDb, {
+      productId: created.productId,
+      slug: "simple-admin-inquiry-product-updated",
+      price: "13.00",
+      isActive: true,
+    });
+
+    const actionsAfterEdit = await listProductActions(appDb, created.productId);
+    expect(actionsAfterEdit).toHaveLength(1);
+    expect(actionsAfterEdit[0].id).toBe(actions[0].id);
+  });
+
+  it("rolls back the product when the default inquiry action cannot be written", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "simple-admin-inquiry-rollback",
+      translations: [{ languageId: defaultLangId, name: "Inquiry Rollback" }],
+    });
+
+    await expect(
+      createCatalogProduct(appDb, {
+        categoryId: cat.categoryId,
+        slug: "simple-admin-inquiry-rollback-product",
+        price: "9.00",
+        translations: [{ languageId: defaultLangId, name: "Rollback Product" }],
+        defaultInquiry: {
+          translations: [
+            {
+              languageId: "99999999-9999-4999-8999-999999999998",
+              label: "Ask about this product",
+            },
+          ],
+        },
+      }),
+    ).rejects.toBeDefined();
+
+    const products = await appDb
+      .select({ id: product.id })
+      .from(product)
+      .where(eq(product.slug, "simple-admin-inquiry-rollback-product"));
+    expect(products).toHaveLength(0);
+  });
+
+  it("creates no product actions when the default inquiry option is not requested", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "simple-admin-no-inquiry",
+      translations: [{ languageId: defaultLangId, name: "No Inquiry" }],
+    });
+
+    const created = await createCatalogProduct(appDb, {
+      categoryId: cat.categoryId,
+      slug: "simple-admin-plain-product",
+      price: "5.00",
+      translations: [{ languageId: defaultLangId, name: "Plain Product" }],
+    });
+
+    expect(await listProductActions(appDb, created.productId)).toHaveLength(0);
+  });
+
+  it("assigns a product to a different category without changing its translations or activation", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const first = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "simple-admin-first-category",
+      translations: [{ languageId: defaultLangId, name: "First Category" }],
+    });
+    const second = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "simple-admin-second-category",
+      translations: [{ languageId: defaultLangId, name: "Second Category" }],
+    });
+
+    const created = await createCatalogProduct(appDb, {
+      categoryId: first.categoryId,
+      slug: "simple-admin-movable-product",
+      price: "42.00",
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "Movable Product",
+          description: "Same description",
+          details: "Same details",
+        },
+        {
+          languageId: arabicLangId,
+          name: "منتج قابل للنقل",
+          description: "نفس الوصف",
+          details: "نفس التفاصيل",
+        },
+      ],
+    });
+
+    await updateCatalogProduct(appDb, created.productId, { isActive: true });
+
+    const edited = await editCatalogProduct(appDb, {
+      productId: created.productId,
+      categoryId: second.categoryId,
+      slug: "simple-admin-movable-product",
+      price: "42.00",
+      isActive: true,
+    });
+
+    expect(edited.product.categoryId).toBe(second.categoryId);
+    expect(edited.product.isActive).toBe(true);
+    expect(edited.product.translations.en?.name).toBe("Movable Product");
+    expect(edited.product.translations.ar?.name).toBe("منتج قابل للنقل");
+
+    expect(await listCatalogProducts(appDb, first.categoryId)).toHaveLength(0);
+    const moved = await listCatalogProducts(appDb, second.categoryId);
+    expect(moved.map((record) => record.id)).toContain(created.productId);
+  });
+
+  it("rejects assignment to a missing category and leaves the product unchanged", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "simple-admin-safe-category",
+      translations: [{ languageId: defaultLangId, name: "Safe Category" }],
+    });
+
+    const created = await createCatalogProduct(appDb, {
+      categoryId: cat.categoryId,
+      slug: "simple-admin-safe-product",
+      price: "7.00",
+      translations: [{ languageId: defaultLangId, name: "Safe Product" }],
+    });
+
+    await expect(
+      editCatalogProduct(appDb, {
+        productId: created.productId,
+        categoryId: "99999999-9999-4999-8999-999999999999",
+        slug: "simple-admin-safe-product",
+        price: "7.00",
+        isActive: false,
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const unchanged = await readCatalogProduct(appDb, created.productId);
+    expect(unchanged?.categoryId).toBe(cat.categoryId);
+    expect(unchanged?.translations.en?.name).toBe("Safe Product");
   });
 });

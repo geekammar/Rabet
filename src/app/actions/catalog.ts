@@ -13,6 +13,7 @@ import {
   validateSlug,
   validateUuid,
 } from "@/lib/catalog/validation";
+import { validateActionLabel } from "@/lib/product-actions/validation";
 import {
   type CatalogCategoryRecord,
   type CatalogProductRecord,
@@ -71,12 +72,14 @@ export type CreateProductActionInput =
       arabicName?: unknown;
       arabicDescription?: unknown;
       arabicDetails?: unknown;
+      allowInquiry?: unknown;
     };
 
 export type UpdateProductActionInput =
   | FormData
   | {
       productId: unknown;
+      categoryId?: unknown;
       slug: unknown;
       price: unknown;
       isActive: unknown;
@@ -249,6 +252,8 @@ export async function createCategoryAction(
     });
 
     revalidatePath("/catalog");
+    revalidatePath("/categories");
+    revalidatePath("/products");
     return {
       success: true,
       categoryId: result.categoryId,
@@ -402,6 +407,8 @@ export async function updateCategoryAction(
     });
 
     revalidatePath("/catalog");
+    revalidatePath("/categories");
+    revalidatePath("/products");
     return {
       success: true,
       categoryId,
@@ -449,6 +456,7 @@ export async function createProductAction(
   const rawArabicName = extractField(input, "arabicName");
   const rawArabicDesc = extractField(input, "arabicDescription");
   const rawArabicDetails = extractField(input, "arabicDetails");
+  const rawAllowInquiry = extractField(input, "allowInquiry");
 
   const errors: Record<string, string> = {};
 
@@ -498,6 +506,16 @@ export async function createProductAction(
     errors.details = detailsRes.error;
   } else {
     details = detailsRes.data;
+  }
+
+  let allowInquiry = false;
+  if (rawAllowInquiry !== undefined && rawAllowInquiry !== null) {
+    const inquiryRes = validateBoolean(rawAllowInquiry, "Allow customers to inquire");
+    if (!inquiryRes.success) {
+      errors.allowInquiry = inquiryRes.error;
+    } else {
+      allowInquiry = inquiryRes.data;
+    }
   }
 
   // Optional Arabic
@@ -566,6 +584,33 @@ export async function createProductAction(
       };
     }
 
+    let defaultInquiry:
+      | { translations: Array<{ languageId: string; label: string }> }
+      | undefined;
+
+    if (allowInquiry) {
+      const defaultInquiryLabel =
+        defaultLangCode === "ar" ? "اسأل عن هذا المنتج" : "Ask about this product";
+      const labelRes = validateActionLabel(defaultInquiryLabel, "Default language");
+      if (!labelRes.success) {
+        return {
+          success: false,
+          code: "INVALID_INPUT",
+          message: "Could not prepare the default inquiry button.",
+          errors: { allowInquiry: labelRes.error },
+        };
+      }
+
+      defaultInquiry = {
+        translations: [
+          {
+            languageId: defaultLangId,
+            label: labelRes.data,
+          },
+        ],
+      };
+    }
+
     const translationsToInsert = [
       {
         languageId: defaultLangId,
@@ -598,9 +643,12 @@ export async function createProductAction(
       slug,
       price,
       translations: translationsToInsert,
+      defaultInquiry,
     });
 
     revalidatePath("/catalog");
+    revalidatePath("/products");
+    revalidatePath("/categories");
     return {
       success: true,
       productId: result.productId,
@@ -641,6 +689,7 @@ export async function updateProductAction(
   await requireAdmin();
 
   const rawProductId = extractField(input, "productId");
+  const rawCategoryId = extractField(input, "categoryId");
   const rawSlug = extractField(input, "slug");
   const rawPrice = extractField(input, "price");
   const rawIsActive = extractField(input, "isActive");
@@ -657,6 +706,16 @@ export async function updateProductAction(
     errors.productId = idRes.error;
   } else {
     productId = idRes.data;
+  }
+
+  let categoryId: string | undefined;
+  if (rawCategoryId !== undefined && rawCategoryId !== null) {
+    const catIdRes = validateUuid(rawCategoryId, "Category");
+    if (!catIdRes.success) {
+      errors.categoryId = catIdRes.error;
+    } else {
+      categoryId = catIdRes.data;
+    }
   }
 
   const slugRes = validateSlug(rawSlug);
@@ -767,6 +826,7 @@ export async function updateProductAction(
 
     const result = await editCatalogProduct(db, {
       productId,
+      ...(categoryId ? { categoryId } : {}),
       slug,
       price,
       isActive,
@@ -774,6 +834,8 @@ export async function updateProductAction(
     });
 
     revalidatePath("/catalog");
+    revalidatePath("/products");
+    revalidatePath("/categories");
     return {
       success: true,
       productId,

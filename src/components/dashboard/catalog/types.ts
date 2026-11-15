@@ -9,7 +9,9 @@ export type {
   CatalogCategoryRecord,
   CatalogProductRecord,
   HierarchyCategoryNode,
+  LanguageRow,
   PaymentMethodRecord,
+  ResolvedLanguage,
 };
 
 export interface CatalogViewData {

@@ -27,6 +27,8 @@ import { auth } from "@/auth";
 /** Dashboard sections that require an authenticated administrator. */
 const PROTECTED_PREFIXES = [
   "/overview",
+  "/products",
+  "/categories",
   "/catalog",
   "/payment-methods",
   "/inquiries",

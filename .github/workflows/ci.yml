@@ -318,6 +318,12 @@ jobs:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run test:browser:payments
 
+      - name: Run simple Products and Categories browser acceptance suite
+        env:
+          RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
+        run: npm run test:browser:simple-catalog
+
       - name: Run Android Mobile Touch Scrolling browser acceptance suite
         env:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres

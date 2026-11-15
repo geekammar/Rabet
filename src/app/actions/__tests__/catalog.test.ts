@@ -427,6 +427,154 @@ describe("Catalog Server Actions", () => {
       expect(res.errors?.arabicName).toMatch(/already Arabic/i);
       expect(mockCreateCatalogProduct).not.toHaveBeenCalled();
     });
+
+    it("creates the default inquiry action atomically only when explicitly opted in", async () => {
+      mockCreateCatalogProduct.mockResolvedValueOnce({
+        productId: "prod-default-inquiry",
+        product: {
+          id: "prod-default-inquiry",
+          categoryId: validCatId,
+          slug: "inquiry-product",
+          price: "25.00",
+          isActive: false,
+          sortOrder: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          translations: {
+            en: {
+              id: "pt-default-inquiry",
+              languageId: "lang-en-id",
+              name: "Inquiry Product",
+              description: null,
+              details: null,
+            },
+          },
+        },
+      });
+
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "inquiry-product",
+        price: "25.00",
+        name: "Inquiry Product",
+        allowInquiry: true,
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          defaultInquiry: {
+            translations: [
+              {
+                languageId: "lang-en-id",
+                label: "Ask about this product",
+              },
+            ],
+          },
+        }),
+      );
+    });
+
+    it("uses the Arabic default inquiry label when Arabic is the store default", async () => {
+      mockResolveDefaultLanguage.mockResolvedValueOnce({
+        id: "lang-ar-id",
+        code: "ar",
+        label: "العربية",
+        isEnabled: true,
+      });
+      mockCreateCatalogProduct.mockResolvedValueOnce({
+        productId: "prod-ar-inquiry",
+        product: {
+          id: "prod-ar-inquiry",
+          categoryId: validCatId,
+          slug: "ar-inquiry-product",
+          price: "25.00",
+          isActive: false,
+          sortOrder: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          translations: {},
+        },
+      });
+
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "ar-inquiry-product",
+        price: "25.00",
+        name: "منتج عربي",
+        allowInquiry: true,
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          defaultInquiry: {
+            translations: [
+              {
+                languageId: "lang-ar-id",
+                label: "اسأل عن هذا المنتج",
+              },
+            ],
+          },
+        }),
+      );
+    });
+
+    it("does not create an inquiry action when the option is omitted or disabled", async () => {
+      mockCreateCatalogProduct.mockResolvedValue({
+        productId: "prod-no-inquiry",
+        product: {
+          id: "prod-no-inquiry",
+          categoryId: validCatId,
+          slug: "plain-product",
+          price: "25.00",
+          isActive: false,
+          sortOrder: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          translations: {},
+        },
+      });
+
+      await createProductAction({
+        categoryId: validCatId,
+        slug: "plain-product",
+        price: "25.00",
+        name: "Plain Product",
+      });
+      await createProductAction({
+        categoryId: validCatId,
+        slug: "plain-product-2",
+        price: "25.00",
+        name: "Plain Product 2",
+        allowInquiry: false,
+      });
+
+      expect(mockCreateCatalogProduct).toHaveBeenCalledTimes(2);
+      expect(
+        mockCreateCatalogProduct.mock.calls[0][1].defaultInquiry,
+      ).toBeUndefined();
+      expect(
+        mockCreateCatalogProduct.mock.calls[1][1].defaultInquiry,
+      ).toBeUndefined();
+    });
+
+    it("rejects a malformed inquiry opt-in before any database write", async () => {
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "phone",
+        price: "10.00",
+        name: "Phone",
+        allowInquiry: "sometimes",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.allowInquiry).toMatch(/valid boolean/i);
+      expect(mockCreateCatalogProduct).not.toHaveBeenCalled();
+    });
   });
 
   describe("updateCategoryAction", () => {
@@ -622,6 +770,58 @@ describe("Catalog Server Actions", () => {
           },
         },
       );
+    });
+
+    it("assigns a different category directly when categoryId is supplied", async () => {
+      const nextCatId = "44444444-4444-4444-4444-444444444444";
+      const mockSavedProduct = {
+        id: validProdId,
+        categoryId: nextCatId,
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+        sortOrder: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {},
+      };
+      mockEditCatalogProduct.mockResolvedValueOnce({ product: mockSavedProduct });
+
+      const res = await updateProductAction({
+        productId: validProdId,
+        categoryId: nextCatId,
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        {
+          productId: validProdId,
+          categoryId: nextCatId,
+          slug: "phone-pro",
+          price: "199.50",
+          isActive: true,
+          translation: null,
+        },
+      );
+    });
+
+    it("rejects a malformed category assignment before writing", async () => {
+      const res = await updateProductAction({
+        productId: validProdId,
+        categoryId: "not-a-uuid",
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.categoryId).toBeDefined();
+      expect(mockEditCatalogProduct).not.toHaveBeenCalled();
     });
   });
 });

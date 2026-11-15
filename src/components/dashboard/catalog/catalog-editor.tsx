@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -42,6 +42,7 @@ import {
   buildCategoryHierarchy,
   type HierarchyCategoryNode,
 } from "@/lib/catalog/tree";
+import { createProductEditDraft } from "@/lib/catalog/product-draft";
 import { resolveCatalogTranslationStatus } from "@/lib/catalog/status";
 import { ProductActionEditor } from "./product-action-editor";
 import type { CatalogCategoryRecord, CatalogViewData } from "./types";
@@ -55,6 +56,17 @@ export function CatalogEditor({
   paymentMethods = [],
   paymentMethodsAvailable = true,
 }: CatalogViewData) {
+  const initialActionProductId =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("actionProduct")
+      : null;
+  const initialActionProduct = initialActionProductId
+    ? initialProducts.find((productRecord) => productRecord.id === initialActionProductId) ?? null
+    : null;
+  const initialProductDraft = initialActionProduct
+    ? createProductEditDraft(initialActionProduct)
+    : null;
+
   // Categories & Products state
   const [categories, setCategories] = useState(initialCategories);
   const [products, setProducts] = useState(initialProducts);
@@ -84,37 +96,12 @@ export function CatalogEditor({
   const [isCreateCategoryOpen, setIsCreateCategoryOpen] = useState(false);
 
   const [isCreateProductOpen, setIsCreateProductOpen] = useState(false);
-  const [editingProductId, setEditingProductId] = useState<string | null>(() => {
-    if (typeof window !== "undefined") {
-      return new URLSearchParams(window.location.search).get("actionProduct");
-    }
-    return null;
-  });
-  const [isActionEditorOpen, setIsActionEditorOpen] = useState<boolean>(() => {
-    if (typeof window !== "undefined") {
-      return Boolean(new URLSearchParams(window.location.search).get("actionProduct"));
-    }
-    return false;
-  });
-
-  const handleOpenActionEditor = (prodId: string) => {
-    setEditingProductId(prodId);
-    setIsActionEditorOpen(true);
-    if (typeof window !== "undefined") {
-      const url = new URL(window.location.href);
-      url.searchParams.set("actionProduct", prodId);
-      window.history.replaceState({}, "", url.toString());
-    }
-  };
-
-  const handleCloseActionEditor = () => {
-    setIsActionEditorOpen(false);
-    if (typeof window !== "undefined") {
-      const url = new URL(window.location.href);
-      url.searchParams.delete("actionProduct");
-      window.history.replaceState({}, "", url.toString());
-    }
-  };
+  const [editingProductId, setEditingProductId] = useState<string | null>(
+    initialActionProductId,
+  );
+  const [isActionEditorOpen, setIsActionEditorOpen] = useState<boolean>(
+    Boolean(initialActionProductId),
+  );
 
   // Pending transition for action executions
   const [isPending, startTransition] = useTransition();
@@ -211,29 +198,83 @@ export function CatalogEditor({
   // ==========================================
   // Product Edit Draft State
   // ==========================================
-  const [prodDraftSlug, setProdDraftSlug] = useState("");
-  const [prodDraftPrice, setProdDraftPrice] = useState("");
-  const [prodDraftIsActive, setProdDraftIsActive] = useState(false);
+  const initialDraftProductId = initialProductDraft?.productId ?? null;
+  const [prodDraftSlug, setProdDraftSlug] = useState(
+    initialProductDraft?.slug ?? "",
+  );
+  const [prodDraftPrice, setProdDraftPrice] = useState(
+    initialProductDraft?.price ?? "",
+  );
+  const [prodDraftIsActive, setProdDraftIsActive] = useState(
+    initialProductDraft?.isActive ?? false,
+  );
   const [prodDraftTranslations, setProdDraftTranslations] = useState<
     Record<string, { name: string; description: string; details: string }>
-  >({});
+  >(initialProductDraft?.translations ?? {});
+  const [prodDraftProductId, setProdDraftProductId] = useState<string | null>(
+    initialDraftProductId,
+  );
+  const prodDraftProductIdRef = useRef<string | null>(initialDraftProductId);
+
+  const applyProductDraft = useCallback(
+    (
+      product: (typeof products)[number],
+      options?: { force?: boolean },
+    ) => {
+      if (!options?.force && prodDraftProductIdRef.current === product.id) {
+        return;
+      }
+
+      const draft = createProductEditDraft(product);
+      setProdDraftSlug(draft.slug);
+      setProdDraftPrice(draft.price);
+      setProdDraftIsActive(draft.isActive);
+      setProdDraftTranslations(draft.translations);
+      setProdDraftProductId(draft.productId);
+      prodDraftProductIdRef.current = draft.productId;
+    },
+    [],
+  );
 
   const handleStartEditProduct = (prod: (typeof products)[0]) => {
     setEditingProductId(prod.id);
-    setProdDraftSlug(prod.slug);
-    setProdDraftPrice(prod.price);
-    setProdDraftIsActive(prod.isActive);
-    const trans: Record<string, { name: string; description: string; details: string }> = {};
-    for (const [code, t] of Object.entries(prod.translations)) {
-      trans[code] = {
-        name: t.name ?? "",
-        description: t.description ?? "",
-        details: t.details ?? "",
-      };
-    }
-    setProdDraftTranslations(trans);
+    applyProductDraft(prod, { force: true });
     setActionFeedback(null);
   };
+
+  const handleOpenActionEditor = (prodId: string) => {
+    const productRecord = products.find((candidate) => candidate.id === prodId);
+    if (productRecord) {
+      applyProductDraft(productRecord);
+    }
+    setEditingProductId(prodId);
+    setIsActionEditorOpen(true);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("actionProduct", prodId);
+      window.history.replaceState({}, "", url.toString());
+    }
+  };
+
+  const handleCloseActionEditor = () => {
+    const productRecord = products.find(
+      (candidate) => candidate.id === editingProductId,
+    );
+    if (productRecord) {
+      applyProductDraft(productRecord);
+    }
+    setIsActionEditorOpen(false);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("actionProduct");
+      window.history.replaceState({}, "", url.toString());
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedProduct) return;
+    applyProductDraft(selectedProduct);
+  }, [selectedProduct, applyProductDraft]);
 
   // ==========================================
   // Create Category Form State
@@ -412,6 +453,17 @@ export function CatalogEditor({
   // ==========================================
   const handleSaveProduct = () => {
     if (!selectedProduct) return;
+
+    if (prodDraftProductId !== selectedProduct.id) {
+      applyProductDraft(selectedProduct, { force: true });
+      setActionFeedback({
+        success: false,
+        message:
+          "Product details were reloaded from the saved record. Please review them before saving.",
+      });
+      return;
+    }
+
     const submittedLang = activeLangTab;
     startTransition(async () => {
       try {
@@ -1269,7 +1321,7 @@ export function CatalogEditor({
                         <Button
                           type="button"
                           onClick={handleSaveProduct}
-                          disabled={isPending}
+                          disabled={isPending || prodDraftProductId !== selectedProduct.id}
                           className="min-h-11 gap-2"
                           data-testid="save-product-btn"
                         >

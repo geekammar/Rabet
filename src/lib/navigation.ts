@@ -1,9 +1,11 @@
 import {
   Bot,
   CreditCard,
+  FolderTree,
+  Layers,
   LayoutDashboard,
   MessageSquareText,
-  Package,
+  PackageSearch,
   Send,
   Settings,
   Users,
@@ -29,10 +31,22 @@ export const navItems: NavItem[] = [
     description: "A summary of catalog and conversation activity.",
   },
   {
-    label: "Catalog",
+    label: "Products",
+    href: "/products",
+    icon: PackageSearch,
+    description: "Add, edit and search products directly.",
+  },
+  {
+    label: "Categories",
+    href: "/categories",
+    icon: FolderTree,
+    description: "Create and manage root and child categories.",
+  },
+  {
+    label: "Advanced Catalog",
     href: "/catalog",
-    icon: Package,
-    description: "Digital products, categories, prices, and configurable buttons.",
+    icon: Layers,
+    description: "Full category tree and configurable product buttons.",
   },
   {
     label: "Payment Methods",
