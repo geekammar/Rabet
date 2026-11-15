@@ -310,7 +310,7 @@ async function main() {
 
   pgClient = postgres(pgUrl);
 
-  // Initialize store settings: English default, Arabic disabled
+  // Initialize store settings: English default, Arabic enabled
   log("Seeding initial store settings and languages...");
   const [langEn] = await pgClient`
     INSERT INTO language (code, label, text_direction, is_enabled)
@@ -319,7 +319,7 @@ async function main() {
   `;
   await pgClient`
     INSERT INTO language (code, label, text_direction, is_enabled)
-    VALUES ('ar', 'العربية', 'rtl', false);
+    VALUES ('ar', 'العربية', 'rtl', true);
   `;
   await pgClient`
     INSERT INTO bot_setting (display_name, currency, default_language_id, ask_for_language, support_category)

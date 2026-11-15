@@ -43,6 +43,14 @@ import {
   MAX_ACTIVE_CHILDREN,
   type SupportedActionType,
 } from "@/lib/product-actions/constants";
+import {
+  buildTranslationDrafts,
+  createEmptyTranslationDraft,
+  reconcileSavedTranslationDraft,
+  updateTranslationDraft,
+  type ActionTranslationDraft,
+} from "@/lib/product-actions/drafts";
+import { getActionLanguageTabs } from "@/lib/product-actions/language-tabs";
 import { resolveActionTranslationStatus } from "@/lib/product-actions/status";
 import { interpolateActionTemplate } from "@/lib/product-actions/templates";
 import {
@@ -134,15 +142,21 @@ export function ProductActionEditor({
     defaultLanguage?.label ?? (defaultLangCode === "ar" ? "العربية" : "English");
   const defaultLangDir =
     defaultLanguage?.textDirection ?? (defaultLangCode === "ar" ? "rtl" : "ltr");
-  const arabicRegistered = languages.some((l) => l.code === "ar");
+
+  const languageTabs = useMemo(
+    () => getActionLanguageTabs(languages, defaultLanguage),
+    [languages, defaultLanguage],
+  );
+  const optionalLanguageTabs = useMemo(
+    () => languageTabs.filter((tab) => !tab.isDefault),
+    [languageTabs],
+  );
 
   // Active language tab in edit drawer
   const [activeLangTab, setActiveLangTab] = useState<string>(defaultLangCode);
   const activeLangDir: "ltr" | "rtl" =
-    languages.find((l) => l.code === activeLangTab)?.textDirection === "rtl" ||
-    activeLangTab === "ar"
-      ? "rtl"
-      : "ltr";
+    languageTabs.find((tab) => tab.code === activeLangTab)?.textDirection ??
+    (activeLangTab === defaultLangCode ? defaultLangDir : "ltr");
 
   const saveVersionRef = useRef(0);
   const loadGenerationRef = useRef(0);
@@ -167,7 +181,7 @@ export function ProductActionEditor({
   const [editPaymentMethodId, setEditPaymentMethodId] = useState("");
 
   const [editDraftTranslations, setEditDraftTranslations] = useState<
-    Record<string, { label: string; menuText: string; templateBody: string }>
+    Record<string, ActionTranslationDraft>
   >({});
 
   useEffect(() => {
@@ -427,15 +441,7 @@ export function ProductActionEditor({
 
     setEditPaymentMethodId(node.paymentMethodId ?? "");
 
-    const trans: Record<string, { label: string; menuText: string; templateBody: string }> = {};
-    for (const [code, t] of Object.entries(node.translations)) {
-      trans[code] = {
-        label: t.label ?? "",
-        menuText: t.menuText ?? "",
-        templateBody: t.templateBody ?? "",
-      };
-    }
-    setEditDraftTranslations(trans);
+    setEditDraftTranslations(buildTranslationDrafts(node.translations));
   };
 
   const handleStartEdit = (node: HierarchyActionNode) => {
@@ -459,11 +465,8 @@ export function ProductActionEditor({
     const targetProductId = currentProductIdRef.current;
     const targetVersion = ++saveVersionRef.current;
     const submittedLang = activeLangTab;
-    const draft = editDraftTranslations[submittedLang] || {
-      label: "",
-      menuText: "",
-      templateBody: "",
-    };
+    const draft =
+      editDraftTranslations[submittedLang] ?? createEmptyTranslationDraft();
     const submittedLabel = draft.label;
     const submittedMenuText = draft.menuText;
     const submittedTemplateBody = draft.templateBody;
@@ -532,27 +535,18 @@ export function ProductActionEditor({
             setEditNavTargetId(authoritative.navigateCategoryId);
           }
 
-          // Reconcile ONLY submitted language draft, preserving text entered after submission
-          setEditDraftTranslations((prev) => {
-            const currentDraft = prev[submittedLang];
-            if (
-              currentDraft &&
-              (currentDraft.label !== submittedLabel ||
-                currentDraft.menuText !== submittedMenuText ||
-                currentDraft.templateBody !== submittedTemplateBody)
-            ) {
-              return prev; // User entered new text during save; do not overwrite!
-            }
-            const savedTrans = authoritative.translations[submittedLang];
-            return {
-              ...prev,
-              [submittedLang]: {
-                label: savedTrans?.label ?? "",
-                menuText: savedTrans?.menuText ?? "",
-                templateBody: savedTrans?.templateBody ?? "",
+          setEditDraftTranslations((prev) =>
+            reconcileSavedTranslationDraft(
+              prev,
+              submittedLang,
+              {
+                label: submittedLabel,
+                menuText: submittedMenuText,
+                templateBody: submittedTemplateBody,
               },
-            };
-          });
+              authoritative.translations[submittedLang],
+            ),
+          );
         }
       } catch {
         if (
@@ -586,9 +580,19 @@ export function ProductActionEditor({
   const [createNavTargetId, setCreateNavTargetId] = useState("");
   const [createPaymentMethodId, setCreatePaymentMethodId] = useState("");
 
-  const [createArabicLabel, setCreateArabicLabel] = useState("");
-  const [createArabicMenuText, setCreateArabicMenuText] = useState("");
-  const [createArabicTemplateBody, setCreateArabicTemplateBody] = useState("");
+  const [createOptionalLangTab, setCreateOptionalLangTab] = useState<string>("");
+  const [createOptionalDrafts, setCreateOptionalDrafts] = useState<
+    Record<string, ActionTranslationDraft>
+  >({});
+
+  const createOptionalActiveTab =
+    optionalLanguageTabs.find((tab) => tab.code === createOptionalLangTab) ??
+    optionalLanguageTabs[0] ??
+    null;
+  const createOptionalActiveDraft = createOptionalActiveTab
+    ? createOptionalDrafts[createOptionalActiveTab.code] ??
+      createEmptyTranslationDraft()
+    : null;
 
   const handleOpenCreate = (parentId: string | null = null) => {
     if (isReadActiveRef.current || isMutationActiveRef.current || isBusy) {
@@ -605,9 +609,8 @@ export function ProductActionEditor({
     setCreateNavTargetKind("category");
     setCreateNavTargetId("");
     setCreatePaymentMethodId("");
-    setCreateArabicLabel("");
-    setCreateArabicMenuText("");
-    setCreateArabicTemplateBody("");
+    setCreateOptionalDrafts({});
+    setCreateOptionalLangTab(optionalLanguageTabs[0]?.code ?? "");
     setIsCreateOpen(true);
     setActionFeedback(null);
   };
@@ -617,6 +620,27 @@ export function ProductActionEditor({
       return;
     }
     const targetProductId = currentProductIdRef.current;
+    const submittedTranslations = optionalLanguageTabs.flatMap((tab) => {
+      const draft = createOptionalDrafts[tab.code];
+      if (!draft) return [];
+
+      const hasContent =
+        draft.label.trim().length > 0 ||
+        draft.menuText.trim().length > 0 ||
+        draft.templateBody.trim().length > 0;
+      if (!hasContent) return [];
+
+      return [
+        {
+          languageCode: tab.code,
+          label: draft.label,
+          menuText: createType === "OPEN_SUBMENU" ? draft.menuText : null,
+          templateBody:
+            createType === "SEND_TEMPLATE_MESSAGE" ? draft.templateBody : null,
+        },
+      ];
+    });
+
     isMutationActiveRef.current = true;
 
     startTransition(async () => {
@@ -630,24 +654,8 @@ export function ProductActionEditor({
           menuText: createType === "OPEN_SUBMENU" ? createMenuText : null,
           templateBody:
             createType === "SEND_TEMPLATE_MESSAGE" ? createTemplateBody : null,
-          arabicLabel:
-            arabicRegistered && defaultLangCode !== "ar" && createArabicLabel.trim().length > 0
-              ? createArabicLabel
-              : undefined,
-          arabicMenuText:
-            createType === "OPEN_SUBMENU" &&
-            arabicRegistered &&
-            defaultLangCode !== "ar" &&
-            createArabicMenuText.trim().length > 0
-              ? createArabicMenuText
-              : undefined,
-          arabicTemplateBody:
-            createType === "SEND_TEMPLATE_MESSAGE" &&
-            arabicRegistered &&
-            defaultLangCode !== "ar" &&
-            createArabicTemplateBody.trim().length > 0
-              ? createArabicTemplateBody
-              : undefined,
+          translations:
+            submittedTranslations.length > 0 ? submittedTranslations : undefined,
           url: createType === "OPEN_URL" ? createUrl : null,
           navigateCategoryId:
             createType === "NAVIGATE_CATALOG" && createNavTargetKind === "category"
@@ -1549,31 +1557,52 @@ export function ProductActionEditor({
 
                 {/* Language Tabs & Localized Content */}
                 <div className="space-y-3 pt-2 border-t">
-                  <div className="flex items-center justify-between">
+                  <div className="space-y-2">
                     <label className="text-xs font-semibold">Localized Content</label>
-                    <div className="flex gap-1">
-                      <Button
-                        type="button"
-                        variant={activeLangTab === defaultLangCode ? "default" : "outline"}
-                        size="sm"
-                        disabled={isBusy}
-                        onClick={() => setActiveLangTab(defaultLangCode)}
-                        className="text-xs min-h-11 px-3"
-                      >
-                        {defaultLangLabel} ({defaultLangCode.toUpperCase()})
-                      </Button>
-                      {arabicRegistered && defaultLangCode !== "ar" && (
-                        <Button
-                          type="button"
-                          variant={activeLangTab === "ar" ? "default" : "outline"}
-                          size="sm"
-                          disabled={isBusy}
-                          onClick={() => setActiveLangTab("ar")}
-                          className="text-xs min-h-11 px-3"
-                        >
-                          العربية (AR)
-                        </Button>
-                      )}
+                    <div
+                      className="flex flex-wrap gap-1.5"
+                      role="group"
+                      aria-label="Translation languages"
+                    >
+                      {languageTabs.map((tab) => {
+                        const tabStatus = resolveActionTranslationStatus({
+                          currentLang: tab.code,
+                          savedTranslations: selectedNode.translations,
+                          actionType: editActionType,
+                          defaultLanguageCode: defaultLangCode,
+                          defaultLanguageLabel: defaultLangLabel,
+                        });
+                        const isActive = activeLangTab === tab.code;
+
+                        return (
+                          <button
+                            key={tab.code}
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => setActiveLangTab(tab.code)}
+                            aria-pressed={isActive}
+                            data-testid={`action-language-tab-${tab.code}`}
+                            data-language-status={tabStatus.isSaved ? "saved" : "missing"}
+                            className={`flex min-h-11 flex-col items-start justify-center gap-0.5 rounded-md border px-3 py-1.5 text-left text-xs transition-colors outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-60 ${
+                              isActive
+                                ? "border-primary bg-primary/10 text-foreground"
+                                : "bg-background hover:bg-muted"
+                            }`}
+                          >
+                            <span dir={tab.textDirection} className="font-medium">
+                              {tab.label} ({tab.code.toUpperCase()})
+                              {tab.isDefault ? " · Default" : ""}
+                            </span>
+                            <span
+                              className={`text-[10px] font-semibold ${
+                                tabStatus.isSaved ? "text-emerald-700" : "text-amber-700"
+                              }`}
+                            >
+                              {tabStatus.isSaved ? "Saved" : "Missing"}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -1620,19 +1649,14 @@ export function ProductActionEditor({
                     <input
                       id="edit-action-label"
                       data-testid="edit-action-label-input"
-                      dir={activeLangTab === "ar" ? "rtl" : "ltr"}
+                      dir={activeLangDir}
                       value={editDraftTranslations[activeLangTab]?.label ?? ""}
                       disabled={isBusy}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         const val = e.target.value;
-                        setEditDraftTranslations((prev) => ({
-                          ...prev,
-                          [activeLangTab]: {
-                            label: val,
-                            menuText: prev[activeLangTab]?.menuText ?? "",
-                            templateBody: prev[activeLangTab]?.templateBody ?? "",
-                          },
-                        }));
+                        setEditDraftTranslations((prev) =>
+                          updateTranslationDraft(prev, activeLangTab, { label: val }),
+                        );
                       }}
                       className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
                       placeholder={
@@ -1662,19 +1686,14 @@ export function ProductActionEditor({
                       <textarea
                         id="edit-action-menu-text"
                         data-testid="edit-action-menu-text-input"
-                        dir={activeLangTab === "ar" ? "rtl" : "ltr"}
+                        dir={activeLangDir}
                         value={editDraftTranslations[activeLangTab]?.menuText ?? ""}
                         disabled={isBusy}
                         onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
                           const val = e.target.value;
-                          setEditDraftTranslations((prev) => ({
-                            ...prev,
-                            [activeLangTab]: {
-                              label: prev[activeLangTab]?.label ?? "",
-                              menuText: val,
-                              templateBody: prev[activeLangTab]?.templateBody ?? "",
-                            },
-                          }));
+                          setEditDraftTranslations((prev) =>
+                            updateTranslationDraft(prev, activeLangTab, { menuText: val }),
+                          );
                         }}
                         rows={3}
                         className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
@@ -1708,19 +1727,16 @@ export function ProductActionEditor({
                       <textarea
                         id="edit-action-template-body"
                         data-testid="edit-action-template-body-input"
-                        dir={activeLangTab === "ar" ? "rtl" : "ltr"}
+                        dir={activeLangDir}
                         value={editDraftTranslations[activeLangTab]?.templateBody ?? ""}
                         disabled={isBusy}
                         onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
                           const val = e.target.value;
-                          setEditDraftTranslations((prev) => ({
-                            ...prev,
-                            [activeLangTab]: {
-                              label: prev[activeLangTab]?.label ?? "",
-                              menuText: prev[activeLangTab]?.menuText ?? "",
+                          setEditDraftTranslations((prev) =>
+                            updateTranslationDraft(prev, activeLangTab, {
                               templateBody: val,
-                            },
-                          }));
+                            }),
+                          );
                         }}
                         rows={4}
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60 font-mono text-xs"
@@ -1743,16 +1759,14 @@ export function ProductActionEditor({
                               type="button"
                               disabled={isBusy}
                               onClick={() => {
-                                const current = editDraftTranslations[activeLangTab]?.templateBody ?? "";
+                                const current =
+                                  editDraftTranslations[activeLangTab]?.templateBody ?? "";
                                 const updated = `${current}{{${ph}}}`;
-                                setEditDraftTranslations((prev) => ({
-                                  ...prev,
-                                  [activeLangTab]: {
-                                    label: prev[activeLangTab]?.label ?? "",
-                                    menuText: prev[activeLangTab]?.menuText ?? "",
+                                setEditDraftTranslations((prev) =>
+                                  updateTranslationDraft(prev, activeLangTab, {
                                     templateBody: updated,
-                                  },
-                                }));
+                                  }),
+                                );
                               }}
                               className="text-xs font-mono px-3 py-2.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-md border bg-muted/60 hover:bg-muted text-foreground transition-colors disabled:opacity-50 disabled:pointer-events-none"
                             >
@@ -1767,14 +1781,6 @@ export function ProductActionEditor({
                         const currentDraft =
                           editDraftTranslations[activeLangTab]?.templateBody ?? "";
                         const hasCurrentDraft = currentDraft.trim().length > 0;
-                        const activeLanguageObj = languages.find(
-                          (l) => l.code === activeLangTab
-                        );
-                        const activeLangDir: "ltr" | "rtl" =
-                          activeLanguageObj?.textDirection === "rtl" ||
-                          activeLangTab === "ar"
-                            ? "rtl"
-                            : "ltr";
 
                         const savedDefaultTrans =
                           selectedNode.translations[defaultLangCode];
@@ -2330,91 +2336,210 @@ export function ProductActionEditor({
                 </div>
               )}
 
-              {/* Optional Arabic fields if registered & default is not Arabic */}
-              {arabicRegistered && defaultLangCode !== "ar" && (
+              {optionalLanguageTabs.length > 0 && (
                 <div className="border-t pt-3 space-y-3">
-                  <p className="text-xs font-semibold text-muted-foreground">
-                    Optional Arabic Translation (العربية)
-                  </p>
-                  <div className="space-y-1.5">
-                    <label
-                      htmlFor="create-action-ar-label"
-                      className="text-xs font-medium"
-                    >
-                      Button Label (Arabic)
-                    </label>
-                    <input
-                      id="create-action-ar-label"
-                      data-testid="create-action-ar-label-input"
-                      dir="rtl"
-                      value={createArabicLabel}
-                      disabled={isBusy}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCreateArabicLabel(e.target.value)}
-                      className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
-                      placeholder="مثال: عرض الخيارات"
-                      maxLength={MAX_ACTION_LABEL_LENGTH}
-                    />
+                  <div className="space-y-1">
+                    <p className="text-xs font-semibold text-muted-foreground">
+                      Optional Translations
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Add any enabled language now, or create the button first and
+                      add translations later in Edit. Leave a language blank to skip
+                      it.
+                    </p>
+                  </div>
+                  <div
+                    className="flex flex-wrap gap-1.5"
+                    role="group"
+                    aria-label="Optional translation languages"
+                  >
+                    {optionalLanguageTabs.map((tab) => {
+                      const draft = createOptionalDrafts[tab.code];
+                      const hasTranslation = Boolean(draft?.label.trim());
+                      const isActive = createOptionalActiveTab?.code === tab.code;
+
+                      return (
+                        <button
+                          key={tab.code}
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => setCreateOptionalLangTab(tab.code)}
+                          aria-pressed={isActive}
+                          data-testid={`create-language-tab-${tab.code}`}
+                          data-language-status={
+                            hasTranslation ? "added" : "not_added"
+                          }
+                          className={`flex min-h-11 flex-col items-start justify-center gap-0.5 rounded-md border px-3 py-1.5 text-left text-xs transition-colors outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-60 ${
+                            isActive
+                              ? "border-primary bg-primary/10 text-foreground"
+                              : "bg-background hover:bg-muted"
+                          }`}
+                        >
+                          <span dir={tab.textDirection} className="font-medium">
+                            {tab.label} ({tab.code.toUpperCase()})
+                          </span>
+                          <span
+                            className={`text-[10px] font-semibold ${
+                              hasTranslation ? "text-emerald-700" : "text-muted-foreground"
+                            }`}
+                          >
+                            {hasTranslation ? "Added" : "Not added"}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
 
-                  {createType === "OPEN_SUBMENU" && (
-                    <div className="space-y-1.5">
-                      <label
-                        htmlFor="create-action-ar-menu-text"
-                        className="text-xs font-medium"
-                      >
-                        Submenu Message (Arabic)
-                      </label>
-                      <textarea
-                        id="create-action-ar-menu-text"
-                        data-testid="create-action-ar-menu-text-input"
-                        dir="rtl"
-                        value={createArabicMenuText}
-                        disabled={isBusy}
-                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCreateArabicMenuText(e.target.value)}
-                        rows={2}
-                        className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
-                        placeholder="رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
-                      />
-                    </div>
-                  )}
-
-                  {createType === "SEND_TEMPLATE_MESSAGE" && (
-                    <div className="space-y-1.5">
-                      <label
-                        htmlFor="create-action-ar-template-body"
-                        className="text-xs font-medium"
-                      >
-                        Message Body (Arabic)
-                      </label>
-                      <textarea
-                        id="create-action-ar-template-body"
-                        data-testid="create-action-ar-template-body-input"
-                        dir="rtl"
-                        value={createArabicTemplateBody}
-                        disabled={isBusy}
-                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCreateArabicTemplateBody(e.target.value)}
-                        rows={3}
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60 font-mono text-xs"
-                        placeholder="أهلاً {{customer_name}}! تفاصيل المنتج: {{product_name}} بسعر {{price}}."
-                      />
-                      <div className="space-y-1">
-                        <p className="text-[11px] text-muted-foreground font-medium">
-                          Supported placeholders:
-                        </p>
-                        <div className="flex flex-wrap gap-2">
-                          {ACTION_MESSAGE_PLACEHOLDERS.map((ph) => (
-                            <button
-                              key={ph}
-                              type="button"
-                              disabled={isBusy}
-                              onClick={() => setCreateArabicTemplateBody((prev) => `${prev}{{${ph}}}`)}
-                              className="text-xs font-mono px-3 py-2.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-md border bg-muted/60 hover:bg-muted text-foreground transition-colors disabled:opacity-50 disabled:pointer-events-none"
-                            >
-                              {`{{${ph}}}`}
-                            </button>
-                          ))}
+                  {createOptionalActiveTab && createOptionalActiveDraft && (
+                    <div className="space-y-3">
+                      <div className="space-y-1.5">
+                        <div className="flex justify-between items-center">
+                          <label
+                            htmlFor={`create-action-${createOptionalActiveTab.code}-label`}
+                            className="text-xs font-medium"
+                          >
+                            Button Label ({createOptionalActiveTab.label}){" "}
+                            <span className="text-muted-foreground">(Optional)</span>
+                          </label>
+                          <span className="text-[10px] text-muted-foreground font-mono">
+                            {Array.from(createOptionalActiveDraft.label).length}/
+                            {MAX_ACTION_LABEL_LENGTH}
+                          </span>
                         </div>
+                        <input
+                          id={`create-action-${createOptionalActiveTab.code}-label`}
+                          data-testid={`create-action-${createOptionalActiveTab.code}-label-input`}
+                          dir={createOptionalActiveTab.textDirection}
+                          value={createOptionalActiveDraft.label}
+                          disabled={isBusy}
+                          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setCreateOptionalDrafts((prev) =>
+                              updateTranslationDraft(
+                                prev,
+                                createOptionalActiveTab.code,
+                                { label: e.target.value },
+                              ),
+                            )
+                          }
+                          className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                          placeholder={
+                            createOptionalActiveTab.code === "ar"
+                              ? "مثال: عرض الخيارات"
+                              : "e.g. Choose Options"
+                          }
+                          maxLength={MAX_ACTION_LABEL_LENGTH}
+                        />
                       </div>
+
+                      {createType === "OPEN_SUBMENU" && (
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center">
+                            <label
+                              htmlFor={`create-action-${createOptionalActiveTab.code}-menu-text`}
+                              className="text-xs font-medium"
+                            >
+                              Submenu Message ({createOptionalActiveTab.label}){" "}
+                              <span className="text-muted-foreground">(Optional)</span>
+                            </label>
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              {Array.from(createOptionalActiveDraft.menuText).length}/
+                              {MAX_ACTION_MENU_TEXT_LENGTH}
+                            </span>
+                          </div>
+                          <textarea
+                            id={`create-action-${createOptionalActiveTab.code}-menu-text`}
+                            data-testid={`create-action-${createOptionalActiveTab.code}-menu-text-input`}
+                            dir={createOptionalActiveTab.textDirection}
+                            value={createOptionalActiveDraft.menuText}
+                            disabled={isBusy}
+                            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
+                              setCreateOptionalDrafts((prev) =>
+                                updateTranslationDraft(
+                                  prev,
+                                  createOptionalActiveTab.code,
+                                  { menuText: e.target.value },
+                                ),
+                              )
+                            }
+                            rows={2}
+                            className="w-full max-w-full min-w-0 rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60"
+                            placeholder={
+                              createOptionalActiveTab.code === "ar"
+                                ? "رسالة اختيارية يتم إرسالها قبل أزرار القائمة الفرعية"
+                                : "Optional message sent before this submenu's buttons"
+                            }
+                          />
+                        </div>
+                      )}
+
+                      {createType === "SEND_TEMPLATE_MESSAGE" && (
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center">
+                            <label
+                              htmlFor={`create-action-${createOptionalActiveTab.code}-template-body`}
+                              className="text-xs font-medium"
+                            >
+                              Message Body ({createOptionalActiveTab.label}){" "}
+                              <span className="text-muted-foreground">(Optional)</span>
+                            </label>
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              {Array.from(createOptionalActiveDraft.templateBody).length}/
+                              {MAX_ACTION_TEMPLATE_BODY_LENGTH}
+                            </span>
+                          </div>
+                          <textarea
+                            id={`create-action-${createOptionalActiveTab.code}-template-body`}
+                            data-testid={`create-action-${createOptionalActiveTab.code}-template-body-input`}
+                            dir={createOptionalActiveTab.textDirection}
+                            value={createOptionalActiveDraft.templateBody}
+                            disabled={isBusy}
+                            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
+                              setCreateOptionalDrafts((prev) =>
+                                updateTranslationDraft(
+                                  prev,
+                                  createOptionalActiveTab.code,
+                                  { templateBody: e.target.value },
+                                ),
+                              )
+                            }
+                            rows={3}
+                            className="w-full rounded-md border bg-background px-3 py-2 text-sm min-h-11 disabled:opacity-60 font-mono text-xs"
+                            placeholder={
+                              createOptionalActiveTab.code === "ar"
+                                ? "أهلاً {{customer_name}}! تفاصيل المنتج: {{product_name}} بسعر {{price}}."
+                                : "Hello {{customer_name}}! Here are details for {{product_name}} priced at {{price}}."
+                            }
+                          />
+                          <div className="flex flex-wrap gap-2">
+                            {ACTION_MESSAGE_PLACEHOLDERS.map((ph) => (
+                              <button
+                                key={ph}
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() =>
+                                  setCreateOptionalDrafts((prev) =>
+                                    updateTranslationDraft(
+                                      prev,
+                                      createOptionalActiveTab.code,
+                                      {
+                                        templateBody: `${createOptionalActiveDraft.templateBody}{{${ph}}}`,
+                                      },
+                                    ),
+                                  )
+                                }
+                                className="text-xs font-mono px-3 py-2.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-md border bg-muted/60 hover:bg-muted text-foreground transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                              >
+                                {`{{${ph}}}`}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <p className="text-[11px] text-muted-foreground">
+                        Translations are added only to the new button. Existing
+                        translations are never overwritten.
+                      </p>
                     </div>
                   )}
                 </div>

@@ -313,6 +313,109 @@ describe("Product Action Server Actions", () => {
         }),
       );
     });
+
+    it("creates optional translations for an Arabic-default store with English enabled", async () => {
+      mockResolveDefaultLanguage.mockResolvedValue({
+        id: "lang-ar-id",
+        code: "ar",
+        label: "العربية",
+        isEnabled: true,
+      });
+      mockListLanguages.mockResolvedValue([
+        { id: "lang-ar-id", code: "ar", label: "العربية", isEnabled: true },
+        { id: "lang-en-id", code: "en", label: "English", isEnabled: true },
+      ]);
+      mockCreateProductAction.mockResolvedValue({
+        actionId: validActionId,
+        action: { id: validActionId, actionType: "OPEN_SUBMENU" },
+      });
+
+      const res = await createProductActionAction({
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        label: "القائمة الرئيسية",
+        translations: [{ languageCode: "en", label: "Main options" }],
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateProductAction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          translations: [
+            expect.objectContaining({
+              languageId: "lang-ar-id",
+              languageCode: "ar",
+              label: "القائمة الرئيسية",
+            }),
+            expect.objectContaining({
+              languageId: "lang-en-id",
+              languageCode: "en",
+              label: "Main options",
+            }),
+          ],
+        }),
+      );
+    });
+
+    it("creates optional translations for three enabled languages", async () => {
+      mockListLanguages.mockResolvedValue([
+        { id: "lang-ar-id", code: "ar", label: "العربية", isEnabled: true },
+        { id: "lang-en-id", code: "en", label: "English", isEnabled: true },
+        { id: "lang-fr-id", code: "fr", label: "Français", isEnabled: true },
+      ]);
+      mockCreateProductAction.mockResolvedValue({
+        actionId: validActionId,
+        action: { id: validActionId, actionType: "OPEN_SUBMENU" },
+      });
+
+      const res = await createProductActionAction({
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        label: "Options",
+        translations: [
+          { languageCode: "ar", label: "خيارات" },
+          { languageCode: "fr", label: "Options FR" },
+        ],
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateProductAction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          translations: expect.arrayContaining([
+            expect.objectContaining({ languageCode: "en", label: "Options" }),
+            expect.objectContaining({ languageCode: "ar", label: "خيارات" }),
+            expect.objectContaining({ languageCode: "fr", label: "Options FR" }),
+          ]),
+        }),
+      );
+    });
+
+    it("rejects blank or unregistered optional translations with no database writes", async () => {
+      const blankRes = await createProductActionAction({
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        label: "Options",
+        translations: [{ languageCode: "ar", label: "   " }],
+      });
+
+      expect(blankRes.success).toBe(false);
+      expect(blankRes.errors?.["translations.ar.label"]).toMatch(/required/i);
+
+      mockListLanguages.mockResolvedValue([
+        { id: "lang-en-id", code: "en", label: "English", isEnabled: true },
+      ]);
+      const unregisteredRes = await createProductActionAction({
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        label: "Options",
+        translations: [{ languageCode: "ar", label: "خيارات" }],
+      });
+
+      expect(unregisteredRes.success).toBe(false);
+      expect(unregisteredRes.errors?.translations).toMatch(/not registered/i);
+      expect(mockCreateProductAction).not.toHaveBeenCalled();
+    });
   });
 
   describe("updateProductActionAction", () => {
@@ -357,19 +460,57 @@ describe("Product Action Server Actions", () => {
       expect(mockEditProductAction).not.toHaveBeenCalled();
     });
 
-    it("rejects unsupported language code before database lookup", async () => {
+    it("rejects malformed language codes before database lookup", async () => {
       const res = await updateProductActionAction({
         actionId: validActionId,
         productId: validProductId,
         actionType: "OPEN_SUBMENU",
         isActive: true,
-        languageCode: "es",
-        label: "Opciones",
+        languageCode: "english",
+        label: "Options",
       });
 
       expect(res.success).toBe(false);
-      expect(res.errors?.languageCode).toMatch(/not supported by the action editor/i);
+      expect(res.errors?.languageCode).toMatch(/two lowercase letters/i);
       expect(mockEditProductAction).not.toHaveBeenCalled();
+    });
+
+    it("updates any registered enabled language, including three-language stores", async () => {
+      mockListLanguages.mockResolvedValue([
+        { id: "lang-ar-id", code: "ar", label: "العربية", isEnabled: true },
+        { id: "lang-en-id", code: "en", label: "English", isEnabled: true },
+        { id: "lang-fr-id", code: "fr", label: "Français", isEnabled: true },
+      ]);
+      mockEditProductAction.mockResolvedValue({
+        action: {
+          id: validActionId,
+          productId: validProductId,
+          actionType: "OPEN_SUBMENU",
+          isActive: true,
+          translations: {},
+        },
+      });
+
+      const res = await updateProductActionAction({
+        actionId: validActionId,
+        productId: validProductId,
+        actionType: "OPEN_SUBMENU",
+        isActive: true,
+        languageCode: "fr",
+        label: "Options",
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditProductAction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          translation: expect.objectContaining({
+            languageId: "lang-fr-id",
+            languageCode: "fr",
+            label: "Options",
+          }),
+        }),
+      );
     });
 
     it("rejects unregistered language update", async () => {

@@ -48,6 +48,39 @@ describe("resolveActionTranslationStatus", () => {
     });
   });
 
+  it("falls back to Arabic when Arabic is the default and English is missing", () => {
+    const res = resolveActionTranslationStatus({
+      currentLang: "en",
+      savedTranslations: {
+        ar: { label: "عرض الخيارات" },
+      },
+      defaultLanguageCode: "ar",
+      defaultLanguageLabel: "العربية",
+    });
+
+    expect(res.kind).toBe("missing_with_fallback");
+    expect(res.label).toBe("Missing (EN) — falls back to العربية");
+    expect(res.isSaved).toBe(false);
+  });
+
+  it("reports saved English independently of the saved Arabic default", () => {
+    const res = resolveActionTranslationStatus({
+      currentLang: "en",
+      savedTranslations: {
+        ar: { label: "عرض الخيارات" },
+        en: { label: "Choose Options" },
+      },
+      defaultLanguageCode: "ar",
+      defaultLanguageLabel: "العربية",
+    });
+
+    expect(res).toEqual({
+      kind: "saved",
+      label: "Saved (EN)",
+      isSaved: true,
+    });
+  });
+
   it("does not report fallback when the default language itself is missing", () => {
     const res = resolveActionTranslationStatus({
       currentLang: "en",
