@@ -427,6 +427,154 @@ describe("Catalog Server Actions", () => {
       expect(res.errors?.arabicName).toMatch(/already Arabic/i);
       expect(mockCreateCatalogProduct).not.toHaveBeenCalled();
     });
+
+    it("creates the default inquiry action atomically only when explicitly opted in", async () => {
+      mockCreateCatalogProduct.mockResolvedValueOnce({
+        productId: "prod-default-inquiry",
+        product: {
+          id: "prod-default-inquiry",
+          categoryId: validCatId,
+          slug: "inquiry-product",
+          price: "25.00",
+          isActive: false,
+          sortOrder: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          translations: {
+            en: {
+              id: "pt-default-inquiry",
+              languageId: "lang-en-id",
+              name: "Inquiry Product",
+              description: null,
+              details: null,
+            },
+          },
+        },
+      });
+
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "inquiry-product",
+        price: "25.00",
+        name: "Inquiry Product",
+        allowInquiry: true,
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          defaultInquiry: {
+            translations: [
+              {
+                languageId: "lang-en-id",
+                label: "Ask about this product",
+              },
+            ],
+          },
+        }),
+      );
+    });
+
+    it("uses the Arabic default inquiry label when Arabic is the store default", async () => {
+      mockResolveDefaultLanguage.mockResolvedValueOnce({
+        id: "lang-ar-id",
+        code: "ar",
+        label: "العربية",
+        isEnabled: true,
+      });
+      mockCreateCatalogProduct.mockResolvedValueOnce({
+        productId: "prod-ar-inquiry",
+        product: {
+          id: "prod-ar-inquiry",
+          categoryId: validCatId,
+          slug: "ar-inquiry-product",
+          price: "25.00",
+          isActive: false,
+          sortOrder: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          translations: {},
+        },
+      });
+
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "ar-inquiry-product",
+        price: "25.00",
+        name: "منتج عربي",
+        allowInquiry: true,
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockCreateCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          defaultInquiry: {
+            translations: [
+              {
+                languageId: "lang-ar-id",
+                label: "اسأل عن هذا المنتج",
+              },
+            ],
+          },
+        }),
+      );
+    });
+
+    it("does not create an inquiry action when the option is omitted or disabled", async () => {
+      mockCreateCatalogProduct.mockResolvedValue({
+        productId: "prod-no-inquiry",
+        product: {
+          id: "prod-no-inquiry",
+          categoryId: validCatId,
+          slug: "plain-product",
+          price: "25.00",
+          isActive: false,
+          sortOrder: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          translations: {},
+        },
+      });
+
+      await createProductAction({
+        categoryId: validCatId,
+        slug: "plain-product",
+        price: "25.00",
+        name: "Plain Product",
+      });
+      await createProductAction({
+        categoryId: validCatId,
+        slug: "plain-product-2",
+        price: "25.00",
+        name: "Plain Product 2",
+        allowInquiry: false,
+      });
+
+      expect(mockCreateCatalogProduct).toHaveBeenCalledTimes(2);
+      expect(
+        mockCreateCatalogProduct.mock.calls[0][1].defaultInquiry,
+      ).toBeUndefined();
+      expect(
+        mockCreateCatalogProduct.mock.calls[1][1].defaultInquiry,
+      ).toBeUndefined();
+    });
+
+    it("rejects a malformed inquiry opt-in before any database write", async () => {
+      const res = await createProductAction({
+        categoryId: validCatId,
+        slug: "phone",
+        price: "10.00",
+        name: "Phone",
+        allowInquiry: "sometimes",
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.allowInquiry).toMatch(/valid boolean/i);
+      expect(mockCreateCatalogProduct).not.toHaveBeenCalled();
+    });
   });
 
   describe("updateCategoryAction", () => {
@@ -551,6 +699,104 @@ describe("Catalog Server Actions", () => {
         },
       );
     });
+
+    it("updates multiple changed category translations in one atomic server action", async () => {
+      const mockSavedCategory = {
+        id: validCatId,
+        parentId: "parent-cat",
+        slug: "electronics",
+        sortOrder: 0,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {},
+      };
+      mockEditCatalogCategory.mockResolvedValueOnce({ category: mockSavedCategory });
+
+      const res = await updateCategoryAction({
+        categoryId: validCatId,
+        slug: "electronics",
+        isActive: true,
+        translations: [
+          {
+            languageCode: "en",
+            name: "Electronics",
+            description: "English description",
+          },
+          {
+            languageCode: "ar",
+            name: "إلكترونيات",
+            description: "وصف عربي",
+          },
+        ],
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditCatalogCategory).toHaveBeenCalledTimes(1);
+      expect(mockEditCatalogCategory).toHaveBeenCalledWith(
+        expect.anything(),
+        {
+          categoryId: validCatId,
+          slug: "electronics",
+          isActive: true,
+          translation: null,
+          translations: [
+            {
+              languageId: "lang-en-id",
+              name: "Electronics",
+              description: "English description",
+            },
+            {
+              languageId: "lang-ar-id",
+              name: "إلكترونيات",
+              description: "وصف عربي",
+            },
+          ],
+        },
+      );
+    });
+
+    it("returns field-specific errors for invalid multilingual category drafts", async () => {
+      const res = await updateCategoryAction({
+        categoryId: validCatId,
+        slug: "electronics",
+        isActive: true,
+        translations: [
+          { languageCode: "en", name: "Electronics" },
+          { languageCode: "ar", name: "   " },
+        ],
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.["translations.ar.name"]).toMatch(/required/i);
+      expect(mockEditCatalogCategory).not.toHaveBeenCalled();
+    });
+
+    it("rejects duplicate or unsupported multilingual category entries before writing", async () => {
+      const duplicate = await updateCategoryAction({
+        categoryId: validCatId,
+        slug: "electronics",
+        isActive: true,
+        translations: [
+          { languageCode: "en", name: "One" },
+          { languageCode: "en", name: "Two" },
+        ],
+      });
+      expect(duplicate.success).toBe(false);
+      expect(duplicate.errors?.["translations.en"]).toMatch(/duplicate/i);
+
+      const unsupported = await updateCategoryAction({
+        categoryId: validCatId,
+        slug: "electronics",
+        isActive: true,
+        translations: [{ languageCode: "fr", name: "Electronique" }],
+      });
+      expect(unsupported.success).toBe(false);
+      expect(unsupported.errors?.["translations.fr"]).toMatch(/not supported/i);
+
+      expect(mockEditCatalogCategory).not.toHaveBeenCalled();
+    });
   });
 
   describe("updateProductAction", () => {
@@ -621,6 +867,177 @@ describe("Catalog Server Actions", () => {
             details: "Long details",
           },
         },
+      );
+    });
+
+    it("assigns a different category directly when categoryId is supplied", async () => {
+      const nextCatId = "44444444-4444-4444-4444-444444444444";
+      const mockSavedProduct = {
+        id: validProdId,
+        categoryId: nextCatId,
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+        sortOrder: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {},
+      };
+      mockEditCatalogProduct.mockResolvedValueOnce({ product: mockSavedProduct });
+
+      const res = await updateProductAction({
+        productId: validProdId,
+        categoryId: nextCatId,
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        {
+          productId: validProdId,
+          categoryId: nextCatId,
+          slug: "phone-pro",
+          price: "199.50",
+          isActive: true,
+          translation: null,
+        },
+      );
+    });
+
+    it("rejects a malformed category assignment before writing", async () => {
+      const res = await updateProductAction({
+        productId: validProdId,
+        categoryId: "not-a-uuid",
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.categoryId).toBeDefined();
+      expect(mockEditCatalogProduct).not.toHaveBeenCalled();
+    });
+
+    it("updates multiple changed product translations with metadata in one atomic call", async () => {
+      const nextCatId = "55555555-5555-4555-8555-555555555555";
+      const mockSavedProduct = {
+        id: validProdId,
+        categoryId: nextCatId,
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+        sortOrder: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {},
+      };
+      mockEditCatalogProduct.mockResolvedValueOnce({ product: mockSavedProduct });
+
+      const res = await updateProductAction({
+        productId: validProdId,
+        categoryId: nextCatId,
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+        translations: [
+          {
+            languageCode: "ar",
+            name: "هاتف برو",
+            description: "وصف عربي",
+            details: "تفاصيل عربية",
+          },
+          {
+            languageCode: "en",
+            name: "Phone Pro",
+            description: "English description",
+            details: "English details",
+          },
+        ],
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditCatalogProduct).toHaveBeenCalledTimes(1);
+      expect(mockEditCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        {
+          productId: validProdId,
+          categoryId: nextCatId,
+          slug: "phone-pro",
+          price: "199.50",
+          isActive: true,
+          translation: null,
+          translations: [
+            {
+              languageId: "lang-ar-id",
+              name: "هاتف برو",
+              description: "وصف عربي",
+              details: "تفاصيل عربية",
+            },
+            {
+              languageId: "lang-en-id",
+              name: "Phone Pro",
+              description: "English description",
+              details: "English details",
+            },
+          ],
+        },
+      );
+    });
+
+    it("returns field-specific errors for invalid multilingual product drafts", async () => {
+      const res = await updateProductAction({
+        productId: validProdId,
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: true,
+        translations: [
+          { languageCode: "en", name: "Phone Pro", details: "x".repeat(4097) },
+          { languageCode: "ar", name: "هاتف", description: null },
+        ],
+      });
+
+      expect(res.success).toBe(false);
+      expect(res.code).toBe("INVALID_INPUT");
+      expect(res.errors?.["translations.en.details"]).toMatch(/4096/i);
+      expect(mockEditCatalogProduct).not.toHaveBeenCalled();
+    });
+
+    it("supports a base-only update through the multilingual contract", async () => {
+      const mockSavedProduct = {
+        id: validProdId,
+        categoryId: "cat-1",
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: false,
+        sortOrder: 0,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        translations: {},
+      };
+      mockEditCatalogProduct.mockResolvedValueOnce({ product: mockSavedProduct });
+
+      const res = await updateProductAction({
+        productId: validProdId,
+        slug: "phone-pro",
+        price: "199.50",
+        isActive: false,
+        translations: [],
+      });
+
+      expect(res.success).toBe(true);
+      expect(mockEditCatalogProduct).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          productId: validProdId,
+          slug: "phone-pro",
+          price: "199.50",
+          isActive: false,
+          translations: [],
+        }),
       );
     });
   });

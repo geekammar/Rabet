@@ -13,7 +13,9 @@ export const metadata: Metadata = {
 };
 
 const operations = navItems.filter((item) =>
-  ["/catalog", "/inquiries", "/customers"].includes(item.href),
+  ["/products", "/categories", "/catalog", "/inquiries", "/customers"].includes(
+    item.href,
+  ),
 );
 
 const configuration = navItems.filter((item) =>

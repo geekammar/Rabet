@@ -8,6 +8,8 @@ import {
   categoryTranslation,
   language,
   product,
+  productAction,
+  productActionTranslation,
   productTranslation,
 } from "@/db/schema";
 import {
@@ -540,6 +542,11 @@ export interface EditCategoryInput {
     name: string;
     description?: string | null;
   } | null;
+  translations?: Array<{
+    languageId: string;
+    name: string;
+    description?: string | null;
+  }> | null;
 }
 
 /**
@@ -581,28 +588,32 @@ export async function editCatalogCategory(
 
     const queries: unknown[] = [categoryUpdate];
 
-    if (input.translation) {
-      const translationUpsert = db
-        .insert(categoryTranslation)
-        .values({
-          id: globalThis.crypto.randomUUID(),
-          categoryId: input.categoryId,
-          languageId: input.translation.languageId,
-          name: input.translation.name,
-          description: input.translation.description ?? null,
-        })
-        .onConflictDoUpdate({
-          target: [
-            categoryTranslation.categoryId,
-            categoryTranslation.languageId,
-          ],
-          set: {
-            name: input.translation.name,
-            description: input.translation.description ?? null,
-            updatedAt: sql`now()`,
-          },
-        });
-      queries.push(translationUpsert);
+    const translationsToPersist =
+      input.translations ?? (input.translation ? [input.translation] : []);
+
+    for (const translation of translationsToPersist) {
+      queries.push(
+        db
+          .insert(categoryTranslation)
+          .values({
+            id: globalThis.crypto.randomUUID(),
+            categoryId: input.categoryId,
+            languageId: translation.languageId,
+            name: translation.name,
+            description: translation.description ?? null,
+          })
+          .onConflictDoUpdate({
+            target: [
+              categoryTranslation.categoryId,
+              categoryTranslation.languageId,
+            ],
+            set: {
+              name: translation.name,
+              description: translation.description ?? null,
+              updatedAt: sql`now()`,
+            },
+          }),
+      );
     }
 
     await executeAtomicBatch(db, queries);
@@ -721,11 +732,19 @@ export interface CreateProductTranslationInput {
   details?: string | null;
 }
 
+export interface CreateProductDefaultInquiryInput {
+  translations: Array<{
+    languageId: string;
+    label: string;
+  }>;
+}
+
 export interface CreateProductInput {
   categoryId: string;
   slug: string;
   price: string;
   translations: CreateProductTranslationInput[];
+  defaultInquiry?: CreateProductDefaultInquiryInput | null;
 }
 
 /**
@@ -783,7 +802,38 @@ export async function createCatalogProduct(
       }),
     );
 
-    await executeAtomicBatch(db, [productInsert, ...translationInserts]);
+    const defaultInquiryQueries: unknown[] = [];
+    if (input.defaultInquiry && input.defaultInquiry.translations.length > 0) {
+      const actionId = globalThis.crypto.randomUUID();
+
+      defaultInquiryQueries.push(
+        db.insert(productAction).values({
+          id: actionId,
+          productId,
+          parentActionId: null,
+          actionType: "START_INQUIRY",
+          sortOrder: 0,
+          isActive: true,
+        }),
+      );
+
+      for (const translation of input.defaultInquiry.translations) {
+        defaultInquiryQueries.push(
+          db.insert(productActionTranslation).values({
+            id: globalThis.crypto.randomUUID(),
+            actionId,
+            languageId: translation.languageId,
+            label: translation.label,
+          }),
+        );
+      }
+    }
+
+    await executeAtomicBatch(db, [
+      productInsert,
+      ...translationInserts,
+      ...defaultInquiryQueries,
+    ]);
 
     const createdRecord = await readCatalogProduct(db, productId);
     if (!createdRecord) {
@@ -802,6 +852,7 @@ export async function createCatalogProduct(
 
 export interface EditProductInput {
   productId: string;
+  categoryId?: string;
   slug: string;
   price: string;
   isActive: boolean;
@@ -811,6 +862,12 @@ export interface EditProductInput {
     description?: string | null;
     details?: string | null;
   } | null;
+  translations?: Array<{
+    languageId: string;
+    name: string;
+    description?: string | null;
+    details?: string | null;
+  }> | null;
 }
 
 /**
@@ -830,7 +887,11 @@ export async function editCatalogProduct(
 ): Promise<{ product: CatalogProductRecord }> {
   try {
     const existing = await db
-      .select({ id: product.id, deletedAt: product.deletedAt })
+      .select({
+        id: product.id,
+        categoryId: product.categoryId,
+        deletedAt: product.deletedAt,
+      })
       .from(product)
       .where(eq(product.id, input.productId));
 
@@ -841,9 +902,25 @@ export async function editCatalogProduct(
       );
     }
 
+    if (input.categoryId && input.categoryId !== existing[0].categoryId) {
+      const [targetCategory] = await db
+        .select({ id: category.id, deletedAt: category.deletedAt })
+        .from(category)
+        .where(eq(category.id, input.categoryId))
+        .limit(1);
+
+      if (!targetCategory || targetCategory.deletedAt !== null) {
+        throw new RabetDataError(
+          "NOT_FOUND",
+          "The selected category does not exist or has been deleted.",
+        );
+      }
+    }
+
     const productUpdate = db
       .update(product)
       .set({
+        categoryId: input.categoryId ?? existing[0].categoryId,
         slug: input.slug,
         price: input.price,
         isActive: input.isActive,
@@ -853,30 +930,34 @@ export async function editCatalogProduct(
 
     const queries: unknown[] = [productUpdate];
 
-    if (input.translation) {
-      const translationUpsert = db
-        .insert(productTranslation)
-        .values({
-          id: globalThis.crypto.randomUUID(),
-          productId: input.productId,
-          languageId: input.translation.languageId,
-          name: input.translation.name,
-          description: input.translation.description ?? null,
-          details: input.translation.details ?? null,
-        })
-        .onConflictDoUpdate({
-          target: [
-            productTranslation.productId,
-            productTranslation.languageId,
-          ],
-          set: {
-            name: input.translation.name,
-            description: input.translation.description ?? null,
-            details: input.translation.details ?? null,
-            updatedAt: sql`now()`,
-          },
-        });
-      queries.push(translationUpsert);
+    const translationsToPersist =
+      input.translations ?? (input.translation ? [input.translation] : []);
+
+    for (const translation of translationsToPersist) {
+      queries.push(
+        db
+          .insert(productTranslation)
+          .values({
+            id: globalThis.crypto.randomUUID(),
+            productId: input.productId,
+            languageId: translation.languageId,
+            name: translation.name,
+            description: translation.description ?? null,
+            details: translation.details ?? null,
+          })
+          .onConflictDoUpdate({
+            target: [
+              productTranslation.productId,
+              productTranslation.languageId,
+            ],
+            set: {
+              name: translation.name,
+              description: translation.description ?? null,
+              details: translation.details ?? null,
+              updatedAt: sql`now()`,
+            },
+          }),
+      );
     }
 
     await executeAtomicBatch(db, queries);

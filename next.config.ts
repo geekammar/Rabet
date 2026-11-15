@@ -20,6 +20,8 @@ import type { NextConfig } from "next";
  */
 const dashboardPaths = [
   "/overview",
+  "/products",
+  "/categories",
   "/catalog",
   "/inquiries",
   "/customers",
