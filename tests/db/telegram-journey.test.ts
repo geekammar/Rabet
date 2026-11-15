@@ -521,10 +521,10 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       expect(rootCatalogMsg.text).toContain("Welcome to Acme Digital Store!");
       expect(rootCatalogMsg.replyMarkup?.inline_keyboard).toEqual([
         [{ text: "🛍 Browse Products", callback_data: "prods" }],
-        [{ text: "🗂 Browse Categories", callback_data: "c:root" }],
+        [{ text: "🗂 Browse Categories", callback_data: "scats" }],
         [{ text: "💬 Contact Support", callback_data: "support" }],
         [{ text: "🌐 Change Language", callback_data: "langs" }],
-        [{ text: "📨 My Inquiries", callback_data: "myinq" }],
+        [{ text: "📨 My Active Inquiries", callback_data: "myinq" }],
       ]);
 
       fakeTransport.clear();
@@ -825,10 +825,10 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       expect(homeMsg.text).toContain("Welcome to Acme Digital Store!");
       expect(homeMsg.replyMarkup?.inline_keyboard).toEqual([
         [{ text: "🛍 Browse Products", callback_data: "prods" }],
-        [{ text: "🗂 Browse Categories", callback_data: "c:root" }],
+        [{ text: "🗂 Browse Categories", callback_data: "scats" }],
         [{ text: "💬 Contact Support", callback_data: "support" }],
         [{ text: "🌐 Change Language", callback_data: "langs" }],
-        [{ text: "📨 My Inquiries", callback_data: "myinq" }],
+        [{ text: "📨 My Active Inquiries", callback_data: "myinq" }],
       ]);
     });
   });
@@ -882,10 +882,10 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       expect(msg.text).toContain("مرحباً بكم في Acme Digital Store!");
       expect(msg.replyMarkup?.inline_keyboard).toEqual([
         [{ text: "🛍 تصفح المنتجات", callback_data: "prods" }],
-        [{ text: "🗂 تصفح الأقسام", callback_data: "c:root" }],
+        [{ text: "🗂 تصفح الأقسام", callback_data: "scats" }],
         [{ text: "💬 تواصل مع الدعم", callback_data: "support" }],
         [{ text: "🌐 تغيير اللغة", callback_data: "langs" }],
-        [{ text: "📨 استفساراتي", callback_data: "myinq" }],
+        [{ text: "📨 استفساراتي النشطة", callback_data: "myinq" }],
       ]);
 
       // Revert store settings
@@ -2111,7 +2111,7 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       // The storefront home exposes the legacy root-category listing entry point.
       const homeKeyboard = fakeTransport.sentMessages[0].replyMarkup?.inline_keyboard ?? [];
       expect(
-        homeKeyboard.flat().find((btn) => btn.callback_data === "c:root"),
+        homeKeyboard.flat().find((btn) => btn.callback_data === "scats"),
       ).toBeDefined();
 
       fakeTransport.clear();

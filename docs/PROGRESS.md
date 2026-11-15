@@ -1414,22 +1414,29 @@ inspection, not merged or deployed.
   the established 10-item page size. Product taps reuse the existing product-card
   renderer and action tree. Stale or out-of-range pages clamp safely.
 - **Shared eligibility read:** `src/lib/catalog/storefront.ts` performs the
-  channel-independent catalog query and batch name resolution, so the home,
-  product list, and category-entry decision share one eligibility definition.
+  channel-independent catalog query and batch name resolution, using the same
+  pure ancestry predicate as the product-card hierarchy guard. It preserves the
+  existing depth safeguard, cycle rejection, and inactive/deleted/missing
+  ancestor semantics while avoiding per-product database ancestry queries.
 - **Categories:** the recursive category model and `c:<uuid>[:page]` callback
-  contract are unchanged. The storefront simply omits the Browse Categories
-  entry point when no eligible product exists.
+  contract are unchanged. The storefront discovery flow uses separate
+  `scats[:page]` / `sc:<uuid>[:page]` callbacks that hide branches without any
+  eligible descendant product, while legacy direct category callbacks continue
+  to expose the full configured tree safely. The Browse Categories entry point
+  is omitted when no eligible product exists.
 - **Support:** `support` is an explicit storefront callback that reuses the
   existing general support create-or-resume inquiry path. It invents no product
   or product action, is idempotent by update/attempt ownership, preserves
   customer ownership, and keeps the existing seller-notification outbox
   deduplication.
-- **Language:** `langs` lists enabled languages only; selection still uses
-  `lang:<code>` and the existing customer preference write, then returns to the
-  storefront in the chosen language. Stale selections for disabled languages
-  change nothing and render through the normal fallback path.
-- **My Inquiries:** `myinq[:page]` is a read-only overview of the same active
-  inquiry set used by inbound routing; it never mutates inquiry state.
+- **Language:** `langs` lists enabled languages only plus an explicit localized
+  Home action; selection still uses `lang:<code>` and the existing customer
+  preference write, then returns to the storefront in the chosen language.
+  Stale selections for disabled languages change nothing and render through the
+  normal fallback path.
+- **My Active Inquiries:** `myinq[:page]` is a read-only overview of the same
+  active inquiry set used by inbound routing; it never mutates inquiry state,
+  and the storefront label explicitly states that it lists active inquiries.
 - **Compatibility:** existing product callbacks, action trees, category
   callbacks, inquiry flows, seller notifications, and `bot_welcome` content are
   preserved. `MANUAL_PAYMENT_PROTOTYPE_ENABLED` remains disabled by default and

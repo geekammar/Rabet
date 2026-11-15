@@ -35,6 +35,7 @@ import {
 } from "@/lib/telegram/transport";
 import { handleTelegramWebhookRequest } from "@/lib/telegram/webhook";
 import { tokens } from "@/lib/telegram/tokens";
+import { isProductHierarchyActive } from "@/lib/catalog/eligibility";
 
 const shouldRun = hasTestCluster();
 
@@ -269,13 +270,17 @@ async function seedDetailsAction(params: {
   return row.id;
 }
 
-function flatButtons(transport: FakeTelegramTransport): string[] {
+function latestButtons(transport: FakeTelegramTransport) {
   const latest =
     transport.editedMessages[transport.editedMessages.length - 1] ??
     transport.sentMessages[transport.sentMessages.length - 1];
-  return (latest?.replyMarkup?.inline_keyboard ?? [])
-    .flat()
-    .map((button) => button.callback_data ?? button.url ?? "");
+  return (latest?.replyMarkup?.inline_keyboard ?? []).flat();
+}
+
+function flatButtons(transport: FakeTelegramTransport): string[] {
+  return latestButtons(transport).map(
+    (button) => button.callback_data ?? button.url ?? "",
+  );
 }
 
 async function enableSyntheticNotifications(): Promise<string> {
@@ -382,11 +387,14 @@ describe.skipIf(!shouldRun)("Default storefront experience", () => {
     expect(flatButtons(transport)).toEqual(
       expect.arrayContaining([
         tokens.products(),
-        tokens.rootCategory(),
+        tokens.storefrontCategories(),
         tokens.support(),
         tokens.languages(),
         tokens.myInquiries(),
       ]),
+    );
+    expect(latestButtons(transport).some((button) => button.text === "📨 My Active Inquiries")).toBe(
+      true,
     );
 
     expect(await testDb!.db.select().from(inquiry)).toHaveLength(inquiriesBefore.length);
@@ -408,7 +416,7 @@ describe.skipIf(!shouldRun)("Default storefront experience", () => {
 
     const { res, transport } = await sendStart(telegramId);
     expect(res.status).toBe(200);
-    expect(flatButtons(transport)).not.toContain(tokens.rootCategory());
+    expect(flatButtons(transport)).not.toContain(tokens.storefrontCategories());
 
     const browse = await sendCallback({
       telegramId,
@@ -562,6 +570,216 @@ describe.skipIf(!shouldRun)("Default storefront experience", () => {
     );
 
     expect(productButtons).toEqual([tokens.product(visibleProduct)]);
+
+    for (const button of productButtons) {
+      const productId = button.slice(2);
+      const guard = await isProductHierarchyActive(asAppDb(testDb!.db), productId);
+      expect(guard.valid).toBe(true);
+    }
+  });
+
+  it("accepts the allowed category-depth boundary in storefront and product-card eligibility", async () => {
+    let parentAtBoundary: string | null = null;
+    for (let i = 1; i <= 64; i++) {
+      parentAtBoundary = await seedCategory({
+        slug: `b-depth-boundary-${i}`,
+        parentId: parentAtBoundary,
+      });
+    }
+    const boundaryProduct = await seedProduct({
+      categoryId: parentAtBoundary!,
+      slug: "b-depth-boundary-product",
+      names: { en: "Depth Boundary Product", ar: "منتج حد العمق" },
+    });
+
+    const telegramId = nextTelegramId();
+    await sendStart(telegramId);
+    const browse = await sendCallback({ telegramId, data: tokens.products() });
+    const productButtons = flatButtons(browse.transport).filter((value) =>
+      value.startsWith("p:"),
+    );
+
+    expect(productButtons).toEqual([tokens.product(boundaryProduct)]);
+    expect(
+      (await isProductHierarchyActive(asAppDb(testDb!.db), boundaryProduct)).valid,
+    ).toBe(true);
+  });
+
+  it("filters empty roots and nested branches from storefront discovery while preserving legacy callbacks", async () => {
+    const emptyRoot = await seedCategory({
+      slug: "b-empty-root",
+      names: { en: "Empty Root", ar: "قسم فارغ" },
+    });
+    const populatedRoot = await seedCategory({
+      slug: "b-populated-root",
+      names: { en: "Populated Root", ar: "قسم ممتلئ" },
+    });
+    const populatedChild = await seedCategory({
+      slug: "b-populated-child",
+      parentId: populatedRoot,
+      names: { en: "Populated Child", ar: "فرع ممتلئ" },
+    });
+    const emptySibling = await seedCategory({
+      slug: "b-empty-sibling",
+      parentId: populatedRoot,
+      names: { en: "Empty Sibling", ar: "فرع فارغ" },
+    });
+    const populatedLeaf = await seedCategory({
+      slug: "b-populated-leaf",
+      parentId: populatedChild,
+      names: { en: "Populated Leaf", ar: "ورقة ممتلئة" },
+    });
+    const leafProduct = await seedProduct({
+      categoryId: populatedLeaf,
+      slug: "b-leaf-product",
+    });
+
+    const inactiveOnlyRoot = await seedCategory({ slug: "b-inactive-only-root" });
+    await seedProduct({
+      categoryId: inactiveOnlyRoot,
+      slug: "b-inactive-only-product",
+      isActive: false,
+    });
+    const deletedOnlyRoot = await seedCategory({ slug: "b-deleted-only-root" });
+    await seedProduct({
+      categoryId: deletedOnlyRoot,
+      slug: "b-deleted-only-product",
+      deletedAt: new Date(),
+    });
+    const hiddenRoot = await seedCategory({ slug: "b-hidden-root" });
+    const hiddenMiddle = await seedCategory({
+      slug: "b-hidden-middle",
+      parentId: hiddenRoot,
+      isActive: false,
+    });
+    const hiddenLeaf = await seedCategory({
+      slug: "b-hidden-leaf",
+      parentId: hiddenMiddle,
+    });
+    await seedProduct({ categoryId: hiddenLeaf, slug: "b-hidden-product" });
+
+    const telegramId = nextTelegramId();
+    await sendStart(telegramId);
+
+    const storefrontRoots = await sendCallback({
+      telegramId,
+      data: tokens.storefrontCategories(),
+    });
+    const rootCallbacks = flatButtons(storefrontRoots.transport).filter((value) =>
+      value.startsWith("sc:"),
+    );
+    expect(rootCallbacks).toEqual([tokens.storefrontCategory(populatedRoot)]);
+    expect(rootCallbacks).not.toContain(tokens.storefrontCategory(emptyRoot));
+    expect(rootCallbacks).not.toContain(tokens.storefrontCategory(inactiveOnlyRoot));
+    expect(rootCallbacks).not.toContain(tokens.storefrontCategory(deletedOnlyRoot));
+    expect(rootCallbacks).not.toContain(tokens.storefrontCategory(hiddenRoot));
+
+    const staleEmpty = await sendCallback({
+      telegramId,
+      data: tokens.storefrontCategory(emptyRoot),
+    });
+    expect(staleEmpty.res.status).toBe(200);
+    expect(staleEmpty.transport.editedMessages[0].text).toContain(
+      "This category is no longer available.",
+    );
+
+    const rootView = await sendCallback({
+      telegramId,
+      data: tokens.storefrontCategory(populatedRoot),
+    });
+    const childCallbacks = flatButtons(rootView.transport).filter((value) =>
+      value.startsWith("sc:"),
+    );
+    expect(childCallbacks).toEqual([tokens.storefrontCategory(populatedChild)]);
+    expect(childCallbacks).not.toContain(tokens.storefrontCategory(emptySibling));
+
+    const childView = await sendCallback({
+      telegramId,
+      data: tokens.storefrontCategory(populatedChild),
+    });
+    expect(flatButtons(childView.transport)).toEqual([
+      tokens.storefrontCategory(populatedLeaf),
+      tokens.storefrontCategory(populatedRoot),
+      tokens.home(),
+    ]);
+
+    const leafView = await sendCallback({
+      telegramId,
+      data: tokens.storefrontCategory(populatedLeaf),
+    });
+    expect(flatButtons(leafView.transport)).toContain(tokens.product(leafProduct));
+
+    const legacyRoots = await sendCallback({ telegramId, data: tokens.rootCategory() });
+    const legacyCallbacks = flatButtons(legacyRoots.transport);
+    expect(legacyCallbacks).toContain(tokens.category(emptyRoot));
+    expect(legacyCallbacks).toContain(tokens.category(inactiveOnlyRoot));
+    expect(legacyCallbacks).toContain(tokens.category(hiddenRoot));
+
+    const legacyEmptyView = await sendCallback({
+      telegramId,
+      data: tokens.category(emptyRoot),
+    });
+    expect(legacyEmptyView.res.status).toBe(200);
+    expect(legacyEmptyView.transport.editedMessages[0].text).toContain("Empty Root");
+
+    const legacyEmptySibling = await sendCallback({
+      telegramId,
+      data: tokens.category(emptySibling),
+    });
+    expect(legacyEmptySibling.res.status).toBe(200);
+    expect(legacyEmptySibling.transport.editedMessages[0].text).toContain(
+      "Empty Sibling",
+    );
+  });
+
+  it("preserves configured ordering and pagination after filtering empty roots", async () => {
+    const populatedIds: string[] = [];
+    for (let i = 1; i <= 12; i++) {
+      await seedCategory({ slug: `b-order-empty-before-${i}` });
+      const rootId = await seedCategory({
+        slug: `b-order-populated-${i}`,
+        names: { en: `Ordered Root ${i}`, ar: `قسم مرتب ${i}` },
+      });
+      await seedProduct({
+        categoryId: rootId,
+        slug: `b-order-product-${i}`,
+        sortOrder: i,
+      });
+      populatedIds.push(rootId);
+      await seedCategory({ slug: `b-order-empty-after-${i}` });
+    }
+
+    const telegramId = nextTelegramId();
+    await sendStart(telegramId);
+
+    const pageOne = await sendCallback({
+      telegramId,
+      data: tokens.storefrontCategories(),
+    });
+    const pageOneCallbacks = flatButtons(pageOne.transport).filter((value) =>
+      value.startsWith("sc:"),
+    );
+    expect(pageOneCallbacks).toEqual(
+      populatedIds.slice(0, 10).map((id) => tokens.storefrontCategory(id)),
+    );
+    expect(flatButtons(pageOne.transport)).toContain(
+      tokens.storefrontCategories(2),
+    );
+
+    const pageTwo = await sendCallback({
+      telegramId,
+      data: tokens.storefrontCategories(2),
+    });
+    const pageTwoCallbacks = flatButtons(pageTwo.transport).filter((value) =>
+      value.startsWith("sc:"),
+    );
+    expect(pageTwoCallbacks).toEqual(
+      populatedIds.slice(10).map((id) => tokens.storefrontCategory(id)),
+    );
+    expect(flatButtons(pageTwo.transport)).toContain(
+      tokens.storefrontCategories(),
+    );
+    expect(new Set([...pageOneCallbacks, ...pageTwoCallbacks]).size).toBe(12);
   });
 
   it("creates one explicit support inquiry and reuses it without duplicate notifications", async () => {
@@ -641,7 +859,16 @@ describe.skipIf(!shouldRun)("Default storefront experience", () => {
     expect(flatButtons(menu.transport)).toEqual([
       tokens.lang("en"),
       tokens.lang("ar"),
+      tokens.home(),
     ]);
+
+    const unchangedHome = await sendCallback({ telegramId, data: tokens.home() });
+    expect(unchangedHome.res.status).toBe(200);
+    const [afterHome] = await testDb!.db
+      .select()
+      .from(customer)
+      .where(eq(customer.telegramId, telegramId));
+    expect(afterHome.selectedLanguageId).toBeNull();
 
     await testDb!.db
       .update(language)
@@ -679,7 +906,7 @@ describe.skipIf(!shouldRun)("Default storefront experience", () => {
     expect(flatButtons(arabic.transport)).toEqual(
       expect.arrayContaining([
         "prods",
-        "c:root",
+        "scats",
         "support",
         "langs",
         "myinq",
@@ -691,6 +918,17 @@ describe.skipIf(!shouldRun)("Default storefront experience", () => {
       .from(customer)
       .where(eq(customer.telegramId, telegramId));
     expect(afterArabic.selectedLanguageId).toBe(arLangId);
+
+    const english = await sendCallback({ telegramId, data: tokens.lang("en") });
+    expect(english.res.status).toBe(200);
+    expect(english.transport.editedMessages[0].text).toContain(
+      "Configured welcome to Default Storefront Store!",
+    );
+    const [afterEnglish] = await testDb!.db
+      .select()
+      .from(customer)
+      .where(eq(customer.telegramId, telegramId));
+    expect(afterEnglish.selectedLanguageId).toBe(enLangId);
   });
 
   it("shows only the current customer's active inquiries and never writes on view", async () => {

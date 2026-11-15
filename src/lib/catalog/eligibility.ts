@@ -14,8 +14,52 @@ import { category, product, productAction } from "@/db/schema";
 
 export const MAX_SAFEGUARD_DEPTH = 64;
 
+export interface CategoryAncestryNode {
+  id: string;
+  parentId: string | null;
+  isActive: boolean;
+}
+
+/**
+ * Pure category-ancestry predicate shared by the live hierarchy guard and the
+ * storefront's batched catalog read.
+ *
+ * The lookup must return `undefined` for missing, soft-deleted, or otherwise
+ * ineligible rows. The walker mirrors `isCategoryHierarchyActive`: at most
+ * `MAX_SAFEGUARD_DEPTH` nodes including the target, no cycles, no missing
+ * rows, and every node active.
+ */
+export function isCategoryAncestryActive(
+  categoryId: string,
+  getCategory: (id: string) => CategoryAncestryNode | undefined,
+): boolean {
+  let currentId: string | null = categoryId;
+  let depth = 0;
+  const visited = new Set<string>();
+
+  while (currentId !== null && depth < MAX_SAFEGUARD_DEPTH) {
+    if (visited.has(currentId)) {
+      return false;
+    }
+    visited.add(currentId);
+
+    const row = getCategory(currentId);
+    if (!row || !row.isActive) {
+      return false;
+    }
+
+    currentId = row.parentId;
+    depth += 1;
+  }
+
+  return currentId === null;
+}
+
 /**
  * Checks category existence, active flag, and whether all ancestors are active and not soft-deleted.
+ *
+ * This live query mirrors `isCategoryAncestryActive`; keep the depth, cycle and
+ * deletion semantics aligned.
  */
 export async function isCategoryHierarchyActive(
   db: Database,

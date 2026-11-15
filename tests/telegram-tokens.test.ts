@@ -35,6 +35,10 @@ describe("telegram tokens", () => {
     expect(tokens.home()).toBe("home");
     expect(tokens.rootCategory()).toBe("c:root");
     expect(tokens.rootCategory(2)).toBe("c:root:2");
+    expect(tokens.storefrontCategories()).toBe("scats");
+    expect(tokens.storefrontCategories(2)).toBe("scats:2");
+    expect(tokens.storefrontCategory(uuid)).toBe(`sc:${uuid}`);
+    expect(tokens.storefrontCategory(uuid, 2)).toBe(`sc:${uuid}:2`);
     expect(tokens.products()).toBe("prods");
     expect(tokens.products(2)).toBe("prods:2");
     expect(tokens.languages()).toBe("langs");
@@ -59,6 +63,8 @@ describe("telegram tokens", () => {
     for (const token of [
       tokens.home(),
       tokens.rootCategory(2),
+      tokens.storefrontCategories(2),
+      tokens.storefrontCategory(uuid, 2),
       tokens.products(2),
       tokens.languages(),
       tokens.support(),
@@ -97,6 +103,9 @@ describe("telegram tokens", () => {
     expect(() => tokens.lang("invalid!code")).toThrow(/Invalid language code/);
     expect(() => tokens.rootCategory(0)).toThrow(/Invalid page number/);
     expect(() => tokens.rootCategory(-2)).toThrow(/Invalid page number/);
+    expect(() => tokens.storefrontCategories(0)).toThrow(/Invalid page number/);
+    expect(() => tokens.storefrontCategory("not-a-uuid")).toThrow(/Invalid category UUID/);
+    expect(() => tokens.storefrontCategory(uuid, 0)).toThrow(/Invalid page number/);
     expect(() => tokens.products(0)).toThrow(/Invalid page number/);
     expect(() => tokens.products(1.5)).toThrow(/Invalid page number/);
     expect(() => tokens.myInquiries(0)).toThrow(/Invalid page number/);
@@ -107,6 +116,18 @@ describe("telegram tokens", () => {
     expect(parseToken("home")).toEqual({ type: "home" });
     expect(parseToken("c:root")).toEqual({ type: "root", page: 1 });
     expect(parseToken("c:root:3")).toEqual({ type: "root", page: 3 });
+    expect(parseToken("scats")).toEqual({ type: "storefrontCategories", page: 1 });
+    expect(parseToken("scats:2")).toEqual({ type: "storefrontCategories", page: 2 });
+    expect(parseToken(`sc:${uuid}`)).toEqual({
+      type: "storefrontCategory",
+      categoryId: uuid,
+      page: 1,
+    });
+    expect(parseToken(`sc:${uuid}:3`)).toEqual({
+      type: "storefrontCategory",
+      categoryId: uuid,
+      page: 3,
+    });
     expect(parseToken("prods")).toEqual({ type: "products", page: 1 });
     expect(parseToken("prods:3")).toEqual({ type: "products", page: 3 });
     expect(parseToken("langs")).toEqual({ type: "languages" });
@@ -181,6 +202,15 @@ describe("telegram tokens", () => {
     // Malformed root category tokens
     expect(parseToken("c:root:abc")).toEqual({ type: "unknown", raw: "c:root:abc" });
     expect(parseToken("c:root:-1")).toEqual({ type: "unknown", raw: "c:root:-1" });
+    expect(parseToken("scats:abc")).toEqual({ type: "unknown", raw: "scats:abc" });
+    expect(parseToken("sc:not-a-uuid")).toEqual({
+      type: "unknown",
+      raw: "sc:not-a-uuid",
+    });
+    expect(parseToken(`sc:${uuid}:0`)).toEqual({
+      type: "unknown",
+      raw: `sc:${uuid}:0`,
+    });
     expect(parseToken("prods:abc")).toEqual({ type: "unknown", raw: "prods:abc" });
     expect(parseToken("prods:0")).toEqual({ type: "unknown", raw: "prods:0" });
     expect(parseToken("myinq:abc")).toEqual({ type: "unknown", raw: "myinq:abc" });
