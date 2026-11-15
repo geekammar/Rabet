@@ -870,6 +870,358 @@ async function main() {
     await fail("Scenario 5: editing duplicated or removed the default inquiry action.");
   }
 
+  log("Scenario 5B: multilingual product and category drafts save all changed tabs");
+  await click(
+    cdp,
+    '[data-testid="product-row"][data-product-slug="browser-product"] [data-testid="edit-product-btn"]',
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="product-form"]'))`,
+    "multilingual product form",
+  );
+  await setInputValue(
+    cdp,
+    '[data-testid="product-description-input"]',
+    "English after multi save",
+  );
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("العربية"),
+    );
+    if (!button) throw new Error("Arabic tab not found");
+    button.click();
+  })()`);
+  await setInputValue(cdp, '[data-testid="product-name-input"]', "منتج المتصفح");
+  await setInputValue(
+    cdp,
+    '[data-testid="product-description-input"]',
+    "وصف عربي من المتصفح",
+  );
+  await setInputValue(
+    cdp,
+    '[data-testid="product-details-input"]',
+    "تفاصيل عربية من المتصفح",
+  );
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("English (EN)"),
+    );
+    if (!button) throw new Error("English tab not found");
+    button.click();
+  })()`);
+  await click(cdp, '[data-testid="save-product-submit-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-product-slug="browser-product"]'))`,
+    "product list after multilingual save from English",
+  );
+
+  let productTranslations = await pgClient`
+    SELECT language_id, name, description, details
+    FROM product_translation
+    WHERE product_id = ${browserProduct.id};
+  `;
+  let englishRow = productTranslations.find((row) => row.language_id === english.id);
+  let arabicRow = productTranslations.find((row) => row.language_id !== english.id);
+  if (
+    englishRow?.description !== "English after multi save" ||
+    arabicRow?.name !== "منتج المتصفح" ||
+    arabicRow?.description !== "وصف عربي من المتصفح" ||
+    arabicRow?.details !== "تفاصيل عربية من المتصفح"
+  ) {
+    await fail(`Scenario 5B: multilingual save from English lost data: ${JSON.stringify(productTranslations)}`);
+  }
+
+  const [activeStateAfterMulti] = await pgClient`
+    SELECT category_id, price, is_active
+    FROM product
+    WHERE id = ${browserProduct.id};
+  `;
+  if (
+    activeStateAfterMulti.category_id !== everyday.id ||
+    activeStateAfterMulti.price !== "18.25" ||
+    activeStateAfterMulti.is_active !== true
+  ) {
+    await fail(`Scenario 5B: metadata changed unexpectedly: ${JSON.stringify(activeStateAfterMulti)}`);
+  }
+
+  await click(
+    cdp,
+    '[data-testid="product-row"][data-product-slug="browser-product"] [data-testid="edit-product-btn"]',
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="product-form"]'))`,
+    "product form for save from Arabic",
+  );
+  await setInputValue(
+    cdp,
+    '[data-testid="product-name-input"]',
+    "Browser Product From Arabic Save",
+  );
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("العربية"),
+    );
+    if (!button) throw new Error("Arabic tab not found");
+    button.click();
+  })()`);
+  await setInputValue(cdp, '[data-testid="product-name-input"]', "منتج المتصفح المحدث");
+  await setInputValue(
+    cdp,
+    '[data-testid="product-details-input"]',
+    "تفاصيل عربية محدثة",
+  );
+  await click(cdp, '[data-testid="save-product-submit-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-product-slug="browser-product"]'))`,
+    "product list after multilingual save from Arabic",
+  );
+
+  productTranslations = await pgClient`
+    SELECT language_id, name, description, details
+    FROM product_translation
+    WHERE product_id = ${browserProduct.id};
+  `;
+  englishRow = productTranslations.find((row) => row.language_id === english.id);
+  arabicRow = productTranslations.find((row) => row.language_id !== english.id);
+  if (
+    englishRow?.name !== "Browser Product From Arabic Save" ||
+    arabicRow?.name !== "منتج المتصفح المحدث" ||
+    arabicRow?.details !== "تفاصيل عربية محدثة"
+  ) {
+    await fail(`Scenario 5B: multilingual save from Arabic lost data: ${JSON.stringify(productTranslations)}`);
+  }
+
+  await click(
+    cdp,
+    '[data-testid="product-row"][data-product-slug="browser-product"] [data-testid="edit-product-btn"]',
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="product-form"]'))`,
+    "product form for validation failure",
+  );
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("العربية"),
+    );
+    if (!button) throw new Error("Arabic tab not found");
+    button.click();
+  })()`);
+  await setInputValue(cdp, '[data-testid="product-name-input"]', "");
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("English (EN)"),
+    );
+    if (!button) throw new Error("English tab not found");
+    button.click();
+  })()`);
+  await setInputValue(
+    cdp,
+    '[data-testid="product-description-input"]',
+    "English draft survives failure",
+  );
+  await click(cdp, '[data-testid="save-product-submit-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="product-form"]')?.querySelector('[role="alert"]'))`,
+    "multilingual validation alert",
+  );
+  const failureState = await cdp.evaluate(`(() => ({
+    formVisible: Boolean(document.querySelector('[data-testid="product-form"]')),
+    description: document.querySelector('[data-testid="product-description-input"]')?.value,
+    alert: document.querySelector('[data-testid="product-form"] [role="alert"]')?.innerText ?? "",
+  }))()`);
+  if (
+    !failureState.formVisible ||
+    failureState.description !== "English draft survives failure" ||
+    !failureState.alert.toLowerCase().includes("arabic")
+  ) {
+    await fail(`Scenario 5B: validation failure lost drafts: ${JSON.stringify(failureState)}`);
+  }
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("العربية"),
+    );
+    if (!button) throw new Error("Arabic tab not found");
+    button.click();
+  })()`);
+  const arabicDraftAfterFailure = await cdp.evaluate(`(() => ({
+    name: document.querySelector('[data-testid="product-name-input"]')?.value,
+    details: document.querySelector('[data-testid="product-details-input"]')?.value,
+  }))()`);
+  if (
+    arabicDraftAfterFailure.name !== "" ||
+    arabicDraftAfterFailure.details !== "تفاصيل عربية محدثة"
+  ) {
+    await fail(`Scenario 5B: Arabic draft was not preserved after failure: ${JSON.stringify(arabicDraftAfterFailure)}`);
+  }
+  await setInputValue(cdp, '[data-testid="product-name-input"]', "منتج المتصفح بعد التصحيح");
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("English (EN)"),
+    );
+    if (!button) throw new Error("English tab not found");
+    button.click();
+  })()`);
+  await click(cdp, '[data-testid="save-product-submit-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-product-slug="browser-product"]'))`,
+    "product list after corrected multilingual save",
+  );
+  productTranslations = await pgClient`
+    SELECT language_id, name, description, details
+    FROM product_translation
+    WHERE product_id = ${browserProduct.id};
+  `;
+  arabicRow = productTranslations.find((row) => row.language_id !== english.id);
+  englishRow = productTranslations.find((row) => row.language_id === english.id);
+  if (
+    arabicRow?.name !== "منتج المتصفح بعد التصحيح" ||
+    englishRow?.description !== "English draft survives failure"
+  ) {
+    await fail(`Scenario 5B: corrected retry did not persist all drafts: ${JSON.stringify(productTranslations)}`);
+  }
+
+  const beforeCancelledMultilingual = await pgClient`
+    SELECT language_id, name, description, details
+    FROM product_translation
+    WHERE product_id = ${browserProduct.id}
+    ORDER BY language_id;
+  `;
+  await click(
+    cdp,
+    '[data-testid="product-row"][data-product-slug="browser-product"] [data-testid="edit-product-btn"]',
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="product-form"]'))`,
+    "product form for cancel warning",
+  );
+  await setInputValue(
+    cdp,
+    '[data-testid="product-description-input"]',
+    "Unsaved English cancel draft",
+  );
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("العربية"),
+    );
+    if (!button) throw new Error("Arabic tab not found");
+    button.click();
+  })()`);
+  await setInputValue(
+    cdp,
+    '[data-testid="product-description-input"]',
+    "مسودة عربية غير محفوظة",
+  );
+  await cdp.evaluate(`window.confirm = () => false;`);
+  await click(cdp, '[data-testid="cancel-product-btn"]');
+  const cancelBlocked = await cdp.evaluate(
+    `Boolean(document.querySelector('[data-testid="product-form"]'))`,
+  );
+  if (!cancelBlocked) {
+    await fail("Scenario 5B: cancel discarded unsaved multilingual drafts without warning.");
+  }
+  const arabicCancelDraft = await cdp.evaluate(
+    `document.querySelector('[data-testid="product-description-input"]')?.value`,
+  );
+  if (arabicCancelDraft !== "مسودة عربية غير محفوظة") {
+    await fail("Scenario 5B: Arabic cancel draft was lost after blocked cancel.");
+  }
+  await cdp.evaluate(`window.confirm = () => true;`);
+  await click(cdp, '[data-testid="cancel-product-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="products-admin"]'))`,
+    "products after confirmed cancel",
+  );
+  const afterCancelledMultilingual = await pgClient`
+    SELECT language_id, name, description, details
+    FROM product_translation
+    WHERE product_id = ${browserProduct.id}
+    ORDER BY language_id;
+  `;
+  if (JSON.stringify(beforeCancelledMultilingual) !== JSON.stringify(afterCancelledMultilingual)) {
+    await fail("Scenario 5B: cancelled multilingual edits were persisted.");
+  }
+
+  log("Scenario 5C: multilingual category edit preserves parent and activation");
+  await navigate(cdp, "/categories", '[data-testid="categories-admin"]', "categories for multilingual edit");
+  await click(
+    cdp,
+    '[data-category-slug="browser-child"] [data-testid="edit-category-btn"]',
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="category-form"]'))`,
+    "multilingual category form",
+  );
+  await setInputValue(cdp, '[data-testid="category-name-input"]', "Browser Child Updated");
+  await setCheckbox(cdp, '[data-testid="category-active-input"]', true);
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("العربية"),
+    );
+    if (!button) throw new Error("Arabic tab not found");
+    button.click();
+  })()`);
+  await setInputValue(cdp, '[data-testid="category-name-input"]', "طفل المتصفح");
+  await setInputValue(
+    cdp,
+    '[data-testid="category-description-input"]',
+    "وصف فئة عربي",
+  );
+  await cdp.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll('#main button')).find((candidate) =>
+      candidate.innerText.includes("English (EN)"),
+    );
+    if (!button) throw new Error("English tab not found");
+    button.click();
+  })()`);
+  await click(cdp, '[data-testid="save-category-submit-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-category-slug="browser-child"]'))`,
+    "categories after multilingual edit",
+  );
+  const [editedCategory] = await pgClient`
+    SELECT parent_id, is_active, slug
+    FROM category
+    WHERE id = ${browserChild.id};
+  `;
+  const categoryTranslations = await pgClient`
+    SELECT language_id, name, description
+    FROM category_translation
+    WHERE category_id = ${browserChild.id};
+  `;
+  const categoryEnglish = categoryTranslations.find((row) => row.language_id === english.id);
+  const categoryArabic = categoryTranslations.find((row) => row.language_id !== english.id);
+  if (
+    editedCategory.parent_id !== browserRoot.id ||
+    editedCategory.is_active !== true ||
+    editedCategory.slug !== "browser-child" ||
+    categoryEnglish?.name !== "Browser Child Updated" ||
+    categoryArabic?.name !== "طفل المتصفح" ||
+    categoryArabic?.description !== "وصف فئة عربي"
+  ) {
+    await fail(`Scenario 5C: multilingual category edit failed: ${JSON.stringify({ editedCategory, categoryTranslations })}`);
+  }
+
+  const actionsAfterMultilingual = await pgClient`
+    SELECT id FROM product_action WHERE product_id = ${browserProduct.id};
+  `;
+  if (
+    actionsAfterMultilingual.length !== 1 ||
+    actionsAfterMultilingual[0].id !== inquiryActions[0].id
+  ) {
+    await fail("Scenario 5B: multilingual saves duplicated or removed the default inquiry action.");
+  }
+
   log("Scenario 6: QA-24 return from Buttons editor preserves fields and active state");
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 1280,

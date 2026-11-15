@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, useTransition } from "react";
+import { useMemo, useRef, useState, useTransition } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -32,6 +32,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { buildAdminCategoryRows } from "@/lib/catalog/admin";
+import { collectChangedTranslations } from "@/lib/catalog/translation-draft";
 import {
   buildCategoryHierarchy,
   resolveCategoryDisplayName,
@@ -58,6 +59,7 @@ interface CategoryFormState {
   isActive: boolean;
   activeLangTab: string;
   translations: Record<string, { name: string; description: string }>;
+  initialTranslations: Record<string, { name: string; description: string }>;
   errors: Record<string, string>;
   initialSnapshot: string;
 }
@@ -113,6 +115,7 @@ export function CategoriesAdmin({
   const [feedback, setFeedback] = useState<CatalogActionResult | null>(null);
   const [form, setForm] = useState<CategoryFormState | null>(null);
   const [isPending, startTransition] = useTransition();
+  const saveInFlightRef = useRef(false);
 
   const defaultLangCode = defaultLanguage?.code ?? "en";
   const defaultLangLabel =
@@ -160,6 +163,7 @@ export function CategoriesAdmin({
       isActive: false,
       activeLangTab: defaultLangCode,
       translations,
+      initialTranslations: translations,
       errors: {},
       initialSnapshot: "",
     };
@@ -190,6 +194,7 @@ export function CategoriesAdmin({
       isActive: categoryRecord.isActive,
       activeLangTab: preferredTab,
       translations,
+      initialTranslations: translations,
       errors: {},
       initialSnapshot: "",
     };
@@ -200,7 +205,7 @@ export function CategoriesAdmin({
   };
 
   const closeForm = () => {
-    if (!form) return;
+    if (!form || isPending || saveInFlightRef.current) return;
     if (
       snapshotForm(form) !== form.initialSnapshot &&
       typeof window !== "undefined" &&
@@ -237,7 +242,8 @@ export function CategoriesAdmin({
   };
 
   const handleSave = () => {
-    if (!form) return;
+    if (!form || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
 
     startTransition(async () => {
       try {
@@ -285,18 +291,16 @@ export function CategoriesAdmin({
           return;
         }
 
-        const submittedTranslation = form.translations[form.activeLangTab] ?? {
-          name: "",
-          description: "",
-        };
+        const changedTranslations = collectChangedTranslations(
+          form.translations,
+          form.initialTranslations,
+        );
 
         const result = await updateCategoryAction({
           categoryId: form.categoryId,
           slug: form.slug,
           isActive: form.isActive,
-          languageCode: form.activeLangTab,
-          name: submittedTranslation.name,
-          description: submittedTranslation.description,
+          translations: changedTranslations,
         });
 
         if (!result.success) {
@@ -316,9 +320,15 @@ export function CategoriesAdmin({
             ),
           );
         }
+        const updatedLanguages = changedTranslations.map((translation) =>
+          translation.languageCode.toUpperCase(),
+        );
         setFeedback({
           success: true,
-          message: `Category saved. ${form.activeLangTab.toUpperCase()} content was updated; other translations and the parent relationship were preserved.`,
+          message:
+            updatedLanguages.length > 0
+              ? `Category saved. Updated ${updatedLanguages.join(", ")} content; other translations and the parent relationship were preserved.`
+              : "Category saved. No translation changes were needed; the parent relationship was preserved.",
         });
         setForm(null);
       } catch {
@@ -327,6 +337,8 @@ export function CategoriesAdmin({
           message:
             "A communication or server error occurred. Your inputs have been preserved. Please try again.",
         });
+      } finally {
+        saveInFlightRef.current = false;
       }
     });
   };
@@ -365,6 +377,16 @@ export function CategoriesAdmin({
       name: "",
       description: "",
     };
+    const translationError = (field: "name" | "description") =>
+      form.errors[`translations.${form.activeLangTab}.${field}`] ??
+      form.errors[field] ??
+      "";
+    const tabHasError = (languageCode: string) =>
+      Object.keys(form.errors).some(
+        (key) =>
+          key === `translations.${languageCode}` ||
+          key.startsWith(`translations.${languageCode}.`),
+      );
     const currentParent = form.parentId
       ? flattened.find((categoryNode) => categoryNode.id === form.parentId)
       : null;
@@ -386,6 +408,7 @@ export function CategoriesAdmin({
             type="button"
             variant="outline"
             onClick={closeForm}
+            disabled={isPending}
             className="min-h-11 gap-2"
           >
             <ArrowLeft className="size-4" />
@@ -540,6 +563,9 @@ export function CategoriesAdmin({
                   className="min-h-11"
                 >
                   {defaultLangLabel} ({defaultLangCode.toUpperCase()})
+                  {tabHasError(defaultLangCode) ? (
+                    <span className="ml-1 text-destructive">!</span>
+                  ) : null}
                 </Button>
                 {arabicRegistered && defaultLangCode !== "ar" ? (
                   <Button
@@ -549,6 +575,9 @@ export function CategoriesAdmin({
                     className="min-h-11"
                   >
                     العربية (AR)
+                    {tabHasError("ar") ? (
+                      <span className="ml-1 text-destructive">!</span>
+                    ) : null}
                   </Button>
                 ) : null}
                 <Badge variant="outline" className="text-xs">
@@ -586,12 +615,14 @@ export function CategoriesAdmin({
                       })
                     }
                     className={`min-h-11 w-full rounded-md border bg-background px-3 py-2 text-sm ${
-                      form.errors.name ? "border-destructive" : ""
+                      translationError("name") ? "border-destructive" : ""
                     }`}
                     placeholder="Category name"
                   />
-                  {form.errors.name ? (
-                    <p className="text-xs text-destructive">{form.errors.name}</p>
+                  {translationError("name") ? (
+                    <p className="text-xs text-destructive">
+                      {translationError("name")}
+                    </p>
                   ) : null}
                 </div>
 
@@ -614,13 +645,13 @@ export function CategoriesAdmin({
                       })
                     }
                     className={`min-h-11 w-full rounded-md border bg-background px-3 py-2 text-sm ${
-                      form.errors.description ? "border-destructive" : ""
+                      translationError("description") ? "border-destructive" : ""
                     }`}
                     placeholder="Optional description"
                   />
-                  {form.errors.description ? (
+                  {translationError("description") ? (
                     <p className="text-xs text-destructive">
-                      {form.errors.description}
+                      {translationError("description")}
                     </p>
                   ) : null}
                 </div>

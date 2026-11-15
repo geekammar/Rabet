@@ -542,6 +542,11 @@ export interface EditCategoryInput {
     name: string;
     description?: string | null;
   } | null;
+  translations?: Array<{
+    languageId: string;
+    name: string;
+    description?: string | null;
+  }> | null;
 }
 
 /**
@@ -583,28 +588,32 @@ export async function editCatalogCategory(
 
     const queries: unknown[] = [categoryUpdate];
 
-    if (input.translation) {
-      const translationUpsert = db
-        .insert(categoryTranslation)
-        .values({
-          id: globalThis.crypto.randomUUID(),
-          categoryId: input.categoryId,
-          languageId: input.translation.languageId,
-          name: input.translation.name,
-          description: input.translation.description ?? null,
-        })
-        .onConflictDoUpdate({
-          target: [
-            categoryTranslation.categoryId,
-            categoryTranslation.languageId,
-          ],
-          set: {
-            name: input.translation.name,
-            description: input.translation.description ?? null,
-            updatedAt: sql`now()`,
-          },
-        });
-      queries.push(translationUpsert);
+    const translationsToPersist =
+      input.translations ?? (input.translation ? [input.translation] : []);
+
+    for (const translation of translationsToPersist) {
+      queries.push(
+        db
+          .insert(categoryTranslation)
+          .values({
+            id: globalThis.crypto.randomUUID(),
+            categoryId: input.categoryId,
+            languageId: translation.languageId,
+            name: translation.name,
+            description: translation.description ?? null,
+          })
+          .onConflictDoUpdate({
+            target: [
+              categoryTranslation.categoryId,
+              categoryTranslation.languageId,
+            ],
+            set: {
+              name: translation.name,
+              description: translation.description ?? null,
+              updatedAt: sql`now()`,
+            },
+          }),
+      );
     }
 
     await executeAtomicBatch(db, queries);
@@ -853,6 +862,12 @@ export interface EditProductInput {
     description?: string | null;
     details?: string | null;
   } | null;
+  translations?: Array<{
+    languageId: string;
+    name: string;
+    description?: string | null;
+    details?: string | null;
+  }> | null;
 }
 
 /**
@@ -915,30 +930,34 @@ export async function editCatalogProduct(
 
     const queries: unknown[] = [productUpdate];
 
-    if (input.translation) {
-      const translationUpsert = db
-        .insert(productTranslation)
-        .values({
-          id: globalThis.crypto.randomUUID(),
-          productId: input.productId,
-          languageId: input.translation.languageId,
-          name: input.translation.name,
-          description: input.translation.description ?? null,
-          details: input.translation.details ?? null,
-        })
-        .onConflictDoUpdate({
-          target: [
-            productTranslation.productId,
-            productTranslation.languageId,
-          ],
-          set: {
-            name: input.translation.name,
-            description: input.translation.description ?? null,
-            details: input.translation.details ?? null,
-            updatedAt: sql`now()`,
-          },
-        });
-      queries.push(translationUpsert);
+    const translationsToPersist =
+      input.translations ?? (input.translation ? [input.translation] : []);
+
+    for (const translation of translationsToPersist) {
+      queries.push(
+        db
+          .insert(productTranslation)
+          .values({
+            id: globalThis.crypto.randomUUID(),
+            productId: input.productId,
+            languageId: translation.languageId,
+            name: translation.name,
+            description: translation.description ?? null,
+            details: translation.details ?? null,
+          })
+          .onConflictDoUpdate({
+            target: [
+              productTranslation.productId,
+              productTranslation.languageId,
+            ],
+            set: {
+              name: translation.name,
+              description: translation.description ?? null,
+              details: translation.details ?? null,
+              updatedAt: sql`now()`,
+            },
+          }),
+      );
     }
 
     await executeAtomicBatch(db, queries);

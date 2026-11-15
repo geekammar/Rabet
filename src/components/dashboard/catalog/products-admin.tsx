@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, useTransition } from "react";
+import { useMemo, useRef, useState, useTransition } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -38,6 +38,7 @@ import {
 } from "@/lib/catalog/admin";
 import { buildCategoryHierarchy } from "@/lib/catalog/tree";
 import { createProductEditDraft } from "@/lib/catalog/product-draft";
+import { collectChangedTranslations } from "@/lib/catalog/translation-draft";
 import type {
   CatalogCategoryRecord,
   CatalogProductRecord,
@@ -68,6 +69,10 @@ interface ProductFormState {
   allowInquiry: boolean;
   activeLangTab: string;
   translations: Record<
+    string,
+    { name: string; description: string; details: string }
+  >;
+  initialTranslations: Record<
     string,
     { name: string; description: string; details: string }
   >;
@@ -130,6 +135,7 @@ export function ProductsAdmin({
   const [feedback, setFeedback] = useState<CatalogActionResult | null>(null);
   const [form, setForm] = useState<ProductFormState | null>(null);
   const [isPending, startTransition] = useTransition();
+  const saveInFlightRef = useRef(false);
 
   const defaultLangCode = defaultLanguage?.code ?? "en";
   const defaultLangLabel =
@@ -197,6 +203,7 @@ export function ProductsAdmin({
       allowInquiry: true,
       activeLangTab: defaultLangCode,
       translations,
+      initialTranslations: translations,
       errors: {},
       initialSnapshot: "",
     };
@@ -222,6 +229,7 @@ export function ProductsAdmin({
       allowInquiry: false,
       activeLangTab: preferredTab,
       translations: draft.translations,
+      initialTranslations: draft.translations,
       errors: {},
       initialSnapshot: "",
     };
@@ -232,7 +240,7 @@ export function ProductsAdmin({
   };
 
   const closeForm = () => {
-    if (!form) return;
+    if (!form || isPending || saveInFlightRef.current) return;
     if (
       snapshotForm(form) !== form.initialSnapshot &&
       typeof window !== "undefined" &&
@@ -276,7 +284,8 @@ export function ProductsAdmin({
   };
 
   const handleSave = () => {
-    if (!form) return;
+    if (!form || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
 
     startTransition(async () => {
       try {
@@ -333,11 +342,10 @@ export function ProductsAdmin({
           return;
         }
 
-        const submittedTranslation = form.translations[form.activeLangTab] ?? {
-          name: "",
-          description: "",
-          details: "",
-        };
+        const changedTranslations = collectChangedTranslations(
+          form.translations,
+          form.initialTranslations,
+        );
 
         const result = await updateProductAction({
           productId: form.productId,
@@ -345,10 +353,7 @@ export function ProductsAdmin({
           slug: form.slug,
           price: form.price,
           isActive: form.isActive,
-          languageCode: form.activeLangTab,
-          name: submittedTranslation.name,
-          description: submittedTranslation.description,
-          details: submittedTranslation.details,
+          translations: changedTranslations,
         });
 
         if (!result.success) {
@@ -368,9 +373,15 @@ export function ProductsAdmin({
             ),
           );
         }
+        const updatedLanguages = changedTranslations.map((translation) =>
+          translation.languageCode.toUpperCase(),
+        );
         setFeedback({
           success: true,
-          message: `Product saved. ${form.activeLangTab.toUpperCase()} content was updated; other translations were preserved.`,
+          message:
+            updatedLanguages.length > 0
+              ? `Product saved. Updated ${updatedLanguages.join(", ")} content; other translations were preserved.`
+              : "Product saved. No translation changes were needed.",
         });
         setForm(null);
       } catch {
@@ -379,6 +390,8 @@ export function ProductsAdmin({
           message:
             "A communication or server error occurred. Your inputs have been preserved. Please try again.",
         });
+      } finally {
+        saveInFlightRef.current = false;
       }
     });
   };
@@ -418,6 +431,16 @@ export function ProductsAdmin({
       description: "",
       details: "",
     };
+    const translationError = (field: "name" | "description" | "details") =>
+      form.errors[`translations.${form.activeLangTab}.${field}`] ??
+      form.errors[field] ??
+      "";
+    const tabHasError = (languageCode: string) =>
+      Object.keys(form.errors).some(
+        (key) =>
+          key === `translations.${languageCode}` ||
+          key.startsWith(`translations.${languageCode}.`),
+      );
 
     return (
       <div
@@ -436,6 +459,7 @@ export function ProductsAdmin({
             type="button"
             variant="outline"
             onClick={closeForm}
+            disabled={isPending}
             className="min-h-11 gap-2"
           >
             <ArrowLeft className="size-4" />
@@ -605,6 +629,9 @@ export function ProductsAdmin({
                   className="min-h-11"
                 >
                   {defaultLangLabel} ({defaultLangCode.toUpperCase()})
+                  {tabHasError(defaultLangCode) ? (
+                    <span className="ml-1 text-destructive">!</span>
+                  ) : null}
                 </Button>
                 {arabicRegistered && defaultLangCode !== "ar" ? (
                   <Button
@@ -614,6 +641,9 @@ export function ProductsAdmin({
                     className="min-h-11"
                   >
                     العربية (AR)
+                    {tabHasError("ar") ? (
+                      <span className="ml-1 text-destructive">!</span>
+                    ) : null}
                   </Button>
                 ) : null}
                 <Badge variant="outline" className="text-xs">
@@ -650,12 +680,14 @@ export function ProductsAdmin({
                       })
                     }
                     className={`min-h-11 w-full rounded-md border bg-background px-3 py-2 text-sm ${
-                      form.errors.name ? "border-destructive" : ""
+                      translationError("name") ? "border-destructive" : ""
                     }`}
                     placeholder="Product name"
                   />
-                  {form.errors.name ? (
-                    <p className="text-xs text-destructive">{form.errors.name}</p>
+                  {translationError("name") ? (
+                    <p className="text-xs text-destructive">
+                      {translationError("name")}
+                    </p>
                   ) : null}
                 </div>
 
@@ -678,13 +710,13 @@ export function ProductsAdmin({
                       })
                     }
                     className={`min-h-11 w-full rounded-md border bg-background px-3 py-2 text-sm ${
-                      form.errors.description ? "border-destructive" : ""
+                      translationError("description") ? "border-destructive" : ""
                     }`}
                     placeholder="Short summary shown on the product card"
                   />
-                  {form.errors.description ? (
+                  {translationError("description") ? (
                     <p className="text-xs text-destructive">
-                      {form.errors.description}
+                      {translationError("description")}
                     </p>
                   ) : null}
                 </div>
@@ -705,12 +737,14 @@ export function ProductsAdmin({
                       })
                     }
                     className={`min-h-11 w-full rounded-md border bg-background px-3 py-2 text-sm ${
-                      form.errors.details ? "border-destructive" : ""
+                      translationError("details") ? "border-destructive" : ""
                     }`}
                     placeholder="Full details revealed when a customer asks"
                   />
-                  {form.errors.details ? (
-                    <p className="text-xs text-destructive">{form.errors.details}</p>
+                  {translationError("details") ? (
+                    <p className="text-xs text-destructive">
+                      {translationError("details")}
+                    </p>
                   ) : null}
                 </div>
 

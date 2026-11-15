@@ -855,4 +855,238 @@ describe.skipIf(!shouldRun)("simple catalog administration data operations", () 
     expect(unchanged?.categoryId).toBe(cat.categoryId);
     expect(unchanged?.translations.en?.name).toBe("Safe Product");
   });
+
+  it("updates multiple translations in one atomic product edit while preserving category and activation", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const first = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "multi-translation-first",
+      translations: [{ languageId: defaultLangId, name: "Multi First" }],
+    });
+    const second = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "multi-translation-second",
+      translations: [{ languageId: defaultLangId, name: "Multi Second" }],
+    });
+
+    const created = await createCatalogProduct(appDb, {
+      categoryId: first.categoryId,
+      slug: "multi-translation-product",
+      price: "31.00",
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "Original English",
+          description: "English desc",
+          details: "English details",
+        },
+        {
+          languageId: arabicLangId,
+          name: "العربي الأصلي",
+          description: "وصف عربي",
+          details: "تفاصيل عربية",
+        },
+      ],
+    });
+
+    await updateCatalogProduct(appDb, created.productId, { isActive: true });
+
+    const edited = await editCatalogProduct(appDb, {
+      productId: created.productId,
+      categoryId: second.categoryId,
+      slug: "multi-translation-product",
+      price: "31.00",
+      isActive: true,
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "Edited English",
+          description: "Edited English desc",
+          details: "Edited English details",
+        },
+        {
+          languageId: arabicLangId,
+          name: "العربي المعدل",
+          description: "وصف عربي معدل",
+          details: "تفاصيل عربية معدلة",
+        },
+      ],
+    });
+
+    expect(edited.product.categoryId).toBe(second.categoryId);
+    expect(edited.product.isActive).toBe(true);
+    expect(edited.product.price).toBe("31.00");
+    expect(edited.product.translations.en?.name).toBe("Edited English");
+    expect(edited.product.translations.ar?.name).toBe("العربي المعدل");
+  });
+
+  it("updates only the supplied translation and leaves untouched rows unchanged", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "single-translation-edit",
+      translations: [{ languageId: defaultLangId, name: "Single Edit" }],
+    });
+
+    const created = await createCatalogProduct(appDb, {
+      categoryId: cat.categoryId,
+      slug: "single-translation-product",
+      price: "12.00",
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "English Original",
+          description: "English original desc",
+        },
+        {
+          languageId: arabicLangId,
+          name: "عربي أصلي",
+          description: "وصف عربي أصلي",
+        },
+      ],
+    });
+
+    const edited = await editCatalogProduct(appDb, {
+      productId: created.productId,
+      slug: "single-translation-product",
+      price: "12.00",
+      isActive: false,
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "English Updated",
+          description: "English updated desc",
+        },
+      ],
+    });
+
+    expect(edited.product.translations.en?.name).toBe("English Updated");
+    expect(edited.product.translations.ar?.name).toBe("عربي أصلي");
+    expect(edited.product.translations.ar?.description).toBe("وصف عربي أصلي");
+  });
+
+  it("updates multiple category translations atomically without changing the parent", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const root = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "multi-category-root",
+      translations: [{ languageId: defaultLangId, name: "Multi Category Root" }],
+    });
+    const child = await createCatalogCategory(appDb, {
+      parentId: root.categoryId,
+      slug: "multi-category-child",
+      translations: [
+        { languageId: defaultLangId, name: "Multi Child EN" },
+        { languageId: arabicLangId, name: "طفل متعدد" },
+      ],
+    });
+
+    const edited = await editCatalogCategory(appDb, {
+      categoryId: child.categoryId,
+      slug: "multi-category-child",
+      isActive: true,
+      translations: [
+        {
+          languageId: defaultLangId,
+          name: "Multi Child EN Updated",
+          description: "Updated English",
+        },
+        {
+          languageId: arabicLangId,
+          name: "طفل متعدد محدث",
+          description: "وصف عربي محدث",
+        },
+      ],
+    });
+
+    expect(edited.category.parentId).toBe(root.categoryId);
+    expect(edited.category.isActive).toBe(true);
+    expect(edited.category.translations.en?.name).toBe("Multi Child EN Updated");
+    expect(edited.category.translations.ar?.name).toBe("طفل متعدد محدث");
+    expect(edited.category.translations.ar?.description).toBe("وصف عربي محدث");
+  });
+
+  it("rolls back a multilingual product edit when any translation write fails", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "multi-rollback-product",
+      translations: [{ languageId: defaultLangId, name: "Multi Rollback" }],
+    });
+
+    const created = await createCatalogProduct(appDb, {
+      categoryId: cat.categoryId,
+      slug: "multi-rollback-product-original",
+      price: "44.00",
+      translations: [
+        { languageId: defaultLangId, name: "Rollback English" },
+        { languageId: arabicLangId, name: "عربي للتراجع" },
+      ],
+    });
+
+    await expect(
+      editCatalogProduct(appDb, {
+        productId: created.productId,
+        slug: "multi-rollback-product-attempted",
+        price: "99.00",
+        isActive: true,
+        translations: [
+          {
+            languageId: defaultLangId,
+            name: "Should Roll Back",
+            description: "Should Roll Back",
+          },
+          {
+            languageId: "99999999-9999-4999-8999-999999999997",
+            name: "Invalid Language",
+          },
+        ],
+      }),
+    ).rejects.toThrow();
+
+    const unchanged = await readCatalogProduct(appDb, created.productId);
+    expect(unchanged?.slug).toBe("multi-rollback-product-original");
+    expect(unchanged?.price).toBe("44.00");
+    expect(unchanged?.isActive).toBe(false);
+    expect(unchanged?.translations.en?.name).toBe("Rollback English");
+    expect(unchanged?.translations.ar?.name).toBe("عربي للتراجع");
+  });
+
+  it("rolls back a multilingual category edit when any translation write fails", async () => {
+    const appDb = asAppDb(testDb!.db);
+
+    const cat = await createCatalogCategory(appDb, {
+      parentId: null,
+      slug: "multi-rollback-category-original",
+      translations: [
+        { languageId: defaultLangId, name: "Category Rollback EN" },
+        { languageId: arabicLangId, name: "فئة للتراجع" },
+      ],
+    });
+
+    await expect(
+      editCatalogCategory(appDb, {
+        categoryId: cat.categoryId,
+        slug: "multi-rollback-category-attempted",
+        isActive: true,
+        translations: [
+          { languageId: defaultLangId, name: "Should Roll Back Category" },
+          {
+            languageId: "99999999-9999-4999-8999-999999999996",
+            name: "Invalid Language",
+          },
+        ],
+      }),
+    ).rejects.toThrow();
+
+    const unchanged = await readCatalogCategory(appDb, cat.categoryId);
+    expect(unchanged?.slug).toBe("multi-rollback-category-original");
+    expect(unchanged?.isActive).toBe(false);
+    expect(unchanged?.translations.en?.name).toBe("Category Rollback EN");
+    expect(unchanged?.translations.ar?.name).toBe("فئة للتراجع");
+  });
 });
