@@ -47,6 +47,9 @@ rabet/
 ├── drizzle/               # Generated, reviewed SQL migrations (the source of truth)
 │   ├── 0000_initial_schema.sql
 │   ├── 0001_tree_and_snapshot_integrity.sql
+│   ├── 0002_payment_methods.sql
+│   ├── 0003_seller_notifications.sql
+│   ├── 0004_storefront_menu.sql
 │   └── meta/              # Drizzle journal + snapshots
 ├── drizzle.config.ts      # Drizzle Kit config (generate is offline; migrate needs DATABASE_URL)
 ├── public/
@@ -59,7 +62,8 @@ rabet/
 │   ├── app/
 │   │   ├── (auth)/login/    # Sign-in page (public)
 │   │   ├── (dashboard)/    # Dashboard route group (shared shell)
-│   │   │   ├── overview/  catalog/  inquiries/  customers/
+│   │   │   ├── overview/  products/  categories/  storefront/
+│   │   │   ├── catalog/  inquiries/  customers/
 │   │   │   ├── bot-content/  telegram/  settings/
 │   │   │   ├── layout.tsx  # Sidebar + header shell + server-side auth gate
 │   │   │   ├── loading.tsx # Skeleton loader for the group
@@ -89,7 +93,7 @@ rabet/
 │   │   ├── data/           # Server-only data access layer (Phase 03C-A)
 │   │   │   ├── errors.ts        # typed errors + SQLSTATE mapping + safe messages
 │   │   │   ├── languages.ts     # language CRUD, enable/disable, default resolution
-│   │   │   ├── settings.ts      # bot_setting singleton: read/init/update
+│   │   │   ├── settings.ts      # bot_setting singleton: read/init/update/menu
 │   │   │   ├── templates.ts     # message templates, translations, fallback chain
 │   │   │   └── index.ts         # barrel — the public surface; server-only
 │   │   ├── navigation.ts   # Single source of truth for dashboard nav
@@ -443,6 +447,19 @@ digital-product catalog with displayed prices and **seller inquiries**.
 
 See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) (ADR-013) and
 [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) §16 for the reasoning.
+
+## Storefront configuration
+
+The dashboard `/storefront` page lets the merchant enable or disable the five
+default Telegram menu entries (Browse Products, Browse Categories, Contact
+Support, Change Language, My Active Inquiries) and reorder them with Up/Down
+controls. Saves are persisted on the settings singleton, and a read-only
+preview shows the saved and pending configurations without sending anything to
+Telegram. Reset to Defaults clears the customization, so stores that never save
+keep the Phase 28 behavior. Contextual rules still hide Categories when no
+eligible product exists and Change Language when only one language is enabled;
+if every enabled entry is temporarily unavailable, Contact Support remains as
+the minimal safe navigation fallback.
 
 ## Mobile-first UX
 

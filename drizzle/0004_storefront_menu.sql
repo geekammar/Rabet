@@ -1,0 +1,1 @@
+ALTER TABLE "bot_setting" ADD COLUMN "storefront_menu" jsonb;

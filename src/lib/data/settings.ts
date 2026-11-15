@@ -5,6 +5,12 @@ import { z } from "zod";
 
 import type { Database } from "@/db/client";
 import { botSetting, product } from "@/db/schema";
+import {
+  resolveStorefrontMenuConfig,
+  storefrontMenuConfigSchema,
+  type StorefrontMenuConfig,
+  type StorefrontMenuConfigSource,
+} from "@/lib/storefront/menu";
 
 import {
   invalidInput,
@@ -297,6 +303,97 @@ export async function updateSettings(
   }
 
   // No row matched the singleton key, so nothing was initialized to update.
+  throw new RabetDataError(
+    "SETTINGS_NOT_INITIALIZED",
+    "Bot settings have not been initialized yet. Complete the initial setup " +
+      "first.",
+  );
+}
+
+export type StorefrontMenuSettings = {
+  config: StorefrontMenuConfig;
+  source: StorefrontMenuConfigSource;
+};
+
+/**
+ * Reads the merchant's storefront menu choices.
+ *
+ * An uninitialized store keeps the `SETTINGS_NOT_INITIALIZED` contract. A
+ * missing value is the backward-compatible Phase 28 default; malformed JSON is
+ * reported as `invalid` but still yields the safe defaults so a bad row cannot
+ * take customer navigation down.
+ */
+export async function readStorefrontMenuSettings(
+  db: Database,
+): Promise<StorefrontMenuSettings> {
+  const settings = await requireSettings(db);
+  return resolveStorefrontMenuConfig(settings.storefrontMenu);
+}
+
+/**
+ * Persists a merchant-customized storefront menu.
+ *
+ * The complete ordered configuration is validated before the single settings
+ * row is updated. The write is a no-op path (typed error) when settings have
+ * not been initialized.
+ */
+export async function saveStorefrontMenuConfig(
+  db: Database,
+  input: unknown,
+): Promise<StorefrontMenuConfig> {
+  let parsed: StorefrontMenuConfig;
+
+  try {
+    parsed = storefrontMenuConfigSchema.parse(input);
+  } catch (error) {
+    throw invalidInput(error);
+  }
+
+  try {
+    const updated = await db
+      .update(botSetting)
+      .set({ storefrontMenu: parsed })
+      .where(eq(botSetting.id, 1))
+      .returning({ storefrontMenu: botSetting.storefrontMenu });
+
+    if (updated.length > 0) {
+      return parsed;
+    }
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+
+  throw new RabetDataError(
+    "SETTINGS_NOT_INITIALIZED",
+    "Bot settings have not been initialized yet. Complete the initial setup " +
+      "first.",
+  );
+}
+
+/**
+ * Restores the Phase 28 default menu by clearing the customization.
+ *
+ * `NULL` is the canonical "not customized" value; reset therefore never writes
+ * a frozen copy of today's defaults, which keeps future default additions
+ * backward compatible.
+ */
+export async function resetStorefrontMenuConfig(
+  db: Database,
+): Promise<StorefrontMenuConfig> {
+  try {
+    const updated = await db
+      .update(botSetting)
+      .set({ storefrontMenu: null })
+      .where(eq(botSetting.id, 1))
+      .returning({ id: botSetting.id });
+
+    if (updated.length > 0) {
+      return resolveStorefrontMenuConfig(null).config;
+    }
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+
   throw new RabetDataError(
     "SETTINGS_NOT_INITIALIZED",
     "Bot settings have not been initialized yet. Complete the initial setup " +

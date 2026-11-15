@@ -43,10 +43,11 @@ export type CreateCategoryActionInput =
   | {
       parentId?: unknown;
       slug: unknown;
-      name: unknown;
+      name?: unknown;
       description?: unknown;
       arabicName?: unknown;
       arabicDescription?: unknown;
+      translations?: unknown;
     };
 
 export type UpdateCategoryActionInput =
@@ -67,12 +68,13 @@ export type CreateProductActionInput =
       categoryId: unknown;
       slug: unknown;
       price: unknown;
-      name: unknown;
+      name?: unknown;
       description?: unknown;
       details?: unknown;
       arabicName?: unknown;
       arabicDescription?: unknown;
       arabicDetails?: unknown;
+      translations?: unknown;
       allowInquiry?: unknown;
     };
 
@@ -130,8 +132,11 @@ export async function createCategoryAction(
   const rawDescription = extractField(input, "description");
   const rawArabicName = extractField(input, "arabicName");
   const rawArabicDesc = extractField(input, "arabicDescription");
+  const rawTranslations = extractField(input, "translations");
 
   const errors: Record<string, string> = {};
+  const isMultiTranslationSubmitted =
+    rawTranslations !== undefined && rawTranslations !== null;
 
   // Validate Parent ID if supplied
   let parentId: string | null = null;
@@ -159,45 +164,47 @@ export async function createCategoryAction(
     slug = slugRes.data;
   }
 
-  // Validate Name for default language
-  const nameRes = validateName(rawName, "Default language");
+  // Legacy single-default + optional Arabic fields are validated only when the
+  // caller did not submit the atomic multi-language list.
   let name = "";
-  if (!nameRes.success) {
-    errors.name = nameRes.error;
-  } else {
-    name = nameRes.data;
-  }
-
-  // Validate Description
-  const descRes = validateDescription(rawDescription, "Default language");
   let description: string | null = null;
-  if (!descRes.success) {
-    errors.description = descRes.error;
-  } else {
-    description = descRes.data;
-  }
-
-  // Validate optional Arabic content
   let arabicName: string | null = null;
-  if (
-    rawArabicName !== undefined &&
-    rawArabicName !== null &&
-    String(rawArabicName).trim().length > 0
-  ) {
-    const arNameRes = validateName(rawArabicName, "Arabic");
-    if (!arNameRes.success) {
-      errors.arabicName = arNameRes.error;
-    } else {
-      arabicName = arNameRes.data;
-    }
-  }
-
-  const arDescRes = validateDescription(rawArabicDesc, "Arabic");
   let arabicDescription: string | null = null;
-  if (!arDescRes.success) {
-    errors.arabicDescription = arDescRes.error;
-  } else {
-    arabicDescription = arDescRes.data;
+
+  if (!isMultiTranslationSubmitted) {
+    const nameRes = validateName(rawName, "Default language");
+    if (!nameRes.success) {
+      errors.name = nameRes.error;
+    } else {
+      name = nameRes.data;
+    }
+
+    const descRes = validateDescription(rawDescription, "Default language");
+    if (!descRes.success) {
+      errors.description = descRes.error;
+    } else {
+      description = descRes.data;
+    }
+
+    if (
+      rawArabicName !== undefined &&
+      rawArabicName !== null &&
+      String(rawArabicName).trim().length > 0
+    ) {
+      const arNameRes = validateName(rawArabicName, "Arabic");
+      if (!arNameRes.success) {
+        errors.arabicName = arNameRes.error;
+      } else {
+        arabicName = arNameRes.data;
+      }
+    }
+
+    const arDescRes = validateDescription(rawArabicDesc, "Arabic");
+    if (!arDescRes.success) {
+      errors.arabicDescription = arDescRes.error;
+    } else {
+      arabicDescription = arDescRes.data;
+    }
   }
 
   if (Object.keys(errors).length > 0) {
@@ -226,38 +233,160 @@ export async function createCategoryAction(
       };
     }
 
-    if (defaultLangCode === "ar" && arabicName) {
-      return {
-        success: false,
-        code: "INVALID_INPUT",
-        message: "The store's default language is already Arabic; do not submit redundant Arabic fields.",
-        errors: { arabicName: "Store default language is already Arabic." },
-      };
-    }
+    let translationsToInsert: Array<{
+      languageId: string;
+      name: string;
+      description: string | null;
+    }>;
 
-    const translationsToInsert = [
-      {
-        languageId: defaultLangId,
-        name,
-        description,
-      },
-    ];
+    if (isMultiTranslationSubmitted) {
+      const parsedTranslations = normalizeTranslationList(rawTranslations);
 
-    if (arabicName && defaultLangCode !== "ar") {
-      const arabicLang = languages.find((l) => l.code === "ar");
-      if (!arabicLang) {
+      if (parsedTranslations === null) {
         return {
           success: false,
-          code: "NOT_FOUND",
-          message: "Arabic is not a registered language in this store.",
-          errors: { arabicName: "Arabic is not registered in this store." },
+          code: "INVALID_INPUT",
+          message: "Translations must be provided as a list.",
+          errors: { translations: "Translations must be provided as a list." },
         };
       }
-      translationsToInsert.push({
-        languageId: arabicLang.id,
-        name: arabicName,
-        description: arabicDescription,
-      });
+
+      const languageByCode = new Map(
+        languages.map((languageRow) => [languageRow.code, languageRow]),
+      );
+      const seenLanguages = new Set<string>();
+      const translationErrors: Record<string, string> = {};
+      const parsedCandidates: Array<{
+        languageId: string;
+        name: string;
+        description: string | null;
+      }> = [];
+
+      for (const item of parsedTranslations) {
+        if (typeof item !== "object" || item === null || Array.isArray(item)) {
+          translationErrors.translations = "Each translation must be an object.";
+          break;
+        }
+
+        const record = item as Record<string, unknown>;
+        const rawLanguageCode = record.languageCode;
+
+        if (
+          typeof rawLanguageCode !== "string" ||
+          rawLanguageCode.trim().length === 0
+        ) {
+          translationErrors.translations = "Each translation requires a language code.";
+          continue;
+        }
+
+        const candidateLanguageCode = rawLanguageCode.trim().toLowerCase();
+
+        if (
+          candidateLanguageCode !== "en" &&
+          candidateLanguageCode !== "ar"
+        ) {
+          translationErrors[`translations.${candidateLanguageCode}`] =
+            `Language '${candidateLanguageCode}' is not supported by the catalog editor.`;
+          continue;
+        }
+
+        if (seenLanguages.has(candidateLanguageCode)) {
+          translationErrors[`translations.${candidateLanguageCode}`] =
+            `Duplicate translation for '${candidateLanguageCode}'.`;
+          continue;
+        }
+        seenLanguages.add(candidateLanguageCode);
+
+        const targetLanguage = languageByCode.get(candidateLanguageCode);
+        if (!targetLanguage) {
+          translationErrors[`translations.${candidateLanguageCode}`] =
+            `Language '${candidateLanguageCode}' is not registered in this store.`;
+          continue;
+        }
+
+        const languageLabel =
+          candidateLanguageCode === "ar" ? "Arabic" : "English";
+        const hasContent = [record.name, record.description].some(
+          (value) => typeof value === "string" && value.trim().length > 0,
+        );
+
+        if (candidateLanguageCode !== defaultLangCode && !hasContent) {
+          continue;
+        }
+
+        const candidateNameRes = validateName(record.name, languageLabel);
+        const candidateDescriptionRes = validateDescription(
+          record.description,
+          languageLabel,
+        );
+
+        if (!candidateNameRes.success) {
+          translationErrors[`translations.${candidateLanguageCode}.name`] =
+            candidateNameRes.error;
+        }
+        if (!candidateDescriptionRes.success) {
+          translationErrors[`translations.${candidateLanguageCode}.description`] =
+            candidateDescriptionRes.error;
+        }
+
+        if (candidateNameRes.success && candidateDescriptionRes.success) {
+          parsedCandidates.push({
+            languageId: targetLanguage.id,
+            name: candidateNameRes.data,
+            description: candidateDescriptionRes.data,
+          });
+        }
+      }
+
+      if (!seenLanguages.has(defaultLangCode)) {
+        translationErrors[`translations.${defaultLangCode}.name`] =
+          "Default language name is required.";
+      }
+
+      if (Object.keys(translationErrors).length > 0) {
+        return {
+          success: false,
+          code: "INVALID_INPUT",
+          message: "Please correct the errors in the form.",
+          errors: translationErrors,
+        };
+      }
+
+      translationsToInsert = parsedCandidates;
+    } else {
+      if (defaultLangCode === "ar" && arabicName) {
+        return {
+          success: false,
+          code: "INVALID_INPUT",
+          message: "The store's default language is already Arabic; do not submit redundant Arabic fields.",
+          errors: { arabicName: "Store default language is already Arabic." },
+        };
+      }
+
+      translationsToInsert = [
+        {
+          languageId: defaultLangId,
+          name,
+          description,
+        },
+      ];
+
+      if (arabicName && defaultLangCode !== "ar") {
+        const arabicLang = languages.find((l) => l.code === "ar");
+        if (!arabicLang) {
+          return {
+            success: false,
+            code: "NOT_FOUND",
+            message: "Arabic is not a registered language in this store.",
+            errors: { arabicName: "Arabic is not registered in this store." },
+          };
+        }
+        translationsToInsert.push({
+          languageId: arabicLang.id,
+          name: arabicName,
+          description: arabicDescription,
+        });
+      }
     }
 
     const result = await createCatalogCategory(db, {
@@ -594,9 +723,12 @@ export async function createProductAction(
   const rawArabicName = extractField(input, "arabicName");
   const rawArabicDesc = extractField(input, "arabicDescription");
   const rawArabicDetails = extractField(input, "arabicDetails");
+  const rawTranslations = extractField(input, "translations");
   const rawAllowInquiry = extractField(input, "allowInquiry");
 
   const errors: Record<string, string> = {};
+  const isMultiTranslationSubmitted =
+    rawTranslations !== undefined && rawTranslations !== null;
 
   const catIdRes = validateUuid(rawCategoryId, "Category");
   let categoryId = "";
@@ -622,28 +754,61 @@ export async function createProductAction(
     price = priceRes.data;
   }
 
-  const nameRes = validateName(rawName, "Default language");
   let name = "";
-  if (!nameRes.success) {
-    errors.name = nameRes.error;
-  } else {
-    name = nameRes.data;
-  }
-
-  const descRes = validateDescription(rawDescription, "Default language");
   let description: string | null = null;
-  if (!descRes.success) {
-    errors.description = descRes.error;
-  } else {
-    description = descRes.data;
-  }
-
-  const detailsRes = validateDetails(rawDetails, "Default language");
   let details: string | null = null;
-  if (!detailsRes.success) {
-    errors.details = detailsRes.error;
-  } else {
-    details = detailsRes.data;
+  let arabicName: string | null = null;
+  let arabicDesc: string | null = null;
+  let arabicDetails: string | null = null;
+
+  if (!isMultiTranslationSubmitted) {
+    const nameRes = validateName(rawName, "Default language");
+    if (!nameRes.success) {
+      errors.name = nameRes.error;
+    } else {
+      name = nameRes.data;
+    }
+
+    const descRes = validateDescription(rawDescription, "Default language");
+    if (!descRes.success) {
+      errors.description = descRes.error;
+    } else {
+      description = descRes.data;
+    }
+
+    const detailsRes = validateDetails(rawDetails, "Default language");
+    if (!detailsRes.success) {
+      errors.details = detailsRes.error;
+    } else {
+      details = detailsRes.data;
+    }
+
+    if (
+      rawArabicName !== undefined &&
+      rawArabicName !== null &&
+      String(rawArabicName).trim().length > 0
+    ) {
+      const arNameRes = validateName(rawArabicName, "Arabic");
+      if (!arNameRes.success) {
+        errors.arabicName = arNameRes.error;
+      } else {
+        arabicName = arNameRes.data;
+      }
+    }
+
+    const arDescRes = validateDescription(rawArabicDesc, "Arabic");
+    if (!arDescRes.success) {
+      errors.arabicDescription = arDescRes.error;
+    } else {
+      arabicDesc = arDescRes.data;
+    }
+
+    const arDetailsRes = validateDetails(rawArabicDetails, "Arabic");
+    if (!arDetailsRes.success) {
+      errors.arabicDetails = arDetailsRes.error;
+    } else {
+      arabicDetails = arDetailsRes.data;
+    }
   }
 
   let allowInquiry = false;
@@ -654,37 +819,6 @@ export async function createProductAction(
     } else {
       allowInquiry = inquiryRes.data;
     }
-  }
-
-  // Optional Arabic
-  let arabicName: string | null = null;
-  if (
-    rawArabicName !== undefined &&
-    rawArabicName !== null &&
-    String(rawArabicName).trim().length > 0
-  ) {
-    const arNameRes = validateName(rawArabicName, "Arabic");
-    if (!arNameRes.success) {
-      errors.arabicName = arNameRes.error;
-    } else {
-      arabicName = arNameRes.data;
-    }
-  }
-
-  const arDescRes = validateDescription(rawArabicDesc, "Arabic");
-  let arabicDesc: string | null = null;
-  if (!arDescRes.success) {
-    errors.arabicDescription = arDescRes.error;
-  } else {
-    arabicDesc = arDescRes.data;
-  }
-
-  const arDetailsRes = validateDetails(rawArabicDetails, "Arabic");
-  let arabicDetails: string | null = null;
-  if (!arDetailsRes.success) {
-    errors.arabicDetails = arDetailsRes.error;
-  } else {
-    arabicDetails = arDetailsRes.data;
   }
 
   if (Object.keys(errors).length > 0) {
@@ -710,15 +844,6 @@ export async function createProductAction(
         success: false,
         code: "SETTINGS_NOT_INITIALIZED",
         message: "Store default language is not configured. Please complete store setup in Settings.",
-      };
-    }
-
-    if (defaultLangCode === "ar" && arabicName) {
-      return {
-        success: false,
-        code: "INVALID_INPUT",
-        message: "The store's default language is already Arabic; do not submit redundant Arabic fields.",
-        errors: { arabicName: "Store default language is already Arabic." },
       };
     }
 
@@ -749,31 +874,174 @@ export async function createProductAction(
       };
     }
 
-    const translationsToInsert = [
-      {
-        languageId: defaultLangId,
-        name,
-        description,
-        details,
-      },
-    ];
+    let translationsToInsert: Array<{
+      languageId: string;
+      name: string;
+      description: string | null;
+      details: string | null;
+    }>;
 
-    if (arabicName && defaultLangCode !== "ar") {
-      const arabicLang = languages.find((l) => l.code === "ar");
-      if (!arabicLang) {
+    if (isMultiTranslationSubmitted) {
+      const parsedTranslations = normalizeTranslationList(rawTranslations);
+
+      if (parsedTranslations === null) {
         return {
           success: false,
-          code: "NOT_FOUND",
-          message: "Arabic is not a registered language in this store.",
-          errors: { arabicName: "Arabic is not registered in this store." },
+          code: "INVALID_INPUT",
+          message: "Translations must be provided as a list.",
+          errors: { translations: "Translations must be provided as a list." },
         };
       }
-      translationsToInsert.push({
-        languageId: arabicLang.id,
-        name: arabicName,
-        description: arabicDesc,
-        details: arabicDetails,
-      });
+
+      const languageByCode = new Map(
+        languages.map((languageRow) => [languageRow.code, languageRow]),
+      );
+      const seenLanguages = new Set<string>();
+      const translationErrors: Record<string, string> = {};
+      const parsedCandidates: Array<{
+        languageId: string;
+        name: string;
+        description: string | null;
+        details: string | null;
+      }> = [];
+
+      for (const item of parsedTranslations) {
+        if (typeof item !== "object" || item === null || Array.isArray(item)) {
+          translationErrors.translations = "Each translation must be an object.";
+          break;
+        }
+
+        const record = item as Record<string, unknown>;
+        const rawLanguageCode = record.languageCode;
+
+        if (
+          typeof rawLanguageCode !== "string" ||
+          rawLanguageCode.trim().length === 0
+        ) {
+          translationErrors.translations = "Each translation requires a language code.";
+          continue;
+        }
+
+        const candidateLanguageCode = rawLanguageCode.trim().toLowerCase();
+
+        if (
+          candidateLanguageCode !== "en" &&
+          candidateLanguageCode !== "ar"
+        ) {
+          translationErrors[`translations.${candidateLanguageCode}`] =
+            `Language '${candidateLanguageCode}' is not supported by the catalog editor.`;
+          continue;
+        }
+
+        if (seenLanguages.has(candidateLanguageCode)) {
+          translationErrors[`translations.${candidateLanguageCode}`] =
+            `Duplicate translation for '${candidateLanguageCode}'.`;
+          continue;
+        }
+        seenLanguages.add(candidateLanguageCode);
+
+        const targetLanguage = languageByCode.get(candidateLanguageCode);
+        if (!targetLanguage) {
+          translationErrors[`translations.${candidateLanguageCode}`] =
+            `Language '${candidateLanguageCode}' is not registered in this store.`;
+          continue;
+        }
+
+        const languageLabel =
+          candidateLanguageCode === "ar" ? "Arabic" : "English";
+        const hasContent = [record.name, record.description, record.details].some(
+          (value) => typeof value === "string" && value.trim().length > 0,
+        );
+
+        if (candidateLanguageCode !== defaultLangCode && !hasContent) {
+          continue;
+        }
+
+        const candidateNameRes = validateName(record.name, languageLabel);
+        const candidateDescriptionRes = validateDescription(
+          record.description,
+          languageLabel,
+        );
+        const candidateDetailsRes = validateDetails(record.details, languageLabel);
+
+        if (!candidateNameRes.success) {
+          translationErrors[`translations.${candidateLanguageCode}.name`] =
+            candidateNameRes.error;
+        }
+        if (!candidateDescriptionRes.success) {
+          translationErrors[`translations.${candidateLanguageCode}.description`] =
+            candidateDescriptionRes.error;
+        }
+        if (!candidateDetailsRes.success) {
+          translationErrors[`translations.${candidateLanguageCode}.details`] =
+            candidateDetailsRes.error;
+        }
+
+        if (
+          candidateNameRes.success &&
+          candidateDescriptionRes.success &&
+          candidateDetailsRes.success
+        ) {
+          parsedCandidates.push({
+            languageId: targetLanguage.id,
+            name: candidateNameRes.data,
+            description: candidateDescriptionRes.data,
+            details: candidateDetailsRes.data,
+          });
+        }
+      }
+
+      if (!seenLanguages.has(defaultLangCode)) {
+        translationErrors[`translations.${defaultLangCode}.name`] =
+          "Default language name is required.";
+      }
+
+      if (Object.keys(translationErrors).length > 0) {
+        return {
+          success: false,
+          code: "INVALID_INPUT",
+          message: "Please correct the errors in the form.",
+          errors: translationErrors,
+        };
+      }
+
+      translationsToInsert = parsedCandidates;
+    } else {
+      if (defaultLangCode === "ar" && arabicName) {
+        return {
+          success: false,
+          code: "INVALID_INPUT",
+          message: "The store's default language is already Arabic; do not submit redundant Arabic fields.",
+          errors: { arabicName: "Store default language is already Arabic." },
+        };
+      }
+
+      translationsToInsert = [
+        {
+          languageId: defaultLangId,
+          name,
+          description,
+          details,
+        },
+      ];
+
+      if (arabicName && defaultLangCode !== "ar") {
+        const arabicLang = languages.find((l) => l.code === "ar");
+        if (!arabicLang) {
+          return {
+            success: false,
+            code: "NOT_FOUND",
+            message: "Arabic is not a registered language in this store.",
+            errors: { arabicName: "Arabic is not registered in this store." },
+          };
+        }
+        translationsToInsert.push({
+          languageId: arabicLang.id,
+          name: arabicName,
+          description: arabicDesc,
+          details: arabicDetails,
+        });
+      }
     }
 
     const result = await createCatalogProduct(db, {

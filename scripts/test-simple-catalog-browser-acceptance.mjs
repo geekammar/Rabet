@@ -362,7 +362,7 @@ async function main() {
   `;
   await pgClient`
     INSERT INTO language (code, label, text_direction, is_enabled)
-    VALUES ('ar', 'العربية', 'rtl', false);
+    VALUES ('ar', 'العربية', 'rtl', true);
   `;
   await pgClient`
     INSERT INTO bot_setting (display_name, currency, default_language_id, ask_for_language)
@@ -1222,6 +1222,259 @@ async function main() {
     await fail("Scenario 5B: multilingual saves duplicated or removed the default inquiry action.");
   }
 
+  log("Scenario 5D: Arabic default store exposes English and Arabic catalog tabs");
+  const [arabicLanguage] = await pgClient`
+    SELECT id FROM language WHERE code = 'ar';
+  `;
+  await pgClient`UPDATE language SET is_enabled = true WHERE id = ${arabicLanguage.id};`;
+  await pgClient`UPDATE bot_setting SET default_language_id = ${arabicLanguage.id} WHERE id = 1;`;
+
+  await navigate(cdp, "/products", '[data-testid="products-admin"]', "products with Arabic default");
+  await click(cdp, '[data-testid="add-product-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="product-form"]'))`,
+    "Arabic-default product form",
+  );
+  const arabicDefaultTabs = await cdp.evaluate(`(() =>
+    Array.from(document.querySelectorAll('[data-testid^="language-tab-"]')).map((button) => button.dataset.testid)
+  )()`);
+  if (
+    JSON.stringify(arabicDefaultTabs) !==
+    JSON.stringify(["language-tab-ar", "language-tab-en"])
+  ) {
+    await fail(`Scenario 5D: expected AR and EN tabs, got ${JSON.stringify(arabicDefaultTabs)}`);
+  }
+  await setInputValue(cdp, '[data-testid="product-category-select"]', everyday.id);
+  await setInputValue(cdp, '[data-testid="product-slug-input"]', "arabic-default-product");
+  await setInputValue(cdp, '[data-testid="product-price-input"]', "7.00");
+  await setInputValue(cdp, '[data-testid="product-name-input"]', "منتج عربي افتراضي");
+  await setInputValue(
+    cdp,
+    '[data-testid="product-description-input"]',
+    "وصف عربي افتراضي",
+  );
+  await click(cdp, '[data-testid="language-tab-en"]');
+  await setInputValue(cdp, '[data-testid="product-name-input"]', "Arabic Default Product");
+  await setInputValue(
+    cdp,
+    '[data-testid="product-description-input"]',
+    "English from the second tab",
+  );
+  await click(cdp, '[data-testid="save-product-submit-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-product-slug="arabic-default-product"]'))`,
+    "created Arabic-default product",
+  );
+
+  const [arabicDefaultProduct] = await pgClient`
+    SELECT id FROM product WHERE slug = 'arabic-default-product';
+  `;
+  let arabicDefaultTranslations = await pgClient`
+    SELECT language_id, name, description
+    FROM product_translation
+    WHERE product_id = ${arabicDefaultProduct.id};
+  `;
+  const arabicDefaultAr = arabicDefaultTranslations.find(
+    (row) => row.language_id === arabicLanguage.id,
+  );
+  const arabicDefaultEn = arabicDefaultTranslations.find(
+    (row) => row.language_id === english.id,
+  );
+  if (
+    arabicDefaultAr?.name !== "منتج عربي افتراضي" ||
+    arabicDefaultAr?.description !== "وصف عربي افتراضي" ||
+    arabicDefaultEn?.name !== "Arabic Default Product" ||
+    arabicDefaultEn?.description !== "English from the second tab"
+  ) {
+    await fail(
+      `Scenario 5D: Arabic-default create lost translations: ${JSON.stringify(arabicDefaultTranslations)}`,
+    );
+  }
+
+  await click(
+    cdp,
+    '[data-testid="product-row"][data-product-slug="arabic-default-product"] [data-testid="edit-product-btn"]',
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="product-form"]'))`,
+    "Arabic-default edit form",
+  );
+  await setInputValue(cdp, '[data-testid="product-name-input"]', "منتج عربي محدث");
+  await click(cdp, '[data-testid="language-tab-en"]');
+  await setInputValue(cdp, '[data-testid="product-name-input"]', "Arabic Default Product Updated");
+  await click(cdp, '[data-testid="language-tab-ar"]');
+  await click(cdp, '[data-testid="save-product-submit-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-product-slug="arabic-default-product"]'))`,
+    "product list after Arabic-tab save",
+  );
+  arabicDefaultTranslations = await pgClient`
+    SELECT language_id, name
+    FROM product_translation
+    WHERE product_id = ${arabicDefaultProduct.id};
+  `;
+  if (
+    arabicDefaultTranslations.find((row) => row.language_id === arabicLanguage.id)?.name !==
+      "منتج عربي محدث" ||
+    arabicDefaultTranslations.find((row) => row.language_id === english.id)?.name !==
+      "Arabic Default Product Updated"
+  ) {
+    await fail(
+      `Scenario 5D: save from the Arabic tab did not persist all changed drafts: ${JSON.stringify(arabicDefaultTranslations)}`,
+    );
+  }
+
+  await navigate(cdp, "/categories", '[data-testid="categories-admin"]', "categories with Arabic default");
+  await click(cdp, '[data-testid="add-category-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="category-form"]'))`,
+    "Arabic-default category form",
+  );
+  const arabicDefaultCategoryTabs = await cdp.evaluate(`(() =>
+    Array.from(document.querySelectorAll('[data-testid^="language-tab-"]')).map((button) => button.dataset.testid)
+  )()`);
+  if (
+    JSON.stringify(arabicDefaultCategoryTabs) !==
+    JSON.stringify(["language-tab-ar", "language-tab-en"])
+  ) {
+    await fail(
+      `Scenario 5D: category form tabs missing English: ${JSON.stringify(arabicDefaultCategoryTabs)}`,
+    );
+  }
+  await setInputValue(cdp, '[data-testid="category-slug-input"]', "arabic-default-category");
+  await setInputValue(cdp, '[data-testid="category-name-input"]', "قسم عربي افتراضي");
+  await click(cdp, '[data-testid="language-tab-en"]');
+  await setInputValue(cdp, '[data-testid="category-name-input"]', "Arabic Default Category");
+  await click(cdp, '[data-testid="save-category-submit-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-category-slug="arabic-default-category"]'))`,
+    "created Arabic-default category",
+  );
+  const [arabicDefaultCategory] = await pgClient`
+    SELECT id FROM category WHERE slug = 'arabic-default-category';
+  `;
+  const arabicDefaultCategoryTranslations = await pgClient`
+    SELECT language_id, name
+    FROM category_translation
+    WHERE category_id = ${arabicDefaultCategory.id};
+  `;
+  if (
+    arabicDefaultCategoryTranslations.find(
+      (row) => row.language_id === arabicLanguage.id,
+    )?.name !== "قسم عربي افتراضي" ||
+    arabicDefaultCategoryTranslations.find((row) => row.language_id === english.id)?.name !==
+      "Arabic Default Category"
+  ) {
+    await fail(
+      `Scenario 5D: Arabic-default category lost translations: ${JSON.stringify(arabicDefaultCategoryTranslations)}`,
+    );
+  }
+
+  await pgClient`UPDATE bot_setting SET default_language_id = ${english.id} WHERE id = 1;`;
+  await pgClient`UPDATE language SET is_enabled = false WHERE id = ${arabicLanguage.id};`;
+
+  log("Scenario 5E: storefront settings, ordering, save, preview and reset");
+  await navigate(cdp, "/storefront", '[data-testid="storefront-settings"]', "storefront settings");
+  const defaultMenuState = await cdp.evaluate(`(() => ({
+    toggles: Array.from(document.querySelectorAll('[data-testid^="storefront-menu-toggle-"]'))
+      .map((input) => ({ id: input.dataset.testid, checked: input.checked })),
+    preview: document.querySelector('[data-testid="storefront-preview-saved"]')?.innerText ?? "",
+    draftPreview: Boolean(document.querySelector('[data-testid="storefront-preview-draft"]')),
+  }))()`);
+  if (
+    defaultMenuState.toggles.length !== 5 ||
+    !defaultMenuState.toggles.every((toggle) => toggle.checked) ||
+    !defaultMenuState.preview.includes("Welcome to Simple Catalog Store!") ||
+    !defaultMenuState.preview.includes("Browse Products") ||
+    defaultMenuState.draftPreview
+  ) {
+    await fail(`Scenario 5E: unexpected default settings state: ${JSON.stringify(defaultMenuState)}`);
+  }
+
+  await setCheckbox(cdp, '[data-testid="storefront-menu-toggle-products"]', false);
+  await setCheckbox(cdp, '[data-testid="storefront-menu-toggle-categories"]', false);
+  await click(cdp, '[data-testid="storefront-menu-up-support"]');
+  await waitFor(
+    cdp,
+    `document.querySelectorAll('[data-testid^="storefront-menu-item-"]')[1]?.dataset.testid === "storefront-menu-item-support"`,
+    "support moved to second position",
+  );
+  await click(cdp, '[data-testid="storefront-menu-up-support"]');
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid^="storefront-menu-item-"]')?.dataset.testid === "storefront-menu-item-support"`,
+    "support moved to first position",
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="storefront-preview-draft"]'))`,
+    "draft customer preview",
+  );
+  const draftPreview = await cdp.evaluate(
+    `document.querySelector('[data-testid="storefront-preview-draft"]').innerText`,
+  );
+  if (
+    !draftPreview.includes("Unsaved draft") ||
+    !draftPreview.includes("Hidden in configuration") ||
+    !draftPreview.toLowerCase().includes("no telegram message is sent")
+  ) {
+    await fail(`Scenario 5E: draft preview missing required states: ${draftPreview}`);
+  }
+  await click(cdp, '[data-testid="storefront-save-btn"]');
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="storefront-settings"] [role="alert"]'))`,
+    "storefront save feedback",
+  );
+  const savedMenu = await pgClient`
+    SELECT storefront_menu FROM bot_setting WHERE id = 1;
+  `;
+  const savedMenuValue = savedMenu[0]?.storefront_menu;
+  const savedMenuItems = Array.isArray(savedMenuValue?.items) ? savedMenuValue.items : [];
+  if (
+    savedMenuItems[0]?.key !== "support" ||
+    savedMenuItems.find((item) => item.key === "products")?.enabled !== false ||
+    savedMenuItems.find((item) => item.key === "categories")?.enabled !== false
+  ) {
+    await fail(`Scenario 5E: saved menu was not persisted: ${JSON.stringify(savedMenuValue)}`);
+  }
+
+  await navigate(cdp, "/storefront", '[data-testid="storefront-settings"]', "storefront after save");
+  const reloadedMenuState = await cdp.evaluate(`(() => ({
+    products: document.querySelector('[data-testid="storefront-menu-toggle-products"]').checked,
+    categories: document.querySelector('[data-testid="storefront-menu-toggle-categories"]').checked,
+    support: document.querySelector('[data-testid="storefront-menu-toggle-support"]').checked,
+    firstItem: document.querySelector('[data-testid^="storefront-menu-item-"]')?.dataset.testid,
+  }))()`);
+  if (
+    reloadedMenuState.products !== false ||
+    reloadedMenuState.categories !== false ||
+    reloadedMenuState.support !== true ||
+    reloadedMenuState.firstItem !== "storefront-menu-item-support"
+  ) {
+    await fail(`Scenario 5E: reloaded settings did not preserve saved choices: ${JSON.stringify(reloadedMenuState)}`);
+  }
+
+  await cdp.evaluate(`window.confirm = () => true;`);
+  await click(cdp, '[data-testid="storefront-reset-btn"]');
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="storefront-menu-toggle-products"]').checked === true`,
+    "reset storefront defaults",
+  );
+  const resetMenu = await pgClient`
+    SELECT storefront_menu FROM bot_setting WHERE id = 1;
+  `;
+  if (resetMenu[0]?.storefront_menu !== null) {
+    await fail(`Scenario 5E: reset did not clear customization: ${JSON.stringify(resetMenu[0])}`);
+  }
+
   log("Scenario 6: QA-24 return from Buttons editor preserves fields and active state");
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 1280,
@@ -1276,6 +1529,10 @@ async function main() {
     await navigate(cdp, "/categories", '[data-testid="categories-admin"]', `categories at ${width}px`);
     await assertNoHorizontalOverflow(cdp, width, `categories ${width}px`);
     await assertTouchTargets(cdp, `categories ${width}px`);
+
+    await navigate(cdp, "/storefront", '[data-testid="storefront-settings"]', `storefront at ${width}px`);
+    await assertNoHorizontalOverflow(cdp, width, `storefront ${width}px`);
+    await assertTouchTargets(cdp, `storefront ${width}px`);
   }
 
   await cdp.send("Emulation.setDeviceMetricsOverride", {

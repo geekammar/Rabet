@@ -19,7 +19,7 @@ const operations = navItems.filter((item) =>
 );
 
 const configuration = navItems.filter((item) =>
-  ["/bot-content", "/telegram", "/settings"].includes(item.href),
+  ["/storefront", "/bot-content", "/telegram", "/settings"].includes(item.href),
 );
 
 function SectionCard({

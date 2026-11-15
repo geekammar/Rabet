@@ -382,6 +382,7 @@ const DASHBOARD_PATHS = [
   "/overview",
   "/products",
   "/categories",
+  "/storefront",
   "/catalog",
   "/payment-methods",
   "/inquiries",

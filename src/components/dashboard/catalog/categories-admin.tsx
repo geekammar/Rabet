@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/card";
 import { buildAdminCategoryRows } from "@/lib/catalog/admin";
 import { collectChangedTranslations } from "@/lib/catalog/translation-draft";
+import { getCatalogLanguageTabs, getTranslationStatus } from "@/lib/catalog/language-tabs";
 import {
   buildCategoryHierarchy,
   resolveCategoryDisplayName,
@@ -122,7 +123,19 @@ export function CategoriesAdmin({
     defaultLanguage?.label ?? (defaultLangCode === "ar" ? "العربية" : "English");
   const defaultLangDir =
     defaultLanguage?.textDirection ?? (defaultLangCode === "ar" ? "rtl" : "ltr");
-  const arabicRegistered = languages.some((languageRow) => languageRow.code === "ar");
+  const languageTabs = useMemo(() => {
+    const tabs = getCatalogLanguageTabs(languages, defaultLanguage);
+    if (tabs.length > 0) return tabs;
+
+    return [
+      {
+        code: defaultLangCode,
+        label: defaultLangLabel,
+        isRtl: defaultLangDir === "rtl",
+        isDefault: true,
+      },
+    ];
+  }, [defaultLanguage, defaultLangCode, defaultLangDir, defaultLangLabel, languages]);
 
   const { flattened } = useMemo(
     () =>
@@ -148,11 +161,9 @@ export function CategoriesAdmin({
   }));
 
   const openCreateForm = (parentId: string | null = null) => {
-    const translations: Record<string, { name: string; description: string }> = {
-      [defaultLangCode]: { name: "", description: "" },
-    };
-    if (arabicRegistered && defaultLangCode !== "ar") {
-      translations.ar = { name: "", description: "" };
+    const translations: Record<string, { name: string; description: string }> = {};
+    for (const tab of languageTabs) {
+      translations[tab.code] = { name: "", description: "" };
     }
 
     const nextForm: CategoryFormState = {
@@ -182,9 +193,15 @@ export function CategoriesAdmin({
       };
     }
 
-    const preferredTab = translations[defaultLangCode]
+    for (const tab of languageTabs) {
+      if (!translations[tab.code]) {
+        translations[tab.code] = { name: "", description: "" };
+      }
+    }
+
+    const preferredTab = languageTabs.some((tab) => tab.code === defaultLangCode)
       ? defaultLangCode
-      : Object.keys(translations)[0] ?? defaultLangCode;
+      : languageTabs[0]?.code ?? defaultLangCode;
 
     const nextForm: CategoryFormState = {
       mode: "edit",
@@ -248,26 +265,28 @@ export function CategoriesAdmin({
     startTransition(async () => {
       try {
         if (form.mode === "create") {
-          const defaultTranslation = form.translations[defaultLangCode] ?? {
-            name: "",
-            description: "",
-          };
-          const arabicTranslation =
-            arabicRegistered && defaultLangCode !== "ar"
-              ? form.translations.ar
-              : undefined;
+          const translations = languageTabs
+            .map((tab) => {
+              const values = form.translations[tab.code] ?? {
+                name: "",
+                description: "",
+              };
+              const hasContent = values.name.trim() || values.description.trim();
+
+              if (tab.code !== defaultLangCode && !hasContent) return null;
+
+              return {
+                languageCode: tab.code,
+                name: values.name,
+                description: values.description,
+              };
+            })
+            .filter((translation) => translation !== null);
 
           const result = await createCategoryAction({
             parentId: form.parentId,
             slug: form.slug,
-            name: defaultTranslation.name,
-            description: defaultTranslation.description,
-            arabicName: arabicTranslation?.name.trim()
-              ? arabicTranslation.name
-              : undefined,
-            arabicDescription: arabicTranslation?.description.trim()
-              ? arabicTranslation.description
-              : undefined,
+            translations,
           });
 
           if (!result.success) {
@@ -373,14 +392,23 @@ export function CategoriesAdmin({
   if (form) {
     const isDirty = snapshotForm(form) !== form.initialSnapshot;
     const formTitle = form.mode === "create" ? "Add category" : "Edit category";
-    const activeTranslation = form.translations[form.activeLangTab] ?? {
+    const activeLanguageTab =
+      languageTabs.find((tab) => tab.code === form.activeLangTab) ??
+      languageTabs[0];
+    const activeTranslation = form.translations[activeLanguageTab.code] ?? {
       name: "",
       description: "",
     };
-    const translationError = (field: "name" | "description") =>
-      form.errors[`translations.${form.activeLangTab}.${field}`] ??
-      form.errors[field] ??
-      "";
+    const translationError = (field: "name" | "description") => {
+      const direct = form.errors[`translations.${activeLanguageTab.code}.${field}`];
+      if (direct) return direct;
+      if (activeLanguageTab.isDefault) return form.errors[field] ?? "";
+      if (activeLanguageTab.code === "ar") {
+        const legacyKey = field === "name" ? "arabicName" : "arabicDescription";
+        return form.errors[legacyKey] ?? "";
+      }
+      return "";
+    };
     const tabHasError = (languageCode: string) =>
       Object.keys(form.errors).some(
         (key) =>
@@ -553,54 +581,53 @@ export function CategoriesAdmin({
             ) : null}
 
             <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  type="button"
-                  variant={
-                    form.activeLangTab === defaultLangCode ? "default" : "outline"
-                  }
-                  onClick={() => updateForm({ activeLangTab: defaultLangCode })}
-                  className="min-h-11"
-                >
-                  {defaultLangLabel} ({defaultLangCode.toUpperCase()})
-                  {tabHasError(defaultLangCode) ? (
-                    <span className="ml-1 text-destructive">!</span>
-                  ) : null}
-                </Button>
-                {arabicRegistered && defaultLangCode !== "ar" ? (
-                  <Button
-                    type="button"
-                    variant={form.activeLangTab === "ar" ? "default" : "outline"}
-                    onClick={() => updateForm({ activeLangTab: "ar" })}
-                    className="min-h-11"
-                  >
-                    العربية (AR)
-                    {tabHasError("ar") ? (
-                      <span className="ml-1 text-destructive">!</span>
-                    ) : null}
-                  </Button>
-                ) : null}
-                <Badge variant="outline" className="text-xs">
-                  {form.translations[form.activeLangTab]?.name?.trim()
-                    ? `Draft (${form.activeLangTab.toUpperCase()})`
-                    : `Missing (${form.activeLangTab.toUpperCase()})`}
-                </Badge>
+              <div className="flex flex-wrap items-center gap-2" role="tablist">
+                {languageTabs.map((tab) => {
+                  const status = getTranslationStatus(form.translations[tab.code]);
+                  const isActive = form.activeLangTab === tab.code;
+
+                  return (
+                    <Button
+                      key={tab.code}
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      variant={isActive ? "default" : "outline"}
+                      onClick={() => updateForm({ activeLangTab: tab.code })}
+                      className="min-h-11 gap-1.5"
+                      data-testid={`language-tab-${tab.code}`}
+                    >
+                      <span>
+                        {tab.label} ({tab.code.toUpperCase()})
+                      </span>
+                      <span
+                        className={`text-xs font-normal ${
+                          isActive ? "opacity-80" : "text-muted-foreground"
+                        }`}
+                      >
+                        {status === "complete" ? "Complete" : "Missing"}
+                      </span>
+                      {tabHasError(tab.code) ? (
+                        <span className="text-destructive">!</span>
+                      ) : null}
+                    </Button>
+                  );
+                })}
               </div>
 
-              {form.mode === "edit" ? (
-                <p className="text-xs text-muted-foreground">
-                  Saving applies the selected language tab. Other translations
-                  are preserved.
-                </p>
-              ) : null}
+              <p className="text-xs text-muted-foreground">
+                {form.mode === "edit"
+                  ? "Save applies all changed language tabs together. Untouched translations are preserved."
+                  : "The default language name is required. Other enabled languages can be filled now or later; blank languages are not created."}
+              </p>
 
               <div
                 className="space-y-4"
-                dir={form.activeLangTab === "ar" ? "rtl" : defaultLangDir}
+                dir={activeLanguageTab.isRtl ? "rtl" : "ltr"}
               >
                 <div className="space-y-1.5">
                   <label htmlFor="category-name" className="text-sm font-medium">
-                    Name ({form.activeLangTab.toUpperCase()}){" "}
+                    Name ({activeLanguageTab.code.toUpperCase()}){" "}
                     <span className="text-destructive">*</span>
                   </label>
                   <input
@@ -631,7 +658,7 @@ export function CategoriesAdmin({
                     htmlFor="category-description"
                     className="text-sm font-medium"
                   >
-                    Description ({form.activeLangTab.toUpperCase()})
+                    Description ({activeLanguageTab.code.toUpperCase()})
                   </label>
                   <textarea
                     id="category-description"
