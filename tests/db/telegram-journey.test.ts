@@ -520,7 +520,11 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       const rootCatalogMsg = fakeTransport.editedMessages[0];
       expect(rootCatalogMsg.text).toContain("Welcome to Acme Digital Store!");
       expect(rootCatalogMsg.replyMarkup?.inline_keyboard).toEqual([
-        [{ text: "Software & Tools", callback_data: `c:${rootCatId}` }],
+        [{ text: "🛍 Browse Products", callback_data: "prods" }],
+        [{ text: "🗂 Browse Categories", callback_data: "scats" }],
+        [{ text: "💬 Contact Support", callback_data: "support" }],
+        [{ text: "🌐 Change Language", callback_data: "langs" }],
+        [{ text: "📨 My Active Inquiries", callback_data: "myinq" }],
       ]);
 
       fakeTransport.clear();
@@ -820,7 +824,11 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       const homeMsg = fakeTransport.editedMessages[0];
       expect(homeMsg.text).toContain("Welcome to Acme Digital Store!");
       expect(homeMsg.replyMarkup?.inline_keyboard).toEqual([
-        [{ text: "Software & Tools", callback_data: `c:${rootCatId}` }],
+        [{ text: "🛍 Browse Products", callback_data: "prods" }],
+        [{ text: "🗂 Browse Categories", callback_data: "scats" }],
+        [{ text: "💬 Contact Support", callback_data: "support" }],
+        [{ text: "🌐 Change Language", callback_data: "langs" }],
+        [{ text: "📨 My Active Inquiries", callback_data: "myinq" }],
       ]);
     });
   });
@@ -873,7 +881,11 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       const msg = fakeTransport.sentMessages[0];
       expect(msg.text).toContain("مرحباً بكم في Acme Digital Store!");
       expect(msg.replyMarkup?.inline_keyboard).toEqual([
-        [{ text: "برمجيات وأدوات", callback_data: expect.stringMatching(/^c:/) }],
+        [{ text: "🛍 تصفح المنتجات", callback_data: "prods" }],
+        [{ text: "🗂 تصفح الأقسام", callback_data: "scats" }],
+        [{ text: "💬 تواصل مع الدعم", callback_data: "support" }],
+        [{ text: "🌐 تغيير اللغة", callback_data: "langs" }],
+        [{ text: "📨 استفساراتي النشطة", callback_data: "myinq" }],
       ]);
 
       // Revert store settings
@@ -2096,8 +2108,37 @@ describe.skipIf(!shouldRun)("Telegram Webhook & First Catalog Journey (Phase 06-
       });
       expect(resStart.status).toBe(200);
 
-      // Check first page keyboard has 10 category rows + 1 pagination row with Next
-      const msg1 = fakeTransport.sentMessages[0];
+      // The storefront home exposes the legacy root-category listing entry point.
+      const homeKeyboard = fakeTransport.sentMessages[0].replyMarkup?.inline_keyboard ?? [];
+      expect(
+        homeKeyboard.flat().find((btn) => btn.callback_data === "scats"),
+      ).toBeDefined();
+
+      fakeTransport.clear();
+
+      // Open root categories, which paginate beyond the 10-item page size
+      const reqRootPage1 = createWebhookRequest(
+        {
+          update_id: 9090,
+          callback_query: {
+            id: "cb_root_p1",
+            from: { id: customerTelegramId, is_bot: false, first_name: "RootPager" },
+            message: { message_id: 1, chat: { id: customerTelegramId, type: "private" } },
+            data: "c:root",
+          },
+        },
+        TEST_WEBHOOK_SECRET,
+      );
+
+      const resRootPage1 = await handleTelegramWebhookRequest(reqRootPage1, {
+        db: asAppDb(testDb!.db),
+        transport: fakeTransport,
+        botToken: TEST_BOT_TOKEN,
+        webhookSecret: TEST_WEBHOOK_SECRET,
+      });
+      expect(resRootPage1.status).toBe(200);
+
+      const msg1 = fakeTransport.editedMessages[0];
       const keyboard1 = msg1.replyMarkup?.inline_keyboard ?? [];
       const nextBtn = keyboard1.flat().find((btn) => btn.callback_data === "c:root:2");
       expect(nextBtn).toBeDefined();

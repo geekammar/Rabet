@@ -19,7 +19,14 @@ import {
   isProductHierarchyActive,
 } from "@/lib/catalog/eligibility";
 import {
+  getEligibleStorefrontCategoryIds,
+  hasEligibleStorefrontProducts,
+  listEligibleStorefrontCategories,
+  listEligibleStorefrontProducts,
+} from "@/lib/catalog/storefront";
+import {
   getCustomerByTelegramId,
+  listEnabledLanguages,
   readSettings,
   resolveMessageText,
   setCustomerSelectedLanguage,
@@ -30,6 +37,7 @@ import {
   handleSupportInquiryCallback,
   recoverAndRenderCommittedInquiryCallback,
   renderCustomerInquiriesList,
+  renderCustomerInquiriesOverview,
   type InquiryJourneyOptions,
 } from "./inquiry-journey";
 import { parseToken, tokens, UUID_REGEX, type ParsedToken } from "./tokens";
@@ -71,6 +79,17 @@ export interface ChannelJourneyOptions {
   manualPaymentPrototypeEnabled?: boolean;
 }
 
+function orderEnabledLanguages<T extends { id: string; code: string }>(
+  languages: T[],
+  defaultLanguageId: string,
+): T[] {
+  return [...languages].sort((a, b) => {
+    if (a.id === defaultLanguageId) return -1;
+    if (b.id === defaultLanguageId) return 1;
+    return a.code < b.code ? -1 : a.code > b.code ? 1 : 0;
+  });
+}
+
 export function getLocalizedUiStrings(isRtl: boolean) {
   if (isRtl) {
     return {
@@ -87,6 +106,17 @@ export function getLocalizedUiStrings(isRtl: boolean) {
       actionNotSupported: "هذا الإجراء غير مدعوم حالياً في هذا الإصدار.",
       storeUnavailable: "المتجر غير متاح حالياً.",
       selectLanguagePrompt: "يرجى اختيار اللغة / Please select your language:",
+      browseProducts: "🛍 تصفح المنتجات",
+      browseCategories: "🗂 تصفح الأقسام",
+      contactSupport: "💬 تواصل مع الدعم",
+      changeLanguage: "🌐 تغيير اللغة",
+      myInquiries: "📨 استفساراتي النشطة",
+      noProducts: "لا توجد منتجات متاحة حالياً.",
+      pageInfo: "الصفحة",
+      noActiveInquiries: "ليس لديك استفسارات نشطة.",
+      activeInquiriesTitle: "استفساراتك النشطة:",
+      inquiriesReplyHint:
+        "للرد، أرسل رسالتك هنا أو استخدم /reply <المرجع> <رسالتك>.",
       openLink: "🌐 فتح الرابط",
       customerFallback: "عميلنا العزيز",
       paymentPrototypeNotice:
@@ -115,6 +145,17 @@ export function getLocalizedUiStrings(isRtl: boolean) {
     actionNotSupported: "This action is not yet supported in this version.",
     storeUnavailable: "This store is currently unavailable.",
     selectLanguagePrompt: "Please select your language / يرجى اختيار اللغة:",
+    browseProducts: "🛍 Browse Products",
+    browseCategories: "🗂 Browse Categories",
+    contactSupport: "💬 Contact Support",
+    changeLanguage: "🌐 Change Language",
+    myInquiries: "📨 My Active Inquiries",
+    noProducts: "No products are available right now.",
+    pageInfo: "Page",
+    noActiveInquiries: "You have no active inquiries.",
+    activeInquiriesTitle: "Your active inquiries:",
+    inquiriesReplyHint:
+      "To reply, send a message here or use /reply <reference> <message>.",
     openLink: "🌐 Open link",
     customerFallback: "Customer",
     paymentPrototypeNotice:
@@ -345,34 +386,11 @@ export async function editOrThrow(
   }
 }
 
-/**
- * Renders the Root Catalog view (Welcome message + root categories).
- */
-async function renderRootCatalog(
+async function resolveWelcomeBody(
   db: Database,
-  transport: TelegramTransport,
-  chatId: number | string,
-  user: TelegramUser,
-  messageIdToEdit?: number,
-  page = 1,
-): Promise<void> {
-  const settings = await readSettings(db);
-  if (!settings) {
-    await sendOrThrow(transport, {
-      chatId,
-      text: "This store is currently unavailable.",
-    });
-    return;
-  }
-
-  const langContext = await resolveCustomerLanguageContext(
-    db,
-    user.id,
-    settings.defaultLanguageId,
-  );
-  const ui = getLocalizedUiStrings(langContext.isRtl);
-
-  // Resolve welcome text
+  settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>,
+  langContext: ResolvedLanguageContext,
+): Promise<string> {
   let welcomeBody = (langContext.isRtl || langContext.code === "ar")
     ? `مرحبًا بك في ${settings.displayName}!`
     : `Welcome to ${settings.displayName}!`;
@@ -389,51 +407,178 @@ async function renderRootCatalog(
   } catch {
     // Fall back to simple greeting
   }
+  return welcomeBody;
+}
 
-  // Read root categories with deterministic tie-breaking
-  const rootCategories = await db
-    .select({
-      id: category.id,
-      slug: category.slug,
-      sortOrder: category.sortOrder,
-    })
-    .from(category)
-    .where(
-      and(
-        isNull(category.parentId),
-        eq(category.isActive, true),
-        isNull(category.deletedAt),
-      ),
-    )
-    .orderBy(asc(category.sortOrder), asc(category.id));
+/**
+ * Renders the virtual default storefront home derived from the configured
+ * settings and the live catalog. Nothing is persisted and opening it creates no
+ * inquiry.
+ */
+async function renderStorefrontHome(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  user: TelegramUser,
+  messageIdToEdit?: number,
+): Promise<void> {
+  const settings = await readSettings(db);
+  if (!settings) {
+    await sendOrThrow(transport, {
+      chatId,
+      text: "This store is currently unavailable.",
+    });
+    return;
+  }
 
-  const totalPages = Math.max(1, Math.ceil(rootCategories.length / TELEGRAM_MENU_PAGE_SIZE));
-  const currentPage = Math.min(Math.max(1, page), totalPages);
-  const startIndex = (currentPage - 1) * TELEGRAM_MENU_PAGE_SIZE;
-  const pageCategories = rootCategories.slice(startIndex, startIndex + TELEGRAM_MENU_PAGE_SIZE);
+  const langContext = await resolveCustomerLanguageContext(
+    db,
+    user.id,
+    settings.defaultLanguageId,
+  );
+  const ui = getLocalizedUiStrings(langContext.isRtl);
+  const welcomeBody = await resolveWelcomeBody(db, settings, langContext);
 
-  // Get translations for root categories
-  const keyboard: TelegramInlineKeyboardButton[][] = [];
+  const [hasProducts, enabledLanguages] = await Promise.all([
+    hasEligibleStorefrontProducts(db),
+    listEnabledLanguages(db),
+  ]);
 
-  for (const cat of pageCategories) {
-    const translations = await db
-      .select({
-        languageId: categoryTranslation.languageId,
-        name: categoryTranslation.name,
-      })
-      .from(categoryTranslation)
-      .where(eq(categoryTranslation.categoryId, cat.id));
+  const keyboard: TelegramInlineKeyboardButton[][] = [
+    [{ text: ui.browseProducts, callback_data: tokens.products() }],
+  ];
 
-    const preferred = translations.find((t) => t.languageId === langContext.id);
-    const fallback = translations.find((t) => t.languageId === settings.defaultLanguageId);
-    const catName = preferred?.name ?? fallback?.name ?? cat.slug;
-
+  if (hasProducts) {
     keyboard.push([
-      {
-        text: catName,
-        callback_data: tokens.category(cat.id),
-      },
+      { text: ui.browseCategories, callback_data: tokens.storefrontCategories() },
     ]);
+  }
+
+  keyboard.push([{ text: ui.contactSupport, callback_data: tokens.support() }]);
+
+  if (enabledLanguages.length > 1) {
+    keyboard.push([{ text: ui.changeLanguage, callback_data: tokens.languages() }]);
+  }
+
+  keyboard.push([{ text: ui.myInquiries, callback_data: tokens.myInquiries() }]);
+
+  if (messageIdToEdit) {
+    await editOrThrow(transport, {
+      chatId,
+      messageId: messageIdToEdit,
+      text: welcomeBody,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+  } else {
+    await sendOrThrow(transport, {
+      chatId,
+      text: welcomeBody,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
+  }
+}
+
+/**
+ * Renders a root-category listing. Legacy `c:root[:page]` navigation uses the
+ * full configured tree; the storefront discovery entry point uses the filtered
+ * mode so branches without eligible products are not offered.
+ */
+async function renderRootCategories(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  user: TelegramUser,
+  messageIdToEdit?: number,
+  page = 1,
+  storefrontMode = false,
+): Promise<void> {
+  const settings = await readSettings(db);
+  if (!settings) {
+    await sendOrThrow(transport, {
+      chatId,
+      text: "This store is currently unavailable.",
+    });
+    return;
+  }
+
+  const langContext = await resolveCustomerLanguageContext(
+    db,
+    user.id,
+    settings.defaultLanguageId,
+  );
+  const ui = getLocalizedUiStrings(langContext.isRtl);
+  const bodyText = await resolveWelcomeBody(db, settings, langContext);
+
+  const keyboard: TelegramInlineKeyboardButton[][] = [];
+  let currentPage = 1;
+  let totalPages = 1;
+
+  if (storefrontMode) {
+    const result = await listEligibleStorefrontCategories(db, {
+      parentId: null,
+      languageId: langContext.id,
+      defaultLanguageId: settings.defaultLanguageId,
+      page,
+      pageSize: TELEGRAM_MENU_PAGE_SIZE,
+    });
+
+    currentPage = result.page;
+    totalPages = result.totalPages;
+
+    for (const item of result.items) {
+      keyboard.push([
+        {
+          text: item.name,
+          callback_data: tokens.storefrontCategory(item.id),
+        },
+      ]);
+    }
+  } else {
+    // Read root categories with deterministic tie-breaking
+    const rootCategories = await db
+      .select({
+        id: category.id,
+        slug: category.slug,
+        sortOrder: category.sortOrder,
+      })
+      .from(category)
+      .where(
+        and(
+          isNull(category.parentId),
+          eq(category.isActive, true),
+          isNull(category.deletedAt),
+        ),
+      )
+      .orderBy(asc(category.sortOrder), asc(category.id));
+
+    totalPages = Math.max(1, Math.ceil(rootCategories.length / TELEGRAM_MENU_PAGE_SIZE));
+    currentPage = Math.min(Math.max(1, page), totalPages);
+    const startIndex = (currentPage - 1) * TELEGRAM_MENU_PAGE_SIZE;
+    const pageCategories = rootCategories.slice(
+      startIndex,
+      startIndex + TELEGRAM_MENU_PAGE_SIZE,
+    );
+
+    for (const cat of pageCategories) {
+      const translations = await db
+        .select({
+          languageId: categoryTranslation.languageId,
+          name: categoryTranslation.name,
+        })
+        .from(categoryTranslation)
+        .where(eq(categoryTranslation.categoryId, cat.id));
+
+      const preferred = translations.find((t) => t.languageId === langContext.id);
+      const fallback = translations.find((t) => t.languageId === settings.defaultLanguageId);
+      const catName = preferred?.name ?? fallback?.name ?? cat.slug;
+
+      keyboard.push([
+        {
+          text: catName,
+          callback_data: tokens.category(cat.id),
+        },
+      ]);
+    }
   }
 
   // Pagination row if multiple pages
@@ -442,31 +587,137 @@ async function renderRootCatalog(
     if (currentPage > 1) {
       navButtons.push({
         text: ui.prevPage,
-        callback_data: tokens.rootCategory(currentPage - 1),
+        callback_data: storefrontMode
+          ? tokens.storefrontCategories(currentPage - 1)
+          : tokens.rootCategory(currentPage - 1),
       });
     }
     if (currentPage < totalPages) {
       navButtons.push({
         text: ui.nextPage,
-        callback_data: tokens.rootCategory(currentPage + 1),
+        callback_data: storefrontMode
+          ? tokens.storefrontCategories(currentPage + 1)
+          : tokens.rootCategory(currentPage + 1),
       });
     }
     keyboard.push(navButtons);
   }
 
-  const replyMarkup: TelegramInlineKeyboardMarkup = { inline_keyboard: keyboard };
+  keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
 
   if (messageIdToEdit) {
     await editOrThrow(transport, {
       chatId,
       messageId: messageIdToEdit,
-      text: welcomeBody,
-      replyMarkup,
+      text: bodyText,
+      replyMarkup: { inline_keyboard: keyboard },
     });
   } else {
-    await sendOrThrow(transport, { chatId, text: welcomeBody, replyMarkup });
+    await sendOrThrow(transport, {
+      chatId,
+      text: bodyText,
+      replyMarkup: { inline_keyboard: keyboard },
+    });
   }
 }
+
+/**
+ * Renders direct, paginated product discovery across the eligible catalog.
+ */
+async function renderStorefrontProducts(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+  settings: NonNullable<Awaited<ReturnType<typeof readSettings>>>,
+  langContext: ResolvedLanguageContext,
+  ui: ReturnType<typeof getLocalizedUiStrings>,
+  page = 1,
+): Promise<void> {
+  const result = await listEligibleStorefrontProducts(db, {
+    languageId: langContext.id,
+    defaultLanguageId: settings.defaultLanguageId,
+    page,
+    pageSize: TELEGRAM_MENU_PAGE_SIZE,
+  });
+
+  const keyboard: TelegramInlineKeyboardButton[][] = result.items.map((item) => [
+    { text: item.name, callback_data: tokens.product(item.id) },
+  ]);
+
+  if (result.totalPages > 1) {
+    const navButtons: TelegramInlineKeyboardButton[] = [];
+    if (result.page > 1) {
+      navButtons.push({
+        text: ui.prevPage,
+        callback_data: tokens.products(result.page - 1),
+      });
+    }
+    if (result.page < result.totalPages) {
+      navButtons.push({
+        text: ui.nextPage,
+        callback_data: tokens.products(result.page + 1),
+      });
+    }
+    keyboard.push(navButtons);
+  }
+
+  keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+  const bodyText =
+    result.totalCount === 0
+      ? ui.noProducts
+      : result.totalPages > 1
+        ? `${ui.browseProducts}\n\n${ui.pageInfo} ${result.page}/${result.totalPages}`
+        : ui.browseProducts;
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: bodyText,
+    replyMarkup: { inline_keyboard: keyboard },
+  });
+}
+
+/**
+ * Renders the explicit language menu. With a single enabled language the menu
+ * is not offered and the storefront home is shown instead.
+ */
+async function renderLanguageMenu(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+  user: TelegramUser,
+  defaultLanguageId: string,
+): Promise<void> {
+  const langContext = await resolveCustomerLanguageContext(db, user.id, defaultLanguageId);
+  const ui = getLocalizedUiStrings(langContext.isRtl);
+  const enabledLanguages = orderEnabledLanguages(
+    await listEnabledLanguages(db),
+    defaultLanguageId,
+  );
+  if (enabledLanguages.length <= 1) {
+    await renderStorefrontHome(db, transport, chatId, user, messageId);
+    return;
+  }
+
+  const langKeyboard: TelegramInlineKeyboardButton[][] = enabledLanguages.map((l) => [
+    {
+      text: l.label,
+      callback_data: tokens.lang(l.code),
+    },
+  ]);
+  langKeyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: ui.selectLanguagePrompt,
+    replyMarkup: { inline_keyboard: langKeyboard },
+  });
+}
+
 
 /**
  * Handles /start command in a private chat.
@@ -499,14 +750,10 @@ export async function handleStartCommand(
   }
 
   // Get all enabled languages
-  const enabledLanguages = await db
-    .select({
-      id: language.id,
-      code: language.code,
-      label: language.label,
-    })
-    .from(language)
-    .where(eq(language.isEnabled, true));
+  const enabledLanguages = orderEnabledLanguages(
+    await listEnabledLanguages(db),
+    settings.defaultLanguageId,
+  );
 
   if (enabledLanguages.length === 0) {
     await sendOrThrow(transport, {
@@ -537,8 +784,8 @@ export async function handleStartCommand(
     return;
   }
 
-  // Otherwise, proceed to root catalog
-  await renderRootCatalog(db, transport, message.chat.id, from);
+  // Otherwise, proceed to the virtual default storefront home
+  await renderStorefrontHome(db, transport, message.chat.id, from);
 }
 
 /**
@@ -554,6 +801,8 @@ async function renderCategory(
   langContext: ResolvedLanguageContext,
   ui: ReturnType<typeof getLocalizedUiStrings>,
   page = 1,
+  storefrontMode = false,
+  eligibleCategoryIds?: Set<string>,
 ): Promise<void> {
   // Load translations
   const catTranslations = await db
@@ -575,8 +824,10 @@ async function renderCategory(
     bodyText += `\n\n${catDesc.trim()}`;
   }
 
-  // Active subcategories with deterministic tie-breaking
-  const subcategories = await db
+  // Active subcategories with deterministic tie-breaking. The storefront
+  // discovery mode additionally hides branches with no eligible descendant
+  // products; legacy category callbacks keep the full configured tree.
+  const allSubcategories = await db
     .select({
       id: category.id,
       slug: category.slug,
@@ -591,6 +842,10 @@ async function renderCategory(
       ),
     )
     .orderBy(asc(category.sortOrder), asc(category.id));
+
+  const subcategories = storefrontMode && eligibleCategoryIds
+    ? allSubcategories.filter((row) => eligibleCategoryIds.has(row.id))
+    : allSubcategories;
 
   // Active products with deterministic tie-breaking
   const productsList = await db
@@ -648,7 +903,9 @@ async function renderCategory(
       keyboard.push([
         {
           text: subName,
-          callback_data: tokens.category(item.id),
+          callback_data: storefrontMode
+            ? tokens.storefrontCategory(item.id)
+            : tokens.category(item.id),
         },
       ]);
     } else {
@@ -679,20 +936,30 @@ async function renderCategory(
     if (currentPage > 1) {
       navButtons.push({
         text: ui.prevPage,
-        callback_data: tokens.category(catRow.id, currentPage - 1),
+        callback_data: storefrontMode
+          ? tokens.storefrontCategory(catRow.id, currentPage - 1)
+          : tokens.category(catRow.id, currentPage - 1),
       });
     }
     if (currentPage < totalPages) {
       navButtons.push({
         text: ui.nextPage,
-        callback_data: tokens.category(catRow.id, currentPage + 1),
+        callback_data: storefrontMode
+          ? tokens.storefrontCategory(catRow.id, currentPage + 1)
+          : tokens.category(catRow.id, currentPage + 1),
       });
     }
     keyboard.push(navButtons);
   }
 
   // Navigation row: Back & Home
-  const backTarget = catRow.parentId ? tokens.category(catRow.parentId) : tokens.home();
+  const backTarget = catRow.parentId
+    ? storefrontMode
+      ? tokens.storefrontCategory(catRow.parentId)
+      : tokens.category(catRow.parentId)
+    : storefrontMode
+      ? tokens.storefrontCategories()
+      : tokens.home();
   keyboard.push([
     { text: ui.back, callback_data: backTarget },
     { text: ui.home, callback_data: tokens.home() },
@@ -766,7 +1033,20 @@ export async function handleCallbackQuery(
     throw new Error("Unrecognized callback token");
   }
 
-  // 1. Language selection callback: lang:<code>
+  // 1. Language menu callback: langs
+  if (parsed.type === "languages") {
+    await renderLanguageMenu(
+      db,
+      transport,
+      chatId,
+      messageId,
+      user,
+      settings.defaultLanguageId,
+    );
+    return;
+  }
+
+  // 1.1. Language selection callback: lang:<code>
   if (parsed.type === "lang") {
     const [targetLang] = await db
       .select({ id: language.id, isEnabled: language.isEnabled })
@@ -778,7 +1058,9 @@ export async function handleCallbackQuery(
       await setCustomerSelectedLanguage(db, user.id, targetLang.id);
     }
 
-    await renderRootCatalog(db, transport, chatId, user, messageId);
+    // A stale selection for a now-disabled language changes nothing and safely
+    // returns to the storefront in the effective fallback language.
+    await renderStorefrontHome(db, transport, chatId, user, messageId);
     return;
   }
 
@@ -820,14 +1102,122 @@ export async function handleCallbackQuery(
     return;
   }
 
+  // My Inquiries overview callback: myinq[:<page>]
+  if (parsed.type === "myInquiries") {
+    await renderCustomerInquiriesOverview(
+      db,
+      transport,
+      chatId,
+      messageId,
+      customerRecord.id,
+      parsed.page,
+      langContext,
+      ui,
+    );
+    return;
+  }
+
+  // Direct storefront product discovery: prods[:<page>]
+  if (parsed.type === "products") {
+    await renderStorefrontProducts(
+      db,
+      transport,
+      chatId,
+      messageId,
+      settings,
+      langContext,
+      ui,
+      parsed.page,
+    );
+    return;
+  }
+
+  // Explicit storefront support entry point. There is no source product action;
+  // the explicit tap reuses the existing general support create-or-resume path.
+  if (parsed.type === "support") {
+    if (!journeyOptions || journeyOptions.updateId <= 0 || !journeyOptions.attemptId) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.optionUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    await handleSupportInquiryCallback(db, transport, {
+      chatId,
+      messageId,
+      user,
+      langContext,
+      ui,
+      backTarget: tokens.home(),
+      returnToProductTarget: tokens.home(),
+      options: journeyOptions,
+    });
+    return;
+  }
+
   // 2. Home or Root callback
   if (parsed.type === "home") {
-    await renderRootCatalog(db, transport, chatId, user, messageId, 1);
+    await renderStorefrontHome(db, transport, chatId, user, messageId);
     return;
   }
 
   if (parsed.type === "root") {
-    await renderRootCatalog(db, transport, chatId, user, messageId, parsed.page);
+    await renderRootCategories(db, transport, chatId, user, messageId, parsed.page);
+    return;
+  }
+
+  // 2.1. Storefront category discovery: scats[:page] / sc:<categoryId>[:<page>]
+  if (parsed.type === "storefrontCategories") {
+    await renderRootCategories(
+      db,
+      transport,
+      chatId,
+      user,
+      messageId,
+      parsed.page,
+      true,
+    );
+    return;
+  }
+
+  if (parsed.type === "storefrontCategory") {
+    const eligibleCategoryIds = await getEligibleStorefrontCategoryIds(db);
+    const categoryCheck = await isCategoryHierarchyActive(db, parsed.categoryId);
+
+    if (
+      !categoryCheck.valid ||
+      !categoryCheck.categoryRow ||
+      !eligibleCategoryIds.has(parsed.categoryId)
+    ) {
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: ui.categoryUnavailable,
+        replyMarkup: {
+          inline_keyboard: [[{ text: ui.home, callback_data: tokens.home() }]],
+        },
+      });
+      return;
+    }
+
+    await renderCategory(
+      db,
+      transport,
+      chatId,
+      messageId,
+      categoryCheck.categoryRow,
+      settings,
+      langContext,
+      ui,
+      parsed.page,
+      true,
+      eligibleCategoryIds,
+    );
     return;
   }
 
@@ -947,7 +1337,7 @@ export async function handleCallbackQuery(
       .limit(1);
 
     if (!act) {
-      await renderRootCatalog(db, transport, chatId, user, messageId);
+      await renderStorefrontHome(db, transport, chatId, user, messageId);
       return;
     }
 
@@ -1117,7 +1507,7 @@ export async function handleCallbackQuery(
   }
 
   // Fallback for unknown tokens
-  await renderRootCatalog(db, transport, chatId, user, messageId);
+  await renderStorefrontHome(db, transport, chatId, user, messageId);
 }
 
 async function findProductContactRoute(

@@ -69,7 +69,11 @@ const trash: string[] = [];
  * run concurrently with this one, so this file's cluster-wide "no database was
  * added" snapshot ignores them. See `databases()` below.
  */
-const SIBLING_SUITE_PREFIXES = ["rabet_test_", "rabet_actions_"];
+const SIBLING_SUITE_PREFIXES = [
+  "rabet_test_",
+  "rabet_actions_",
+  "rabet_upgrade_",
+];
 
 afterAll(() => {
   for (const dir of trash) {

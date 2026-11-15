@@ -30,6 +30,37 @@ export const tokens = {
     }
     return assertValidCallbackData(page && page > 1 ? `c:root:${page}` : "c:root");
   },
+  storefrontCategories: (page?: number): string => {
+    if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
+      throw new Error(`Invalid page number: ${page}`);
+    }
+    return assertValidCallbackData(page && page > 1 ? `scats:${page}` : "scats");
+  },
+  storefrontCategory: (categoryId: string, page?: number): string => {
+    if (!UUID_REGEX.test(categoryId)) {
+      throw new Error(`Invalid category UUID: "${categoryId}"`);
+    }
+    if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
+      throw new Error(`Invalid page number: ${page}`);
+    }
+    return assertValidCallbackData(
+      page && page > 1 ? `sc:${categoryId}:${page}` : `sc:${categoryId}`,
+    );
+  },
+  products: (page?: number): string => {
+    if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
+      throw new Error(`Invalid page number: ${page}`);
+    }
+    return assertValidCallbackData(page && page > 1 ? `prods:${page}` : "prods");
+  },
+  languages: (): string => assertValidCallbackData("langs"),
+  support: (): string => assertValidCallbackData("support"),
+  myInquiries: (page?: number): string => {
+    if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
+      throw new Error(`Invalid page number: ${page}`);
+    }
+    return assertValidCallbackData(page && page > 1 ? `myinq:${page}` : "myinq");
+  },
   lang: (code: string): string => {
     if (!LANG_CODE_REGEX.test(code)) {
       throw new Error(`Invalid language code format: "${code}"`);
@@ -99,6 +130,12 @@ export const tokens = {
 export type ParsedToken =
   | { type: "home" }
   | { type: "root"; page: number }
+  | { type: "storefrontCategories"; page: number }
+  | { type: "storefrontCategory"; categoryId: string; page: number }
+  | { type: "products"; page: number }
+  | { type: "languages" }
+  | { type: "support" }
+  | { type: "myInquiries"; page: number }
   | { type: "lang"; code: string }
   | { type: "category"; categoryId: string; page: number }
   | { type: "product"; productId: string }
@@ -122,6 +159,72 @@ export function parseToken(data?: string): ParsedToken {
 
   if (data === "home") {
     return { type: "home" };
+  }
+
+  if (data === "langs") {
+    return { type: "languages" };
+  }
+
+  if (data === "support") {
+    return { type: "support" };
+  }
+
+  if (data === "scats") {
+    return { type: "storefrontCategories", page: 1 };
+  }
+
+  if (data.startsWith("scats:")) {
+    const pageStr = data.slice(6);
+    if (PAGE_REGEX.test(pageStr)) {
+      return { type: "storefrontCategories", page: parseInt(pageStr, 10) };
+    }
+    return { type: "unknown", raw: data };
+  }
+
+  if (data.startsWith("sc:")) {
+    const parts = data.slice(3).split(":");
+    const categoryId = parts[0];
+
+    if (!UUID_REGEX.test(categoryId)) {
+      return { type: "unknown", raw: data };
+    }
+
+    if (parts.length === 1) {
+      return { type: "storefrontCategory", categoryId, page: 1 };
+    }
+    if (parts.length === 2 && PAGE_REGEX.test(parts[1])) {
+      return {
+        type: "storefrontCategory",
+        categoryId,
+        page: parseInt(parts[1], 10),
+      };
+    }
+
+    return { type: "unknown", raw: data };
+  }
+
+  if (data === "prods") {
+    return { type: "products", page: 1 };
+  }
+
+  if (data.startsWith("prods:")) {
+    const pageStr = data.slice(6);
+    if (PAGE_REGEX.test(pageStr)) {
+      return { type: "products", page: parseInt(pageStr, 10) };
+    }
+    return { type: "unknown", raw: data };
+  }
+
+  if (data === "myinq") {
+    return { type: "myInquiries", page: 1 };
+  }
+
+  if (data.startsWith("myinq:")) {
+    const pageStr = data.slice(6);
+    if (PAGE_REGEX.test(pageStr)) {
+      return { type: "myInquiries", page: parseInt(pageStr, 10) };
+    }
+    return { type: "unknown", raw: data };
   }
 
   if (data === "inq") {

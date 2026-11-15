@@ -574,7 +574,7 @@ export async function handleSupportInquiryCallback(
     chatId: number | string;
     messageId: number;
     user: TelegramUser;
-    actionRow: SupportActionRow;
+    actionRow?: SupportActionRow;
     langContext: ResolvedLanguageContext;
     ui: ReturnType<typeof getLocalizedUiStrings>;
     backTarget: string;
@@ -610,14 +610,17 @@ export async function handleSupportInquiryCallback(
   const settings = await readSettings(db);
   const displayName = settings?.displayName ?? "Store";
 
-  // 2. Validate configured support_category against current bot_setting.support_category
-  const config = (actionRow.actionConfig as { support_category?: string } | null) ?? {};
+  // 2. Validate configured support_category against current bot_setting.support_category.
+  // Storefront support has no source action and therefore no category override:
+  // it reuses the same general support thread as free-text support.
+  const config = (actionRow?.actionConfig as { support_category?: string } | null) ?? {};
   const supportCategory = config.support_category?.trim() || null;
 
-  const keyboard: TelegramInlineKeyboardButton[][] = [
-    [{ text: ui.back, callback_data: backTarget }],
-  ];
-  if (actionRow.parentActionId) {
+  const keyboard: TelegramInlineKeyboardButton[][] = [];
+  if (backTarget !== tokens.home()) {
+    keyboard.push([{ text: ui.back, callback_data: backTarget }]);
+  }
+  if (actionRow?.parentActionId) {
     keyboard.push([{ text: ui.returnToProduct, callback_data: returnToProductTarget }]);
   }
   keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
@@ -759,6 +762,64 @@ export async function renderCustomerInquiriesList(
     replyMarkup: resp.replyMarkup,
   });
 }
+
+/**
+ * Renders the storefront "My Inquiries" view. It is a read-only overview of the
+ * same active inquiry set used by inbound routing; it never creates or resumes
+ * an inquiry.
+ */
+export async function renderCustomerInquiriesOverview(
+  db: Database,
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+  customerId: string,
+  page: number,
+  langContext: ResolvedLanguageContext,
+  ui: ReturnType<typeof getLocalizedUiStrings>,
+): Promise<void> {
+  const paged = await listActiveCustomerInquiriesPaged(db, customerId, {
+    page,
+    pageSize: 5,
+  });
+
+  const referencesList = paged.inquiries.map((inq) => {
+    let contextName = langContext.isRtl ? "الدعم" : "Support";
+    if (inq.productId) {
+      const snapshot = inq.productSnapshot as { name?: string } | null;
+      contextName = snapshot?.name ?? (langContext.isRtl ? "استفسار منتج" : "Product inquiry");
+    } else if (inq.category) {
+      contextName = `${langContext.isRtl ? "الدعم" : "Support"} (${inq.category})`;
+    }
+    return `• ${inq.reference}: ${contextName}`;
+  });
+
+  const text =
+    paged.inquiries.length === 0
+      ? ui.noActiveInquiries
+      : `${ui.activeInquiriesTitle}\n\n${referencesList.join("\n")}\n\n${ui.inquiriesReplyHint}`;
+
+  const keyboard: TelegramInlineKeyboardButton[][] = [];
+  const navRow: TelegramInlineKeyboardButton[] = [];
+  if (paged.page > 1) {
+    navRow.push({ text: ui.prevPage, callback_data: tokens.myInquiries(paged.page - 1) });
+  }
+  if (paged.page < paged.totalPages) {
+    navRow.push({ text: ui.nextPage, callback_data: tokens.myInquiries(paged.page + 1) });
+  }
+  if (navRow.length > 0) {
+    keyboard.push(navRow);
+  }
+  keyboard.push([{ text: ui.home, callback_data: tokens.home() }]);
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text,
+    replyMarkup: { inline_keyboard: keyboard },
+  });
+}
+
 
 
 /**
