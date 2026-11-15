@@ -1,6 +1,6 @@
 import "server-only";
 
-import { eq, isNull } from "drizzle-orm";
+import { eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Database } from "@/db/client";
@@ -14,6 +14,7 @@ import {
 
 import {
   invalidInput,
+  isUndefinedColumnError,
   mapDatabaseError,
   RabetDataError,
 } from "./errors";
@@ -132,13 +133,28 @@ export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
  * `id` is constrained to `1`, so this is always a single-row lookup.
  */
 export async function readSettings(db: Database): Promise<BotSettings | null> {
+  // Explicit columns keep this read compatible with a database where the
+  // additive storefront-menu migration has not been applied yet. The menu has
+  // its own capability-aware reader below; treating it as `null` here preserves
+  // the Phase 28 defaults for every existing caller.
   const rows = await db
-    .select()
+    .select({
+      id: botSetting.id,
+      defaultLanguageId: botSetting.defaultLanguageId,
+      currency: botSetting.currency,
+      displayName: botSetting.displayName,
+      askForLanguage: botSetting.askForLanguage,
+      supportCategory: botSetting.supportCategory,
+      supportReplyTime: botSetting.supportReplyTime,
+      createdAt: botSetting.createdAt,
+      updatedAt: botSetting.updatedAt,
+    })
     .from(botSetting)
     .where(eq(botSetting.id, 1))
     .limit(1);
 
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row ? { ...row, storefrontMenu: null } : null;
 }
 
 /**
@@ -218,24 +234,42 @@ export async function initializeSettings(
   }
 
   try {
-    const inserted = await db
-      .insert(botSetting)
-      .values({
-        // The singleton: the primary key and the `CHECK (id = 1)` both fix this.
-        id: 1,
-        defaultLanguageId: defaultLanguage.id,
-        currency: parsed.currency,
-        displayName: parsed.displayName,
-        askForLanguage: parsed.askForLanguage,
-        supportCategory: parsed.supportCategory,
-        supportReplyTime: parsed.supportReplyTime ?? null,
-      })
-      // The idempotency site. A conflict here means settings already exist; the
-      // branch below reports it instead of clobbering the owner's configuration.
-      .onConflictDoNothing({ target: botSetting.id })
-      .returning();
+    // Explicit column list, intentionally omitting `storefront_menu`: the
+    // initialization contract must keep working on a database where the
+    // additive storefront-menu migration has not been applied yet. The column
+    // has no default and stays NULL, which is the documented "not customized"
+    // state.
+    const inserted = await db.execute<{ id: number }>(sql`
+      insert into ${botSetting} (
+        "id",
+        "default_language_id",
+        "currency",
+        "display_name",
+        "ask_for_language",
+        "support_category",
+        "support_reply_time"
+      ) values (
+        1,
+        ${defaultLanguage.id},
+        ${parsed.currency},
+        ${parsed.displayName},
+        ${parsed.askForLanguage},
+        ${sql.param(parsed.supportCategory, botSetting.supportCategory)},
+        ${parsed.supportReplyTime ?? null}
+      )
+      on conflict ("id") do nothing
+      returning "id"
+    `);
 
-    if (inserted.length > 0) return inserted[0];
+    const rawRows: unknown = Array.isArray(inserted)
+      ? inserted
+      : (inserted as { rows?: unknown[] })?.rows;
+    const insertedRows = Array.isArray(rawRows) ? rawRows : [];
+
+    if (insertedRows.length > 0) {
+      const settings = await readSettings(db);
+      if (settings) return settings;
+    }
   } catch (error) {
     throw mapDatabaseError(error);
   }
@@ -295,9 +329,11 @@ export async function updateSettings(
         supportReplyTime: parsed.supportReplyTime,
       })
       .where(eq(botSetting.id, 1))
-      .returning();
+      .returning({ id: botSetting.id });
 
-    if (updated.length > 0) return updated[0];
+    if (updated.length > 0) {
+      return requireSettings(db);
+    }
   } catch (error) {
     throw mapDatabaseError(error);
   }
@@ -326,8 +362,25 @@ export type StorefrontMenuSettings = {
 export async function readStorefrontMenuSettings(
   db: Database,
 ): Promise<StorefrontMenuSettings> {
-  const settings = await requireSettings(db);
-  return resolveStorefrontMenuConfig(settings.storefrontMenu);
+  await requireSettings(db);
+
+  try {
+    const rows = await db
+      .select({ storefrontMenu: botSetting.storefrontMenu })
+      .from(botSetting)
+      .where(eq(botSetting.id, 1))
+      .limit(1);
+
+    return resolveStorefrontMenuConfig(rows[0]?.storefrontMenu);
+  } catch (error) {
+    if (isUndefinedColumnError(error)) {
+      // The additive migration has not been applied yet. Existing stores keep
+      // the Phase 28 behavior instead of failing the customer home.
+      return resolveStorefrontMenuConfig(null);
+    }
+
+    throw mapDatabaseError(error);
+  }
 }
 
 /**
@@ -360,6 +413,14 @@ export async function saveStorefrontMenuConfig(
       return parsed;
     }
   } catch (error) {
+    if (isUndefinedColumnError(error)) {
+      throw new RabetDataError(
+        "SCHEMA_UPGRADE_REQUIRED",
+        "The storefront menu database upgrade has not been applied yet.",
+        { cause: error },
+      );
+    }
+
     throw mapDatabaseError(error);
   }
 
@@ -391,6 +452,14 @@ export async function resetStorefrontMenuConfig(
       return resolveStorefrontMenuConfig(null).config;
     }
   } catch (error) {
+    if (isUndefinedColumnError(error)) {
+      throw new RabetDataError(
+        "SCHEMA_UPGRADE_REQUIRED",
+        "The storefront menu database upgrade has not been applied yet.",
+        { cause: error },
+      );
+    }
+
     throw mapDatabaseError(error);
   }
 

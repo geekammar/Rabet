@@ -13,13 +13,13 @@ import {
   isConfigured,
   listEnabledLanguages,
   readSettings,
+  readStorefrontMenuSettings,
   resolveMessageText,
   toSafeErrorMessage,
 } from "@/lib/data";
-import {
-  resolveStorefrontMenuConfig,
-  type StorefrontMenuConfig,
-  type StorefrontMenuConfigSource,
+import type {
+  StorefrontMenuConfig,
+  StorefrontMenuConfigSource,
 } from "@/lib/storefront/menu";
 
 export const metadata: Metadata = {
@@ -72,9 +72,10 @@ async function loadStorefrontViewData(): Promise<StorefrontViewData> {
       return { kind: "store_setup_required" };
     }
 
-    const [languages, hasProducts] = await Promise.all([
+    const [languages, hasProducts, menu] = await Promise.all([
       listEnabledLanguages(db),
       hasEligibleStorefrontProducts(db),
+      readStorefrontMenuSettings(db),
     ]);
 
     const orderedLanguages = [...languages].sort((a, b) => {
@@ -110,8 +111,6 @@ async function loadStorefrontViewData(): Promise<StorefrontViewData> {
 
       welcomeMessages[languageRow.code] = text;
     }
-
-    const menu = resolveStorefrontMenuConfig(settings.storefrontMenu);
 
     return {
       kind: "ready",

@@ -1459,7 +1459,10 @@ inspection, not merged or deployed.
   `jsonb` column. `NULL` means "not customized" and resolves to the Phase 28
   defaults, so existing stores keep all five entries enabled in the original
   order without any data backfill. No table, product, category or tenant model
-  was added.
+  was added. Settings reads and initialization remain compatible with a
+  pre-0004 database: customer rendering falls back to the defaults until the
+  additive migration is applied, and a save reports a clear upgrade-required
+  message instead of failing the existing settings/Telegram journeys.
 - **Configuration model:** the five fixed entry points are `products`,
   `categories`, `support`, `languages` and `inquiries`. The stored array order is
   the merchant's display order; each item carries an `enabled` flag. Writes

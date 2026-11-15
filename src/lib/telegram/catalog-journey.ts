@@ -28,6 +28,7 @@ import {
   getCustomerByTelegramId,
   listEnabledLanguages,
   readSettings,
+  readStorefrontMenuSettings,
   resolveMessageText,
   setCustomerSelectedLanguage,
   upsertCustomer,
@@ -54,7 +55,6 @@ import { isManualPaymentPrototypeEnabled } from "@/lib/payment-methods/prototype
 import {
   getStorefrontMenuButtonLabels,
   getVisibleStorefrontMenuItems,
-  resolveStorefrontMenuConfig,
   type StorefrontMenuItemKey,
 } from "@/lib/storefront/menu";
 import {
@@ -473,7 +473,7 @@ async function renderStorefrontHome(
     listEnabledLanguages(db),
   ]);
 
-  const menuSettings = resolveStorefrontMenuConfig(settings.storefrontMenu);
+  const menuSettings = await readStorefrontMenuSettings(db);
   const visibleItems = getVisibleStorefrontMenuItems(menuSettings.config, {
     hasEligibleProducts: hasProducts,
     enabledLanguageCount: enabledLanguages.length,
