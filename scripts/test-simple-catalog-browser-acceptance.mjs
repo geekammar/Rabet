@@ -1435,7 +1435,9 @@ async function main() {
   const savedMenu = await pgClient`
     SELECT storefront_menu FROM bot_setting WHERE id = 1;
   `;
-  const savedMenuValue = savedMenu[0]?.storefront_menu;
+  const savedMenuRaw = savedMenu[0]?.storefront_menu;
+  const savedMenuValue =
+    typeof savedMenuRaw === "string" ? JSON.parse(savedMenuRaw) : savedMenuRaw;
   const savedMenuItems = Array.isArray(savedMenuValue?.items) ? savedMenuValue.items : [];
   if (
     savedMenuItems[0]?.key !== "support" ||

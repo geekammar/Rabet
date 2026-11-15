@@ -29,6 +29,7 @@ const PROTECTED_PREFIXES = [
   "/overview",
   "/products",
   "/categories",
+  "/storefront",
   "/catalog",
   "/payment-methods",
   "/inquiries",
