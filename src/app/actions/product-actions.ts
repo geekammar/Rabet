@@ -51,6 +51,7 @@ export type CreateProductActionInput =
       arabicLabel?: unknown;
       arabicMenuText?: unknown;
       arabicTemplateBody?: unknown;
+      translations?: unknown;
       url?: unknown;
       navigateCategoryId?: unknown;
       navigateProductId?: unknown;
@@ -146,6 +147,7 @@ export async function createProductActionAction(
   const rawArabicLabel = extractField(input, "arabicLabel");
   const rawArabicMenuText = extractField(input, "arabicMenuText");
   const rawArabicTemplateBody = extractField(input, "arabicTemplateBody");
+  const rawTranslations = extractField(input, "translations");
   const rawUrl = extractField(input, "url");
   const rawNavCat = extractField(input, "navigateCategoryId");
   const rawNavProd = extractField(input, "navigateProductId");
@@ -350,6 +352,121 @@ export async function createProductActionAction(
     }
   }
 
+  type ParsedOptionalTranslation = {
+    languageCode: string;
+    label: string;
+    menuText: string | null;
+    templateBody: string | null;
+  };
+
+  const optionalTranslations: ParsedOptionalTranslation[] = [];
+  if (rawTranslations !== undefined && rawTranslations !== null) {
+    let parsedTranslations: unknown = rawTranslations;
+
+    if (isFormData && typeof rawTranslations === "string") {
+      try {
+        parsedTranslations = JSON.parse(rawTranslations);
+      } catch {
+        errors.translations = "Translations must be a valid JSON array.";
+      }
+    }
+
+    if (errors.translations === undefined && !Array.isArray(parsedTranslations)) {
+      errors.translations = "Translations must be an array.";
+    }
+
+    if (errors.translations === undefined && Array.isArray(parsedTranslations)) {
+      const seenLanguageCodes = new Set<string>();
+
+      parsedTranslations.forEach((entry, index) => {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+          errors[`translations.${index}`] = "Each translation must be an object.";
+          return;
+        }
+
+        const record = entry as Record<string, unknown>;
+        const entryLanguageCode =
+          typeof record.languageCode === "string"
+            ? record.languageCode.trim().toLowerCase()
+            : "";
+
+        if (!/^[a-z]{2}$/.test(entryLanguageCode)) {
+          errors[`translations.${index}.languageCode`] =
+            "Language code must be two lowercase letters.";
+          return;
+        }
+
+        if (seenLanguageCodes.has(entryLanguageCode)) {
+          errors[`translations.${entryLanguageCode}`] =
+            `Language "${entryLanguageCode}" was submitted more than once.`;
+          return;
+        }
+        seenLanguageCodes.add(entryLanguageCode);
+
+        const languageLabel = entryLanguageCode.toUpperCase();
+        const entryLabelRes = validateActionLabel(record.label, languageLabel);
+        if (!entryLabelRes.success) {
+          errors[`translations.${entryLanguageCode}.label`] = entryLabelRes.error;
+          return;
+        }
+
+        let entryMenuText: string | null = null;
+        if (record.menuText !== undefined) {
+          if (typeRes.success && typeRes.data !== "OPEN_SUBMENU") {
+            const hasMenuText =
+              record.menuText !== null &&
+              String(record.menuText).trim().length > 0;
+            if (hasMenuText) {
+              errors[`translations.${entryLanguageCode}.menuText`] =
+                `Submenu message is only permitted on OPEN_SUBMENU actions, not on ${typeRes.data}.`;
+              return;
+            }
+          } else {
+            const menuTextRes = validateActionMenuText(record.menuText, languageLabel);
+            if (!menuTextRes.success) {
+              errors[`translations.${entryLanguageCode}.menuText`] =
+                menuTextRes.error;
+              return;
+            }
+            entryMenuText = menuTextRes.data;
+          }
+        }
+
+        let entryTemplateBody: string | null = null;
+        if (record.templateBody !== undefined) {
+          if (typeRes.success && typeRes.data !== "SEND_TEMPLATE_MESSAGE") {
+            const hasTemplateBody =
+              record.templateBody !== null &&
+              String(record.templateBody).trim().length > 0;
+            if (hasTemplateBody) {
+              errors[`translations.${entryLanguageCode}.templateBody`] =
+                `Message body is only permitted on SEND_TEMPLATE_MESSAGE actions, not on ${typeRes.data}.`;
+              return;
+            }
+          } else {
+            const templateBodyRes = validateActionTemplateBody(record.templateBody, {
+              required: false,
+              languageLabel,
+            });
+            if (!templateBodyRes.success) {
+              errors[`translations.${entryLanguageCode}.templateBody`] =
+                templateBodyRes.error!;
+              return;
+            }
+            entryTemplateBody = templateBodyRes.data ?? null;
+          }
+        }
+
+        optionalTranslations.push({
+          languageCode: entryLanguageCode,
+          label: entryLabelRes.data,
+          menuText: entryMenuText,
+          templateBody: entryTemplateBody,
+        });
+      });
+    }
+  }
+
   // Check if raw values were submitted for incompatible parameter check
   const submittedMenuText =
     rawMenuText !== undefined && rawMenuText !== null && String(rawMenuText).trim().length > 0
@@ -433,6 +550,35 @@ export async function createProductActionAction(
       };
     }
 
+    if (
+      optionalTranslations.some(
+        (translation) => translation.languageCode === defaultLangCode,
+      )
+    ) {
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        message:
+          "The default language must be submitted as the default label, not as an optional translation.",
+        errors: {
+          translations: `Language "${defaultLangCode}" is the store default language.`,
+        },
+      };
+    }
+
+    if (
+      arabicLabel &&
+      defaultLangCode !== "ar" &&
+      optionalTranslations.some((translation) => translation.languageCode === "ar")
+    ) {
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        message: "Arabic translation was submitted more than once.",
+        errors: { arabicLabel: "Arabic translation was submitted twice." },
+      };
+    }
+
     const translationsToInsert = [
       {
         languageId: defaultLangId,
@@ -442,6 +588,30 @@ export async function createProductActionAction(
         templateBody,
       },
     ];
+
+    for (const optionalTranslation of optionalTranslations) {
+      const targetLanguage = languages.find(
+        (languageRow) => languageRow.code === optionalTranslation.languageCode,
+      );
+      if (!targetLanguage) {
+        return {
+          success: false,
+          code: "NOT_FOUND",
+          message: `Language "${optionalTranslation.languageCode}" is not registered in this store.`,
+          errors: {
+            translations: `Language "${optionalTranslation.languageCode}" is not registered.`,
+          },
+        };
+      }
+
+      translationsToInsert.push({
+        languageId: targetLanguage.id,
+        languageCode: targetLanguage.code,
+        label: optionalTranslation.label,
+        menuText: optionalTranslation.menuText,
+        templateBody: optionalTranslation.templateBody,
+      });
+    }
 
     if (arabicLabel && defaultLangCode !== "ar") {
       const arabicLang = languages.find((l) => l.code === "ar");
@@ -568,8 +738,9 @@ export async function updateProductActionAction(
       errors.languageCode = "Language code is required when updating translations.";
     } else {
       langCode = rawLangCode.trim().toLowerCase();
-      if (langCode !== "en" && langCode !== "ar") {
-        errors.languageCode = `Language '${langCode}' is not supported by the action editor.`;
+      if (!/^[a-z]{2}$/.test(langCode)) {
+        errors.languageCode =
+          "Language code must be exactly two lowercase letters.";
       }
     }
 

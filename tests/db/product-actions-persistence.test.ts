@@ -344,6 +344,46 @@ describe.skipIf(!shouldRun)("product actions persistence & integrity", () => {
     expect(arabicAfter.isEnabled).toBe(false);
   });
 
+  it("adds an English translation to an Arabic-only action without altering Arabic", async () => {
+    const testProductId = await createProductFixture("arabic-first");
+    const appDb = asAppDb(testDb!.db);
+
+    const actionRes = await createProductAction(appDb, {
+      productId: testProductId,
+      actionType: "START_INQUIRY",
+      isActive: true,
+      translations: [
+        {
+          languageId: arabicLangId,
+          languageCode: "ar",
+          label: "اسأل عن هذا المنتج",
+        },
+      ],
+    });
+
+    const before = await readProductAction(appDb, actionRes.actionId);
+    expect(before?.translations.ar?.label).toBe("اسأل عن هذا المنتج");
+    expect(before?.translations.en).toBeUndefined();
+
+    await editProductAction(appDb, {
+      actionId: actionRes.actionId,
+      productId: testProductId,
+      actionType: "START_INQUIRY",
+      isActive: true,
+      translation: {
+        languageId: defaultLangId,
+        languageCode: "en",
+        label: "Ask about this product",
+      },
+    });
+
+    const after = await readProductAction(appDb, actionRes.actionId);
+    expect(after?.translations.ar?.id).toBe(before?.translations.ar?.id);
+    expect(after?.translations.ar?.label).toBe("اسأل عن هذا المنتج");
+    expect(after?.translations.en?.label).toBe("Ask about this product");
+    expect(after?.actionType).toBe("START_INQUIRY");
+  });
+
   it("enforces active child limit (MAX_ACTIVE_CHILDREN = 20)", async () => {
     const testProductId = await createProductFixture("child-limit-20");
     const appDb = asAppDb(testDb!.db);
