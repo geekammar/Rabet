@@ -1,113 +1,22 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { LayoutDashboard } from "lucide-react";
+import { connection } from "next/server";
 
-import { EmptyState } from "@/components/empty-state";
-import { PageHeader } from "@/components/page-header";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { navItems } from "@/lib/navigation";
+import { OverviewDashboard } from "@/components/dashboard/overview/overview-dashboard";
+import { requireAdmin } from "@/lib/auth/session";
+import { loadOverviewData } from "@/lib/dashboard/overview";
 
 export const metadata: Metadata = {
   title: "Overview",
-  description: "A snapshot of catalog and inquiry activity in Rabet.",
+  description: "Store counts and common merchant tasks.",
 };
 
-const operations = navItems.filter((item) =>
-  ["/products", "/categories", "/catalog", "/inquiries", "/customers"].includes(
-    item.href,
-  ),
-);
+export const instant = false;
 
-const configuration = navItems.filter((item) =>
-  ["/storefront", "/bot-content", "/telegram", "/settings"].includes(item.href),
-);
+export default async function OverviewPage() {
+  await connection();
+  await requireAdmin();
 
-function SectionCard({
-  href,
-  icon: Icon,
-  label,
-  description,
-}: {
-  href: string;
-  icon: (typeof navItems)[number]["icon"];
-  label: string;
-  description: string;
-}) {
-  return (
-    <Link href={href} className="group block rounded-xl focus:outline-none">
-      <Card className="h-full transition-colors group-hover:bg-muted/40 group-focus-visible:ring-2 group-focus-visible:ring-ring">
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <span
-              aria-hidden="true"
-              className="flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground"
-            >
-              <Icon className="size-4.5" />
-            </span>
-            <CardTitle>{label}</CardTitle>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">{description}</p>
-        </CardContent>
-      </Card>
-    </Link>
-  );
-}
+  const data = await loadOverviewData();
 
-export default function OverviewPage() {
-  return (
-    <div className="space-y-8">
-      <PageHeader
-        title="Overview"
-        description="Catalog and inquiry activity will appear here as the features are implemented."
-      />
-
-      <EmptyState
-        icon={LayoutDashboard}
-        title="No activity yet"
-        description="The secure dashboard shell is ready. Catalog management, inquiries and Telegram integration are planned for upcoming phases."
-      />
-
-      <section aria-labelledby="operations-heading" className="space-y-4">
-        <h2
-          id="operations-heading"
-          className="font-heading text-lg font-semibold tracking-tight"
-        >
-          Operations
-        </h2>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {operations.map((item) => (
-            <SectionCard
-              key={item.href}
-              href={item.href}
-              icon={item.icon}
-              label={item.label}
-              description={item.description}
-            />
-          ))}
-        </div>
-      </section>
-
-      <section aria-labelledby="configuration-heading" className="space-y-4">
-        <h2
-          id="configuration-heading"
-          className="font-heading text-lg font-semibold tracking-tight"
-        >
-          Bot &amp; settings
-        </h2>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {configuration.map((item) => (
-            <SectionCard
-              key={item.href}
-              href={item.href}
-              icon={item.icon}
-              label={item.label}
-              description={item.description}
-            />
-          ))}
-        </div>
-      </section>
-    </div>
-  );
+  return <OverviewDashboard data={data} />;
 }

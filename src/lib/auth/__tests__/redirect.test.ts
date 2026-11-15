@@ -12,6 +12,20 @@ describe("safeLoginRedirect", () => {
     expect(safeLoginRedirect("/orders/123")).toBe(DEFAULT_LOGIN_REDIRECT);
   });
 
+  it("accepts every regular dashboard destination used by the navigation", () => {
+    for (const path of [
+      "/products",
+      "/categories",
+      "/storefront",
+      "/payment-methods",
+      "/inquiries/REF-123",
+      "/telegram",
+      "/settings",
+    ]) {
+      expect(safeLoginRedirect(path)).toBe(path);
+    }
+  });
+
   it("rejects protocol-relative URLs", () => {
     expect(isValidInternalRedirect("//evil.com")).toBe(false);
     expect(safeLoginRedirect("//evil.com")).toBe(DEFAULT_LOGIN_REDIRECT);

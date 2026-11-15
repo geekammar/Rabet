@@ -22,7 +22,9 @@ const dashboardPaths = [
   "/overview",
   "/products",
   "/categories",
+  "/storefront",
   "/catalog",
+  "/payment-methods",
   "/inquiries",
   "/customers",
   "/bot-content",
@@ -34,19 +36,21 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   async headers() {
-    return dashboardPaths.map((source) => ({
-      source,
-      headers: [
-        {
-          key: "Cache-Control",
-          value: "private, no-store, must-revalidate",
-        },
-        {
-          key: "Pragma",
-          value: "no-cache",
-        },
-      ],
-    }));
+    return dashboardPaths.flatMap((path) =>
+      [path, `${path}/:path*`].map((source) => ({
+        source,
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "private, no-store, must-revalidate",
+          },
+          {
+            key: "Pragma",
+            value: "no-cache",
+          },
+        ],
+      })),
+    );
   },
   turbopack: {
     rules: {

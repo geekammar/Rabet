@@ -2,12 +2,12 @@ import {
   Bot,
   CreditCard,
   FolderTree,
-  Layers,
   LayoutDashboard,
   MessageSquareText,
-  PackageSearch,
+  Package,
   Send,
   Settings,
+  SlidersHorizontal,
   Store,
   Users,
   type LucideIcon,
@@ -20,75 +20,145 @@ export type NavItem = {
   description: string;
 };
 
+export type NavGroupId =
+  | "home"
+  | "store-management"
+  | "store-setup"
+  | "advanced-tools";
+
+export type NavGroup = {
+  id: NavGroupId;
+  label: string;
+  items: NavItem[];
+  collapsible: boolean;
+  defaultOpen: boolean;
+};
+
 /**
  * Single source of truth for dashboard navigation.
- * Consumed by desktop sidebar, mobile drawer, and overview quick-links.
+ * Consumed by the desktop sidebar and the mobile drawer.
  */
-export const navItems: NavItem[] = [
+export const navGroups: NavGroup[] = [
   {
-    label: "Overview",
-    href: "/overview",
-    icon: LayoutDashboard,
-    description: "A summary of catalog and conversation activity.",
+    id: "home",
+    label: "Home",
+    collapsible: false,
+    defaultOpen: true,
+    items: [
+      {
+        label: "Overview",
+        href: "/overview",
+        icon: LayoutDashboard,
+        description: "Store counts and the tasks a merchant does most often.",
+      },
+    ],
   },
   {
-    label: "Products",
-    href: "/products",
-    icon: PackageSearch,
-    description: "Add, edit and search products directly.",
+    id: "store-management",
+    label: "Store Management",
+    collapsible: false,
+    defaultOpen: true,
+    items: [
+      {
+        label: "Products",
+        href: "/products",
+        icon: Package,
+        description: "Create and edit products, prices, and availability.",
+      },
+      {
+        label: "Categories",
+        href: "/categories",
+        icon: FolderTree,
+        description: "Organize products into root and child categories.",
+      },
+      {
+        label: "Inquiries",
+        href: "/inquiries",
+        icon: MessageSquareText,
+        description: "Read and reply to customer questions and support conversations.",
+      },
+      {
+        label: "Payment Methods",
+        href: "/payment-methods",
+        icon: CreditCard,
+        description: "Configure payment instructions and preview them. Not live checkout.",
+      },
+      {
+        label: "Customers",
+        href: "/customers",
+        icon: Users,
+        description: "People who contact your store through Telegram.",
+      },
+    ],
   },
   {
-    label: "Categories",
-    href: "/categories",
-    icon: FolderTree,
-    description: "Create and manage root and child categories.",
+    id: "store-setup",
+    label: "Store Setup",
+    collapsible: false,
+    defaultOpen: true,
+    items: [
+      {
+        label: "Storefront",
+        href: "/storefront",
+        icon: Store,
+        description: "Choose the customer menu entries and their order.",
+      },
+      {
+        label: "Bot Content",
+        href: "/bot-content",
+        icon: Bot,
+        description: "Edit the messages and translations customers receive.",
+      },
+      {
+        label: "Settings",
+        href: "/settings",
+        icon: Settings,
+        description: "Store identity, languages, support, and seller notifications.",
+      },
+    ],
   },
   {
-    label: "Storefront",
-    href: "/storefront",
-    icon: Store,
-    description: "Choose the customer menu entries and their order.",
-  },
-  {
-    label: "Advanced Catalog",
-    href: "/catalog",
-    icon: Layers,
-    description: "Full category tree and configurable product buttons.",
-  },
-  {
-    label: "Payment Methods",
-    href: "/payment-methods",
-    icon: CreditCard,
-    description: "Central payment methods, instructions, and customer preview.",
-  },
-  {
-    label: "Inquiries",
-    href: "/inquiries",
-    icon: MessageSquareText,
-    description: "Product questions and customer support conversations.",
-  },
-  {
-    label: "Customers",
-    href: "/customers",
-    icon: Users,
-    description: "People who interact with the Telegram bot.",
-  },
-  {
-    label: "Bot Content",
-    href: "/bot-content",
-    icon: Bot,
-    description: "Editable bot messages and language content.",
-  },
-  {
-    label: "Telegram",
-    href: "/telegram",
-    icon: Send,
-    description: "Bot connection and webhook settings.",
-  },
-  {
-    label: "Settings",
-    href: "/settings",
-    icon: Settings,
-    description: "Catalog and bot configuration.",
+    id: "advanced-tools",
+    label: "Advanced Tools",
+    collapsible: true,
+    defaultOpen: false,
+    items: [
+      {
+        label: "Advanced Catalog",
+        href: "/catalog",
+        icon: SlidersHorizontal,
+        description: "Full category tree and product-button editor.",
+      },
+      {
+        label: "Telegram / Diagnostics",
+        href: "/telegram",
+        icon: Send,
+        description: "Bot connection guidance and seller notification diagnostics.",
+      },
+    ],
   },
 ];
+
+export const navItems: NavItem[] = navGroups.flatMap((group) => group.items);
+
+export function isNavItemActive(pathname: string, href: string): boolean {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+export function getNavGroupForPath(pathname: string): NavGroup | undefined {
+  return navGroups.find((group) =>
+    group.items.some((item) => isNavItemActive(pathname, item.href)),
+  );
+}
+
+export function getNavGroupOpenState(
+  pathname: string,
+): Record<NavGroupId, boolean> {
+  return Object.fromEntries(
+    navGroups.map((group) => [
+      group.id,
+      group.defaultOpen ||
+        group.items.some((item) => isNavItemActive(pathname, item.href)),
+    ]),
+  ) as Record<NavGroupId, boolean>;
+}

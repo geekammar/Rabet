@@ -18,9 +18,9 @@ export function Header() {
         <Badge variant="outline" className="hidden sm:inline-flex font-normal text-muted-foreground shrink-0">
           <span
             aria-hidden="true"
-            className="size-1.5 rounded-full bg-amber-500"
+            className="size-1.5 rounded-full bg-emerald-500"
           />
-          Discovery · Admin
+          Admin
         </Badge>
         <LogoutButton />
       </div>

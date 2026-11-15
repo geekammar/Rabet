@@ -319,7 +319,7 @@ export function PaymentMethodsManager({
         <div>
           <PageHeader
             title="Payment Methods"
-            description="Define payment methods once, bind them to product buttons, and preview localized instructions. Configuration is not checkout."
+            description="Define payment methods once, bind them to product buttons, and preview localized instructions. Configuration only — no live checkout."
           />
         </div>
 

@@ -6,7 +6,6 @@ import { MenuIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
-  SheetClose,
   SheetContent,
   SheetDescription,
   SheetHeader,
@@ -48,15 +47,14 @@ export function MobileNav() {
             Dashboard navigation
           </SheetDescription>
         </SheetHeader>
-        <SheetClose asChild>
-          <div className="flex-1 overflow-y-auto p-4">
-            <DashboardNav onNavigate={() => setOpen(false)} />
-          </div>
-        </SheetClose>
+        <div className="flex-1 overflow-y-auto p-4">
+          <DashboardNav
+            variant="mobile"
+            onNavigate={() => setOpen(false)}
+          />
+        </div>
         <div className="border-t p-4">
-          <p className="text-xs text-muted-foreground">
-            Discovery · Catalog & inquiries
-          </p>
+          <p className="text-xs text-muted-foreground">Rabet merchant dashboard</p>
         </div>
       </SheetContent>
     </Sheet>
