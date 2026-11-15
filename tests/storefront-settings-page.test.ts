@@ -10,6 +10,9 @@ vi.mock("@/app/actions/storefront", () => ({
 const { StorefrontSettingsManager } = await import(
   "@/components/dashboard/storefront/storefront-settings-manager"
 );
+const { saveStorefrontMenuAction, resetStorefrontMenuAction } = await import(
+  "@/app/actions/storefront"
+);
 const { defaultStorefrontMenuConfig } = await import("@/lib/storefront/menu");
 
 describe("storefront settings dashboard", () => {
@@ -46,9 +49,22 @@ describe("storefront settings dashboard", () => {
     expect(html).toContain("Temporarily unavailable");
     expect(html).toContain("Welcome to Preview Store!");
     expect(html).toContain("No Telegram message is sent");
+    expect(html).toContain('data-testid="storefront-preview-button-products"');
+    expect(html).toContain('data-testid="storefront-preview-button-support"');
+    expect(html).toContain('data-testid="storefront-preview-button-languages"');
+    expect(html).toContain('data-testid="storefront-preview-button-inquiries"');
+    expect(html).not.toContain('data-testid="storefront-preview-button-categories"');
+    expect(html.indexOf('data-testid="storefront-preview-button-products"')).toBeLessThan(
+      html.indexOf('data-testid="storefront-preview-button-support"'),
+    );
+    expect(html.indexOf('data-testid="storefront-preview-button-support"')).toBeLessThan(
+      html.indexOf('data-testid="storefront-preview-button-languages"'),
+    );
     expect(html).toContain('data-testid="storefront-save-btn"');
     expect(html).toContain('data-testid="storefront-reset-btn"');
     expect(html).not.toContain('data-testid="storefront-preview-draft"');
+    expect(saveStorefrontMenuAction).not.toHaveBeenCalled();
+    expect(resetStorefrontMenuAction).not.toHaveBeenCalled();
   });
 
   it("uses localized labels in the preview and keeps touch targets", () => {
@@ -70,9 +86,84 @@ describe("storefront settings dashboard", () => {
     );
 
     expect(html).toContain("تصفح المنتجات");
-    expect(html).toContain("تغيير اللغة");
+    expect(html).toContain("تواصل مع الدعم");
+    expect(html).toContain("استفساراتي النشطة");
+    expect(html).not.toContain("تغيير اللغة");
     expect(html).toContain("Only one language is enabled");
+    expect(html).toContain('data-testid="storefront-preview-button-products"');
+    expect(html).not.toContain('data-testid="storefront-preview-button-languages"');
     expect(html).toContain("min-h-11");
     expect(html).toContain("overflow-x-clip");
+  });
+
+  it("renders only visible buttons and uses the support fallback when none are available", () => {
+    const html = renderToStaticMarkup(
+      createElement(StorefrontSettingsManager, {
+        savedConfig: {
+          version: 1,
+          items: [
+            { key: "products", enabled: false },
+            { key: "categories", enabled: false },
+            { key: "support", enabled: false },
+            { key: "languages", enabled: true },
+            { key: "inquiries", enabled: false },
+          ],
+        },
+        configSource: "saved",
+        displayName: "Preview Store",
+        defaultLanguageCode: "en",
+        enabledLanguages: [{ code: "en", label: "English", isRtl: false }],
+        visibility: {
+          hasEligibleProducts: false,
+          enabledLanguageCount: 1,
+        },
+        welcomeMessages: {
+          en: "Welcome to Preview Store!",
+        },
+      }),
+    );
+
+    expect(html).toContain('data-testid="storefront-preview-button-support"');
+    expect(html).not.toContain('data-testid="storefront-preview-button-products"');
+    expect(html).not.toContain('data-testid="storefront-preview-button-categories"');
+    expect(html).not.toContain('data-testid="storefront-preview-button-languages"');
+    expect(html).not.toContain('data-testid="storefront-preview-button-inquiries"');
+    expect(html).toContain("Contact Support is");
+    expect(html).toContain("shown as the safe navigation fallback");
+  });
+
+  it("shows disabled and contextual statuses only in the configuration list", () => {
+    const html = renderToStaticMarkup(
+      createElement(StorefrontSettingsManager, {
+        savedConfig: {
+          version: 1,
+          items: [
+            { key: "products", enabled: true },
+            { key: "categories", enabled: true },
+            { key: "support", enabled: true },
+            { key: "languages", enabled: false },
+            { key: "inquiries", enabled: true },
+          ],
+        },
+        configSource: "saved",
+        displayName: "Preview Store",
+        defaultLanguageCode: "en",
+        enabledLanguages: [{ code: "en", label: "English", isRtl: false }],
+        visibility: {
+          hasEligibleProducts: false,
+          enabledLanguageCount: 1,
+        },
+        welcomeMessages: {
+          en: "Welcome to Preview Store!",
+        },
+      }),
+    );
+
+    expect(html).toContain('data-testid="storefront-menu-item-languages"');
+    expect(html).toContain('data-testid="storefront-menu-item-categories"');
+    expect(html).toContain("Hidden in configuration");
+    expect(html).toContain("Temporarily unavailable");
+    expect(html).not.toContain('data-testid="storefront-preview-button-languages"');
+    expect(html).not.toContain('data-testid="storefront-preview-button-categories"');
   });
 });

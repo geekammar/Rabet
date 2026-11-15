@@ -54,7 +54,7 @@ import {
 import { isManualPaymentPrototypeEnabled } from "@/lib/payment-methods/prototype";
 import {
   getStorefrontMenuButtonLabels,
-  getVisibleStorefrontMenuItems,
+  resolveStorefrontMenuButtons,
   type StorefrontMenuItemKey,
 } from "@/lib/storefront/menu";
 import {
@@ -474,24 +474,18 @@ async function renderStorefrontHome(
   ]);
 
   const menuSettings = await readStorefrontMenuSettings(db);
-  const visibleItems = getVisibleStorefrontMenuItems(menuSettings.config, {
+  const menuButtons = resolveStorefrontMenuButtons(menuSettings.config, {
     hasEligibleProducts: hasProducts,
     enabledLanguageCount: enabledLanguages.length,
   });
   const menuLabels = getStorefrontMenuButtonLabels(langContext.isRtl);
 
-  const keyboard: TelegramInlineKeyboardButton[][] = visibleItems.map((item) => [
+  const keyboard: TelegramInlineKeyboardButton[][] = menuButtons.items.map((item) => [
     {
       text: menuLabels[item.key],
       callback_data: storefrontMenuCallbackData(item.key),
     },
   ]);
-
-  if (keyboard.length === 0) {
-    keyboard.push([
-      { text: menuLabels.support, callback_data: tokens.support() },
-    ]);
-  }
 
   if (messageIdToEdit) {
     await editOrThrow(transport, {

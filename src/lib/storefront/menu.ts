@@ -169,6 +169,36 @@ export function getVisibleStorefrontMenuItems(
   );
 }
 
+export interface ResolvedStorefrontMenuButtons {
+  items: StorefrontMenuItem[];
+  fallbackUsed: boolean;
+}
+
+/**
+ * The single resolution used by both the live Telegram home and the dashboard
+ * customer preview.
+ *
+ * It returns only the buttons that are actually rendered, in configured order,
+ * and supplies the documented Contact Support fallback when configuration plus
+ * contextual eligibility leave no visible entry. Keeping this shared prevents
+ * the preview from drifting into a different interpretation of the menu.
+ */
+export function resolveStorefrontMenuButtons(
+  config: StorefrontMenuConfig,
+  visibility: StorefrontMenuVisibility,
+): ResolvedStorefrontMenuButtons {
+  const visibleItems = getVisibleStorefrontMenuItems(config, visibility);
+
+  if (visibleItems.length > 0) {
+    return { items: visibleItems, fallbackUsed: false };
+  }
+
+  return {
+    items: [{ key: "support", enabled: true }],
+    fallbackUsed: true,
+  };
+}
+
 export function availabilityReasonLabel(
   reason: "no_products" | "single_language",
 ): string {

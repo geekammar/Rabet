@@ -1381,10 +1381,19 @@ async function main() {
 
   log("Scenario 5E: storefront settings, ordering, save, preview and reset");
   await navigate(cdp, "/storefront", '[data-testid="storefront-settings"]', "storefront settings");
+  const beforePreviewCounts = await pgClient`
+    SELECT
+      (SELECT count(*)::int FROM inquiry) AS inquiries,
+      (SELECT count(*)::int FROM telegram_update) AS telegram_updates,
+      (SELECT count(*)::int FROM customer) AS customers;
+  `;
   const defaultMenuState = await cdp.evaluate(`(() => ({
     toggles: Array.from(document.querySelectorAll('[data-testid^="storefront-menu-toggle-"]'))
       .map((input) => ({ id: input.dataset.testid, checked: input.checked })),
     preview: document.querySelector('[data-testid="storefront-preview-saved"]')?.innerText ?? "",
+    previewButtons: Array.from(
+      document.querySelectorAll('[data-testid="storefront-preview-saved"] [data-testid^="storefront-preview-button-"]'),
+    ).map((button) => button.dataset.testid),
     draftPreview: Boolean(document.querySelector('[data-testid="storefront-preview-draft"]')),
   }))()`);
   if (
@@ -1392,6 +1401,15 @@ async function main() {
     !defaultMenuState.toggles.every((toggle) => toggle.checked) ||
     !defaultMenuState.preview.includes("Welcome to Simple Catalog Store!") ||
     !defaultMenuState.preview.includes("Browse Products") ||
+    !defaultMenuState.preview.includes("Browse Categories") ||
+    defaultMenuState.preview.includes("Change Language") ||
+    JSON.stringify(defaultMenuState.previewButtons) !==
+      JSON.stringify([
+        "storefront-preview-button-products",
+        "storefront-preview-button-categories",
+        "storefront-preview-button-support",
+        "storefront-preview-button-inquiries",
+      ]) ||
     defaultMenuState.draftPreview
   ) {
     await fail(`Scenario 5E: unexpected default settings state: ${JSON.stringify(defaultMenuState)}`);
@@ -1416,15 +1434,49 @@ async function main() {
     `Boolean(document.querySelector('[data-testid="storefront-preview-draft"]'))`,
     "draft customer preview",
   );
-  const draftPreview = await cdp.evaluate(
-    `document.querySelector('[data-testid="storefront-preview-draft"]').innerText`,
-  );
+  const previewStateBeforeSave = await cdp.evaluate(`(() => {
+    const saved = document.querySelector('[data-testid="storefront-preview-saved"]');
+    const draft = document.querySelector('[data-testid="storefront-preview-draft"]');
+    return {
+      savedText: saved?.innerText ?? "",
+      savedButtons: Array.from(
+        saved?.querySelectorAll('[data-testid^="storefront-preview-button-"]') ?? [],
+      ).map((button) => button.dataset.testid),
+      draftText: draft?.innerText ?? "",
+      draftButtons: Array.from(
+        draft?.querySelectorAll('[data-testid^="storefront-preview-button-"]') ?? [],
+      ).map((button) => button.dataset.testid),
+    };
+  })()`);
   if (
-    !draftPreview.includes("Unsaved draft") ||
-    !draftPreview.includes("Hidden in configuration") ||
-    !draftPreview.toLowerCase().includes("no telegram message is sent")
+    !previewStateBeforeSave.savedText.includes("Browse Products") ||
+    !previewStateBeforeSave.savedText.includes("Browse Categories") ||
+    previewStateBeforeSave.savedText.includes("Unsaved draft") ||
+    !previewStateBeforeSave.draftText.includes("Unsaved draft") ||
+    previewStateBeforeSave.draftText.includes("Browse Products") ||
+    previewStateBeforeSave.draftText.includes("Browse Categories") ||
+    previewStateBeforeSave.draftText.includes("Change Language") ||
+    !previewStateBeforeSave.draftText.toLowerCase().includes("no telegram message is sent") ||
+    JSON.stringify(previewStateBeforeSave.draftButtons) !==
+      JSON.stringify([
+        "storefront-preview-button-support",
+        "storefront-preview-button-inquiries",
+      ])
   ) {
-    await fail(`Scenario 5E: draft preview missing required states: ${draftPreview}`);
+    await fail(
+      `Scenario 5E: saved/draft preview accuracy failed: ${JSON.stringify(previewStateBeforeSave)}`,
+    );
+  }
+  const afterPreviewCounts = await pgClient`
+    SELECT
+      (SELECT count(*)::int FROM inquiry) AS inquiries,
+      (SELECT count(*)::int FROM telegram_update) AS telegram_updates,
+      (SELECT count(*)::int FROM customer) AS customers;
+  `;
+  if (JSON.stringify(beforePreviewCounts[0]) !== JSON.stringify(afterPreviewCounts[0])) {
+    await fail(
+      `Scenario 5E: previewing wrote data: ${JSON.stringify(beforePreviewCounts[0])} -> ${JSON.stringify(afterPreviewCounts[0])}`,
+    );
   }
   await click(cdp, '[data-testid="storefront-save-btn"]');
   await waitFor(
@@ -1448,17 +1500,32 @@ async function main() {
   }
 
   await navigate(cdp, "/storefront", '[data-testid="storefront-settings"]', "storefront after save");
-  const reloadedMenuState = await cdp.evaluate(`(() => ({
-    products: document.querySelector('[data-testid="storefront-menu-toggle-products"]').checked,
-    categories: document.querySelector('[data-testid="storefront-menu-toggle-categories"]').checked,
-    support: document.querySelector('[data-testid="storefront-menu-toggle-support"]').checked,
-    firstItem: document.querySelector('[data-testid^="storefront-menu-item-"]')?.dataset.testid,
-  }))()`);
+  const reloadedMenuState = await cdp.evaluate(`(() => {
+    const saved = document.querySelector('[data-testid="storefront-preview-saved"]');
+    return {
+      products: document.querySelector('[data-testid="storefront-menu-toggle-products"]').checked,
+      categories: document.querySelector('[data-testid="storefront-menu-toggle-categories"]').checked,
+      support: document.querySelector('[data-testid="storefront-menu-toggle-support"]').checked,
+      firstItem: document.querySelector('[data-testid^="storefront-menu-item-"]')?.dataset.testid,
+      savedText: saved?.innerText ?? "",
+      savedButtons: Array.from(
+        saved?.querySelectorAll('[data-testid^="storefront-preview-button-"]') ?? [],
+      ).map((button) => button.dataset.testid),
+    };
+  })()`);
   if (
     reloadedMenuState.products !== false ||
     reloadedMenuState.categories !== false ||
     reloadedMenuState.support !== true ||
-    reloadedMenuState.firstItem !== "storefront-menu-item-support"
+    reloadedMenuState.firstItem !== "storefront-menu-item-support" ||
+    reloadedMenuState.savedText.includes("Browse Products") ||
+    reloadedMenuState.savedText.includes("Browse Categories") ||
+    reloadedMenuState.savedText.includes("Change Language") ||
+    JSON.stringify(reloadedMenuState.savedButtons) !==
+      JSON.stringify([
+        "storefront-preview-button-support",
+        "storefront-preview-button-inquiries",
+      ])
   ) {
     await fail(`Scenario 5E: reloaded settings did not preserve saved choices: ${JSON.stringify(reloadedMenuState)}`);
   }
@@ -1476,6 +1543,43 @@ async function main() {
   if (resetMenu[0]?.storefront_menu !== null) {
     await fail(`Scenario 5E: reset did not clear customization: ${JSON.stringify(resetMenu[0])}`);
   }
+
+  await setCheckbox(cdp, '[data-testid="storefront-menu-toggle-products"]', false);
+  await setCheckbox(cdp, '[data-testid="storefront-menu-toggle-categories"]', false);
+  await setCheckbox(cdp, '[data-testid="storefront-menu-toggle-support"]', false);
+  await setCheckbox(cdp, '[data-testid="storefront-menu-toggle-inquiries"]', false);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="storefront-preview-draft"]'))`,
+    "fallback draft preview",
+  );
+  const fallbackPreview = await cdp.evaluate(`(() => {
+    const draft = document.querySelector('[data-testid="storefront-preview-draft"]');
+    return {
+      text: draft?.innerText ?? "",
+      buttons: Array.from(
+        draft?.querySelectorAll('[data-testid^="storefront-preview-button-"]') ?? [],
+      ).map((button) => button.dataset.testid),
+    };
+  })()`);
+  if (
+    JSON.stringify(fallbackPreview.buttons) !==
+      JSON.stringify(["storefront-preview-button-support"]) ||
+    !fallbackPreview.text.includes("shown as the safe navigation fallback") ||
+    !fallbackPreview.text.includes(" exactly as in Telegram")
+  ) {
+    await fail(
+      `Scenario 5E: support fallback preview is inaccurate: ${JSON.stringify(fallbackPreview)}`,
+    );
+  }
+
+  await click(cdp, '[data-testid="storefront-reset-btn"]');
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="storefront-menu-toggle-products"]').checked === true &&
+     document.querySelector('[data-testid="storefront-menu-toggle-support"]').checked === true`,
+    "reset unsaved fallback draft",
+  );
 
   log("Scenario 6: QA-24 return from Buttons editor preserves fields and active state");
   await cdp.send("Emulation.setDeviceMetricsOverride", {

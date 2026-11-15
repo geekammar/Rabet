@@ -43,6 +43,9 @@ import {
   listPaymentMethods,
   listProductActions,
   readProductAction,
+  readStorefrontMenuSettings,
+  resetStorefrontMenuConfig,
+  saveStorefrontMenuConfig,
 } from "@/lib/data";
 import { createFakeTelegramTransport } from "@/lib/telegram/transport";
 import { handleTelegramWebhookRequest } from "@/lib/telegram/webhook";
@@ -275,6 +278,25 @@ describe.skipIf(!shouldRun)("Production Release Upgrade Path (Phase 10B -> Phase
     const methodsList = await listPaymentMethods(appDb);
     expect(methodsList).toEqual([]);
 
+    // 7b. Storefront menu customization remains safe and default before 0004
+    const menuBeforeMigration = await readStorefrontMenuSettings(appDb);
+    expect(menuBeforeMigration.source).toBe("default");
+    expect(menuBeforeMigration.config.items.map((item) => item.key)).toEqual([
+      "products",
+      "categories",
+      "support",
+      "languages",
+      "inquiries",
+    ]);
+    expect(menuBeforeMigration.config.items.every((item) => item.enabled)).toBe(true);
+
+    await expect(
+      saveStorefrontMenuConfig(appDb, menuBeforeMigration.config),
+    ).rejects.toMatchObject({ code: "SCHEMA_UPGRADE_REQUIRED" });
+    await expect(resetStorefrontMenuConfig(appDb)).rejects.toMatchObject({
+      code: "SCHEMA_UPGRADE_REQUIRED",
+    });
+
     // 8. Telegram catalog journey executes cleanly without throwing enum errors on old schema
     const fakeTransport = createFakeTelegramTransport();
     const req = new Request("https://example.com/api/telegram/webhook", {
@@ -304,6 +326,43 @@ describe.skipIf(!shouldRun)("Production Release Upgrade Path (Phase 10B -> Phase
     expect(res.status).toBe(200);
     expect(fakeTransport.editedMessages).toHaveLength(1);
     expect(fakeTransport.editedMessages[0].text).toContain("Starter Kit");
+
+    // 9. /start still renders the Phase 28 default home before 0004
+    const startReq = new Request("https://example.com/api/telegram/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-telegram-bot-api-secret-token": "secret-test-token-123",
+      },
+      body: JSON.stringify({
+        update_id: 8802,
+        message: {
+          message_id: 11,
+          chat: { id: 7702, type: "private" },
+          from: { id: 7702, is_bot: false, first_name: "Menu Customer" },
+          text: "/start",
+        },
+      }),
+    });
+
+    const startRes = await handleTelegramWebhookRequest(startReq, {
+      db: appDb,
+      transport: fakeTransport,
+      botToken: "123456:FAKE_TOKEN_FOR_PRE_UPGRADE",
+      webhookSecret: "secret-test-token-123",
+    });
+
+    expect(startRes.status).toBe(200);
+    const homeMessage = fakeTransport.sentMessages.at(-1);
+    const homeButtons = (
+      homeMessage?.replyMarkup?.inline_keyboard ?? []
+    ).flat().map((button) => button.callback_data);
+    expect(homeButtons).toEqual([
+      tokens.products(),
+      tokens.storefrontCategories(),
+      tokens.support(),
+      tokens.myInquiries(),
+    ]);
   });
 
   it("B. Runner inspect mode: validates prior release schema and reports pending 0002", async () => {

@@ -6,6 +6,7 @@ import {
   getStorefrontMenuButtonLabels,
   getStorefrontMenuItemAvailability,
   getVisibleStorefrontMenuItems,
+  resolveStorefrontMenuButtons,
   resolveStorefrontMenuConfig,
   storefrontMenuConfigSchema,
 } from "../menu";
@@ -137,6 +138,93 @@ describe("storefront menu configuration", () => {
       "support",
       "languages",
       "inquiries",
+    ]);
+  });
+
+  it("resolves the default five entries in order for customer rendering", () => {
+    const resolved = resolveStorefrontMenuButtons(defaultStorefrontMenuConfig(), {
+      hasEligibleProducts: true,
+      enabledLanguageCount: 2,
+    });
+
+    expect(resolved.fallbackUsed).toBe(false);
+    expect(resolved.items.map((item) => item.key)).toEqual([...STOREFRONT_MENU_KEYS]);
+  });
+
+  it("removes a disabled entry from customer rendering", () => {
+    const resolved = resolveStorefrontMenuButtons(
+      {
+        version: 1,
+        items: [
+          { key: "products", enabled: false },
+          { key: "categories", enabled: true },
+          { key: "support", enabled: true },
+          { key: "languages", enabled: true },
+          { key: "inquiries", enabled: true },
+        ],
+      },
+      { hasEligibleProducts: true, enabledLanguageCount: 2 },
+    );
+
+    expect(resolved.items.map((item) => item.key)).toEqual([
+      "categories",
+      "support",
+      "languages",
+      "inquiries",
+    ]);
+  });
+
+  it("removes contextually unavailable categories and language switching", () => {
+    const resolved = resolveStorefrontMenuButtons(defaultStorefrontMenuConfig(), {
+      hasEligibleProducts: false,
+      enabledLanguageCount: 1,
+    });
+
+    expect(resolved.items.map((item) => item.key)).toEqual([
+      "products",
+      "support",
+      "inquiries",
+    ]);
+  });
+
+  it("uses the support fallback when every configured entry is unavailable", () => {
+    const resolved = resolveStorefrontMenuButtons(
+      {
+        version: 1,
+        items: [
+          { key: "categories", enabled: true },
+          { key: "languages", enabled: true },
+          { key: "products", enabled: false },
+          { key: "support", enabled: false },
+          { key: "inquiries", enabled: false },
+        ],
+      },
+      { hasEligibleProducts: false, enabledLanguageCount: 1 },
+    );
+
+    expect(resolved.fallbackUsed).toBe(true);
+    expect(resolved.items).toEqual([{ key: "support", enabled: true }]);
+  });
+
+  it("preserves configured order after filtering", () => {
+    const resolved = resolveStorefrontMenuButtons(
+      {
+        version: 1,
+        items: [
+          { key: "inquiries", enabled: true },
+          { key: "support", enabled: true },
+          { key: "products", enabled: false },
+          { key: "categories", enabled: true },
+          { key: "languages", enabled: true },
+        ],
+      },
+      { hasEligibleProducts: false, enabledLanguageCount: 2 },
+    );
+
+    expect(resolved.items.map((item) => item.key)).toEqual([
+      "inquiries",
+      "support",
+      "languages",
     ]);
   });
 

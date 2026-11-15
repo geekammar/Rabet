@@ -1483,9 +1483,13 @@ inspection, not merged or deployed.
   toggles, Up/Down ordering (no drag-and-drop), save/error/success states,
   unsaved-change protection, a confirmed Reset to Defaults, and a read-only
   customer preview for both the saved configuration and any pending draft. The
-  preview shows localized labels for each enabled language, the configured
-  order, visibility status/reasons, and a representative welcome message, and
-  states clearly that it sends nothing to Telegram.
+  preview renders only the buttons that would actually appear in Telegram,
+  resolved by the same shared visibility/fallback function as the live home:
+  disabled and contextually unavailable entries remain visible only in the
+  configuration status list. It preserves configured order and Arabic/English
+  RTL/LTR labels, shows Contact Support when no configured entry is currently
+  visible, distinguishes saved from draft previews, and states clearly that it
+  sends nothing to Telegram and writes nothing.
 - **PM-09 repair:** the simplified Products and Categories forms now derive tabs
   from every enabled, supported catalog language instead of assuming English or
   treating Arabic as the only optional language. Arabic-default with English
@@ -1499,5 +1503,16 @@ inspection, not merged or deployed.
   validation. PostgreSQL tests cover default/save/reset/malformed configurations
   and live Telegram home ordering, hiding, callback compatibility and fallback.
   The browser acceptance suite adds Arabic-default English/Arabic tab coverage,
-  storefront save/reload/reset/preview checks, and 320/360/390/430 px overflow
+  storefront save/reload/reset/preview checks, saved-vs-draft and fallback
+  preview fidelity, no-write preview checks, and 320/360/390/430 px overflow
   and touch-target checks.
+- **Release readiness (manual order):** merge the approved PR; verify Vercel
+  Production is READY on the merge SHA; inspect the target database and applied
+  migration state read-only; apply only `0004_storefront_menu.sql` through the
+  authorized GitHub Actions production runner after owner approval and a verified
+  restore point; verify schema and application functionality; then run focused
+  Muse acceptance. The production runner is restricted to manual
+  `workflow_dispatch` on `main` in the fixed `Production` environment with pinned
+  host/database variables and the direct unpooled TLS secret; it rejects pooled,
+  DEV, loopback and unpinned targets. It must not be assumed usable for an
+  arbitrary database. No migration runs automatically from this PR.

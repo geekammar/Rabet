@@ -333,6 +333,30 @@ The runner enforces strict safety properties before opening a connection or writ
 
 The full operator guide is in [docs/PHASE_10B_PRODUCTION_PREPARATION.md](./docs/PHASE_10B_PRODUCTION_PREPARATION.md).
 
+#### Release order for a new additive migration
+
+For every new migration, including `drizzle/0004_storefront_menu.sql`:
+
+1. Merge the approved PR.
+2. Verify Vercel Production is **READY** on the merge SHA.
+3. Inspect the target database and its applied migration state read-only, and
+   confirm `0004_storefront_menu.sql` is the only pending migration.
+4. Apply only that committed migration through the authorized GitHub Actions
+   production runner, after explicit owner approval and a verified restore
+   point. If inspection shows different pending migrations, drift or an
+   ambiguous state, stop and escalate instead of writing.
+5. Verify the resulting schema and application functionality.
+6. Run the focused Muse acceptance for the changed feature.
+
+The production runner is intentionally target-restricted: it runs only through
+manual `workflow_dispatch` on `refs/heads/main` in the fixed `Production` GitHub
+Environment, requires the pinned `NEON_PROD_EXPECTED_HOST` and
+`NEON_PROD_EXPECTED_DB_NAME`, and accepts only the direct unpooled
+`NEON_PROD_DATABASE_URL` with TLS. It rejects pooled endpoints, the known
+development endpoint, loopback targets and any unpinned target. Do not assume it
+can be used for an arbitrary database, and do not bypass it with a VPS or local
+production migration.
+
 ### Running the DB tests
 
 The DB suites run against **real PostgreSQL** because every invariant they assert
@@ -347,11 +371,14 @@ In CI the DB job also runs `npm run db:check` to catch schema/migration drift.
 
 ### Production migrations
 
-**No production database exists or has been contacted.** When one is provisioned,
-migrations are run **by hand** from the development VPS against the **unpooled**
-connection, after a manual snapshot — never from a Vercel build, never at
-application startup, and never through `drizzle-kit push`. The step-by-step
-operator runbook is in [docs/PHASE_03B_HANDOFF.md](./docs/PHASE_03B_HANDOFF.md).
+Production migrations are **manual and runner-restricted**. They are never run
+from the development VPS, a local machine, a Vercel build or application startup,
+and never through `drizzle-kit push`. The authorized path is the manual
+`Neon PROD database` GitHub Actions workflow described above, on `main`, with the
+fixed target pinning, a verified restore point and owner approval. Use the
+release order in "Release order for a new additive migration"; the underlying
+operator runbook is in
+[docs/PHASE_10B_PRODUCTION_PREPARATION.md](./docs/PHASE_10B_PRODUCTION_PREPARATION.md).
 
 ## Environment variables
 

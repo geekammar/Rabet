@@ -6,8 +6,6 @@ import {
   ArrowDown,
   ArrowUp,
   CheckCircle2,
-  Eye,
-  EyeOff,
   Info,
   Loader2,
   RotateCcw,
@@ -33,7 +31,7 @@ import {
   availabilityReasonLabel,
   getStorefrontMenuButtonLabels,
   getStorefrontMenuItemAvailability,
-  getVisibleStorefrontMenuItems,
+  resolveStorefrontMenuButtons,
   type StorefrontMenuConfig,
   type StorefrontMenuConfigSource,
   type StorefrontMenuVisibility,
@@ -138,8 +136,10 @@ function MenuPreview({
   welcomeText: string;
 }) {
   const labels = getStorefrontMenuButtonLabels(previewLanguage.isRtl);
-  const visibleItems = getVisibleStorefrontMenuItems(config, visibility);
-  const fallbackUsed = visibleItems.length === 0;
+  const { items: previewItems, fallbackUsed } = resolveStorefrontMenuButtons(
+    config,
+    visibility,
+  );
 
   return (
     <Card
@@ -171,56 +171,32 @@ function MenuPreview({
             {welcomeText}
           </p>
 
-          <div className="mt-4 space-y-2" aria-label="Customer menu preview">
+          <div
+            className="mt-4 space-y-2"
+            aria-label="Customer menu preview buttons"
+            data-testid="storefront-preview-menu"
+          >
             {fallbackUsed ? (
               <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
-                No configured entry is currently visible, so Contact Support is
-                shown as the minimal safe navigation fallback.
+                No enabled entry is currently available, so Contact Support is
+                shown as the safe navigation fallback, exactly as in Telegram.
               </div>
             ) : null}
 
-            {config.items.map((item, index) => {
-              const status = statusForItem(item, visibility);
-              const isVisible = item.enabled && status.tone === "visible";
-
-              return (
-                <div
-                  key={item.key}
-                  className={`flex min-w-0 flex-col gap-1 rounded-lg border px-3 py-2 sm:flex-row sm:items-center sm:justify-between ${
-                    isVisible ? "bg-background" : "bg-muted/30"
-                  }`}
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="w-5 shrink-0 text-xs text-muted-foreground">
-                      {index + 1}.
-                    </span>
-                    {isVisible ? (
-                      <Eye className="size-4 shrink-0 text-emerald-600" aria-hidden="true" />
-                    ) : (
-                      <EyeOff
-                        className="size-4 shrink-0 text-muted-foreground"
-                        aria-hidden="true"
-                      />
-                    )}
-                    <span
-                      className={`min-w-0 break-words text-sm ${
-                        isVisible ? "font-medium" : "text-muted-foreground"
-                      }`}
-                    >
-                      {labels[item.key]}
-                    </span>
-                  </div>
-                  <div className="flex flex-col gap-1 sm:items-end">
-                    <StatusBadge status={status} />
-                    {status.reason ? (
-                      <span className="break-words text-xs text-muted-foreground">
-                        {status.reason}
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
+            {previewItems.map((item, index) => (
+              <div
+                key={item.key}
+                data-testid={`storefront-preview-button-${item.key}`}
+                className="flex min-w-0 items-center gap-2 rounded-lg border bg-background px-3 py-2"
+              >
+                <span className="w-5 shrink-0 text-xs text-muted-foreground">
+                  {index + 1}.
+                </span>
+                <span className="min-w-0 break-words text-sm font-medium">
+                  {labels[item.key]}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
 
@@ -416,8 +392,7 @@ export function StorefrontSettingsManager({
           <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-600" />
           <p>
             The saved menu configuration could not be read. Customers are safely
-            seeing the five default entries. Save this form to replace the
-            invalid value.
+            seeing the default menu. Save this form to replace the invalid value.
           </p>
         </div>
       ) : null}
@@ -427,8 +402,8 @@ export function StorefrontSettingsManager({
           <CardTitle className="text-base">Menu entries</CardTitle>
           <CardDescription>
             {source === "default"
-              ? "This store is using the default menu: all five entries are enabled in the original order."
-              : "Use the up and down buttons to change the order customers see."}
+              ? "This store is using the default menu: all five entries are enabled in the original order. Customer visibility still depends on catalog and language availability."
+              : "Use the up and down buttons to change the order customers see. Enabled entries may still be temporarily unavailable because of catalog or language rules."}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -508,10 +483,11 @@ export function StorefrontSettingsManager({
               {enabledCount} of {draft.items.length} entries enabled
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              At least one entry must stay enabled. If every enabled entry is
-              temporarily unavailable because of catalog or language rules,
-              Contact Support is shown as a safe fallback so customers are never
-              left without navigation.
+              Enabled means chosen in configuration; it does not override
+              contextual availability. At least one entry must stay enabled. If
+              every enabled entry is temporarily unavailable, Contact Support is
+              shown as a safe fallback so customers are never left without
+              navigation.
             </p>
           </div>
 
@@ -555,7 +531,7 @@ export function StorefrontSettingsManager({
           <div>
             <h2 className="text-base font-semibold">Customer preview</h2>
             <p className="text-sm text-muted-foreground">
-              A read-only representation of the Telegram home screen.
+              Shows only the buttons that would currently appear in Telegram.
             </p>
           </div>
 
@@ -581,7 +557,7 @@ export function StorefrontSettingsManager({
 
         <MenuPreview
           title="Saved configuration"
-          description={`What customers currently see in Telegram for ${displayName}.`}
+          description={`The saved menu for ${displayName}, filtered by the same catalog and language rules as the live Telegram home.`}
           config={savedConfig}
           visibility={visibility}
           isDraft={false}
@@ -598,7 +574,7 @@ export function StorefrontSettingsManager({
         {isDirty ? (
           <MenuPreview
             title="Pending unsaved changes"
-            description="This preview updates as you edit. It is not live in Telegram until you save."
+            description="The draft menu, filtered the same way. It is not live in Telegram until you save."
             config={draft}
             visibility={visibility}
             isDraft
