@@ -33,6 +33,7 @@ import {
   createTestDatabase,
   hasTestCluster,
   pgErrorCode,
+  pgErrorMessage,
   type TestDatabase,
 } from "./helpers";
 
@@ -46,6 +47,8 @@ const verificationFile = path.resolve(
   import.meta.dirname,
   "../../docs/backfill/legacy-store-verification.sql",
 );
+const backfillSql = readFileSync(backfillFile, "utf8");
+const verificationSql = readFileSync(verificationFile, "utf8");
 
 const OWNERSHIP_TABLES = [
   "bot_setting",
@@ -270,21 +273,12 @@ async function seedLegacyData() {
   };
 }
 
-function backfillStatements(): string[] {
-  return readFileSync(backfillFile, "utf8")
-    .split("--> statement-breakpoint")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
+async function runBackfillOn(db: TestDatabase["db"]) {
+  await db.execute(sql.raw(backfillSql));
 }
 
 async function runBackfill() {
-  const statements = backfillStatements();
-
-  await testDb!.db.transaction(async (tx) => {
-    for (const statement of statements) {
-      await tx.execute(sql.raw(statement));
-    }
-  });
+  await runBackfillOn(testDb!.db);
 }
 
 async function ownershipSnapshot() {
@@ -320,6 +314,17 @@ async function ownershipSnapshot() {
       (select count(*)::int from "message_translation") as message_translation,
       (select count(*)::int from "payment_method_translation") as payment_method_translation
   `);
+  const timestamps = await db.execute<{ data: Record<string, unknown> }>(sql`
+    select jsonb_build_object(
+      'bot_setting', (select jsonb_agg(jsonb_build_object('id', "id", 'updated_at', "updated_at") order by "id") from "bot_setting"),
+      'category', (select jsonb_agg(jsonb_build_object('id', "id", 'updated_at', "updated_at") order by "id") from "category"),
+      'customer', (select jsonb_agg(jsonb_build_object('id', "id", 'updated_at', "updated_at") order by "id") from "customer"),
+      'message_template', (select jsonb_agg(jsonb_build_object('id', "id", 'updated_at', "updated_at") order by "id") from "message_template"),
+      'payment_method', (select jsonb_agg(jsonb_build_object('id', "id", 'updated_at', "updated_at") order by "id") from "payment_method"),
+      'product', (select jsonb_agg(jsonb_build_object('id', "id", 'updated_at', "updated_at") order by "id") from "product"),
+      'seller_notification_setting', (select jsonb_agg(jsonb_build_object('id', "id", 'updated_at', "updated_at") order by "id") from "seller_notification_setting")
+    ) as data
+  `);
 
   return {
     categories,
@@ -328,6 +333,7 @@ async function ownershipSnapshot() {
     deliveries,
     updates,
     translations: translations[0],
+    timestamps: timestamps[0].data,
   };
 }
 
@@ -363,6 +369,8 @@ describe("S1.2 migration static safety", () => {
     const verification = readFileSync(verificationFile, "utf8");
 
     expect(backfill).toContain("NOT EXECUTED BY THE REPOSITORY");
+    expect(backfill).toContain("DO $legacy_store_backfill$");
+    expect(backfill).not.toContain("--> statement-breakpoint");
     expect(backfill).not.toMatch(/https?:\/\//i);
     expect(backfill).not.toMatch(/\b(sendMessage|pg_notify|NOTIFY)\b/i);
     expect(verification).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
@@ -664,6 +672,7 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
     expect(afterFirst.deliveries).toEqual(before.deliveries);
     expect(afterFirst.updates).toEqual(before.updates);
     expect(afterFirst.translations).toEqual(before.translations);
+    expect(afterFirst.timestamps).toEqual(before.timestamps);
 
     const firstDelivery = await testDb!.db.execute<{ status: string }>(sql`
       select "status" from "seller_notification_delivery" where "reference" = 'SND-LEGACY'
@@ -689,6 +698,22 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
     const afterSecond = await ownershipSnapshot();
     expect(afterSecond).toEqual(afterFirst);
 
+    const verification = await testDb!.db.execute<{
+      kind: string;
+      check_name: string;
+      actual: string;
+      expected: string | null;
+      ok: boolean | null;
+    }>(sql.raw(verificationSql));
+    const assertions = verification.filter((row) => row.kind === "assertion");
+    expect(assertions.length).toBeGreaterThan(0);
+    expect(assertions.every((row) => row.ok === true)).toBe(true);
+    expect(
+      verification.some(
+        (row) => row.kind === "metric" && row.check_name === "translation_counts",
+      ),
+    ).toBe(true);
+
     const deliveryCount = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from "seller_notification_delivery"
     `);
@@ -706,6 +731,221 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
       from "product" p where p."id" = ${seeded.activeProduct.id}
     `);
     expect(relationships[0].category_id).toBe(seeded.child.id);
+  });
+
+  it("rolls back store creation and every ownership write when a late step fails", async () => {
+    const seeded = await seedLegacyData();
+    const before = await ownershipSnapshot();
+    const db = testDb!.db;
+
+    await db.execute(sql`drop trigger if exists backfill_force_failure_trigger on "telegram_update"`);
+    await db.execute(sql`drop function if exists public.backfill_force_failure()`);
+    await db.execute(sql`
+      create function public.backfill_force_failure()
+      returns trigger
+      language plpgsql
+      as $$
+      begin
+        raise exception 'simulated late backfill failure';
+      end;
+      $$
+    `);
+    await db.execute(sql`
+      create trigger backfill_force_failure_trigger
+      before update on "telegram_update"
+      for each row execute function public.backfill_force_failure()
+    `);
+
+    let caught: unknown;
+    try {
+      await runBackfill();
+    } catch (error) {
+      caught = error;
+    } finally {
+      await db.execute(sql`drop trigger if exists backfill_force_failure_trigger on "telegram_update"`);
+      await db.execute(sql`drop function if exists public.backfill_force_failure()`);
+    }
+
+    expect(pgErrorMessage(caught)).toMatch(/simulated late backfill failure/);
+
+    const [stores] = await db.execute<{ count: number }>(
+      sql`select count(*)::int as count from "store"`,
+    );
+    expect(stores.count).toBe(0);
+
+    for (const table of OWNERSHIP_TABLES) {
+      const [row] = await db.execute<{ owned: number }>(sql`
+        select count(*) filter (where "store_id" is not null)::int as owned
+        from ${sql.raw(`"${table}"`)}
+      `);
+      expect(row.owned).toBe(0);
+    }
+
+    const after = await ownershipSnapshot();
+    expect(after).toEqual(before);
+    expect(after.timestamps).toEqual(before.timestamps);
+    expect(seeded.activeProduct.storeId).toBeNull();
+  });
+
+  it("fails closed when another unrelated store exists", async () => {
+    await seedLegacyData();
+    const db = testDb!.db;
+    await db.insert(store).values({
+      name: "Other Store",
+      slug: "other-store",
+      status: "active",
+    });
+    const before = await ownershipSnapshot();
+
+    let caught: unknown;
+    try {
+      await runBackfill();
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(pgErrorMessage(caught)).toMatch(
+      /not empty but the deterministic legacy store slug|another store exists/i,
+    );
+    const [stores] = await db.execute<{ count: number }>(
+      sql`select count(*)::int as count from "store"`,
+    );
+    expect(stores.count).toBe(1);
+    const [legacy] = await db.execute<{ count: number }>(sql`
+      select count(*)::int as count from "store" where "slug" = 'legacy-store'
+    `);
+    expect(legacy.count).toBe(0);
+
+    for (const table of OWNERSHIP_TABLES) {
+      const [row] = await db.execute<{ owned: number }>(sql`
+        select count(*) filter (where "store_id" is not null)::int as owned
+        from ${sql.raw(`"${table}"`)}
+      `);
+      expect(row.owned).toBe(0);
+    }
+    expect(await ownershipSnapshot()).toEqual(before);
+  });
+
+  it("fails closed when the legacy slug has an unexpected identity", async () => {
+    await seedLegacyData();
+    const db = testDb!.db;
+    await db.insert(store).values({
+      name: "Unexpected Store",
+      slug: "legacy-store",
+      status: "onboarding",
+    });
+    const before = await ownershipSnapshot();
+
+    let caught: unknown;
+    try {
+      await runBackfill();
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(pgErrorMessage(caught)).toMatch(/unexpected identity/i);
+    const [stores] = await db.execute<{ count: number }>(
+      sql`select count(*)::int as count from "store"`,
+    );
+    expect(stores.count).toBe(1);
+
+    for (const table of OWNERSHIP_TABLES) {
+      const [row] = await db.execute<{ owned: number }>(sql`
+        select count(*) filter (where "store_id" is not null)::int as owned
+        from ${sql.raw(`"${table}"`)}
+      `);
+      expect(row.owned).toBe(0);
+    }
+    expect(await ownershipSnapshot()).toEqual(before);
+  });
+
+  it("fails closed when a row is already owned by another store", async () => {
+    const seeded = await seedLegacyData();
+    const db = testDb!.db;
+    await db.insert(store).values({
+      name: "Rabet Legacy Store",
+      slug: "legacy-store",
+      status: "active",
+    });
+    const [other] = await db
+      .insert(store)
+      .values({ name: "Other Store", slug: "other-store", status: "active" })
+      .returning();
+    await db.execute(sql`
+      update "category" set "store_id" = ${other.id} where "id" = ${seeded.root.id}
+    `);
+
+    let caught: unknown;
+    try {
+      await runBackfill();
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(pgErrorMessage(caught)).toMatch(/owned by another store/i);
+    const [root] = await db.execute<{ store_id: string | null }>(sql`
+      select "store_id" from "category" where "id" = ${seeded.root.id}
+    `);
+    expect(root.store_id).toBe(other.id);
+    const [child] = await db.execute<{ store_id: string | null }>(sql`
+      select "store_id" from "category" where "id" = ${seeded.child.id}
+    `);
+    expect(child.store_id).toBeNull();
+    const [stores] = await db.execute<{ count: number }>(
+      sql`select count(*)::int as count from "store"`,
+    );
+    expect(stores.count).toBe(2);
+  });
+
+  it("fails closed when the 0006 schema baseline is missing", async () => {
+    const missingDb = await createTestDatabase("backfill_missing_baseline");
+
+    try {
+      await missingDb.db.execute(sql`alter table "customer" drop column "store_id" cascade`);
+
+      let caught: unknown;
+      try {
+        await runBackfillOn(missingDb.db);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(pgErrorMessage(caught)).toMatch(
+        /required column public.customer.store_id is missing/i,
+      );
+      const [stores] = await missingDb.db.execute<{ count: number }>(
+        sql`select count(*)::int as count from "store"`,
+      );
+      expect(stores.count).toBe(0);
+    } finally {
+      await missingDb.close();
+    }
+  });
+
+  it("still allows legacy NULL ownership writes after backfill (S1.3 gap)", async () => {
+    await seedLegacyData();
+    await runBackfill();
+
+    const db = testDb!.db;
+    const upserted = await upsertCustomer(asAppDb(db), {
+      telegramId: 987654322,
+      firstName: "Post-backfill legacy write",
+    });
+    expect(upserted.storeId).toBeNull();
+
+    const claimed = await claimTelegramUpdate(asAppDb(db), {
+      updateId: 7002,
+      updateType: "message",
+      payload: { message: { message_id: 2 } },
+    });
+    expect(claimed.status).toBe("claimed");
+    expect(claimed.row.storeId).toBeNull();
+
+    const [created] = await db
+      .insert(category)
+      .values({ slug: "post-backfill-null-owner", sortOrder: 100 })
+      .returning();
+    expect(created.storeId).toBeNull();
   });
 
   it("re-applying the migration chain is a no-op", async () => {
