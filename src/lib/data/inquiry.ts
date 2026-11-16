@@ -8,11 +8,16 @@ import {
   customer,
   inquiry,
   inquiryMessage,
+  product,
   sellerNotificationDelivery,
   telegramUpdate,
 } from "@/db/schema";
 import { executeAtomicBatch, toBatchable } from "./catalog";
 import { mapDatabaseError } from "./errors";
+import {
+  assertOwnershipCompatible,
+  resolveLegacyStoreIdForWrite,
+} from "./store-context";
 
 export type InquiryRecord = typeof inquiry.$inferSelect;
 export type InquiryMessageRecord = typeof inquiryMessage.$inferSelect;
@@ -127,6 +132,57 @@ export function createReceiptAssertionQuery(
   );
 }
 
+/**
+ * Verifies the trusted legacy context and the ownership relationship between a
+ * customer and an optional product before an inquiry is created.
+ *
+ * Inquiry ownership derives from the customer. A product may be referenced only
+ * when its ownership is compatible with the customer and the legacy context;
+ * historical NULL values remain a documented transition condition.
+ */
+async function assertInquiryOwnership(
+  db: Database,
+  customerId: string,
+  productId?: string,
+): Promise<void> {
+  const storeId = await resolveLegacyStoreIdForWrite(db);
+
+  const [customerRow] = await db
+    .select({ id: customer.id, storeId: customer.storeId })
+    .from(customer)
+    .where(eq(customer.id, customerId))
+    .limit(1);
+
+  if (customerRow) {
+    assertOwnershipCompatible(
+      storeId,
+      customerRow.storeId,
+      "The customer belongs to a different store.",
+    );
+  }
+
+  if (productId) {
+    const [productRow] = await db
+      .select({ id: product.id, storeId: product.storeId })
+      .from(product)
+      .where(eq(product.id, productId))
+      .limit(1);
+
+    if (productRow) {
+      assertOwnershipCompatible(
+        storeId,
+        productRow.storeId,
+        "The product belongs to a different store.",
+      );
+      assertOwnershipCompatible(
+        customerRow?.storeId,
+        productRow.storeId,
+        "The customer and the product belong to different stores.",
+      );
+    }
+  }
+}
+
 export interface CreateOrResumeProductInquiryInput {
   customerId: string;
   productId: string;
@@ -159,6 +215,8 @@ export async function createOrResumeProductInquiry(
   input: CreateOrResumeProductInquiryInput,
 ): Promise<CreateOrResumeProductInquiryResult> {
   try {
+    await assertInquiryOwnership(db, input.customerId, input.productId);
+
     const newId = crypto.randomUUID();
     const newRef = generateInquiryReference();
 
@@ -384,6 +442,8 @@ export async function createOrResumeSupportInquiry(
   input: CreateOrResumeSupportInquiryInput,
 ): Promise<CreateOrResumeSupportInquiryResult> {
   try {
+    await assertInquiryOwnership(db, input.customerId);
+
     const newId = crypto.randomUUID();
     const newRef = generateInquiryReference();
     const targetCategory = input.category ?? null;
@@ -601,6 +661,8 @@ export async function appendInboundCustomerMessage(
   input: AppendInboundCustomerMessageInput,
 ): Promise<AppendInboundCustomerMessageResult> {
   try {
+    await assertInquiryOwnership(db, input.customerId);
+
     const newMessageId = crypto.randomUUID();
 
     const lockCustomerQuery = toBatchable(
@@ -856,6 +918,8 @@ export async function routeAndAppendCustomerText(
   input: RouteAndAppendCustomerTextInput,
 ): Promise<RouteAndAppendCustomerTextResult> {
   try {
+    await assertInquiryOwnership(db, input.customerId);
+
     const newInqId = crypto.randomUUID();
     const newRef = generateInquiryReference();
     const newMsgId = crypto.randomUUID();

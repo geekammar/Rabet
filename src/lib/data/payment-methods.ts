@@ -11,6 +11,10 @@ import {
 import { executeAtomicBatch } from "./catalog";
 import { mapDatabaseError, RabetDataError } from "./errors";
 import { listLanguages, resolveDefaultLanguage } from "./languages";
+import {
+  assertOwnershipCompatible,
+  resolveLegacyStoreIdForWrite,
+} from "./store-context";
 
 /**
  * ===========================================================================
@@ -104,6 +108,7 @@ export interface PaymentMethodTranslationRecord {
 
 export interface PaymentMethodRecord {
   id: string;
+  storeId?: string | null;
   adminLabel: string;
   isActive: boolean;
   sortOrder: number;
@@ -152,7 +157,15 @@ export async function listPaymentMethods(
     }
 
     const methodRows = await db
-      .select()
+      .select({
+        id: paymentMethod.id,
+        storeId: paymentMethod.storeId,
+        adminLabel: paymentMethod.adminLabel,
+        isActive: paymentMethod.isActive,
+        sortOrder: paymentMethod.sortOrder,
+        createdAt: paymentMethod.createdAt,
+        updatedAt: paymentMethod.updatedAt,
+      })
       .from(paymentMethod)
       .orderBy(paymentMethod.sortOrder, paymentMethod.createdAt);
 
@@ -228,7 +241,15 @@ export async function readPaymentMethod(
     }
 
     const [row] = await db
-      .select()
+      .select({
+        id: paymentMethod.id,
+        storeId: paymentMethod.storeId,
+        adminLabel: paymentMethod.adminLabel,
+        isActive: paymentMethod.isActive,
+        sortOrder: paymentMethod.sortOrder,
+        createdAt: paymentMethod.createdAt,
+        updatedAt: paymentMethod.updatedAt,
+      })
       .from(paymentMethod)
       .where(eq(paymentMethod.id, id))
       .limit(1);
@@ -284,6 +305,8 @@ export async function createPaymentMethod(
   input: CreatePaymentMethodData,
 ): Promise<{ methodId: string; method: PaymentMethodRecord }> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const capability = await checkPaymentMethodsCapability(db);
     if (!capability.supported) {
       throw new RabetDataError(
@@ -365,6 +388,7 @@ export async function createPaymentMethod(
 
     const methodInsert = db.insert(paymentMethod).values({
       id: methodId,
+      storeId,
       adminLabel,
       isActive,
       sortOrder: nextSortOrder,
@@ -412,6 +436,8 @@ export async function editPaymentMethod(
   input: EditPaymentMethodData,
 ): Promise<{ method: PaymentMethodRecord }> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const capability = await checkPaymentMethodsCapability(db);
     if (!capability.supported) {
       throw new RabetDataError(
@@ -424,6 +450,12 @@ export async function editPaymentMethod(
     if (!existing) {
       throw new RabetDataError("NOT_FOUND", "Payment method not found.");
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      existing.storeId,
+      "The payment method belongs to a different store.",
+    );
 
     const updateSet: Record<string, unknown> = {
       updatedAt: sql`now()`,

@@ -24,6 +24,12 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for the stack and ADRs,
 > data, remove legacy unique constraints, enforce composite ownership foreign keys,
 > or change any runtime path; the model described below remains the single-store
 > MVP behaviour. See [S1.2_TENANT_OWNERSHIP.md](./S1.2_TENANT_OWNERSHIP.md).
+>
+> **S1.3-A write ownership.** A trusted legacy-store resolver now stamps new
+> rows in the eight ownership roots when the approved store exists. Updates do
+> not transfer ownership, runtime writes do not backfill history, and reads are
+> still unfiltered until S1.3-B. See
+> [S1.3A_SAAS_DATA_ARCHITECTURE.md](./S1.3A_SAAS_DATA_ARCHITECTURE.md).
 
 ---
 

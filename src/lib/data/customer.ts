@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import type { Database } from "@/db/client";
 import { customer } from "@/db/schema";
 import { mapDatabaseError } from "./errors";
+import { resolveLegacyStoreIdForWrite } from "./store-context";
 
 export interface UpsertCustomerInput {
   telegramId: number;
@@ -29,6 +30,8 @@ export async function upsertCustomer(
   input: UpsertCustomerInput,
 ): Promise<CustomerRecord> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const updateSet: Record<string, unknown> = {
       telegramUsername: input.telegramUsername ?? null,
       firstName: input.firstName ?? null,
@@ -45,6 +48,7 @@ export async function upsertCustomer(
     const [row] = await db
       .insert(customer)
       .values({
+        storeId,
         telegramId: input.telegramId,
         telegramUsername: input.telegramUsername ?? null,
         firstName: input.firstName ?? null,
@@ -93,6 +97,8 @@ export async function setCustomerSelectedLanguage(
   languageId: string,
 ): Promise<CustomerRecord> {
   try {
+    await resolveLegacyStoreIdForWrite(db);
+
     const [row] = await db
       .update(customer)
       .set({
@@ -121,6 +127,8 @@ export async function setCustomerBlockedStatus(
   isBlocked: boolean,
 ): Promise<void> {
   try {
+    await resolveLegacyStoreIdForWrite(db);
+
     await db
       .update(customer)
       .set({

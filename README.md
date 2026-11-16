@@ -199,9 +199,12 @@ financial entity exists anywhere** (ADR-013).
 The S1.1 migration `0005_tenant_identity_foundation` adds three isolated tenant
 identity tables — `store`, `app_user` and `store_membership`. The S1.2 migration
 `0006_tenant_ownership_expansion` adds nullable `store_id` ownership columns to
-the tenant-owned roots, with foreign keys and indexes. No row is backfilled, no
-existing unique constraint is removed, and no runtime path reads or filters by
-`store_id` in this phase. See [S1.2_TENANT_OWNERSHIP.md](./docs/S1.2_TENANT_OWNERSHIP.md).
+the tenant-owned roots, with foreign keys and indexes. S1.3-A adds a trusted
+legacy-store resolver and stamps new writes with the verified store id when it
+exists; updates never transfer ownership, existing rows are not backfilled by
+runtime code, and reads still do not filter by `store_id`. See
+[S1.2_TENANT_OWNERSHIP.md](./docs/S1.2_TENANT_OWNERSHIP.md) and
+[S1.3A_SAAS_DATA_ARCHITECTURE.md](./docs/S1.3A_SAAS_DATA_ARCHITECTURE.md).
 
 ### Folder structure
 
@@ -415,6 +418,7 @@ never points at `DATABASE_URL`.
 - [docs/PROGRESS.md](./docs/PROGRESS.md) — phase status, what is done and what is pending.
 - [docs/DATA_MODEL.md](./docs/DATA_MODEL.md) — the approved data model: the two recursive hierarchies (catalog + interaction buttons), the configurable button-action system, the inquiry model, security and integrity rules, infrastructure and migration plan.
 - [docs/PHASE_03B_HANDOFF.md](./docs/PHASE_03B_HANDOFF.md) — Phase 03B implementation status, migration files, test commands and results, and the production migration runbook.
+- [docs/S1.3A_SAAS_DATA_ARCHITECTURE.md](./docs/S1.3A_SAAS_DATA_ARCHITECTURE.md) — S1.3-A trusted ownership contract, write coverage, compatibility limits and deferred S1.3-B enforcement.
 
 ## Development workflow
 

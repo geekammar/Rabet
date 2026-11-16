@@ -5,7 +5,8 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import { telegramUpdate } from "@/db/schema";
-import { mapDatabaseError } from "./errors";
+import { mapDatabaseError, RabetDataError } from "./errors";
+import { resolveLegacyStoreIdForWrite } from "./store-context";
 
 export type TelegramUpdateRecord = typeof telegramUpdate.$inferSelect;
 
@@ -68,6 +69,7 @@ export async function claimTelegramUpdate(
   input: ClaimTelegramUpdateInput,
 ): Promise<ClaimTelegramUpdateResult> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
     const attemptId = input.attemptId ?? crypto.randomUUID();
     const now = new Date();
     const leaseMs = input.leaseMs ?? IN_FLIGHT_LEASE_MS;
@@ -84,6 +86,7 @@ export async function claimTelegramUpdate(
     const [insertedRow] = await db
       .insert(telegramUpdate)
       .values({
+        storeId,
         updateId: input.updateId,
         updateType: input.updateType,
         payload: envelope,
@@ -134,6 +137,18 @@ export async function claimTelegramUpdate(
       .where(eq(telegramUpdate.updateId, input.updateId))
       .limit(1);
 
+    if (
+      existing &&
+      storeId !== null &&
+      existing.storeId !== null &&
+      existing.storeId !== storeId
+    ) {
+      throw new RabetDataError(
+        "CROSS_STORE_REFERENCE",
+        "The Telegram update belongs to a different store.",
+      );
+    }
+
     if (!existing || existing.processedAt !== null) {
       return { status: "already_processed", row: existing! };
     }
@@ -158,6 +173,8 @@ export async function markTelegramUpdateProcessed(
   },
 ): Promise<boolean> {
   try {
+    await resolveLegacyStoreIdForWrite(db);
+
     const [row] = await db
       .update(telegramUpdate)
       .set({
@@ -193,6 +210,8 @@ export async function markTelegramUpdateFailed(
   },
 ): Promise<boolean> {
   try {
+    await resolveLegacyStoreIdForWrite(db);
+
     const [row] = await db
       .update(telegramUpdate)
       .set({
@@ -227,6 +246,8 @@ export async function recordTelegramUpdateReceipt(
   },
 ): Promise<boolean> {
   try {
+    await resolveLegacyStoreIdForWrite(db);
+
     const [row] = await db
       .update(telegramUpdate)
       .set({
