@@ -50,6 +50,7 @@ rabet/
 │   ├── 0002_payment_methods.sql
 │   ├── 0003_seller_notifications.sql
 │   ├── 0004_storefront_menu.sql
+│   ├── 0005_tenant_identity_foundation.sql
 │   └── meta/              # Drizzle journal + snapshots
 ├── drizzle.config.ts      # Drizzle Kit config (generate is offline; migrate needs DATABASE_URL)
 ├── public/
@@ -87,7 +88,7 @@ rabet/
 │   │   └── page-header.tsx # Reusable page header
 │   ├── db/                 # Database layer — server-only (Phase 03B)
 │   │   ├── client.ts       # `getDb()` — lazy neon-http Drizzle client
-│   │   └── schema/         # 14 tables in 7 domains + barrel index
+│   │   └── schema/         # 17 tables in 8 domains + barrel index
 │   ├── lib/
 │   │   ├── auth/           # admin-config, credentials, session, redirect, schema, cache
 │   │   ├── data/           # Server-only data access layer (Phase 03C-A)
@@ -193,6 +194,12 @@ product categories, digital products with displayed prices, recursive
 product action-button trees, localized action labels, Telegram customers,
 product inquiries, inquiry messages and Telegram update deduplication. **No
 financial entity exists anywhere** (ADR-013).
+
+The S1.1 migration `0005_tenant_identity_foundation` adds three isolated tenant
+identity tables — `store`, `app_user` and `store_membership` — as an additive
+foundation for the future invite-only SaaS. No existing table, route,
+authentication path or bot behavior changes, and no business table gains a
+`store_id` in this phase.
 
 ### Folder structure
 

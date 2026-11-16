@@ -36,6 +36,13 @@
       "when": 1794716803213,
       "tag": "0004_storefront_menu",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794827808841,
+      "tag": "0005_tenant_identity_foundation",
+      "breakpoints": true
     }
   ]
 }
