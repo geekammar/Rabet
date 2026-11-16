@@ -77,8 +77,9 @@ import postgres from "postgres";
 
 const WIZARD = "rabet db:setup:dev";
 
-/** The eighteen domain tables created by the committed chain. */
+/** The twenty-one domain tables created by the committed chain. */
 export const EXPECTED_TABLES = [
+  "app_user",
   "bot_setting",
   "category",
   "category_translation",
@@ -96,6 +97,8 @@ export const EXPECTED_TABLES = [
   "product_translation",
   "seller_notification_delivery",
   "seller_notification_setting",
+  "store",
+  "store_membership",
   "telegram_update",
 ];
 
@@ -106,10 +109,18 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0002_payment_methods",
   "0003_seller_notifications",
   "0004_storefront_menu",
+  "0005_tenant_identity_foundation",
 ];
 
+const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
+
+/** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
+export const EXPECTED_TABLES_V3 = EXPECTED_TABLES.filter(
+  (t) => !TENANT_TABLES.has(t),
+);
+
 /** The sixteen domain tables created by the 0000+0001+0002 schema (Phase 11 baseline). */
-export const EXPECTED_TABLES_V2 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V2 = EXPECTED_TABLES_V3.filter(
   (t) => t !== "seller_notification_delivery" && t !== "seller_notification_setting",
 );
 
@@ -145,17 +156,27 @@ export const EXPECTED_INDEXES_V1 = EXPECTED_INDEXES_V2.filter(
   (i) => i !== "payment_method_translation_method_language_idx",
 );
 
-/**
- * Indexes the wizard requires. The five partial unique indexes carry the
- * integrity rules, the business-key indexes protect the natural unique keys,
- * and the composite translation indexes protect the per-language uniqueness.
- */
-export const EXPECTED_INDEXES = [
+/** The twenty-two indexes present in the 0000..0004 schema (prior release baseline). */
+export const EXPECTED_INDEXES_V3 = [
   ...EXPECTED_INDEXES_V2,
   "seller_notification_delivery_event_inquiry_idx",
   "seller_notification_delivery_reference_unique",
   "seller_notification_delivery_status_idx",
   "seller_notification_delivery_created_at_idx",
+];
+
+/**
+ * Indexes the wizard requires. The five partial unique indexes carry the
+ * integrity rules, the business-key indexes protect the natural unique keys,
+ * the composite translation indexes protect the per-language uniqueness, and
+ * the tenant indexes protect store slugs, case-insensitive emails and one
+ * membership per store/user pair.
+ */
+export const EXPECTED_INDEXES = [
+  ...EXPECTED_INDEXES_V3,
+  "app_user_email_lower_unique",
+  "store_slug_unique",
+  "store_membership_store_user_unique",
 ];
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
@@ -176,14 +197,31 @@ export const CRITICAL_CONSTRAINTS_V2 = [
 
 export const CRITICAL_CONSTRAINTS_V1 = CRITICAL_CONSTRAINTS_V2;
 
-/** CHECK and domain constraints the wizard requires (domain rules the schema enforces). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK and domain constraints present in the 0000..0004 schema (prior release baseline). */
+export const CRITICAL_CONSTRAINTS_V3 = [
   ...CRITICAL_CONSTRAINTS_V2,
   "seller_notification_setting_singleton_check",
   "seller_notification_setting_language_check",
   "seller_notification_setting_destination_check",
   "seller_notification_delivery_status_check",
   "seller_notification_delivery_inquiry_id_fk",
+];
+
+/** CHECK and domain constraints the wizard requires (domain rules the schema enforces). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V3,
+  "store_name_not_empty_check",
+  "store_slug_format_check",
+  "store_status_check",
+  "app_user_email_not_empty_check",
+  "app_user_email_trimmed_check",
+  "app_user_status_check",
+  "app_user_platform_role_check",
+  "app_user_session_version_nonnegative_check",
+  "store_membership_role_check",
+  "store_membership_status_check",
+  "store_membership_store_id_store_id_fk",
+  "store_membership_user_id_app_user_id_fk",
 ];
 
 /** Notification update triggers created by migration 0003. */

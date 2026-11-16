@@ -73,13 +73,16 @@ import {
   CRITICAL_CONSTRAINTS,
   CRITICAL_CONSTRAINTS_V1,
   CRITICAL_CONSTRAINTS_V2,
+  CRITICAL_CONSTRAINTS_V3,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
+  EXPECTED_INDEXES_V3,
   EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
   EXPECTED_TABLES_V2,
+  EXPECTED_TABLES_V3,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -594,7 +597,9 @@ export async function validateTarget(ctx, options = {}) {
       ? CRITICAL_CONSTRAINTS_V1
       : expectedTables === EXPECTED_TABLES_V2
         ? CRITICAL_CONSTRAINTS_V2
-        : CRITICAL_CONSTRAINTS);
+        : expectedTables === EXPECTED_TABLES_V3
+          ? CRITICAL_CONSTRAINTS_V3
+          : CRITICAL_CONSTRAINTS);
   const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
 
   const prefixCount = options.expectedHashes
@@ -1365,14 +1370,36 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 5 &&
+        inspected.state.pending[0] === "0005_tenant_identity_foundation"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V3,
+          expectedIndexes: EXPECTED_INDEXES_V3,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V3,
+          expectedHashes: ctx.committedHashes.slice(0, 5).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 5 migrations recorded, " +
+              "but live schema does not match the supported prior release (0004_storefront_menu).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 4 &&
         inspected.state.pending[0] === "0004_storefront_menu"
       ) {
         header("Validating prior release schema on target (read-only)");
         const validated = await validateTarget(ctx, {
-          expectedTables: EXPECTED_TABLES,
-          expectedIndexes: EXPECTED_INDEXES,
-          expectedConstraints: CRITICAL_CONSTRAINTS,
+          expectedTables: EXPECTED_TABLES_V3,
+          expectedIndexes: EXPECTED_INDEXES_V3,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V3,
           expectedHashes: ctx.committedHashes.slice(0, 4).map((e) => e.hash),
         });
         if (!validated) {
@@ -1461,6 +1488,9 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV4 =
+        inspected.state.appliedCount === 5 &&
+        inspected.state.pending[0] === "0005_tenant_identity_foundation";
       const isKnownPriorReleaseV3 =
         inspected.state.appliedCount === 4 &&
         inspected.state.pending[0] === "0004_storefront_menu";
@@ -1471,12 +1501,38 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV3) {
+      if (isKnownPriorReleaseV4) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
-          expectedTables: EXPECTED_TABLES,
-          expectedIndexes: EXPECTED_INDEXES,
-          expectedConstraints: CRITICAL_CONSTRAINTS,
+          expectedTables: EXPECTED_TABLES_V3,
+          expectedIndexes: EXPECTED_INDEXES_V3,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V3,
+          expectedHashes: ctx.committedHashes.slice(0, 5).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0004_storefront_menu). " +
+              "Proceeding with migration to 0005_tenant_identity_foundation.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV3) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V3,
+          expectedIndexes: EXPECTED_INDEXES_V3,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V3,
           expectedHashes: ctx.committedHashes.slice(0, 4).map((e) => e.hash),
         });
 
