@@ -1,4 +1,14 @@
-import { jsonb, pgTable, text, timestamp, uuid, bigint } from "drizzle-orm/pg-core";
+import {
+  bigint,
+  index,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core";
+
+import { store } from "./tenant";
 
 /**
  * `telegram_update` — the deduplication / idempotency log.
@@ -22,17 +32,24 @@ import { jsonb, pgTable, text, timestamp, uuid, bigint } from "drizzle-orm/pg-co
  * not a `bot_setting` value, so the seller cannot disable the housekeeping
  * that keeps the table bounded (DATA_MODEL.md §11.3, §12.3, §19.5).
  */
-export const telegramUpdate = pgTable("telegram_update", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  // Telegram update ids are 64-bit; stored as `bigint`, read as a JS number.
-  updateId: bigint("update_id", { mode: "number" }).notNull().unique(),
-  // e.g. `message`, `callback_query` — the retained audit-trail type.
-  updateType: text("update_type").notNull(),
-  // Pruned on a schedule (see module doc).
-  payload: jsonb("payload"),
-  processedAt: timestamp("processed_at", { withTimezone: true, mode: "date" }),
-  processingError: text("processing_error"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
-    .notNull()
-    .defaultNow(),
-});
+export const telegramUpdate = pgTable(
+  "telegram_update",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    storeId: uuid("store_id").references(() => store.id, {
+      onDelete: "restrict",
+    }),
+    // Telegram update ids are 64-bit; stored as `bigint`, read as a JS number.
+    updateId: bigint("update_id", { mode: "number" }).notNull().unique(),
+    // e.g. `message`, `callback_query` — the retained audit-trail type.
+    updateType: text("update_type").notNull(),
+    // Pruned on a schedule (see module doc).
+    payload: jsonb("payload"),
+    processedAt: timestamp("processed_at", { withTimezone: true, mode: "date" }),
+    processingError: text("processing_error"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("telegram_update_store_idx").on(table.storeId)],
+);

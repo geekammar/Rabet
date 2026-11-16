@@ -1,5 +1,6 @@
 import {
   boolean,
+  index,
   integer,
   pgTable,
   text,
@@ -9,6 +10,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { language } from "./settings";
+import { store } from "./tenant";
 
 /**
  * ===========================================================================
@@ -24,18 +26,25 @@ import { language } from "./settings";
  * Defaults to disabled (isActive = false).
  */
 
-export const paymentMethod = pgTable("payment_method", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  adminLabel: text("admin_label").notNull(),
-  isActive: boolean("is_active").notNull().default(false),
-  sortOrder: integer("sort_order").notNull().default(0),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
-    .notNull()
-    .defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
-    .notNull()
-    .defaultNow(),
-});
+export const paymentMethod = pgTable(
+  "payment_method",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    storeId: uuid("store_id").references(() => store.id, {
+      onDelete: "restrict",
+    }),
+    adminLabel: text("admin_label").notNull(),
+    isActive: boolean("is_active").notNull().default(false),
+    sortOrder: integer("sort_order").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("payment_method_store_idx").on(table.storeId)],
+);
 
 export const paymentMethodTranslation = pgTable(
   "payment_method_translation",

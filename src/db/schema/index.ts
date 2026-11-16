@@ -10,9 +10,10 @@
  * helpers work).
  *
  * The Tenant domain (`store`, `app_user`, `store_membership`) is the additive
- * S1.1 foundation for the future invite-only SaaS. It is not referenced by any
- * existing business table or runtime path yet; the application remains
- * single-store and single-administrator.
+ * foundation for the future invite-only SaaS. S1.2 adds nullable ownership
+ * columns to the tenant-owned roots, but no runtime path reads or writes them
+ * yet; the application remains single-store and single-administrator until a
+ * separately approved backfill and enforcement phase.
  *
  * Two independent recursive hierarchies live here and are never merged
  * (ADR-014): the catalog tree (`category.parentId`) and the interaction tree

@@ -110,6 +110,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0003_seller_notifications",
   "0004_storefront_menu",
   "0005_tenant_identity_foundation",
+  "0006_tenant_ownership_expansion",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -118,6 +119,9 @@ const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
 export const EXPECTED_TABLES_V3 = EXPECTED_TABLES.filter(
   (t) => !TENANT_TABLES.has(t),
 );
+
+/** The twenty-one domain tables present in the 0005 tenant-identity baseline. */
+export const EXPECTED_TABLES_V4 = [...EXPECTED_TABLES];
 
 /** The sixteen domain tables created by the 0000+0001+0002 schema (Phase 11 baseline). */
 export const EXPECTED_TABLES_V2 = EXPECTED_TABLES_V3.filter(
@@ -166,17 +170,31 @@ export const EXPECTED_INDEXES_V3 = [
 ];
 
 /**
- * Indexes the wizard requires. The five partial unique indexes carry the
- * integrity rules, the business-key indexes protect the natural unique keys,
- * the composite translation indexes protect the per-language uniqueness, and
- * the tenant indexes protect store slugs, case-insensitive emails and one
- * membership per store/user pair.
+ * Indexes present in the 0000..0005 tenant-identity baseline.
+ *
+ * The five partial unique indexes carry the integrity rules, the business-key
+ * indexes protect the natural unique keys, the composite translation indexes
+ * protect the per-language uniqueness, and the tenant indexes protect store
+ * slugs, case-insensitive emails and one membership per store/user pair.
  */
-export const EXPECTED_INDEXES = [
+export const EXPECTED_INDEXES_V4 = [
   ...EXPECTED_INDEXES_V3,
   "app_user_email_lower_unique",
   "store_slug_unique",
   "store_membership_store_user_unique",
+];
+
+/** Indexes the current chain requires, including the S1.2 ownership indexes. */
+export const EXPECTED_INDEXES = [
+  ...EXPECTED_INDEXES_V4,
+  "bot_setting_store_idx",
+  "category_store_idx",
+  "product_store_idx",
+  "message_template_store_idx",
+  "customer_store_idx",
+  "payment_method_store_idx",
+  "seller_notification_setting_store_idx",
+  "telegram_update_store_idx",
 ];
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
@@ -207,8 +225,8 @@ export const CRITICAL_CONSTRAINTS_V3 = [
   "seller_notification_delivery_inquiry_id_fk",
 ];
 
-/** CHECK and domain constraints the wizard requires (domain rules the schema enforces). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK and domain constraints present in the 0000..0005 tenant-identity baseline. */
+export const CRITICAL_CONSTRAINTS_V4 = [
   ...CRITICAL_CONSTRAINTS_V3,
   "store_name_not_empty_check",
   "store_slug_format_check",
@@ -222,6 +240,19 @@ export const CRITICAL_CONSTRAINTS = [
   "store_membership_status_check",
   "store_membership_store_id_store_id_fk",
   "store_membership_user_id_app_user_id_fk",
+];
+
+/** CHECK, domain and ownership constraints the current chain requires. */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V4,
+  "bot_setting_store_id_store_id_fk",
+  "category_store_id_store_id_fk",
+  "product_store_id_store_id_fk",
+  "message_template_store_id_store_id_fk",
+  "customer_store_id_store_id_fk",
+  "payment_method_store_id_store_id_fk",
+  "seller_notification_setting_store_id_store_id_fk",
+  "telegram_update_store_id_store_id_fk",
 ];
 
 /** Notification update triggers created by migration 0003. */

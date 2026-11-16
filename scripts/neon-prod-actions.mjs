@@ -74,15 +74,18 @@ import {
   CRITICAL_CONSTRAINTS_V1,
   CRITICAL_CONSTRAINTS_V2,
   CRITICAL_CONSTRAINTS_V3,
+  CRITICAL_CONSTRAINTS_V4,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
   EXPECTED_INDEXES_V3,
+  EXPECTED_INDEXES_V4,
   EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
   EXPECTED_TABLES_V2,
   EXPECTED_TABLES_V3,
+  EXPECTED_TABLES_V4,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -599,7 +602,9 @@ export async function validateTarget(ctx, options = {}) {
         ? CRITICAL_CONSTRAINTS_V2
         : expectedTables === EXPECTED_TABLES_V3
           ? CRITICAL_CONSTRAINTS_V3
-          : CRITICAL_CONSTRAINTS);
+          : expectedTables === EXPECTED_TABLES_V4
+            ? CRITICAL_CONSTRAINTS_V4
+            : CRITICAL_CONSTRAINTS);
   const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
 
   const prefixCount = options.expectedHashes
@@ -1370,6 +1375,28 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 6 &&
+        inspected.state.pending[0] === "0006_tenant_ownership_expansion"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V4,
+          expectedIndexes: EXPECTED_INDEXES_V4,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V4,
+          expectedHashes: ctx.committedHashes.slice(0, 6).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 6 migrations recorded, " +
+              "but live schema does not match the supported prior release (0005_tenant_identity_foundation).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 5 &&
         inspected.state.pending[0] === "0005_tenant_identity_foundation"
       ) {
@@ -1488,6 +1515,9 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV5 =
+        inspected.state.appliedCount === 6 &&
+        inspected.state.pending[0] === "0006_tenant_ownership_expansion";
       const isKnownPriorReleaseV4 =
         inspected.state.appliedCount === 5 &&
         inspected.state.pending[0] === "0005_tenant_identity_foundation";
@@ -1501,7 +1531,33 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV4) {
+      if (isKnownPriorReleaseV5) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V4,
+          expectedIndexes: EXPECTED_INDEXES_V4,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V4,
+          expectedHashes: ctx.committedHashes.slice(0, 6).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0005_tenant_identity_foundation). " +
+              "Proceeding with migration to 0006_tenant_ownership_expansion.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV4) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V3,

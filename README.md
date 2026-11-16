@@ -51,6 +51,7 @@ rabet/
 │   ├── 0003_seller_notifications.sql
 │   ├── 0004_storefront_menu.sql
 │   ├── 0005_tenant_identity_foundation.sql
+│   ├── 0006_tenant_ownership_expansion.sql
 │   └── meta/              # Drizzle journal + snapshots
 ├── drizzle.config.ts      # Drizzle Kit config (generate is offline; migrate needs DATABASE_URL)
 ├── public/
@@ -196,10 +197,11 @@ product inquiries, inquiry messages and Telegram update deduplication. **No
 financial entity exists anywhere** (ADR-013).
 
 The S1.1 migration `0005_tenant_identity_foundation` adds three isolated tenant
-identity tables — `store`, `app_user` and `store_membership` — as an additive
-foundation for the future invite-only SaaS. No existing table, route,
-authentication path or bot behavior changes, and no business table gains a
-`store_id` in this phase.
+identity tables — `store`, `app_user` and `store_membership`. The S1.2 migration
+`0006_tenant_ownership_expansion` adds nullable `store_id` ownership columns to
+the tenant-owned roots, with foreign keys and indexes. No row is backfilled, no
+existing unique constraint is removed, and no runtime path reads or filters by
+`store_id` in this phase. See [S1.2_TENANT_OWNERSHIP.md](./docs/S1.2_TENANT_OWNERSHIP.md).
 
 ### Folder structure
 

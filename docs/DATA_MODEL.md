@@ -17,9 +17,13 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for the stack and ADRs,
 [PROGRESS.md](./PROGRESS.md) for phase status.
 
 > **S1.1 additive foundation.** `drizzle/0005_tenant_identity_foundation.sql` adds
-> `store`, `app_user` and `store_membership` for the future invite-only SaaS. The
-> tables are not referenced by any existing business table or runtime path; the
-> model described below remains the single-store MVP behaviour.
+> `store`, `app_user` and `store_membership` for the future invite-only SaaS.
+>
+> **S1.2 ownership preparation.** `drizzle/0006_tenant_ownership_expansion.sql`
+> adds nullable `store_id` columns to the tenant-owned roots. It does not backfill
+> data, remove legacy unique constraints, enforce composite ownership foreign keys,
+> or change any runtime path; the model described below remains the single-store
+> MVP behaviour. See [S1.2_TENANT_OWNERSHIP.md](./S1.2_TENANT_OWNERSHIP.md).
 
 ---
 

@@ -3,6 +3,7 @@ import {
   boolean,
   char,
   check,
+  index,
   jsonb,
   pgTable,
   smallint,
@@ -10,6 +11,8 @@ import {
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
+
+import { store } from "./tenant";
 
 /**
  * `bot_setting` — the single configuration row for the one bot.
@@ -36,6 +39,9 @@ export const botSetting = pgTable(
     // `smallint` + `CHECK (id = 1)` forces the singleton. A default of `1`
     // keeps the single legitimate insert ergonomic.
     id: smallint("id").primaryKey().default(1),
+    storeId: uuid("store_id").references(() => store.id, {
+      onDelete: "restrict",
+    }),
     defaultLanguageId: uuid("default_language_id")
       .notNull()
       .references(() => language.id, { onDelete: "restrict" }),
@@ -66,6 +72,7 @@ export const botSetting = pgTable(
       .defaultNow(),
   },
   (table) => [
+    index("bot_setting_store_idx").on(table.storeId),
     check(
       "bot_setting_singleton_check",
       sql`${table.id} = 1`,

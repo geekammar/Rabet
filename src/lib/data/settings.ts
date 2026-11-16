@@ -154,7 +154,7 @@ export async function readSettings(db: Database): Promise<BotSettings | null> {
     .limit(1);
 
   const row = rows[0];
-  return row ? { ...row, storefrontMenu: null } : null;
+  return row ? { ...row, storeId: null, storefrontMenu: null } : null;
 }
 
 /**
