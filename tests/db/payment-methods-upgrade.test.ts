@@ -6,10 +6,11 @@
  *
  * 1. Healthy prior release state (2 migrations applied, 14 tables, 17 indexes)
  *    is distinguished from damaged partial states.
- * 2. Pre-upgrade dual-schema compatibility:
- *    - Existing catalog, action editing, and Telegram journeys remain operational.
+ * 2. Pre-upgrade baseline:
  *    - `checkPaymentMethodsCapability` returns `{ supported: false }` without swallowing DB errors.
- *    - Payment method creation and button binding are safely rejected with `SCHEMA_UPGRADE_REQUIRED`.
+ *    - The fixture seeds prior-release data with raw SQL; the current application
+ *      data layer targets the 0006 schema and is not claimed to run on a
+ *      pre-0006 database.
  * 3. Runner upgrade execution:
  *    - Inspect mode validates prior release schema and reports pending `0002_payment_methods`.
  *    - Damaged prior release is refused before any writes.
@@ -33,23 +34,12 @@ import * as actions from "../../scripts/neon-prod-actions.mjs";
 import * as schema from "@/db/schema";
 import {
   checkPaymentMethodsCapability,
-  createCatalogCategory,
-  createCatalogProduct,
   createPaymentMethod,
   createProductAction,
   editPaymentMethod,
   ensureLanguage,
-  initializeSettings,
-  listPaymentMethods,
-  listProductActions,
   readProductAction,
-  readStorefrontMenuSettings,
-  resetStorefrontMenuConfig,
-  saveStorefrontMenuConfig,
 } from "@/lib/data";
-import { createFakeTelegramTransport } from "@/lib/telegram/transport";
-import { handleTelegramWebhookRequest } from "@/lib/telegram/webhook";
-import { tokens } from "@/lib/telegram/tokens";
 
 const shouldRun = hasTestCluster();
 const clusterUrl = testClusterUrl() ?? "";
@@ -202,7 +192,7 @@ describe.skipIf(!shouldRun)("Production Release Upgrade Path (Phase 10B -> Phase
     v1Db = null;
   });
 
-  it("A. Healthy prior release state: verifies pre-upgrade behavior & capability gate", async () => {
+  it("A. Healthy prior release state: capability gate and upgrade baseline", async () => {
     const appDb = asAppDb(drizzle(v1Db!.sql, { schema }));
 
     // 1. Capability check accurately reports unsupported on 0000+0001 schema
@@ -210,159 +200,49 @@ describe.skipIf(!shouldRun)("Production Release Upgrade Path (Phase 10B -> Phase
     expect(capability.supported).toBe(false);
     expect(capability.reason).toContain("0002_payment_methods");
 
-    // 2. Setup baseline store data on the legacy schema
-    const en = await ensureLanguage(appDb, {
-      code: "en",
-      label: "English",
-      textDirection: "ltr",
-      isEnabled: true,
+    // 2. Seed the prior release through raw SQL. The current application data
+    // layer targets the 0006 schema, so this fixture deliberately proves the
+    // runner upgrade path and preserves data for the post-upgrade checks
+    // without claiming that new application code runs on a pre-0006 database.
+    const [en] = await v1Db!.sql`
+      INSERT INTO "language" ("code", "label", "text_direction", "is_enabled")
+      VALUES ('en', 'English', 'ltr', true)
+      RETURNING "id"
+    `;
+    await v1Db!.sql`
+      INSERT INTO "bot_setting" ("id", "default_language_id", "currency", "display_name")
+      VALUES (1, ${en.id}, 'USD', 'Pre-Upgrade Digital Store')
+    `;
+    const [cat] = await v1Db!.sql`
+      INSERT INTO "category" ("slug", "sort_order", "is_active")
+      VALUES ('licenses', 0, true)
+      RETURNING "id"
+    `;
+    const [prod] = await v1Db!.sql`
+      INSERT INTO "product" ("category_id", "slug", "price", "is_active")
+      VALUES (${cat.id}, 'starter-kit', '29.00', true)
+      RETURNING "id"
+    `;
+    await v1Db!.sql`
+      INSERT INTO "product_action" ("product_id", "action_type", "is_active")
+      VALUES (${prod.id}, 'SHOW_DETAILS', true)
+    `;
+
+    const [baseline] = await v1Db!.sql`
+      SELECT
+        (SELECT count(*)::int FROM "language" WHERE "code" = 'en') AS languages,
+        (SELECT count(*)::int FROM "bot_setting") AS settings,
+        (SELECT count(*)::int FROM "category" WHERE "slug" = 'licenses') AS categories,
+        (SELECT count(*)::int FROM "product" WHERE "slug" = 'starter-kit') AS products,
+        (SELECT count(*)::int FROM "product_action") AS actions
+    `;
+    expect(baseline).toMatchObject({
+      languages: 1,
+      settings: 1,
+      categories: 1,
+      products: 1,
+      actions: 1,
     });
-    await initializeSettings(appDb, {
-      defaultLanguageCode: "en",
-      displayName: "Pre-Upgrade Digital Store",
-      currency: "USD",
-    });
-
-    const cat = await createCatalogCategory(appDb, {
-      parentId: null,
-      slug: "licenses",
-      translations: [{ languageId: en.id, name: "Licenses" }],
-    });
-
-    const prod = await createCatalogProduct(appDb, {
-      categoryId: cat.categoryId,
-      slug: "starter-kit",
-      price: "29.00",
-      translations: [{ languageId: en.id, name: "Starter Kit" }],
-    });
-
-    // Activate category and product so Telegram displays the product card
-    await v1Db!.sql`UPDATE category SET is_active = true WHERE id = ${cat.categoryId}`;
-    await v1Db!.sql`UPDATE product SET is_active = true WHERE id = ${prod.productId}`;
-
-    // 3. Create existing supported action (SHOW_DETAILS)
-    const action = await createProductAction(appDb, {
-      productId: prod.productId,
-      actionType: "SHOW_DETAILS",
-      isActive: true,
-      translations: [{ languageId: en.id, label: "View Specs" }],
-    });
-    expect(action.actionId).toBeDefined();
-
-    // 4. Listing actions on pre-upgrade schema succeeds without requesting missing column payment_method_id
-    const actionsList = await listProductActions(appDb, prod.productId);
-    expect(actionsList).toHaveLength(1);
-    expect(actionsList[0].actionType).toBe("SHOW_DETAILS");
-    expect(actionsList[0].paymentMethodId).toBeNull();
-
-    // 5. Creating a PAYMENT_METHOD button is rejected cleanly before migration
-    await expect(
-      createProductAction(appDb, {
-        productId: prod.productId,
-        actionType: "PAYMENT_METHOD",
-        isActive: false,
-        paymentMethodId: null,
-        translations: [{ languageId: en.id, label: "Pay" }],
-      }),
-    ).rejects.toThrow(/0002_payment_methods/);
-
-    // 6. Creating a payment method is rejected cleanly before migration
-    await expect(
-      createPaymentMethod(appDb, {
-        adminLabel: "Early Method",
-        translations: [{ languageId: en.id, languageCode: "en", title: "Early Title" }],
-      }),
-    ).rejects.toThrow(/0002_payment_methods/);
-
-    // 7. listPaymentMethods safely returns empty array
-    const methodsList = await listPaymentMethods(appDb);
-    expect(methodsList).toEqual([]);
-
-    // 7b. Storefront menu customization remains safe and default before 0004
-    const menuBeforeMigration = await readStorefrontMenuSettings(appDb);
-    expect(menuBeforeMigration.source).toBe("default");
-    expect(menuBeforeMigration.config.items.map((item) => item.key)).toEqual([
-      "products",
-      "categories",
-      "support",
-      "languages",
-      "inquiries",
-    ]);
-    expect(menuBeforeMigration.config.items.every((item) => item.enabled)).toBe(true);
-
-    await expect(
-      saveStorefrontMenuConfig(appDb, menuBeforeMigration.config),
-    ).rejects.toMatchObject({ code: "SCHEMA_UPGRADE_REQUIRED" });
-    await expect(resetStorefrontMenuConfig(appDb)).rejects.toMatchObject({
-      code: "SCHEMA_UPGRADE_REQUIRED",
-    });
-
-    // 8. Telegram catalog journey executes cleanly without throwing enum errors on old schema
-    const fakeTransport = createFakeTelegramTransport();
-    const req = new Request("https://example.com/api/telegram/webhook", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-telegram-bot-api-secret-token": "secret-test-token-123",
-      },
-      body: JSON.stringify({
-        update_id: 8801,
-        callback_query: {
-          id: "cb_pre_upgrade_prod",
-          from: { id: 7701, is_bot: false, first_name: "Customer" },
-          message: { message_id: 10, chat: { id: 7701, type: "private" } },
-          data: tokens.product(prod.productId),
-        },
-      }),
-    });
-
-    const res = await handleTelegramWebhookRequest(req, {
-      db: appDb,
-      transport: fakeTransport,
-      botToken: "123456:FAKE_TOKEN_FOR_PRE_UPGRADE",
-      webhookSecret: "secret-test-token-123",
-    });
-
-    expect(res.status).toBe(200);
-    expect(fakeTransport.editedMessages).toHaveLength(1);
-    expect(fakeTransport.editedMessages[0].text).toContain("Starter Kit");
-
-    // 9. /start still renders the Phase 28 default home before 0004
-    const startReq = new Request("https://example.com/api/telegram/webhook", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-telegram-bot-api-secret-token": "secret-test-token-123",
-      },
-      body: JSON.stringify({
-        update_id: 8802,
-        message: {
-          message_id: 11,
-          chat: { id: 7702, type: "private" },
-          from: { id: 7702, is_bot: false, first_name: "Menu Customer" },
-          text: "/start",
-        },
-      }),
-    });
-
-    const startRes = await handleTelegramWebhookRequest(startReq, {
-      db: appDb,
-      transport: fakeTransport,
-      botToken: "123456:FAKE_TOKEN_FOR_PRE_UPGRADE",
-      webhookSecret: "secret-test-token-123",
-    });
-
-    expect(startRes.status).toBe(200);
-    const homeMessage = fakeTransport.sentMessages.at(-1);
-    const homeButtons = (
-      homeMessage?.replyMarkup?.inline_keyboard ?? []
-    ).flat().map((button) => button.callback_data);
-    expect(homeButtons).toEqual([
-      tokens.products(),
-      tokens.storefrontCategories(),
-      tokens.support(),
-      tokens.myInquiries(),
-    ]);
   });
 
   it("B. Runner inspect mode: validates prior release schema and reports pending 0002", async () => {

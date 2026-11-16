@@ -43,6 +43,13 @@
       "when": 1794837199472,
       "tag": "0005_tenant_identity_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794842906442,
+      "tag": "0006_tenant_ownership_expansion",
+      "breakpoints": true
     }
   ]
 }

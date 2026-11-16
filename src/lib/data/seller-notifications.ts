@@ -160,6 +160,7 @@ export async function getVerifiedNotificationConfig(
 function mapSettingRow(row: Record<string, unknown>): SellerNotificationSettingRecord {
   return {
     id: Number(row.id ?? 1),
+    storeId: ((row.storeId ?? row.store_id ?? null) as string | null),
     enabled: Boolean(row.enabled),
     destinationChatId:
       (row.destination_chat_id as string | null) ??

@@ -1024,7 +1024,60 @@ describe("production runner flows and execution", () => {
     expect(output()).toContain("No DDL ran, no migration ledger was modified");
   });
 
-  it("inspect mode validates the 0004 prior release before the tenant migration", async () => {
+  it("inspect mode validates the 0005 prior release before the ownership migration", async () => {
+    const { io, output } = testIo();
+    const scenario = emptyScenario();
+    scenario.ledgerExists = true;
+    scenario.applied = committed.slice(0, 6).map((entry, index) => ({
+      id: String(index + 1),
+      hash: entry.hash,
+      created_at: String(entry.when),
+    }));
+    scenario.appTables = [...wizard.EXPECTED_TABLES_V4];
+    scenario.indexes = [...wizard.EXPECTED_INDEXES_V4];
+    scenario.constraints = wizard.CRITICAL_CONSTRAINTS_V4.map((name) => ({
+      name,
+      type: "c",
+    }));
+    scenario.treeFks = Object.entries(wizard.EXPECTED_TREE_FKS).map(
+      ([table, name]) => ({ name, table_name: table }),
+    );
+    scenario.triggers = wizard.EXPECTED_NOTIFICATION_TRIGGERS.map((name) => ({
+      name,
+    }));
+
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    let commandsRun = 0;
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandsRun += 1;
+        return { code: 0 };
+      },
+      mode: "inspect",
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("inspected");
+    expect(commandsRun).toBe(0);
+    expect(result.state?.pending).toEqual([
+      "0006_tenant_ownership_expansion",
+    ]);
+    expect(output()).toContain("Validating prior release schema on target");
+    expect(output()).toContain("0005_tenant_identity_foundation");
+  });
+
+  it("still validates the 0004 baseline when both 0005 and 0006 are pending", async () => {
     const { io, output } = testIo();
     const scenario = emptyScenario();
     scenario.ledgerExists = true;
@@ -1072,6 +1125,7 @@ describe("production runner flows and execution", () => {
     expect(commandsRun).toBe(0);
     expect(result.state?.pending).toEqual([
       "0005_tenant_identity_foundation",
+      "0006_tenant_ownership_expansion",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1111,6 +1165,67 @@ describe("production runner flows and execution", () => {
     expect(executedCommands).toContain("npm run db:migrate");
     expect(output()).toContain("Production migration complete");
     expect(output()).toContain("Migrations were successfully applied and verified live on the target");
+  });
+
+  it("migrate mode accepts the 0005 baseline and applies only the ownership migration", async () => {
+    const { io, output } = testIo();
+    const scenario = emptyScenario();
+    scenario.ledgerExists = true;
+    scenario.applied = committed.slice(0, 6).map((entry, index) => ({
+      id: String(index + 1),
+      hash: entry.hash,
+      created_at: String(entry.when),
+    }));
+    scenario.appTables = [...wizard.EXPECTED_TABLES_V4];
+    scenario.indexes = [...wizard.EXPECTED_INDEXES_V4];
+    scenario.constraints = wizard.CRITICAL_CONSTRAINTS_V4.map((name) => ({
+      name,
+      type: "c",
+    }));
+    scenario.treeFks = Object.entries(wizard.EXPECTED_TREE_FKS).map(
+      ([table, name]) => ({ name, table_name: table }),
+    );
+    scenario.triggers = wizard.EXPECTED_NOTIFICATION_TRIGGERS.map((name) => ({
+      name,
+    }));
+    const executedCommands: string[] = [];
+
+    const env = {
+      [actions.PROD_URL_ENV]: GOOD_URL,
+      [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+      [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+    };
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async (opts) => {
+        executedCommands.push(`${opts.command} ${opts.args.join(" ")}`);
+        if (opts.args.includes("db:migrate")) {
+          applyMigrationsTo(scenario);
+        }
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("migrated");
+    expect(executedCommands).toContain("npm run db:migrate");
+    expect(result.writes.migrationsApplied).toEqual([
+      "0006_tenant_ownership_expansion",
+    ]);
+    expect(output()).toContain(
+      "Verified healthy prior release (0005_tenant_identity_foundation)",
+    );
+    expect(output()).toContain(
+      "Proceeding with migration to 0006_tenant_ownership_expansion",
+    );
   });
 
   it("repeated migrate on configured database is an honest no-op", async () => {

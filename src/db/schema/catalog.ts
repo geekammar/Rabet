@@ -14,6 +14,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { language } from "./settings";
+import { store } from "./tenant";
 
 /**
  * ===========================================================================
@@ -54,6 +55,9 @@ export const category = pgTable(
   "category",
   {
     id: uuid("id").defaultRandom().primaryKey(),
+    storeId: uuid("store_id").references(() => store.id, {
+      onDelete: "restrict",
+    }),
     // Annotated `PgColumn` so the self-reference type-checks without an
     // inference cycle (`category` cannot infer its own type while its
     // initializer reads `category.id`). The runtime thunk is unchanged.
@@ -76,6 +80,7 @@ export const category = pgTable(
       .defaultNow(),
   },
   (table) => [
+    index("category_store_idx").on(table.storeId),
     // **C1** — a `NULL` parent (root) satisfies this because `NULL <> id` is
     // `NULL`, which is not a violation.
     check("category_no_self_parent_check", sql`${table.parentId} <> ${table.id}`),
@@ -144,6 +149,9 @@ export const product = pgTable(
   "product",
   {
     id: uuid("id").defaultRandom().primaryKey(),
+    storeId: uuid("store_id").references(() => store.id, {
+      onDelete: "restrict",
+    }),
     // `RESTRICT`: a category holding products is not deletable until the
     // products are re-parented, so a category move can never strand products
     // the seller believes are gone.
@@ -163,6 +171,7 @@ export const product = pgTable(
       .defaultNow(),
   },
   (table) => [
+    index("product_store_idx").on(table.storeId),
     // A displayed price may be zero (a freebie) but never negative.
     check("product_price_nonnegative_check", sql`${table.price} >= 0`),
     index("product_category_order_idx")

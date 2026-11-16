@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   check,
+  index,
   pgTable,
   text,
   timestamp,
@@ -9,6 +10,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { language } from "./settings";
+import { store } from "./tenant";
 
 /**
  * `message_template` — the editable global bot strings.
@@ -23,17 +25,24 @@ import { language } from "./settings";
  * dashboard form that edits these, where each string is actually used. It
  * carries no runtime meaning and defaults to nothing.
  */
-export const messageTemplate = pgTable("message_template", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  key: text("key").notNull().unique(),
-  description: text("description"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
-    .notNull()
-    .defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
-    .notNull()
-    .defaultNow(),
-});
+export const messageTemplate = pgTable(
+  "message_template",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    storeId: uuid("store_id").references(() => store.id, {
+      onDelete: "restrict",
+    }),
+    key: text("key").notNull().unique(),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("message_template_store_idx").on(table.storeId)],
+);
 
 /**
  * `message_translation` — the per-language body for a template.

@@ -14,6 +14,7 @@ import {
 
 import { customer } from "./customer";
 import { product } from "./catalog";
+import { store } from "./tenant";
 
 /**
  * The unified conversation model (DATA_MODEL.md §9).
@@ -63,6 +64,9 @@ export const inquiry = pgTable(
   "inquiry",
   {
     id: uuid("id").defaultRandom().primaryKey(),
+    storeId: uuid("store_id").references(() => store.id, {
+      onDelete: "restrict",
+    }),
     // `RESTRICT`: conversations outlive account state — a customer row cannot
     // be deleted while its inquiry history exists.
     customerId: uuid("customer_id")
@@ -99,6 +103,7 @@ export const inquiry = pgTable(
       .defaultNow(),
   },
   (table) => [
+    index("inquiry_store_idx").on(table.storeId),
     index("inquiry_customer_status_idx").on(table.customerId, table.status),
     // At most one active inquiry per customer per product. Partial because
     // only active statuses participate, and note a general-support inquiry

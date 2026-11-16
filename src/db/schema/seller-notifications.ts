@@ -15,6 +15,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { inquiry } from "./inquiry";
+import { store } from "./tenant";
 
 export type SellerNotificationStatus =
   | "pending"
@@ -48,6 +49,9 @@ export const sellerNotificationSetting = pgTable(
   "seller_notification_setting",
   {
     id: smallint("id").primaryKey().default(1),
+    storeId: uuid("store_id").references(() => store.id, {
+      onDelete: "restrict",
+    }),
     enabled: boolean("enabled").notNull().default(false),
     // Decimal string representing seller's private Telegram chat ID
     destinationChatId: text("destination_chat_id"),
@@ -70,6 +74,7 @@ export const sellerNotificationSetting = pgTable(
       .defaultNow(),
   },
   (table) => [
+    index("seller_notification_setting_store_idx").on(table.storeId),
     check(
       "seller_notification_setting_singleton_check",
       sql`${table.id} = 1`,
