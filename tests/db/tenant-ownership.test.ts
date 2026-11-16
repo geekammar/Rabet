@@ -54,7 +54,6 @@ const OWNERSHIP_TABLES = [
   "payment_method",
   "message_template",
   "customer",
-  "inquiry",
   "seller_notification_setting",
   "telegram_update",
 ] as const;
@@ -62,6 +61,7 @@ const OWNERSHIP_TABLES = [
 const ALL_STORE_ID_TABLES = [...OWNERSHIP_TABLES, "store_membership"] as const;
 
 const DERIVED_TABLES = [
+  "inquiry",
   "category_translation",
   "product_translation",
   "product_action",
@@ -332,7 +332,7 @@ async function ownershipSnapshot() {
 }
 
 describe("S1.2 migration static safety", () => {
-  it("adds only the nine nullable ownership columns", () => {
+  it("adds only the eight nullable ownership columns", () => {
     const migration = readFileSync(
       path.resolve(
         import.meta.dirname,
@@ -447,7 +447,6 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
       "product_store_idx",
       "message_template_store_idx",
       "customer_store_idx",
-      "inquiry_store_idx",
       "payment_method_store_idx",
       "seller_notification_setting_store_idx",
       "telegram_update_store_idx",

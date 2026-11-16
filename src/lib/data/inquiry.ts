@@ -333,7 +333,6 @@ export async function createOrResumeProductInquiry(
     return {
       inquiry: {
         id: row.id,
-        storeId: null,
         customerId: row.customer_id,
         productId: row.product_id,
         reference: row.reference,
@@ -551,7 +550,6 @@ export async function createOrResumeSupportInquiry(
     return {
       inquiry: {
         id: row.id,
-        storeId: null,
         customerId: row.customer_id,
         productId: row.product_id,
         reference: row.reference,
@@ -799,7 +797,6 @@ export async function appendInboundCustomerMessage(
       },
       inquiry: {
         id: row.inq_id,
-        storeId: null,
         customerId: row.inq_customer_id,
         productId: row.inq_product_id,
         reference: row.inq_reference,
@@ -890,7 +887,7 @@ export async function routeAndAppendCustomerText(
       candidate_inquiries AS (
         SELECT id, customer_id, product_id, reference, status, category,
                product_snapshot, selected_options, opened_at, last_reply_at,
-               closed_at, created_at, updated_at, store_id
+               closed_at, created_at, updated_at
         FROM ${inquiry}
         WHERE customer_id = ${input.customerId}::uuid
           AND status IN ('open', 'waiting_on_customer')
@@ -988,7 +985,7 @@ export async function routeAndAppendCustomerText(
         SELECT
           id, customer_id, product_id, reference, status, category,
           product_snapshot, selected_options, opened_at, last_reply_at,
-          closed_at, created_at, updated_at, store_id
+          closed_at, created_at, updated_at
         FROM target_inquiry
         WHERE NOT EXISTS (SELECT 1 FROM updated_inquiry)
       ),
@@ -1177,7 +1174,6 @@ export async function routeAndAppendCustomerText(
       status: "saved",
       inquiry: {
         id: row.inq_id,
-        storeId: null,
         customerId: row.inq_customer_id!,
         productId: row.inq_product_id ?? null,
         reference: row.inq_reference!,

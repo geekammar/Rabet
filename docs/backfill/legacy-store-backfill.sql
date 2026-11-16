@@ -73,12 +73,6 @@ FROM "store" AS legacy
 WHERE legacy."slug" = 'legacy-store' AND target."store_id" IS NULL;
 --> statement-breakpoint
 
-UPDATE "inquiry" AS target
-SET "store_id" = legacy."id"
-FROM "store" AS legacy
-WHERE legacy."slug" = 'legacy-store' AND target."store_id" IS NULL;
---> statement-breakpoint
-
 UPDATE "seller_notification_setting" AS target
 SET "store_id" = legacy."id"
 FROM "store" AS legacy
@@ -111,8 +105,6 @@ BEGIN
     SELECT 1 FROM "message_template" WHERE "store_id" IS NULL
     UNION ALL
     SELECT 1 FROM "customer" WHERE "store_id" IS NULL
-    UNION ALL
-    SELECT 1 FROM "inquiry" WHERE "store_id" IS NULL
     UNION ALL
     SELECT 1 FROM "seller_notification_setting" WHERE "store_id" IS NULL
     UNION ALL

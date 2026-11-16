@@ -1384,7 +1384,6 @@ export type TransitionInquiryStatusResult = typeof inquiry.$inferSelect & {
 function mapInquiryRow(row: Record<string, unknown>): typeof inquiry.$inferSelect {
   return {
     id: row.id as string,
-    storeId: ((row.storeId ?? row.store_id ?? null) as string | null),
     customerId: ((row.customerId ?? row.customer_id) as string),
     productId: (((row.productId ?? row.product_id) as string | null) ?? null),
     reference: row.reference as string,

@@ -1,5 +1,5 @@
 {
-  "id": "1b7db21e-5ac1-4f0d-b362-d53032afbb67",
+  "id": "750aa6df-a5f1-4fff-b2c6-f212f6b3d0a4",
   "prevId": "ad87495b-535a-423d-b2e8-8d6b9368554c",
   "version": "7",
   "dialect": "postgresql",
@@ -1287,12 +1287,6 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "store_id": {
-          "name": "store_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "customer_id": {
           "name": "customer_id",
           "type": "uuid",
@@ -1372,21 +1366,6 @@
         }
       },
       "indexes": {
-        "inquiry_store_idx": {
-          "name": "inquiry_store_idx",
-          "columns": [
-            {
-              "expression": "store_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "inquiry_customer_status_idx": {
           "name": "inquiry_customer_status_idx",
           "columns": [
@@ -1432,19 +1411,6 @@
         }
       },
       "foreignKeys": {
-        "inquiry_store_id_store_id_fk": {
-          "name": "inquiry_store_id_store_id_fk",
-          "tableFrom": "inquiry",
-          "tableTo": "store",
-          "columnsFrom": [
-            "store_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
-        },
         "inquiry_customer_id_customer_id_fk": {
           "name": "inquiry_customer_id_customer_id_fk",
           "tableFrom": "inquiry",

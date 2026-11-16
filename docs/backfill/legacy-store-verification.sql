@@ -29,8 +29,6 @@ SELECT 'message_template', count(*), count("store_id"), count(*) FILTER (WHERE "
 UNION ALL
 SELECT 'customer', count(*), count("store_id"), count(*) FILTER (WHERE "store_id" IS NULL) FROM "customer"
 UNION ALL
-SELECT 'inquiry', count(*), count("store_id"), count(*) FILTER (WHERE "store_id" IS NULL) FROM "inquiry"
-UNION ALL
 SELECT 'seller_notification_setting', count(*), count("store_id"), count(*) FILTER (WHERE "store_id" IS NULL) FROM "seller_notification_setting"
 UNION ALL
 SELECT 'telegram_update', count(*), count("store_id"), count(*) FILTER (WHERE "store_id" IS NULL) FROM "telegram_update";
@@ -46,25 +44,28 @@ FROM "product" p
 JOIN "category" c ON c."id" = p."category_id"
 WHERE p."store_id" IS DISTINCT FROM c."store_id";
 
-SELECT count(*)::int AS inquiry_customer_store_mismatch
+SELECT count(*)::int AS inquiry_customer_missing_ownership
 FROM "inquiry" i
 JOIN "customer" c ON c."id" = i."customer_id"
-WHERE i."store_id" IS DISTINCT FROM c."store_id";
+WHERE c."store_id" IS NULL;
 
-SELECT count(*)::int AS inquiry_product_store_mismatch
+SELECT count(*)::int AS inquiry_product_customer_store_mismatch
 FROM "inquiry" i
+JOIN "customer" c ON c."id" = i."customer_id"
 JOIN "product" p ON p."id" = i."product_id"
-WHERE i."store_id" IS DISTINCT FROM p."store_id";
+WHERE c."store_id" IS DISTINCT FROM p."store_id";
 
-SELECT count(*)::int AS inquiry_message_thread_mismatch
+SELECT count(*)::int AS inquiry_message_thread_missing_ownership
 FROM "inquiry_message" m
 JOIN "inquiry" i ON i."id" = m."inquiry_id"
-WHERE i."store_id" IS NULL;
+JOIN "customer" c ON c."id" = i."customer_id"
+WHERE c."store_id" IS NULL;
 
-SELECT count(*)::int AS notification_delivery_thread_mismatch
+SELECT count(*)::int AS notification_delivery_thread_missing_ownership
 FROM "seller_notification_delivery" d
 JOIN "inquiry" i ON i."id" = d."inquiry_id"
-WHERE i."store_id" IS NULL;
+JOIN "customer" c ON c."id" = i."customer_id"
+WHERE c."store_id" IS NULL;
 
 -- 4. Identity and delivery state preserved (counts, not mutations).
 SELECT "status", count(*)::int AS delivery_count
