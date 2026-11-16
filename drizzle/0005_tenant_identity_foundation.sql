@@ -7,6 +7,7 @@ CREATE TABLE "app_user" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "app_user_email_not_empty_check" CHECK (btrim("app_user"."email") <> ''),
+	CONSTRAINT "app_user_email_trimmed_check" CHECK ("app_user"."email" = btrim("app_user"."email")),
 	CONSTRAINT "app_user_status_check" CHECK ("app_user"."status" IN ('active', 'disabled')),
 	CONSTRAINT "app_user_platform_role_check" CHECK ("app_user"."platform_role" IN ('user', 'super_admin')),
 	CONSTRAINT "app_user_session_version_nonnegative_check" CHECK ("app_user"."session_version" >= 0)
@@ -21,7 +22,7 @@ CREATE TABLE "store" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "store_slug_unique" UNIQUE("slug"),
 	CONSTRAINT "store_name_not_empty_check" CHECK (btrim("store"."name") <> ''),
-	CONSTRAINT "store_slug_not_empty_check" CHECK (btrim("store"."slug") <> ''),
+	CONSTRAINT "store_slug_format_check" CHECK ("store"."slug" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
 	CONSTRAINT "store_status_check" CHECK ("store"."status" IN ('onboarding', 'active', 'suspended'))
 );
 --> statement-breakpoint

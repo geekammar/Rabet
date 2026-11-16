@@ -1,5 +1,5 @@
 {
-  "id": "624753ec-8bbc-41e7-9193-288d6cff8f20",
+  "id": "ad87495b-535a-423d-b2e8-8d6b9368554c",
   "prevId": "4300f59f-cc1e-471d-be3e-d13ef794ac9a",
   "version": "7",
   "dialect": "postgresql",
@@ -2244,6 +2244,10 @@
           "name": "app_user_email_not_empty_check",
           "value": "btrim(\"app_user\".\"email\") <> ''"
         },
+        "app_user_email_trimmed_check": {
+          "name": "app_user_email_trimmed_check",
+          "value": "\"app_user\".\"email\" = btrim(\"app_user\".\"email\")"
+        },
         "app_user_status_check": {
           "name": "app_user_status_check",
           "value": "\"app_user\".\"status\" IN ('active', 'disabled')"
@@ -2322,9 +2326,9 @@
           "name": "store_name_not_empty_check",
           "value": "btrim(\"store\".\"name\") <> ''"
         },
-        "store_slug_not_empty_check": {
-          "name": "store_slug_not_empty_check",
-          "value": "btrim(\"store\".\"slug\") <> ''"
+        "store_slug_format_check": {
+          "name": "store_slug_format_check",
+          "value": "\"store\".\"slug\" ~ '^[a-z0-9]+(-[a-z0-9]+)*$'"
         },
         "store_status_check": {
           "name": "store_status_check",

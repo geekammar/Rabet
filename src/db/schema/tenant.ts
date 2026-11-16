@@ -26,6 +26,10 @@ import {
  * `app_user` stores identity only. Passwords, hashes, invitation tokens and
  * secrets are out of scope; the existing environment-backed administrator is
  * unchanged.
+ *
+ * `store.slug` is a canonical lowercase ASCII slug: one or more alphanumeric
+ * segments joined by single hyphens. Email is stored trimmed and is unique
+ * case-insensitively.
  */
 
 export type StoreStatus = "onboarding" | "active" | "suspended";
@@ -53,7 +57,10 @@ export const store = pgTable(
   },
   (table) => [
     check("store_name_not_empty_check", sql`btrim(${table.name}) <> ''`),
-    check("store_slug_not_empty_check", sql`btrim(${table.slug}) <> ''`),
+    check(
+      "store_slug_format_check",
+      sql`${table.slug} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'`,
+    ),
     check(
       "store_status_check",
       sql`${table.status} IN ('onboarding', 'active', 'suspended')`,
@@ -76,9 +83,10 @@ export const PLATFORM_ROLES: readonly PlatformRole[] = ["user", "super_admin"];
  * `app_user` — a future merchant/platform identity, unrelated to the existing
  * single administrator for now.
  *
- * Email uniqueness is case-insensitive at the database level through a unique
- * expression index on `lower(email)`, so `Owner@example.com` and
- * `owner@example.com` cannot both exist.
+ * Email is stored exactly as written after the database rejects surrounding
+ * whitespace (`email = btrim(email)`), and uniqueness is case-insensitive
+ * through a unique expression index on `lower(email)`, so `Owner@example.com`
+ * and `owner@example.com` cannot both exist.
  */
 export const appUser = pgTable(
   "app_user",
@@ -98,6 +106,10 @@ export const appUser = pgTable(
   (table) => [
     uniqueIndex("app_user_email_lower_unique").on(sql`lower(${table.email})`),
     check("app_user_email_not_empty_check", sql`btrim(${table.email}) <> ''`),
+    check(
+      "app_user_email_trimmed_check",
+      sql`${table.email} = btrim(${table.email})`,
+    ),
     check("app_user_status_check", sql`${table.status} IN ('active', 'disabled')`),
     check(
       "app_user_platform_role_check",

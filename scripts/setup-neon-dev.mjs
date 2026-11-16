@@ -211,9 +211,10 @@ export const CRITICAL_CONSTRAINTS_V3 = [
 export const CRITICAL_CONSTRAINTS = [
   ...CRITICAL_CONSTRAINTS_V3,
   "store_name_not_empty_check",
-  "store_slug_not_empty_check",
+  "store_slug_format_check",
   "store_status_check",
   "app_user_email_not_empty_check",
+  "app_user_email_trimmed_check",
   "app_user_status_check",
   "app_user_platform_role_check",
   "app_user_session_version_nonnegative_check",

@@ -139,13 +139,37 @@ describe.skipIf(!shouldRun)("S1.1 tenant identity schema", () => {
     }
   });
 
-  it("enforces non-empty store names and slugs and unique slugs", async () => {
+  it("accepts canonical lowercase ASCII store slugs", async () => {
+    const slugs = ["my-store", "store1", "digital-products-2"];
+
+    for (const slug of slugs) {
+      const row = await insertStore({ slug });
+
+      expect(row.slug).toBe(slug);
+    }
+  });
+
+  it("rejects non-canonical store slugs and still enforces uniqueness", async () => {
+    const rejected = [
+      "",
+      "   ",
+      "MyStore",
+      "my store",
+      "-store",
+      "store-",
+      "store--name",
+      "store!",
+    ];
+
+    for (const slug of rejected) {
+      await expectDbError(
+        () => insertStore({ slug }),
+        "23514",
+      );
+    }
+
     await expectDbError(
       () => insertStore({ name: "   " }),
-      "23514",
-    );
-    await expectDbError(
-      () => insertStore({ slug: "   " }),
       "23514",
     );
     await expectDbError(
@@ -161,15 +185,25 @@ describe.skipIf(!shouldRun)("S1.1 tenant identity schema", () => {
     );
   });
 
-  it("enforces case-insensitive app_user email uniqueness", async () => {
+  it("enforces case-insensitive email uniqueness and rejects surrounding whitespace", async () => {
     await insertUser({ email: "Owner@Example.com" });
 
     await expectDbError(
       () => insertUser({ email: "owner@example.com" }),
       "23505",
     );
+    await expectDbError(
+      () => insertUser({ email: "owner@example.com " }),
+      "23514",
+    );
+    await expectDbError(
+      () => insertUser({ email: " owner@example.com" }),
+      "23514",
+    );
 
-    await expect(insertUser({ email: "other@example.com" })).resolves.toBeDefined();
+    const accepted = await insertUser({ email: "other@example.com" });
+
+    expect(accepted.email).toBe("other@example.com");
   });
 
   it("rejects invalid app_user status, platform role and session version", async () => {
