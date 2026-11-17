@@ -922,16 +922,20 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
     }
   });
 
-  it("still allows legacy NULL ownership writes after backfill (S1.3 gap)", async () => {
+  it("stamps runtime writes after the legacy store exists (S1.3-A)", async () => {
     await seedLegacyData();
     await runBackfill();
 
     const db = testDb!.db;
+    const [legacy] = await db.execute<{ id: string }>(sql`
+      select "id" from "store" where "slug" = 'legacy-store'
+    `);
+
     const upserted = await upsertCustomer(asAppDb(db), {
       telegramId: 987654322,
-      firstName: "Post-backfill legacy write",
+      firstName: "Post-backfill write",
     });
-    expect(upserted.storeId).toBeNull();
+    expect(upserted.storeId).toBe(legacy.id);
 
     const claimed = await claimTelegramUpdate(asAppDb(db), {
       updateId: 7002,
@@ -939,8 +943,10 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
       payload: { message: { message_id: 2 } },
     });
     expect(claimed.status).toBe("claimed");
-    expect(claimed.row.storeId).toBeNull();
+    expect(claimed.row.storeId).toBe(legacy.id);
 
+    // Direct schema inserts bypass the write services and remain NULL; this is
+    // the historical compatibility path the application no longer uses.
     const [created] = await db
       .insert(category)
       .values({ slug: "post-backfill-null-owner", sortOrder: 100 })

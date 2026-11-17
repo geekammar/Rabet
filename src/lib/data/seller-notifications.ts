@@ -9,6 +9,10 @@ import {
   sellerNotificationSetting,
 } from "@/db/schema";
 import { mapDatabaseError, RabetDataError } from "./errors";
+import {
+  assertOwnershipCompatible,
+  resolveLegacyStoreIdForWrite,
+} from "./store-context";
 
 export interface SellerNotificationCapability {
   supported: boolean;
@@ -227,7 +231,16 @@ export async function saveSellerNotificationConfig(
     );
   }
 
+  const storeId = await resolveLegacyStoreIdForWrite(db);
   const existing = await readSellerNotificationConfig(db);
+
+  if (existing) {
+    assertOwnershipCompatible(
+      storeId,
+      existing.storeId,
+      "The seller notification settings belong to a different store.",
+    );
+  }
 
   let destination = input.destinationChatId !== undefined ? input.destinationChatId : existing?.destinationChatId ?? null;
   if (destination) {
@@ -250,10 +263,10 @@ export async function saveSellerNotificationConfig(
   try {
     const result = await db.execute(sql`
       INSERT INTO ${sellerNotificationSetting} (
-        id, enabled, destination_chat_id, language, verified_at, verified_bot_id, verified_bot_username, verified_chat_id, revision, created_at, updated_at
+        id, store_id, enabled, destination_chat_id, language, verified_at, verified_bot_id, verified_bot_username, verified_chat_id, revision, created_at, updated_at
       )
       VALUES (
-        1, false, ${destination}, ${language}, NULL, NULL, NULL, NULL, 1, now(), now()
+        1, ${storeId}::uuid, false, ${destination}, ${language}, NULL, NULL, NULL, NULL, 1, now(), now()
       )
       ON CONFLICT (id) DO UPDATE SET
         destination_chat_id = ${destination},
@@ -322,6 +335,8 @@ export async function recordVerificationSuccess(
   if (!cap.supported) {
     throw new RabetDataError("SCHEMA_UPGRADE_REQUIRED", cap.reason ?? "Schema upgrade required.");
   }
+
+  await resolveLegacyStoreIdForWrite(db);
 
   const destination = input.expectedDestination ?? input.destinationChatId;
   const revisionFilter = input.expectedRevision !== undefined
@@ -399,6 +414,8 @@ export async function setSellerNotificationEnabled(
   if (!cap.supported) {
     throw new RabetDataError("SCHEMA_UPGRADE_REQUIRED", cap.reason ?? "Schema upgrade required.");
   }
+
+  await resolveLegacyStoreIdForWrite(db);
 
   try {
     if (enabled) {
@@ -483,10 +500,13 @@ export async function claimTestCooldown(
     throw new RabetDataError("SCHEMA_UPGRADE_REQUIRED", cap.reason ?? "Schema upgrade required.");
   }
 
+  const storeId = await resolveLegacyStoreIdForWrite(db);
+
   try {
     const result = await db.execute(sql`
       INSERT INTO ${sellerNotificationSetting} (
         id,
+        store_id,
         enabled,
         language,
         revision,
@@ -496,6 +516,7 @@ export async function claimTestCooldown(
       )
       VALUES (
         1,
+        ${storeId}::uuid,
         false,
         'ar',
         1,
@@ -560,6 +581,8 @@ export async function recordTestRateLimited(
 ): Promise<void> {
   const cap = await checkSellerNotificationCapability(db);
   if (!cap.supported) return;
+
+  await resolveLegacyStoreIdForWrite(db);
 
   try {
     await db.execute(sql`

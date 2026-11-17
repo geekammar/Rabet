@@ -16,6 +16,10 @@ import {
   mapDatabaseError,
   RabetDataError,
 } from "./errors";
+import {
+  assertOwnershipCompatible,
+  resolveLegacyStoreIdForWrite,
+} from "./store-context";
 
 /**
  * ===========================================================================
@@ -161,7 +165,15 @@ export async function listCatalogCategories(
 ): Promise<CatalogCategoryRecord[]> {
   try {
     const categories = await db
-      .select()
+      .select({
+        id: category.id,
+        parentId: category.parentId,
+        slug: category.slug,
+        sortOrder: category.sortOrder,
+        isActive: category.isActive,
+        createdAt: category.createdAt,
+        updatedAt: category.updatedAt,
+      })
       .from(category)
       .where(isNull(category.deletedAt))
       .orderBy(category.sortOrder, category.createdAt, category.id);
@@ -235,7 +247,16 @@ export async function listCatalogProducts(
     }
 
     const products = await db
-      .select()
+      .select({
+        id: product.id,
+        categoryId: product.categoryId,
+        slug: product.slug,
+        price: product.price,
+        isActive: product.isActive,
+        sortOrder: product.sortOrder,
+        createdAt: product.createdAt,
+        updatedAt: product.updatedAt,
+      })
       .from(product)
       .where(and(...conditions))
       .orderBy(product.sortOrder, product.createdAt, product.id);
@@ -308,7 +329,15 @@ export async function readCatalogCategory(
 ): Promise<CatalogCategoryRecord | null> {
   try {
     const rows = await db
-      .select()
+      .select({
+        id: category.id,
+        parentId: category.parentId,
+        slug: category.slug,
+        sortOrder: category.sortOrder,
+        isActive: category.isActive,
+        createdAt: category.createdAt,
+        updatedAt: category.updatedAt,
+      })
       .from(category)
       .where(and(eq(category.id, id), isNull(category.deletedAt)));
 
@@ -373,7 +402,16 @@ export async function readCatalogProduct(
 ): Promise<CatalogProductRecord | null> {
   try {
     const rows = await db
-      .select()
+      .select({
+        id: product.id,
+        categoryId: product.categoryId,
+        slug: product.slug,
+        price: product.price,
+        isActive: product.isActive,
+        sortOrder: product.sortOrder,
+        createdAt: product.createdAt,
+        updatedAt: product.updatedAt,
+      })
       .from(product)
       .where(and(eq(product.id, id), isNull(product.deletedAt)));
 
@@ -459,10 +497,16 @@ export async function createCatalogCategory(
   input: CreateCategoryInput,
 ): Promise<{ categoryId: string; category: CatalogCategoryRecord }> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     // 1. If parentId is specified, verify it exists and is not soft-deleted
     if (input.parentId !== null) {
       const parentRows = await db
-        .select({ id: category.id, deletedAt: category.deletedAt })
+        .select({
+          id: category.id,
+          storeId: category.storeId,
+          deletedAt: category.deletedAt,
+        })
         .from(category)
         .where(eq(category.id, input.parentId));
 
@@ -472,6 +516,12 @@ export async function createCatalogCategory(
           "The selected parent category does not exist or has been deleted.",
         );
       }
+
+      assertOwnershipCompatible(
+        storeId,
+        parentRows[0].storeId,
+        "The parent category belongs to a different store.",
+      );
     }
 
     // 2. Calculate next sort order among siblings.
@@ -500,6 +550,7 @@ export async function createCatalogCategory(
     // 3. Prepare atomic batch queries
     const categoryInsert = db.insert(category).values({
       id: categoryId,
+      storeId,
       parentId: input.parentId,
       slug: input.slug,
       sortOrder: nextOrder,
@@ -565,8 +616,14 @@ export async function editCatalogCategory(
   input: EditCategoryInput,
 ): Promise<{ category: CatalogCategoryRecord }> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const existing = await db
-      .select({ id: category.id, deletedAt: category.deletedAt })
+      .select({
+        id: category.id,
+        storeId: category.storeId,
+        deletedAt: category.deletedAt,
+      })
       .from(category)
       .where(eq(category.id, input.categoryId));
 
@@ -576,6 +633,12 @@ export async function editCatalogCategory(
         "The category does not exist or has been deleted.",
       );
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      existing[0].storeId,
+      "The category belongs to a different store.",
+    );
 
     const categoryUpdate = db
       .update(category)
@@ -645,8 +708,14 @@ export async function updateCatalogCategory(
   },
 ): Promise<void> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const existing = await db
-      .select({ id: category.id, deletedAt: category.deletedAt })
+      .select({
+        id: category.id,
+        storeId: category.storeId,
+        deletedAt: category.deletedAt,
+      })
       .from(category)
       .where(eq(category.id, categoryId));
 
@@ -656,6 +725,12 @@ export async function updateCatalogCategory(
         "The category does not exist or has been deleted.",
       );
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      existing[0].storeId,
+      "The category belongs to a different store.",
+    );
 
     const updates: Record<string, unknown> = {};
     if (input.slug !== undefined) updates.slug = input.slug;
@@ -687,8 +762,14 @@ export async function saveCatalogCategoryTranslation(
   },
 ): Promise<void> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const catRows = await db
-      .select({ id: category.id, deletedAt: category.deletedAt })
+      .select({
+        id: category.id,
+        storeId: category.storeId,
+        deletedAt: category.deletedAt,
+      })
       .from(category)
       .where(eq(category.id, input.categoryId));
 
@@ -698,6 +779,12 @@ export async function saveCatalogCategoryTranslation(
         "The category does not exist or has been deleted.",
       );
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      catRows[0].storeId,
+      "The category belongs to a different store.",
+    );
 
     await db
       .insert(categoryTranslation)
@@ -761,8 +848,14 @@ export async function createCatalogProduct(
   input: CreateProductInput,
 ): Promise<{ productId: string; product: CatalogProductRecord }> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const catRows = await db
-      .select({ id: category.id, deletedAt: category.deletedAt })
+      .select({
+        id: category.id,
+        storeId: category.storeId,
+        deletedAt: category.deletedAt,
+      })
       .from(category)
       .where(eq(category.id, input.categoryId));
 
@@ -772,6 +865,12 @@ export async function createCatalogProduct(
         "The target category does not exist or has been deleted.",
       );
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      catRows[0].storeId,
+      "The target category belongs to a different store.",
+    );
 
     const [maxRow] = await db
       .select({ maxOrder: sql<number | null>`max(${product.sortOrder})` })
@@ -784,6 +883,7 @@ export async function createCatalogProduct(
 
     const productInsert = db.insert(product).values({
       id: productId,
+      storeId,
       categoryId: input.categoryId,
       slug: input.slug,
       price: input.price,
@@ -886,9 +986,12 @@ export async function editCatalogProduct(
   input: EditProductInput,
 ): Promise<{ product: CatalogProductRecord }> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const existing = await db
       .select({
         id: product.id,
+        storeId: product.storeId,
         categoryId: product.categoryId,
         deletedAt: product.deletedAt,
       })
@@ -902,9 +1005,19 @@ export async function editCatalogProduct(
       );
     }
 
+    assertOwnershipCompatible(
+      storeId,
+      existing[0].storeId,
+      "The product belongs to a different store.",
+    );
+
     if (input.categoryId && input.categoryId !== existing[0].categoryId) {
       const [targetCategory] = await db
-        .select({ id: category.id, deletedAt: category.deletedAt })
+        .select({
+          id: category.id,
+          storeId: category.storeId,
+          deletedAt: category.deletedAt,
+        })
         .from(category)
         .where(eq(category.id, input.categoryId))
         .limit(1);
@@ -915,6 +1028,17 @@ export async function editCatalogProduct(
           "The selected category does not exist or has been deleted.",
         );
       }
+
+      assertOwnershipCompatible(
+        existing[0].storeId,
+        targetCategory.storeId,
+        "The product and the selected category belong to different stores.",
+      );
+      assertOwnershipCompatible(
+        storeId,
+        targetCategory.storeId,
+        "The selected category belongs to a different store.",
+      );
     }
 
     const productUpdate = db
@@ -990,8 +1114,14 @@ export async function updateCatalogProduct(
   },
 ): Promise<void> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const existing = await db
-      .select({ id: product.id, deletedAt: product.deletedAt })
+      .select({
+        id: product.id,
+        storeId: product.storeId,
+        deletedAt: product.deletedAt,
+      })
       .from(product)
       .where(eq(product.id, productId));
 
@@ -1001,6 +1131,12 @@ export async function updateCatalogProduct(
         "The product does not exist or has been deleted.",
       );
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      existing[0].storeId,
+      "The product belongs to a different store.",
+    );
 
     const updates: Record<string, unknown> = {};
     if (input.slug !== undefined) updates.slug = input.slug;
@@ -1034,8 +1170,14 @@ export async function saveCatalogProductTranslation(
   },
 ): Promise<void> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const prodRows = await db
-      .select({ id: product.id, deletedAt: product.deletedAt })
+      .select({
+        id: product.id,
+        storeId: product.storeId,
+        deletedAt: product.deletedAt,
+      })
       .from(product)
       .where(eq(product.id, input.productId));
 
@@ -1045,6 +1187,12 @@ export async function saveCatalogProductTranslation(
         "The product does not exist or has been deleted.",
       );
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      prodRows[0].storeId,
+      "The product belongs to a different store.",
+    );
 
     await db
       .insert(productTranslation)

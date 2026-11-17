@@ -12,6 +12,10 @@ import {
   RabetDataError,
 } from "./errors";
 import { languageCodeSchema, requireLanguage, resolveDefaultLanguage } from "./languages";
+import {
+  assertOwnershipCompatible,
+  resolveLegacyStoreIdForWrite,
+} from "./store-context";
 
 /**
  * ===========================================================================
@@ -225,9 +229,12 @@ export async function createTemplate(
   }
 
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     const inserted = await db
       .insert(messageTemplate)
       .values({
+        storeId,
         key: parsed.key,
         description: parsed.description ?? null,
       })
@@ -263,6 +270,30 @@ export async function updateTemplate(
   }
 
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
+    const [existing] = await db
+      .select({
+        id: messageTemplate.id,
+        storeId: messageTemplate.storeId,
+      })
+      .from(messageTemplate)
+      .where(eq(messageTemplate.key, parsed.key))
+      .limit(1);
+
+    if (!existing) {
+      throw new RabetDataError(
+        "TEMPLATE_NOT_FOUND",
+        `No message template exists with the key "${parsed.key}".`,
+      );
+    }
+
+    assertOwnershipCompatible(
+      storeId,
+      existing.storeId,
+      "The message template belongs to a different store.",
+    );
+
     const updated = await db
       .update(messageTemplate)
       .set({ description: parsed.description ?? null })
@@ -309,8 +340,15 @@ export async function saveTranslation(
     throw invalidInput(error);
   }
 
+  const storeId = await resolveLegacyStoreIdForWrite(db);
   const template = await requireTemplate(db, parsed.templateKey);
   const targetLanguage = await requireLanguage(db, parsed.languageCode);
+
+  assertOwnershipCompatible(
+    storeId,
+    template.storeId,
+    "The message template belongs to a different store.",
+  );
 
   try {
     const upserted = await db

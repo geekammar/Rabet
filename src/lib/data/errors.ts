@@ -55,6 +55,10 @@ export type DataErrorCode =
   | "SETTINGS_NOT_INITIALIZED"
   /** The `bot_setting` singleton already exists; use the update path. */
   | "SETTINGS_ALREADY_INITIALIZED"
+  /** The transitional tenant identity is missing, wrong or ambiguous. */
+  | "TENANT_CONTEXT_INVALID"
+  /** A write would link two rows that already belong to different stores. */
+  | "CROSS_STORE_REFERENCE"
   /** No `language` row carries this code. */
   | "LANGUAGE_NOT_FOUND"
   /** The language row exists but `is_enabled` is false. */

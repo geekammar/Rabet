@@ -19,6 +19,10 @@ import {
   RabetDataError,
 } from "./errors";
 import { languageCodeSchema, requireLanguage } from "./languages";
+import {
+  assertOwnershipCompatible,
+  resolveLegacyStoreIdForWrite,
+} from "./store-context";
 
 /**
  * ===========================================================================
@@ -140,6 +144,7 @@ export async function readSettings(db: Database): Promise<BotSettings | null> {
   const rows = await db
     .select({
       id: botSetting.id,
+      storeId: botSetting.storeId,
       defaultLanguageId: botSetting.defaultLanguageId,
       currency: botSetting.currency,
       displayName: botSetting.displayName,
@@ -154,7 +159,7 @@ export async function readSettings(db: Database): Promise<BotSettings | null> {
     .limit(1);
 
   const row = rows[0];
-  return row ? { ...row, storeId: null, storefrontMenu: null } : null;
+  return row ? { ...row, storefrontMenu: null } : null;
 }
 
 /**
@@ -220,6 +225,8 @@ export async function initializeSettings(
     throw invalidInput(error);
   }
 
+  const storeId = await resolveLegacyStoreIdForWrite(db);
+
   // Validate the default-language relationship before writing. This is the rule
   // a `CHECK` cannot express (DATA_MODEL.md §12.5): the referenced language must
   // exist *and* be enabled.
@@ -242,6 +249,7 @@ export async function initializeSettings(
     const inserted = await db.execute<{ id: number }>(sql`
       insert into ${botSetting} (
         "id",
+        "store_id",
         "default_language_id",
         "currency",
         "display_name",
@@ -250,6 +258,7 @@ export async function initializeSettings(
         "support_reply_time"
       ) values (
         1,
+        ${storeId}::uuid,
         ${defaultLanguage.id},
         ${parsed.currency},
         ${parsed.displayName},
@@ -299,6 +308,17 @@ export async function updateSettings(
     parsed = updateSettingsSchema.parse(input);
   } catch (error) {
     throw invalidInput(error);
+  }
+
+  const storeId = await resolveLegacyStoreIdForWrite(db);
+  const existing = await readSettings(db);
+
+  if (existing) {
+    assertOwnershipCompatible(
+      storeId,
+      existing.storeId,
+      "The bot settings belong to a different store.",
+    );
   }
 
   let defaultLanguageId: string | undefined;
@@ -402,6 +422,17 @@ export async function saveStorefrontMenuConfig(
     throw invalidInput(error);
   }
 
+  const storeId = await resolveLegacyStoreIdForWrite(db);
+  const existing = await readSettings(db);
+
+  if (existing) {
+    assertOwnershipCompatible(
+      storeId,
+      existing.storeId,
+      "The bot settings belong to a different store.",
+    );
+  }
+
   try {
     const updated = await db
       .update(botSetting)
@@ -441,6 +472,17 @@ export async function saveStorefrontMenuConfig(
 export async function resetStorefrontMenuConfig(
   db: Database,
 ): Promise<StorefrontMenuConfig> {
+  const storeId = await resolveLegacyStoreIdForWrite(db);
+  const existing = await readSettings(db);
+
+  if (existing) {
+    assertOwnershipCompatible(
+      storeId,
+      existing.storeId,
+      "The bot settings belong to a different store.",
+    );
+  }
+
   try {
     const updated = await db
       .update(botSetting)

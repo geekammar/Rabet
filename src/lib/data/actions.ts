@@ -22,6 +22,10 @@ import { executeAtomicBatch } from "./catalog";
 import { mapDatabaseError, RabetDataError } from "./errors";
 import { resolveDefaultLanguage } from "./languages";
 import { checkPaymentMethodsCapability } from "./payment-methods";
+import {
+  assertOwnershipCompatible,
+  resolveLegacyStoreIdForWrite,
+} from "./store-context";
 
 const BASE_PRODUCT_ACTION_COLUMNS = {
   id: productAction.id,
@@ -287,9 +291,15 @@ export async function createProductAction(
   input: CreateProductActionData,
 ): Promise<{ actionId: string; action: ProductActionRecord }> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     // 1. Verify referenced product exists and is not soft-deleted
     const [targetProduct] = await db
-      .select({ id: product.id, deletedAt: product.deletedAt })
+      .select({
+        id: product.id,
+        storeId: product.storeId,
+        deletedAt: product.deletedAt,
+      })
       .from(product)
       .where(eq(product.id, input.productId))
       .limit(1);
@@ -300,6 +310,12 @@ export async function createProductAction(
         "Referenced product does not exist or has been deleted.",
       );
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      targetProduct.storeId,
+      "The product belongs to a different store.",
+    );
 
     const parentId = input.parentActionId?.trim() || null;
     const isActive = input.isActive ?? true;
@@ -396,7 +412,11 @@ export async function createProductAction(
 
       if (catId) {
         const [targetCat] = await db
-          .select({ id: category.id, deletedAt: category.deletedAt })
+          .select({
+            id: category.id,
+            storeId: category.storeId,
+            deletedAt: category.deletedAt,
+          })
           .from(category)
           .where(eq(category.id, catId))
           .limit(1);
@@ -407,11 +427,21 @@ export async function createProductAction(
             "Referenced navigation target category does not exist or has been deleted.",
           );
         }
+
+        assertOwnershipCompatible(
+          targetProduct.storeId,
+          targetCat.storeId,
+          "The navigation target category belongs to a different store.",
+        );
       }
 
       if (prodId) {
         const [targetProd] = await db
-          .select({ id: product.id, deletedAt: product.deletedAt })
+          .select({
+            id: product.id,
+            storeId: product.storeId,
+            deletedAt: product.deletedAt,
+          })
           .from(product)
           .where(eq(product.id, prodId))
           .limit(1);
@@ -422,6 +452,12 @@ export async function createProductAction(
             "Referenced navigation target product does not exist or has been deleted.",
           );
         }
+
+        assertOwnershipCompatible(
+          targetProduct.storeId,
+          targetProd.storeId,
+          "The navigation target product belongs to a different store.",
+        );
       }
     }
 
@@ -443,7 +479,11 @@ export async function createProductAction(
       }
       if (pmId) {
         const [targetMethod] = await db
-          .select({ id: paymentMethod.id, isActive: paymentMethod.isActive })
+          .select({
+            id: paymentMethod.id,
+            storeId: paymentMethod.storeId,
+            isActive: paymentMethod.isActive,
+          })
           .from(paymentMethod)
           .where(eq(paymentMethod.id, pmId))
           .limit(1);
@@ -454,6 +494,12 @@ export async function createProductAction(
             "Referenced payment method does not exist.",
           );
         }
+
+        assertOwnershipCompatible(
+          targetProduct.storeId,
+          targetMethod.storeId,
+          "The payment method belongs to a different store.",
+        );
       }
     }
 
@@ -702,9 +748,15 @@ export async function editProductAction(
   input: EditProductActionData,
 ): Promise<{ action: ProductActionRecord }> {
   try {
+    const storeId = await resolveLegacyStoreIdForWrite(db);
+
     // 1. Verify referenced product exists and is not soft-deleted
     const [targetProduct] = await db
-      .select({ id: product.id, deletedAt: product.deletedAt })
+      .select({
+        id: product.id,
+        storeId: product.storeId,
+        deletedAt: product.deletedAt,
+      })
       .from(product)
       .where(eq(product.id, input.productId))
       .limit(1);
@@ -715,6 +767,12 @@ export async function editProductAction(
         "Referenced product does not exist or has been deleted.",
       );
     }
+
+    assertOwnershipCompatible(
+      storeId,
+      targetProduct.storeId,
+      "The product belongs to a different store.",
+    );
 
     // 2. Verify action exists and belongs to the specified product
     const existing = await readProductAction(db, input.actionId);
@@ -865,7 +923,11 @@ export async function editProductAction(
 
         if (navCatToSet) {
           const [targetCat] = await db
-            .select({ id: category.id, deletedAt: category.deletedAt })
+            .select({
+              id: category.id,
+              storeId: category.storeId,
+              deletedAt: category.deletedAt,
+            })
             .from(category)
             .where(eq(category.id, navCatToSet))
             .limit(1);
@@ -876,11 +938,21 @@ export async function editProductAction(
               "Cannot activate action: target category does not exist or has been deleted.",
             );
           }
+
+          assertOwnershipCompatible(
+            targetProduct.storeId,
+            targetCat.storeId,
+            "The navigation target category belongs to a different store.",
+          );
         }
 
         if (navProdToSet) {
           const [targetProd] = await db
-            .select({ id: product.id, deletedAt: product.deletedAt })
+            .select({
+              id: product.id,
+              storeId: product.storeId,
+              deletedAt: product.deletedAt,
+            })
             .from(product)
             .where(eq(product.id, navProdToSet))
             .limit(1);
@@ -891,6 +963,12 @@ export async function editProductAction(
               "Cannot activate action: target product does not exist or has been deleted.",
             );
           }
+
+          assertOwnershipCompatible(
+            targetProduct.storeId,
+            targetProd.storeId,
+            "The navigation target product belongs to a different store.",
+          );
         }
       } else {
         // Safe deactivation:
@@ -898,7 +976,11 @@ export async function editProductAction(
         // If the target is UNCHANGED, retain it on deactivation without rejecting.
         if (isCategoryTargetChanged && navCatToSet) {
           const [targetCat] = await db
-            .select({ id: category.id, deletedAt: category.deletedAt })
+            .select({
+              id: category.id,
+              storeId: category.storeId,
+              deletedAt: category.deletedAt,
+            })
             .from(category)
             .where(eq(category.id, navCatToSet))
             .limit(1);
@@ -909,11 +991,21 @@ export async function editProductAction(
               "Referenced navigation target category does not exist or has been deleted.",
             );
           }
+
+          assertOwnershipCompatible(
+            targetProduct.storeId,
+            targetCat.storeId,
+            "The navigation target category belongs to a different store.",
+          );
         }
 
         if (isProductTargetChanged && navProdToSet) {
           const [targetProd] = await db
-            .select({ id: product.id, deletedAt: product.deletedAt })
+            .select({
+              id: product.id,
+              storeId: product.storeId,
+              deletedAt: product.deletedAt,
+            })
             .from(product)
             .where(eq(product.id, navProdToSet))
             .limit(1);
@@ -924,6 +1016,12 @@ export async function editProductAction(
               "Referenced navigation target product does not exist or has been deleted.",
             );
           }
+
+          assertOwnershipCompatible(
+            targetProduct.storeId,
+            targetProd.storeId,
+            "The navigation target product belongs to a different store.",
+          );
         }
       }
     } else if (input.actionType === "OPEN_SUPPORT") {
@@ -970,7 +1068,11 @@ export async function editProductAction(
 
       if (paymentMethodIdToSet) {
         const [targetMethod] = await db
-          .select({ id: paymentMethod.id, isActive: paymentMethod.isActive })
+          .select({
+            id: paymentMethod.id,
+            storeId: paymentMethod.storeId,
+            isActive: paymentMethod.isActive,
+          })
           .from(paymentMethod)
           .where(eq(paymentMethod.id, paymentMethodIdToSet))
           .limit(1);
@@ -981,6 +1083,12 @@ export async function editProductAction(
             "Referenced payment method does not exist.",
           );
         }
+
+        assertOwnershipCompatible(
+          targetProduct.storeId,
+          targetMethod.storeId,
+          "The payment method belongs to a different store.",
+        );
       }
 
       if (input.isActive && !paymentMethodIdToSet) {
