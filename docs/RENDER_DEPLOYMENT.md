@@ -26,8 +26,9 @@ flowchart LR
    git fetch origin main
    git rev-parse origin/main
    ```
-3. Confirm both required workflows succeeded on `main` for that exact SHA:
-   - **CI** (`.github/workflows/ci.yml`) — `verify`, `db`, `browser`, and `baseline-touch` all `success`.
+3. Confirm all three required workflows succeeded on `main` for that exact SHA:
+   - **CI** (`.github/workflows/ci.yml` — `push` event on `main`) — `verify`, `db`, `browser`, and `baseline-touch` all `success`.
+   - **Dependency Audit** (`.github/workflows/audit.yml` — `push` event on `main`) — production dependency gate `clean` (`0` vulnerabilities) and full-tree validation `success`.
    - **Render Image** (`.github/workflows/render-image.yml` → `verify-image` job) — `success`.
 
 ### Step 2 — Manually Publish the Immutable Image to GHCR
@@ -37,12 +38,14 @@ flowchart LR
    - **Use workflow from:** `Branch: main`
    - **`expected_sha`:** paste the exact 40-character `main` commit SHA.
    - **`confirm`:** type `PUBLISH_RENDER_IMAGE` (exact match).
-3. Before granting `packages: write`, the workflow automatically enforces:
+3. Before granting `packages: write`, the workflow (`prepare-release` + `scripts/ghcr-release-gate.mjs`) automatically enforces:
    - `GITHUB_EVENT_NAME == "workflow_dispatch"` and `GITHUB_REF == "refs/heads/main"`.
    - Checked-out `HEAD` equals `expected_sha` **and** matches current `origin/main` (stopping stale releases).
-   - The latest `push` run of `ci.yml` on `main` for `expected_sha` completed with `conclusion == "success"`.
+   - The latest `push` run of **`CI` (`ci.yml`)** on `main` for `expected_sha` completed with `conclusion == "success"`.
+   - The latest run of **`Dependency Audit` (`audit.yml`)** on `main` for `expected_sha` completed with `conclusion == "success"`.
    - The exact `linux/amd64` image passes the full container smoke-test suite (`scripts/test-container-smoke.mjs`).
-   - Immediately before `docker push`, `origin/main` is checked a second time so a release superseded mid-run stops cleanly.
+   - Immediately before registry access, `origin/main` is checked a second time so a release superseded mid-run stops cleanly.
+   - **Idempotent retry protection:** `publish` inspects `ghcr.io/geekammar/rabet:sha-<expected_sha>` via the GHCR OCI v2 API before pushing, distinguishing a genuine missing tag (`404 NAME_UNKNOWN` / `MANIFEST_UNKNOWN`) from registry authentication (`401`/`403`) or network/`5xx` errors. If `sha-<expected_sha>` already exists, it cryptographically verifies `linux/amd64`, `org.opencontainers.image.revision`, `org.opencontainers.image.source`, and `RABET_BUILD_SHA` and reuses the existing `@sha256:...` digest **without overwriting the tag** (or fails closed on any provenance mismatch).
 4. Copy the emitted **Immutable GHCR Digest Reference** from the workflow run summary:
    ```text
    ghcr.io/geekammar/rabet@sha256:<64-hex-digest>

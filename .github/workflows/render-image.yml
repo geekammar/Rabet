@@ -125,10 +125,11 @@ jobs:
   # ---------------------------------------------------------------------------
   # Manual main-only release gate + verified image build (NO packages:write).
   # Serializes release runs, stops stale releases if origin/main has moved, and
-  # requires a completed successful `CI` run for the exact main commit SHA.
+  # requires BOTH a completed successful `push` CI run AND a completed
+  # successful `Dependency Audit` run on `main` for the exact expected SHA.
   # ---------------------------------------------------------------------------
   prepare-release:
-    name: Verify main provenance, CI status & smoke-test release image
+    name: Verify main provenance, CI + Audit status & smoke-test release image
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -140,9 +141,12 @@ jobs:
       actions: read
     outputs:
       verified_sha: ${{ steps.provenance.outputs.verified_sha }}
+      repo_path: ${{ steps.provenance.outputs.repo_path }}
+      tag_name: ${{ steps.provenance.outputs.tag_name }}
       image_repo: ${{ steps.provenance.outputs.image_repo }}
       image_tag: ${{ steps.provenance.outputs.image_tag }}
-      ci_run_url: ${{ steps.ci-gate.outputs.ci_run_url }}
+      ci_run_url: ${{ steps.workflow-gates.outputs.ci_run_url }}
+      audit_run_url: ${{ steps.workflow-gates.outputs.audit_run_url }}
 
     services:
       postgres:
@@ -226,11 +230,15 @@ jobs:
             exit 1
           fi
 
-          IMAGE_REPO="ghcr.io/$(printf '%s' "${REPO_FULL_NAME}" | tr '[:upper:]' '[:lower:]')"
-          IMAGE_TAG="${IMAGE_REPO}:sha-${EXPECTED_SHA}"
+          REPO_PATH="$(printf '%s' "${REPO_FULL_NAME}" | tr '[:upper:]' '[:lower:]')"
+          TAG_NAME="sha-${EXPECTED_SHA}"
+          IMAGE_REPO="ghcr.io/${REPO_PATH}"
+          IMAGE_TAG="${IMAGE_REPO}:${TAG_NAME}"
 
           {
             echo "verified_sha=${EXPECTED_SHA}"
+            echo "repo_path=${REPO_PATH}"
+            echo "tag_name=${TAG_NAME}"
             echo "image_repo=${IMAGE_REPO}"
             echo "image_tag=${IMAGE_TAG}"
           } >> "$GITHUB_OUTPUT"
@@ -238,52 +246,39 @@ jobs:
           echo "Verified checkout HEAD and current origin/main == ${EXPECTED_SHA}"
           echo "Target image tag: ${IMAGE_TAG}"
 
-      - name: Verify matching main CI workflow run succeeded
-        id: ci-gate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERIFIED_SHA: ${{ steps.provenance.outputs.verified_sha }}
-          REPO_FULL_NAME: ${{ github.repository }}
-        run: |
-          RUNS_JSON="$(gh api "/repos/${REPO_FULL_NAME}/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=${VERIFIED_SHA}&per_page=20")"
-          CI_URL="$(
-            RUNS_JSON="${RUNS_JSON}" VERIFIED_SHA="${VERIFIED_SHA}" node - <<'NODE'
-              const data = JSON.parse(process.env.RUNS_JSON ?? "{}");
-              const sha = process.env.VERIFIED_SHA ?? "";
-              const runs = Array.isArray(data.workflow_runs) ? data.workflow_runs : [];
-
-              const matching = runs.filter(
-                (r) =>
-                  r.head_sha?.toLowerCase() === sha &&
-                  r.head_branch === "main" &&
-                  r.event === "push",
-              );
-
-              if (matching.length === 0) {
-                console.error(`Refusing to publish: no push CI workflow run found on main for SHA ${sha}.`);
-                process.exit(1);
-              }
-
-              // GitHub returns runs newest-first; require the latest run on this SHA to have completed with success.
-              const latest = matching[0];
-              if (latest.status !== "completed" || latest.conclusion !== "success") {
-                console.error(
-                  `Refusing to publish: latest main CI run (${latest.html_url}) has status="${latest.status}", conclusion="${latest.conclusion}".`,
-                );
-                process.exit(1);
-              }
-
-              process.stdout.write(latest.html_url);
-            NODE
-          )"
-          echo "ci_run_url=${CI_URL}" >> "$GITHUB_OUTPUT"
-          echo "Verified successful main CI run: ${CI_URL}"
-
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
+      - name: Verify matching main push CI and Dependency Audit runs succeeded
+        id: workflow-gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_SHA: ${{ steps.provenance.outputs.verified_sha }}
+          REPO_FULL_NAME: ${{ github.repository }}
+        run: |
+          CI_RUNS_JSON="$(gh api "/repos/${REPO_FULL_NAME}/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=${VERIFIED_SHA}&per_page=20")"
+          AUDIT_RUNS_JSON="$(gh api "/repos/${REPO_FULL_NAME}/actions/workflows/audit.yml/runs?branch=main&head_sha=${VERIFIED_SHA}&per_page=20")"
+
+          GATE_RESULT="$(
+            CI_RUNS_JSON="${CI_RUNS_JSON}" \
+            AUDIT_RUNS_JSON="${AUDIT_RUNS_JSON}" \
+            VERIFIED_SHA="${VERIFIED_SHA}" \
+            node scripts/ghcr-release-gate.mjs verify-workflows
+          )"
+
+          CI_URL="$(GATE_RESULT="${GATE_RESULT}" node -e 'process.stdout.write(JSON.parse(process.env.GATE_RESULT).ciRunUrl)')"
+          AUDIT_URL="$(GATE_RESULT="${GATE_RESULT}" node -e 'process.stdout.write(JSON.parse(process.env.GATE_RESULT).auditRunUrl)')"
+
+          {
+            echo "ci_run_url=${CI_URL}"
+            echo "audit_run_url=${AUDIT_URL}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Verified successful main push CI run: ${CI_URL}"
+          echo "Verified successful main Dependency Audit run: ${AUDIT_URL}"
 
       - name: Install host test runner dependencies
         run: npm ci
@@ -336,9 +331,12 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Manual main-only GHCR publication — the ONLY job granted `packages: write`.
-  # Re-verifies origin/main freshness immediately prior to push so a release
-  # that became stale during smoke testing is stopped cleanly. Never deletes or
-  # overwrites previous SHA tags/digests, preserving rollback targets.
+  # Re-verifies origin/main freshness immediately prior to registry access.
+  # Retry-safe: inspects GHCR via OCI v2 API first — if `sha-<SHA>` already
+  # exists, verifies provenance (`linux/amd64`, OCI revision & source labels,
+  # `RABET_BUILD_SHA`, SHA-256 digests) and reuses its immutable digest without
+  # overwriting the tag; stops clearly on provenance mismatch or registry
+  # auth/network failure. Preserves all older digests for rollback.
   # ---------------------------------------------------------------------------
   publish:
     name: Publish verified SHA image to GHCR
@@ -354,26 +352,79 @@ jobs:
       packages: write
 
     steps:
+      - name: Checkout release gate helper at exact verified SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.verified_sha }}
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Re-verify target SHA is still current remote main
         env:
           VERIFIED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
-          REPO_URL: https://github.com/${{ github.repository }}.git
         run: |
-          REMOTE_MAIN_SHA="$(git ls-remote --exit-code "${REPO_URL}" refs/heads/main | awk '{print $1}')"
+          CHECKOUT_SHA="$(git rev-parse HEAD)"
+          REMOTE_MAIN_SHA="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          if [ "${CHECKOUT_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "::error::Checkout HEAD (${CHECKOUT_SHA}) !== verified SHA (${VERIFIED_SHA})."
+            exit 1
+          fi
           if [ "${REMOTE_MAIN_SHA}" != "${VERIFIED_SHA}" ]; then
             echo "::error::Stopping stale release before GHCR push: ${VERIFIED_SHA} is behind current origin/main (${REMOTE_MAIN_SHA})."
             exit 1
           fi
           echo "Confirmed ${VERIFIED_SHA} remains current origin/main."
 
-      - name: Download verified image archive
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether immutable SHA tag already exists on GHCR
+        id: tag-check
+        env:
+          GHCR_REPO_PATH: ${{ needs.prepare-release.outputs.repo_path }}
+          GHCR_TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+          VERIFIED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
+          EXPECTED_SOURCE_URL: https://github.com/${{ github.repository }}
+          GHCR_ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHECK_JSON="$(node scripts/ghcr-release-gate.mjs check-ghcr-tag)"
+          TAG_STATUS="$(CHECK_JSON="${CHECK_JSON}" node -e 'process.stdout.write(JSON.parse(process.env.CHECK_JSON).status)')"
+          echo "tag_status=${TAG_STATUS}" >> "$GITHUB_OUTPUT"
+
+          if [ "${TAG_STATUS}" = "exists_verified" ]; then
+            EXISTING_DIGEST="$(CHECK_JSON="${CHECK_JSON}" node -e 'process.stdout.write(JSON.parse(process.env.CHECK_JSON).repoDigest)')"
+            echo "existing_repo_digest=${EXISTING_DIGEST}" >> "$GITHUB_OUTPUT"
+            echo "Verified existing immutable tag on GHCR (will reuse without overwriting): ${EXISTING_DIGEST}"
+          elif [ "${TAG_STATUS}" = "missing" ]; then
+            echo "Confirmed tag does not yet exist on GHCR (safe to push once)."
+          else
+            echo "::error::Unexpected tag check status: ${TAG_STATUS}"
+            exit 1
+          fi
+
+      - name: Download verified image archive (new tag only)
+        if: steps.tag-check.outputs.tag_status == 'missing'
         uses: actions/download-artifact@v4
         with:
           name: rabet-verified-image-${{ needs.prepare-release.outputs.verified_sha }}
           path: ${{ runner.temp }}
 
-      - name: Load and verify image revision label
+      - name: Push new immutable SHA-tagged image (never overwrites existing tags)
+        id: push-new
+        if: steps.tag-check.outputs.tag_status == 'missing'
         env:
+          IMAGE_REPO: ${{ needs.prepare-release.outputs.image_repo }}
           IMAGE_TAG: ${{ needs.prepare-release.outputs.image_tag }}
           VERIFIED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
         run: |
@@ -384,20 +435,6 @@ jobs:
             exit 1
           fi
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push immutable SHA-tagged image and emit GHCR digest
-        env:
-          IMAGE_REPO: ${{ needs.prepare-release.outputs.image_repo }}
-          IMAGE_TAG: ${{ needs.prepare-release.outputs.image_tag }}
-          VERIFIED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
-          CI_RUN_URL: ${{ needs.prepare-release.outputs.ci_run_url }}
-        run: |
           docker push "${IMAGE_TAG}"
 
           REPO_DIGEST="$(docker image inspect --format='{{index .RepoDigests 0}}' "${IMAGE_TAG}")"
@@ -405,18 +442,45 @@ jobs:
             echo "::error::Unexpected repo digest format: ${REPO_DIGEST}"
             exit 1
           fi
+          echo "repo_digest=${REPO_DIGEST}" >> "$GITHUB_OUTPUT"
 
-          # Verify the immutable digest is resolvable directly on GHCR
-          docker buildx imagetools inspect "${REPO_DIGEST}" >/dev/null
+      - name: Verify GHCR digest and emit release summary
+        env:
+          TAG_STATUS: ${{ steps.tag-check.outputs.tag_status }}
+          EXISTING_DIGEST: ${{ steps.tag-check.outputs.existing_repo_digest }}
+          PUSHED_DIGEST: ${{ steps.push-new.outputs.repo_digest }}
+          IMAGE_REPO: ${{ needs.prepare-release.outputs.image_repo }}
+          IMAGE_TAG: ${{ needs.prepare-release.outputs.image_tag }}
+          VERIFIED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
+          CI_RUN_URL: ${{ needs.prepare-release.outputs.ci_run_url }}
+          AUDIT_RUN_URL: ${{ needs.prepare-release.outputs.audit_run_url }}
+        run: |
+          if [ "${TAG_STATUS}" = "exists_verified" ]; then
+            FINAL_DIGEST="${EXISTING_DIGEST}"
+            PUBLISH_MODE="Reused existing provenance-verified digest (retry-safe; tag was not overwritten)"
+          else
+            FINAL_DIGEST="${PUSHED_DIGEST}"
+            PUBLISH_MODE="Published new immutable SHA-tagged image"
+          fi
 
-          echo "Published immutable image: ${REPO_DIGEST}"
+          if ! printf '%s' "${FINAL_DIGEST}" | grep -Eq "^${IMAGE_REPO}@sha256:[0-9a-f]{64}$"; then
+            echo "::error::Invalid final GHCR digest reference: ${FINAL_DIGEST}"
+            exit 1
+          fi
+
+          # Confirm the immutable digest is resolvable on GHCR
+          docker buildx imagetools inspect "${FINAL_DIGEST}" >/dev/null
+
+          echo "Final verified GHCR digest: ${FINAL_DIGEST}"
           {
             echo "## Published Render Runtime Image"
             echo ""
-            echo "- **Immutable GHCR Digest Reference (use this in Render):** \`${REPO_DIGEST}\`"
+            echo "- **Immutable GHCR Digest Reference (use this in Render):** \`${FINAL_DIGEST}\`"
             echo "- **SHA Tag:** \`${IMAGE_TAG}\`"
+            echo "- **Publish Mode:** ${PUBLISH_MODE}"
             echo "- **Source Commit SHA (\`main\`):** \`${VERIFIED_SHA}\`"
-            echo "- **Verified \`main\` CI Run:** ${CI_RUN_URL}"
+            echo "- **Verified \`main\` Push CI Run:** ${CI_RUN_URL}"
+            echo "- **Verified \`main\` Dependency Audit Run:** ${AUDIT_RUN_URL}"
             echo "- **Platform:** \`linux/amd64\`"
             echo "- **Rollback Policy:** Previous \`sha-*\` tags and \`@sha256:...\` digests remain retained in GHCR. No automatic Render deployment was triggered."
           } >> "$GITHUB_STEP_SUMMARY"
