@@ -333,30 +333,64 @@ export async function inspectExistingGhcrTag({
   }
 
   if (manifestRes.status === 404) {
-    // Distinguish genuine OCI NAME_UNKNOWN / MANIFEST_UNKNOWN 404 from unexpected proxy errors
-    const text = await manifestRes.text().catch(() => "");
-    if (text.trim().length > 0) {
-      try {
-        const parsedErr = JSON.parse(text);
-        const codes = Array.isArray(parsedErr?.errors)
-          ? parsedErr.errors.map((e) => String(e?.code ?? ""))
-          : [];
-        const allowedCodes = new Set(["MANIFEST_UNKNOWN", "NAME_UNKNOWN"]);
-        if (codes.length > 0 && !codes.every((c) => allowedCodes.has(c))) {
-          throw new ReleaseGateError(
-            "REGISTRY_NETWORK_ERROR",
-            `Unexpected 404 error codes from GHCR for ${normalizedRepo}:${tagName}: ${codes.join(", ")}`,
-          );
-        }
-      } catch (err) {
-        if (err instanceof ReleaseGateError) throw err;
-        // Non-JSON 404 body from an intermediate proxy cannot be trusted as an OCI manifest miss
+    // Fail closed unless the 404 body is a valid OCI error envelope with a
+    // non-empty `errors` array where EVERY entry carries `NAME_UNKNOWN` or
+    // `MANIFEST_UNKNOWN`. Empty bodies, `{}`, `{"errors":[]}`, non-OCI proxy
+    // 404s, and mixed/unknown error codes are all rejected.
+    let text = "";
+    try {
+      text = await manifestRes.text();
+    } catch (err) {
+      throw new ReleaseGateError(
+        "REGISTRY_NETWORK_ERROR",
+        `Failed to read HTTP 404 body from GHCR for ${normalizedRepo}:${tagName}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    if (text.trim().length === 0) {
+      throw new ReleaseGateError(
+        "REGISTRY_NETWORK_ERROR",
+        `Ambiguous empty HTTP 404 body from GHCR while checking ${normalizedRepo}:${tagName}.`,
+      );
+    }
+
+    let parsedErr;
+    try {
+      parsedErr = JSON.parse(text);
+    } catch {
+      throw new ReleaseGateError(
+        "REGISTRY_NETWORK_ERROR",
+        `Non-OCI 404 response from GHCR while checking ${normalizedRepo}:${tagName}.`,
+      );
+    }
+
+    if (
+      typeof parsedErr !== "object" ||
+      parsedErr === null ||
+      Array.isArray(parsedErr) ||
+      !Array.isArray(parsedErr.errors) ||
+      parsedErr.errors.length === 0
+    ) {
+      throw new ReleaseGateError(
+        "REGISTRY_NETWORK_ERROR",
+        `Ambiguous 404 JSON body without non-empty OCI errors array from GHCR for ${normalizedRepo}:${tagName}.`,
+      );
+    }
+
+    const allowedCodes = new Set(["MANIFEST_UNKNOWN", "NAME_UNKNOWN"]);
+    for (const entry of parsedErr.errors) {
+      const code =
+        typeof entry === "object" && entry !== null && !Array.isArray(entry)
+          ? entry.code
+          : undefined;
+      if (typeof code !== "string" || !allowedCodes.has(code)) {
         throw new ReleaseGateError(
           "REGISTRY_NETWORK_ERROR",
-          `Non-OCI 404 response from GHCR while checking ${normalizedRepo}:${tagName}.`,
+          `Unexpected or malformed 404 OCI error code from GHCR for ${normalizedRepo}:${tagName}: ${String(code)}`,
         );
       }
     }
+
     return { status: "missing" };
   }
 

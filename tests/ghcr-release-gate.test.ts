@@ -224,6 +224,78 @@ describe("inspectExistingGhcrTag", () => {
     ).rejects.toMatchObject({ code: "REGISTRY_NETWORK_ERROR" });
   });
 
+  it("fails closed on ambiguous 404 bodies: empty body, {}, empty errors array, and mixed/unknown OCI codes", async () => {
+    const ambiguous404Responses: Array<{ label: string; makeResponse: () => Response }> = [
+      {
+        label: "empty 404 body",
+        makeResponse: () => new Response("", { status: 404 }),
+      },
+      {
+        label: "whitespace-only 404 body",
+        makeResponse: () =>
+          new Response("   \n  ", {
+            status: 404,
+            headers: { "content-type": "application/json" },
+          }),
+      },
+      {
+        label: "empty JSON object {}",
+        makeResponse: () => jsonResponse({}, 404),
+      },
+      {
+        label: "empty OCI errors array {\"errors\":[]}",
+        makeResponse: () => jsonResponse({ errors: [] }, 404),
+      },
+      {
+        label: "mixed allowed and unknown OCI codes",
+        makeResponse: () =>
+          jsonResponse(
+            {
+              errors: [
+                { code: "MANIFEST_UNKNOWN", message: "manifest unknown" },
+                { code: "DENIED", message: "denied" },
+              ],
+            },
+            404,
+          ),
+      },
+      {
+        label: "mixed NAME_UNKNOWN and unrecognized OCI code",
+        makeResponse: () =>
+          jsonResponse(
+            {
+              errors: [
+                { code: "NAME_UNKNOWN", message: "repository unknown" },
+                { code: "BLOB_UNKNOWN", message: "unexpected code" },
+              ],
+            },
+            404,
+          ),
+      },
+      {
+        label: "OCI error entry missing string code",
+        makeResponse: () => jsonResponse({ errors: [{}] }, 404),
+      },
+    ];
+
+    for (const testCase of ambiguous404Responses) {
+      const fetchMock = (async (input: RequestInfo | URL) => {
+        if (String(input).includes("/token?")) {
+          return jsonResponse({ token: "bearer-123" });
+        }
+        return testCase.makeResponse();
+      }) as typeof fetch;
+
+      await expect(
+        inspectExistingGhcrTag({ ...baseParams, fetchImpl: fetchMock }),
+        `Expected fail-closed rejection for: ${testCase.label}`,
+      ).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof ReleaseGateError && err.code === "REGISTRY_NETWORK_ERROR",
+      );
+    }
+  });
+
   it("verifies provenance across BuildKit OCI Image Index + config blob and reuses existing digest", async () => {
     const configJson = JSON.stringify({
       architecture: "amd64",
