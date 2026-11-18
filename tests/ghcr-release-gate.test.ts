@@ -5,6 +5,7 @@ import {
   inspectExistingGhcrTag,
   ReleaseGateError,
   verifyMainWorkflowGates,
+  waitForMainWorkflowGates,
 } from "../scripts/ghcr-release-gate.mjs";
 
 const SAMPLE_SHA = "f30a29d66ecad4f174195e04f71a791d2c782fc2";
@@ -137,6 +138,145 @@ describe("verifyMainWorkflowGates", () => {
         },
       }),
     ).toThrow(/status="in_progress"/);
+  });
+});
+
+describe("waitForMainWorkflowGates", () => {
+  function runsResponse(
+    sha: string,
+    workflow: "ci" | "audit",
+    status: string,
+    conclusion: string | null,
+  ): Response {
+    return jsonResponse({
+      workflow_runs: [
+        {
+          head_sha: sha,
+          head_branch: "main",
+          event: workflow === "ci" ? "push" : "push",
+          status,
+          conclusion,
+          html_url: `https://github.com/geekammar/Rabet/actions/runs/${workflow}-${status}`,
+        },
+      ],
+    });
+  }
+
+  function queuedFetch(
+    ciResponses: Response[],
+    auditResponses: Response[],
+  ): typeof fetch {
+    let ciIndex = 0;
+    let auditIndex = 0;
+    return (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/workflows/ci.yml/runs")) {
+        return ciResponses[
+          Math.min(ciIndex++, ciResponses.length - 1)
+        ].clone();
+      }
+      if (url.includes("/workflows/audit.yml/runs")) {
+        return auditResponses[
+          Math.min(auditIndex++, auditResponses.length - 1)
+        ].clone();
+      }
+      return jsonResponse({ error: "unexpected" }, 500);
+    }) as typeof fetch;
+  }
+
+  it("waits through in-progress runs and succeeds only after both exact-SHA gates pass", async () => {
+    let now = 0;
+    const fetchImpl = queuedFetch(
+      [
+        runsResponse(SAMPLE_SHA, "ci", "in_progress", null),
+        runsResponse(SAMPLE_SHA, "ci", "completed", "success"),
+      ],
+      [
+        runsResponse(SAMPLE_SHA, "audit", "in_progress", null),
+        runsResponse(SAMPLE_SHA, "audit", "completed", "success"),
+      ],
+    );
+
+    const res = await waitForMainWorkflowGates({
+      expectedSha: SAMPLE_SHA,
+      repoFullName: "geekammar/Rabet",
+      token: "ghs_synthetic_test_token",
+      fetchImpl,
+      sleepImpl: async () => {
+        now += 1;
+      },
+      nowImpl: () => now,
+      timeoutMs: 10,
+      pollIntervalMs: 1,
+    });
+
+    expect(res.verifiedSha).toBe(SAMPLE_SHA);
+    expect(res.ciRunUrl).toContain("ci-completed");
+    expect(res.auditRunUrl).toContain("audit-completed");
+  });
+
+  it("fails immediately when either latest exact-SHA run completed unsuccessfully", async () => {
+    let now = 0;
+    await expect(
+      waitForMainWorkflowGates({
+        expectedSha: SAMPLE_SHA,
+        repoFullName: "geekammar/Rabet",
+        token: "ghs_synthetic_test_token",
+        fetchImpl: queuedFetch(
+          [runsResponse(SAMPLE_SHA, "ci", "completed", "failure")],
+          [runsResponse(SAMPLE_SHA, "audit", "completed", "success")],
+        ),
+        sleepImpl: async () => {
+          now += 1;
+        },
+        nowImpl: () => now,
+        timeoutMs: 10,
+        pollIntervalMs: 1,
+      }),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof ReleaseGateError && err.code === "WORKFLOW_GATE_FAILED",
+    );
+  });
+
+  it("fails closed on timeout when either gate run is missing or never completes", async () => {
+    let now = 0;
+    await expect(
+      waitForMainWorkflowGates({
+        expectedSha: SAMPLE_SHA,
+        repoFullName: "geekammar/Rabet",
+        token: "ghs_synthetic_test_token",
+        fetchImpl: queuedFetch(
+          [runsResponse(SAMPLE_SHA, "ci", "completed", "success")],
+          [jsonResponse({ workflow_runs: [] })],
+        ),
+        sleepImpl: async () => {
+          now += 1;
+        },
+        nowImpl: () => now,
+        timeoutMs: 3,
+        pollIntervalMs: 1,
+      }),
+    ).rejects.toThrow(/Timed out waiting for push CI and Dependency Audit success/);
+  });
+
+  it("fails closed when GitHub run queries are rejected", async () => {
+    const fetchImpl = (async () =>
+      jsonResponse({ message: "Bad credentials" }, 401)) as typeof fetch;
+
+    await expect(
+      waitForMainWorkflowGates({
+        expectedSha: SAMPLE_SHA,
+        repoFullName: "geekammar/Rabet",
+        token: "ghs_synthetic_test_token",
+        fetchImpl,
+        timeoutMs: 1,
+        pollIntervalMs: 1,
+      }),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof ReleaseGateError && err.code === "WORKFLOW_QUERY_FAILED",
+    );
   });
 });
 

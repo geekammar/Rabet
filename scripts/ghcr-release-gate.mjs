@@ -47,7 +47,7 @@ const INDEX_MEDIA_TYPES = new Set([
 
 export class ReleaseGateError extends Error {
   /**
-   * @param {"INVALID_INPUT" | "WORKFLOW_GATE_FAILED" | "REGISTRY_AUTH_ERROR" | "REGISTRY_NETWORK_ERROR" | "PROVENANCE_MISMATCH"} code
+   * @param {"INVALID_INPUT" | "WORKFLOW_GATE_FAILED" | "WORKFLOW_QUERY_FAILED" | "REGISTRY_AUTH_ERROR" | "REGISTRY_NETWORK_ERROR" | "PROVENANCE_MISMATCH"} code
    * @param {string} message
    */
   constructor(code, message) {
@@ -141,6 +141,220 @@ export function verifyMainWorkflowGates({
     ciRunUrl: String(latestCi.html_url),
     auditRunUrl: String(latestAudit.html_url),
   };
+}
+
+function selectLatestCiRun(ciRunsPayload, sha) {
+  const ciRuns = Array.isArray(ciRunsPayload?.workflow_runs)
+    ? ciRunsPayload.workflow_runs
+    : [];
+  return ciRuns.find(
+    (r) =>
+      r?.head_sha?.toLowerCase() === sha &&
+      r?.head_branch === "main" &&
+      r?.event === "push",
+  );
+}
+
+function selectLatestAuditRun(auditRunsPayload, sha) {
+  const auditRuns = Array.isArray(auditRunsPayload?.workflow_runs)
+    ? auditRunsPayload.workflow_runs
+    : [];
+  return auditRuns.find(
+    (r) =>
+      r?.head_sha?.toLowerCase() === sha &&
+      r?.head_branch === "main" &&
+      (r?.event === "push" || r?.event === "workflow_dispatch"),
+  );
+}
+
+function describeRun(run) {
+  if (!run) return "missing";
+  return `status="${run.status ?? "unknown"}", conclusion="${run.conclusion ?? "null"}"`;
+}
+
+async function fetchWorkflowRuns({
+  fetchImpl,
+  apiBaseUrl,
+  repoFullName,
+  workflowFile,
+  event,
+  sha,
+  token,
+  timeoutMs,
+}) {
+  const params = new URLSearchParams({
+    branch: "main",
+    head_sha: sha,
+    per_page: "100",
+  });
+  if (event) params.set("event", event);
+  const url = `${apiBaseUrl}/repos/${repoFullName}/actions/workflows/${workflowFile}/runs?${params.toString()}`;
+
+  let res;
+  try {
+    res = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    throw new ReleaseGateError(
+      "WORKFLOW_QUERY_FAILED",
+      `Network error querying GitHub Actions runs (${workflowFile}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    throw new ReleaseGateError(
+      "WORKFLOW_QUERY_FAILED",
+      `GitHub Actions run query for ${workflowFile} was rejected with HTTP ${res.status}.`,
+    );
+  }
+  if (!res.ok) {
+    throw new ReleaseGateError(
+      "WORKFLOW_QUERY_FAILED",
+      `GitHub Actions run query for ${workflowFile} failed with HTTP ${res.status}.`,
+    );
+  }
+
+  try {
+    return await res.json();
+  } catch (err) {
+    throw new ReleaseGateError(
+      "WORKFLOW_QUERY_FAILED",
+      `GitHub Actions run query for ${workflowFile} returned malformed JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Waits until the exact `main` SHA has BOTH a completed successful `push` CI
+ * run and a completed successful Dependency Audit run.
+ *
+ * This is used by the automatic `push` release path because ci.yml/audit.yml
+ * start at the same time as render-image.yml. It never treats a missing or
+ * in-progress run as success; a completed non-success run fails immediately,
+ * and a timeout fails closed.
+ *
+ * @param {{
+ *   expectedSha: string,
+ *   repoFullName: string,
+ *   token: string,
+ *   apiBaseUrl?: string,
+ *   fetchImpl?: typeof fetch,
+ *   sleepImpl?: (ms: number) => Promise<void>,
+ *   nowImpl?: () => number,
+ *   timeoutMs?: number,
+ *   pollIntervalMs?: number,
+ * }} params
+ */
+export async function waitForMainWorkflowGates({
+  expectedSha,
+  repoFullName,
+  token,
+  apiBaseUrl = "https://api.github.com",
+  fetchImpl = globalThis.fetch,
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  nowImpl = () => Date.now(),
+  timeoutMs = 40 * 60 * 1000,
+  pollIntervalMs = 20_000,
+}) {
+  const sha = String(expectedSha ?? "").trim().toLowerCase();
+  if (!SHA40_RE.test(sha)) {
+    throw new ReleaseGateError(
+      "INVALID_INPUT",
+      `expectedSha must be a 40-character lowercase hex SHA (got "${expectedSha}").`,
+    );
+  }
+  const repo = String(repoFullName ?? "").trim();
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new ReleaseGateError(
+      "INVALID_INPUT",
+      `repoFullName must be owner/repository (got "${repoFullName}").`,
+    );
+  }
+  if (!token) {
+    throw new ReleaseGateError(
+      "WORKFLOW_QUERY_FAILED",
+      "A GitHub token is required to query workflow runs.",
+    );
+  }
+
+  const deadline = nowImpl() + timeoutMs;
+  let latestCi = null;
+  let latestAudit = null;
+
+  while (true) {
+    const [ciRunsPayload, auditRunsPayload] = await Promise.all([
+      fetchWorkflowRuns({
+        fetchImpl,
+        apiBaseUrl,
+        repoFullName: repo,
+        workflowFile: "ci.yml",
+        event: "push",
+        sha,
+        token,
+        timeoutMs: 15_000,
+      }),
+      fetchWorkflowRuns({
+        fetchImpl,
+        apiBaseUrl,
+        repoFullName: repo,
+        workflowFile: "audit.yml",
+        sha,
+        token,
+        timeoutMs: 15_000,
+      }),
+    ]);
+
+    latestCi = selectLatestCiRun(ciRunsPayload, sha);
+    latestAudit = selectLatestAuditRun(auditRunsPayload, sha);
+
+    const ciCompletedFailure =
+      latestCi &&
+      latestCi.status === "completed" &&
+      latestCi.conclusion !== "success";
+    const auditCompletedFailure =
+      latestAudit &&
+      latestAudit.status === "completed" &&
+      latestAudit.conclusion !== "success";
+
+    if (ciCompletedFailure || auditCompletedFailure) {
+      // Reuse verifyMainWorkflowGates for the exact failure message and
+      // consistent gate semantics.
+      verifyMainWorkflowGates({
+        expectedSha: sha,
+        ciRunsPayload,
+        auditRunsPayload,
+      });
+    }
+
+    if (
+      latestCi?.status === "completed" &&
+      latestCi.conclusion === "success" &&
+      latestAudit?.status === "completed" &&
+      latestAudit.conclusion === "success"
+    ) {
+      return verifyMainWorkflowGates({
+        expectedSha: sha,
+        ciRunsPayload,
+        auditRunsPayload,
+      });
+    }
+
+    if (nowImpl() >= deadline) {
+      throw new ReleaseGateError(
+        "WORKFLOW_GATE_FAILED",
+        `Timed out waiting for push CI and Dependency Audit success on main for ${sha} (CI ${describeRun(latestCi)}; Audit ${describeRun(latestAudit)}).`,
+      );
+    }
+
+    await sleepImpl(pollIntervalMs);
+  }
 }
 
 async function registryFetch(fetchImpl, url, init, timeoutMs) {
@@ -529,6 +743,26 @@ async function runCli() {
     return;
   }
 
+  if (mode === "wait-workflows") {
+    const configuredTimeout = Number(process.env.GATE_TIMEOUT_MS);
+    const configuredPoll = Number(process.env.GATE_POLL_INTERVAL_MS);
+    const res = await waitForMainWorkflowGates({
+      expectedSha: process.env.VERIFIED_SHA ?? "",
+      repoFullName: process.env.REPO_FULL_NAME ?? "",
+      token: process.env.GH_TOKEN ?? "",
+      timeoutMs:
+        Number.isFinite(configuredTimeout) && configuredTimeout > 0
+          ? configuredTimeout
+          : 40 * 60 * 1000,
+      pollIntervalMs:
+        Number.isFinite(configuredPoll) && configuredPoll > 0
+          ? configuredPoll
+          : 20_000,
+    });
+    process.stdout.write(`${JSON.stringify(res)}\n`);
+    return;
+  }
+
   if (mode === "check-ghcr-tag") {
     const res = await inspectExistingGhcrTag({
       repoPath: process.env.GHCR_REPO_PATH ?? "",
@@ -543,7 +777,7 @@ async function runCli() {
   }
 
   throw new Error(
-    `Unknown mode "${mode}". Expected "verify-workflows" or "check-ghcr-tag".`,
+    `Unknown mode "${mode}". Expected "verify-workflows", "wait-workflows", or "check-ghcr-tag".`,
   );
 }
 
