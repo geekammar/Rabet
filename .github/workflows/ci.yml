@@ -8,12 +8,13 @@ on:
 
 # Two jobs, both required:
 #
-#   verify — install, lint, typecheck, build, and the unit + auth integration
-#            suite. No database is needed: the auth tests generate their own
-#            throwaway AUTH_SECRET and Argon2id hash in-process (tests/setup.ts),
-#            and the wizard flow tests drive every branch of the setup wizard
-#            through an injected IO/database/subprocess surface
-#            (tests/wizard/). The committed-secret guard
+#   verify — install, lint, typecheck, build, the unit suite, and the auth
+#            integration suite against a throwaway PostgreSQL service (the
+#            durable login limiter lives in the database). The auth tests
+#            generate their own AUTH_SECRET and Argon2id hash in-process
+#            (tests/setup.ts), and the wizard flow tests drive every branch of
+#            the setup wizard through an injected IO/database/subprocess
+#            surface (tests/wizard/). The committed-secret guard
 #            (tests/wizard/no-committed-credentials.test.ts) also runs here.
 #
 #   db     — an isolated PostgreSQL service container, the migration chain
@@ -32,6 +33,21 @@ jobs:
   verify:
     name: Lint, typecheck, build, auth + unit tests
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: rabet
+          POSTGRES_PASSWORD: rabet
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rabet -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout
@@ -66,13 +82,36 @@ jobs:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run build
 
-      # Unit + auth integration suites, and the wizard flow suite. The database
-      # suites inside this run skip cleanly (no cluster is designated in this
-      # job); the `db` job runs them.
-      - name: Unit, auth and wizard tests
+      # Unit tests and the wizard flow suite. The auth and database integration
+      # suites skip cleanly here because no cluster is designated; the steps
+      # below and the `db` job provide one.
+      - name: Unit and wizard tests
         env:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run test
+
+      # The auth integration suite now exercises the durable login limiter, so
+      # it runs against an isolated PostgreSQL service and creates a throwaway
+      # database per run (tests/db/helpers.ts). No Neon or production URL is
+      # ever involved.
+      - name: Wait for the isolated PostgreSQL service
+        run: |
+          for attempt in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U rabet -d postgres -t 2 >/dev/null 2>&1; then
+              echo "PostgreSQL is accepting connections."
+              exit 0
+            fi
+            echo "Waiting for PostgreSQL… ($attempt)"
+            sleep 2
+          done
+          echo "PostgreSQL never became ready." >&2
+          exit 1
+
+      - name: Auth integration + login throttling tests — isolated PostgreSQL
+        env:
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
+          RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
+        run: npx vitest run tests/auth.test.ts tests/db/login-throttle.test.ts
 
   db:
     name: PostgreSQL service — migrations + DB integration tests

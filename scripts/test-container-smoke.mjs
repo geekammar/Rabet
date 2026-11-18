@@ -17,9 +17,8 @@
  *        - `GET /manifest.webmanifest` + all PWA icons + `/favicon.ico` -> 200
  *        - `/sw.js` & `/service-worker.js` -> 404 (ADR-008)
  *        - Signed-out dashboard paths + `/api/admin` redirect to `/login`
- *        - Invalid & valid login with synthetic Argon2id credentials
- *        - Authenticated dashboard `Cache-Control: private, no-store, must-revalidate`
- *        - Logout invalidation + unconfigured webhook `503` fail-closed
+ *        - Login page privacy + missing-CSRF rejection
+ *        - Unconfigured webhook `503` fail-closed
  *   3. Reverse-proxy HTTPS + isolated PostgreSQL + dummy Telegram webhook
  *      container on non-default PORT (`4311`):
  *        - `GET /api/healthz` performs 0 DB queries and 0 Telegram calls
@@ -27,6 +26,9 @@
  *          redirects cleanly to `https://rabet-proxy.example.test/login` (never
  *          `0.0.0.0:4311`), issues `__Secure-authjs.session-token` (`Secure`),
  *          and renders seeded store data from isolated PostgreSQL on `/overview`
+ *        - Invalid & valid login with synthetic Argon2id credentials through the
+ *          real durable login limiter, authenticated dashboard cache policy,
+ *          admin API, and logout invalidation
  *        - `POST /api/telegram/webhook` with missing or wrong secret returns
  *          `401 Unauthorized` with 0 SQL queries, 0 DB writes, and 0 outbound
  *          Telegram API calls
@@ -84,6 +86,22 @@ let smokeDbName = null;
 
 function log(msg) {
   process.stdout.write(`[container-smoke] ${msg}\n`);
+}
+
+/**
+ * Formats a postgres.js value the way Neon's HTTP endpoint does (text wire
+ * format). Its boolean parser accepts `"t"`/`"f"`, not JSON `true`/`false`, so
+ * forwarding raw JS booleans would make the real login limiter read the wrong
+ * decision.
+ */
+function formatBridgeValue(value) {
+  if (typeof value === "boolean") return value ? "t" : "f";
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    return `{${value.map((entry) => JSON.stringify(String(entry))).join(",")}}`;
+  }
+  if (typeof value === "object" && value !== null) return JSON.stringify(value);
+  return value;
 }
 
 function runDocker(args, { allowFailure = false } = {}) {
@@ -495,108 +513,10 @@ async function main() {
     false,
   );
 
-  // Wrong password & unknown email rejected via Argon2id
-  {
-    const { csrfToken, jar } = await fetchCsrf(pureBase, {});
-    const badPwRes = await rawRequest(pureBase, "/api/auth/callback/credentials", {
-      jar,
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        csrfToken,
-        email: TEST_EMAIL,
-        password: "definitely-wrong-password",
-        callbackUrl: `${pureBase}/overview`,
-      }).toString(),
-    });
-    assert.match(badPwRes.location ?? "", /CredentialsSignin/);
-    assert.equal(
-      Object.keys(badPwRes.jar).some((k) => k.includes("session-token")),
-      false,
-    );
-  }
-  {
-    const { csrfToken, jar } = await fetchCsrf(pureBase, {});
-    const badEmailRes = await rawRequest(pureBase, "/api/auth/callback/credentials", {
-      jar,
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        csrfToken,
-        email: "nobody@example.test",
-        password: TEST_PASSWORD,
-        callbackUrl: `${pureBase}/overview`,
-      }).toString(),
-    });
-    assert.match(badEmailRes.location ?? "", /CredentialsSignin/);
-    assert.equal(
-      Object.keys(badEmailRes.jar).some((k) => k.includes("session-token")),
-      false,
-    );
-  }
-
-  // Valid login exercises Argon2id inside the running standalone container
-  const { csrfToken: validCsrf, jar: csrfJar } = await fetchCsrf(pureBase, {});
-  const validLoginRes = await rawRequest(pureBase, "/api/auth/callback/credentials", {
-    jar: csrfJar,
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      csrfToken: validCsrf,
-      email: TEST_EMAIL,
-      password: TEST_PASSWORD,
-      callbackUrl: `${pureBase}/overview`,
-    }).toString(),
-  });
-  assert.ok([302, 303].includes(validLoginRes.status));
-  assert.match(validLoginRes.location ?? "", /\/overview$/);
-  assert.equal(
-    Object.keys(validLoginRes.jar).some((k) => k.includes("session-token")),
-    true,
-    "Expected session-token cookie after valid Argon2id login",
-  );
-
-  // Authenticated dashboard responses & cache policy
-  for (const authedPath of ["/overview", "/settings", "/inquiries", "/customers"]) {
-    const res = await rawRequest(pureBase, authedPath, { jar: { ...validLoginRes.jar } });
-    assert.equal(res.status, 200, `Expected 200 on authenticated ${authedPath}`);
-    assert.equal(
-      res.headers.get("cache-control"),
-      "private, no-store, must-revalidate",
-      `Authenticated ${authedPath} must enforce strict private no-store cache policy`,
-    );
-    assert.equal(res.headers.get("pragma"), "no-cache");
-  }
-  const overviewPure = await rawRequest(pureBase, "/overview", {
-    jar: { ...validLoginRes.jar },
-  });
-  assert.ok(overviewPure.body.includes("Quick actions"));
-  assert.ok(overviewPure.body.includes("Database setup required"));
-
-  const adminApiRes = await rawRequest(pureBase, "/api/admin", {
-    jar: { ...validLoginRes.jar },
-  });
-  assert.equal(adminApiRes.status, 200);
-  assert.deepEqual(JSON.parse(adminApiRes.body), { ok: true, admin: TEST_EMAIL });
-
-  // Logout invalidates session
-  const { csrfToken: outCsrf, jar: outJar } = await fetchCsrf(pureBase, {
-    ...validLoginRes.jar,
-  });
-  const logoutRes = await rawRequest(pureBase, "/api/auth/signout", {
-    jar: outJar,
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      csrfToken: outCsrf,
-      callbackUrl: `${pureBase}/login`,
-    }).toString(),
-  });
-  assert.match(logoutRes.location ?? "", /\/login/);
-  const afterLogoutRes = await rawRequest(pureBase, "/overview", {
-    jar: logoutRes.jar,
-  });
-  assert.ok([302, 307].includes(afterLogoutRes.status));
+  // Credential verification and authenticated-session checks now require the
+  // durable login limiter, so they run in container #2 against isolated
+  // PostgreSQL with the real limiter (see below). This container deliberately
+  // has no database.
 
   // Unconfigured webhook fails closed with 503
   const unconfiguredWebhookRes = await rawRequest(pureBase, "/api/telegram/webhook", {
@@ -658,7 +578,9 @@ async function main() {
             const rows = await smokeSql.unsafe(query, params || []);
             const cols = rows.columns || [];
             const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));
-            const rowArrays = rows.map((r) => cols.map((c) => r[c.name]));
+            const rowArrays = rows.map((r) =>
+              cols.map((c) => formatBridgeValue(r[c.name])),
+            );
             return { rows: rowArrays, fields };
           };
           const responsePayload = Array.isArray(payload.queries)
@@ -799,6 +721,69 @@ async function main() {
     `Reverse-proxy unauthenticated redirect must target ${PROXY_ORIGIN}/login, got ${unauthProxyOverview.location}`,
   );
 
+  // Invalid credentials exercise Argon2id + the real durable login limiter on
+  // the isolated PostgreSQL database, and must not issue a session.
+  {
+    const { csrfToken, jar } = await fetchCsrf(
+      proxyLocalBase,
+      {},
+      proxyHeaders,
+    );
+    const badPwRes = await rawRequest(
+      proxyLocalBase,
+      "/api/auth/callback/credentials",
+      {
+        jar,
+        method: "POST",
+        headers: {
+          ...proxyHeaders,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          csrfToken,
+          email: TEST_EMAIL,
+          password: "definitely-wrong-password",
+          callbackUrl: `${PROXY_ORIGIN}/overview`,
+        }).toString(),
+      },
+    );
+    assert.match(badPwRes.location ?? "", /CredentialsSignin/);
+    assert.equal(
+      Object.keys(badPwRes.jar).some((k) => k.includes("session-token")),
+      false,
+    );
+  }
+  {
+    const { csrfToken, jar } = await fetchCsrf(
+      proxyLocalBase,
+      {},
+      proxyHeaders,
+    );
+    const badEmailRes = await rawRequest(
+      proxyLocalBase,
+      "/api/auth/callback/credentials",
+      {
+        jar,
+        method: "POST",
+        headers: {
+          ...proxyHeaders,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          csrfToken,
+          email: "nobody@example.test",
+          password: TEST_PASSWORD,
+          callbackUrl: `${PROXY_ORIGIN}/overview`,
+        }).toString(),
+      },
+    );
+    assert.match(badEmailRes.location ?? "", /CredentialsSignin/);
+    assert.equal(
+      Object.keys(badEmailRes.jar).some((k) => k.includes("session-token")),
+      false,
+    );
+  }
+
   // HTTPS login behind reverse proxy: must issue __Secure-authjs.session-token with Secure attribute
   const { csrfToken: httpsCsrf, jar: httpsCsrfJar } = await fetchCsrf(
     proxyLocalBase,
@@ -854,7 +839,59 @@ async function main() {
     "private, no-store, must-revalidate",
   );
   assert.ok(sqlQueryCount > sqlBeforeHealth, "Expected SQL reads during /overview render");
-  log("Verified HTTPS reverse-proxy auth redirects, __Secure- cookie, and isolated PostgreSQL dashboard read.");
+
+  // Authenticated dashboard responses & cache policy (real session + real DB)
+  for (const authedPath of ["/overview", "/settings", "/inquiries", "/customers"]) {
+    const res = await rawRequest(proxyLocalBase, authedPath, {
+      jar: { ...httpsLoginRes.jar },
+      headers: proxyHeaders,
+    });
+    assert.equal(res.status, 200, `Expected 200 on authenticated ${authedPath}`);
+    assert.equal(
+      res.headers.get("cache-control"),
+      "private, no-store, must-revalidate",
+      `Authenticated ${authedPath} must enforce strict private no-store cache policy`,
+    );
+    assert.equal(res.headers.get("pragma"), "no-cache");
+  }
+  assert.ok(
+    authedDbOverview.body.includes("Quick actions"),
+    "Authenticated /overview must render dashboard content",
+  );
+
+  const adminApiRes = await rawRequest(proxyLocalBase, "/api/admin", {
+    jar: { ...httpsLoginRes.jar },
+    headers: proxyHeaders,
+  });
+  assert.equal(adminApiRes.status, 200);
+  assert.deepEqual(JSON.parse(adminApiRes.body), { ok: true, admin: TEST_EMAIL });
+
+  // Logout invalidates the session
+  const { csrfToken: outCsrf, jar: outJar } = await fetchCsrf(
+    proxyLocalBase,
+    { ...httpsLoginRes.jar },
+    proxyHeaders,
+  );
+  const logoutRes = await rawRequest(proxyLocalBase, "/api/auth/signout", {
+    jar: outJar,
+    method: "POST",
+    headers: {
+      ...proxyHeaders,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      csrfToken: outCsrf,
+      callbackUrl: `${PROXY_ORIGIN}/login`,
+    }).toString(),
+  });
+  assert.match(logoutRes.location ?? "", /\/login/);
+  const afterLogoutRes = await rawRequest(proxyLocalBase, "/overview", {
+    jar: logoutRes.jar,
+    headers: proxyHeaders,
+  });
+  assert.ok([302, 307].includes(afterLogoutRes.status));
+
+  log("Verified HTTPS reverse-proxy auth redirects, __Secure- cookie, invalid/valid login with the real limiter, dashboard reads, and logout.");
 
   // Dummy webhook tests: missing & wrong secret must reject with 401, 0 SQL queries, 0 DB rows, 0 Telegram calls
   const sampleUpdatePayload = JSON.stringify({

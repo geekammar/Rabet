@@ -153,7 +153,7 @@ Configure these as individual Environment Variables on the Render Web Service (n
 
 ### 4.1 Code Review of Credential Entry & Boundary Paths
 
-ADR-011 documents that Rabet ships **no in-application login rate limiter** and relies on Argon2id cost (`19 MiB`, `timeCost: 2` on every attempt including unknown emails), single-admin fail-closed config, and external edge/entry protection. Reviewing the codebase confirms **two** HTTP entry paths invoke `verifyAdminCredentials()` (`src/lib/auth/credentials.ts`):
+ADR-011 originally shipped **no in-application login rate limiter** and relied on Argon2id cost (`19 MiB`, `timeCost: 2` on every attempt including unknown emails), single-admin fail-closed config, and external edge protection. The current Render branch closes that gap with a durable PostgreSQL limiter (migration `0007_admin_login_throttle`) and still keeps the Argon2id cost. Reviewing the codebase confirms **two** HTTP entry paths invoke `verifyAdminCredentials()` (`src/lib/auth/credentials.ts`), which is where the shared attempt is counted:
 
 1. **Login Server Action (`src/app/actions/auth.ts` → `login()`):**
    - Invoked by `<LoginForm />` as `POST /login` carrying a `Next-Action` header.
@@ -162,6 +162,14 @@ ADR-011 documents that Rabet ships **no in-application login rate limiter** and 
 2. **Auth.js Credentials Callback (`src/app/api/auth/[...nextauth]/route.ts`):**
    - Invoked at `POST /api/auth/callback/credentials` (excluded from `src/proxy.ts` matcher so unauthenticated sign-in works).
    - Enforces Auth.js double-submit CSRF cookie/token (`MissingCSRF` on mismatch) before calling `Credentials.authorize()` → `verifyAdminCredentials()`.
+
+**Shared durable login budget (migration `0007_admin_login_throttle`):**
+- `verifyAdminCredentials()` calls `consumeLoginAttempt()` (`src/lib/auth/login-throttle.ts`) exactly once per submitted credential pair, **before** the Argon2 verification. Both paths above therefore draw from one budget; neither path keeps a second counter.
+- **Limit and window:** 5 attempts per 15 minutes, fixed window anchored at the first attempt. A verified credential pair resets the row. After the window expires the next attempt starts a fresh budget, so the administrator can retry without operator action. Five attempts covers normal typo/caps-lock retries; the window caps a remote guesser at 20 attempts/hour even under concurrency.
+- **Atomicity:** the decision is one `INSERT … ON CONFLICT DO UPDATE … RETURNING` statement. PostgreSQL serializes writers on the singleton row, so concurrent requests cannot all pass on the same count.
+- **Bounded storage and source independence:** one row (`id = 1`) holds `attempt_count` and `window_started_at`. No row is created per submitted email or IP, no client-controlled proxy header is read, and the count is capped at the budget plus one, so the table cannot grow or overflow.
+- **Fail closed:** a missing table, missing `DATABASE_URL`, or unreachable database denies the attempt before Argon2 runs. The response stays the generic “Incorrect email or password.”; no credential, hash or connection string is logged.
+- This guard covers only admin credential verification. Public pages, `/api/healthz` and `/api/telegram/webhook` do not touch it.
 
 **Protected Dashboard & Cache Boundaries:**
 - Every dashboard path (`/overview`, `/products`, `/categories`, `/storefront`, `/catalog`, `/payment-methods`, `/inquiries`, `/customers`, `/bot-content`, `/telegram`, `/settings`) is gated twice (ADR-010): optimistically in `src/proxy.ts` and authoritatively via `await requireAdmin()` in `src/app/(dashboard)/layout.tsx`, Server Actions, and `/api/admin`.
@@ -174,7 +182,7 @@ ADR-011 documents that Rabet ships **no in-application login rate limiter** and 
 ### 4.2 Direct-Origin Bypass Assessment & Exact Blocker on Render Hobby + Starter
 
 > [!WARNING]
-> **Deployment-only configuration on Render Hobby + Starter CANNOT prevent direct-origin bypass.** Keep real `ADMIN_EMAIL` and `ADMIN_PASSWORD_HASH` **out** of the public Render service until the reviewer approves and lands one of the small follow-ups below (or upgrades the workspace tier).
+> **Deployment-only configuration on Render Hobby + Starter CANNOT prevent direct-origin bypass.** The origin-side login limiter added in this branch bounds credential guessing on both credential paths even through the direct origin, but it does not restrict who can reach the dashboard. Keep the remaining ingress hardening (Cloudflare Access and origin-JWT verification) as the control that decides *who* may reach the service; do not treat an edge-only rule as covering the `*.onrender.com` origin.
 
 Why deployment-only changes fall short on Render Hobby + Starter:
 
@@ -202,7 +210,7 @@ Why deployment-only changes fall short on Render Hobby + Starter:
 2. **Smallest Code Follow-Up Required to Close Direct-Origin Bypass (~35 lines, separate focused PR):**
    - Verify Cloudflare Access's asymmetrically signed `Cf-Access-Jwt-Assertion` request header against `https://<CF_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` (`POLICY_AUD = CF_ACCESS_POLICY_AUD`) in `src/proxy.ts` (and before `verifyAdminCredentials()` so `/api/auth/callback/credentials` is also covered) whenever `CF_ACCESS_POLICY_AUD` is set, exempting only `/api/healthz` (Render internal probe) and `/api/telegram/webhook` (`X-Telegram-Bot-Api-Secret-Token`).
    - With that check in place, any direct-to-Render `curl --resolve` bypass lacks a valid Cloudflare-signed JWT and is rejected with `403 Forbidden` at the origin before Argon2 or Auth.js runs.
-   - *(Alternative if no custom domain is desired: a small durable PostgreSQL rate-limit guard inside `verifyAdminCredentials()` using the existing `Rabet_prod` database, closing ADR-011 across both `POST /login` and `POST /api/auth/callback/credentials` even on `*.onrender.com`.)*
+   - *(The no-custom-domain alternative is now implemented in this branch: the durable PostgreSQL limiter inside `verifyAdminCredentials()` closes ADR-011 across both `POST /login` and `POST /api/auth/callback/credentials` even on `*.onrender.com`. Cloudflare Access/origin-JWT verification remains a separate later hardening step, because it also governs non-credential access.)*
 
 ### 4.4 How to Verify Ingress Once Applied
 
@@ -233,6 +241,17 @@ Run all four checks from an unauthenticated external terminal before loading rea
      -H "Content-Type: application/json" \
      -d '{"update_id":1}'
    ```
+
+### 4.5 Rollout Order for Admin-Login Throttling (Migration `0007`)
+
+The limiter **fails closed** when its table is missing, so apply the additive database migration before promoting a new image. The old image ignores the extra table; the new image needs it.
+
+1. **Merge the reviewed PR to `main`.** Record the exact 40-character merge SHA.
+2. **Inspect production first (read-only).** GitHub → Actions → **Neon PROD database** (`.github/workflows/neon-prod-migrate.yml`) → Run workflow → branch `main` → mode `inspect`. The runner verifies the target identity, refuses drift, validates the supported prior release (`0006_tenant_ownership_expansion`) and reports `0007_admin_login_throttle` as pending. No DDL or ledger writes happen.
+3. **Record a verified restore point**, then run the same workflow in `migrate` mode from `main` and type `MIGRATE_RABET_PROD` exactly. The approved runner executes `npm run db:migrate` against the unpooled Production URL from the `Production` GitHub Environment, then re-inspects the live schema, ledger hashes/objects and the new singleton table. It never runs `drizzle-kit push` and never migrates from the application image or at boot.
+4. **Confirm the runner reports the full chain applied** (8 migrations, `admin_login_throttle` present, prior tables/data intact) before continuing.
+5. **Publish and promote the image.** Run **Render Image** with the exact `main` SHA and `PUBLISH_RENDER_IMAGE`, then pin the emitted `ghcr.io/geekammar/rabet@sha256:...` digest on Render. The image smoke test uses isolated PostgreSQL and exercises invalid and valid logins through the real limiter.
+6. **Acceptance after deploy:** a valid admin login succeeds; five wrong attempts followed by the correct password are rejected; the same correct password succeeds after the 15-minute window expires; `/api/healthz` and the Telegram webhook remain unaffected. Until these pass, do not change Telegram, DNS or branding.
 
 ---
 

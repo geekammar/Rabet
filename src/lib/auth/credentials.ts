@@ -3,6 +3,10 @@ import "server-only";
 import { verify } from "@node-rs/argon2";
 
 import { getAdminConfig } from "@/lib/auth/admin-config";
+import {
+  consumeLoginAttempt,
+  resetLoginThrottle,
+} from "@/lib/auth/login-throttle";
 import { signInSchema } from "@/lib/auth/schema";
 
 /**
@@ -23,6 +27,11 @@ import { signInSchema } from "@/lib/auth/schema";
  *   performing one Argon2 verification per attempt — including when the email
  *   does not match — so the expensive work cannot be skipped to detect a
  *   correct email address. The Argon2 cost itself dominates request time.
+ * - Every attempt first consumes one unit from the shared, durable admin
+ *   login budget (see `login-throttle.ts`). The budget is global to the one
+ *   administrator, independent of the submitted email or any client header,
+ *   and is checked *before* Argon2. If the throttle store is unavailable the
+ *   attempt is denied rather than verified.
  */
 
 export type AdminUser = {
@@ -66,6 +75,22 @@ export async function verifyAdminCredentials(
   // Fail closed when the deployment has no complete admin configuration.
   if (!config) return null;
 
+  // The limiter is authoritative and runs before the password hash. A storage
+  // failure must not silently downgrade to "no throttling", so it returns the
+  // same generic rejection as every other failure.
+  let attempt;
+
+  try {
+    attempt = await consumeLoginAttempt();
+  } catch {
+    console.error(
+      "Admin login throttling is unavailable; denying credential verification.",
+    );
+    return null;
+  }
+
+  if (!attempt.allowed) return null;
+
   // Always run one Argon2 verification so a wrong email costs the same as a
   // wrong password (see the note on timing above).
   const passwordMatches = await verify(config.passwordHash, password).catch(
@@ -74,6 +99,15 @@ export async function verifyAdminCredentials(
   const emailMatches = safeEqual(email, config.email);
 
   if (!emailMatches || !passwordMatches) return null;
+
+  // A verified credential pair clears the budget. If this write fails the
+  // login still succeeds; the remaining count is safe and the window expires
+  // on its own.
+  try {
+    await resetLoginThrottle();
+  } catch {
+    // Best-effort only: never turn a valid login into a failure here.
+  }
 
   return { id: ADMIN_USER_ID, email: config.email };
 }

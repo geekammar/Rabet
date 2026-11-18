@@ -77,8 +77,9 @@ import postgres from "postgres";
 
 const WIZARD = "rabet db:setup:dev";
 
-/** The twenty-one domain tables created by the committed chain. */
+/** The twenty-two domain tables created by the committed chain. */
 export const EXPECTED_TABLES = [
+  "admin_login_throttle",
   "app_user",
   "bot_setting",
   "category",
@@ -111,17 +112,23 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0004_storefront_menu",
   "0005_tenant_identity_foundation",
   "0006_tenant_ownership_expansion",
+  "0007_admin_login_throttle",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
 
-/** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
-export const EXPECTED_TABLES_V3 = EXPECTED_TABLES.filter(
-  (t) => !TENANT_TABLES.has(t),
+/** The twenty-one domain tables present in the 0005 tenant-identity baseline. */
+export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
+  (t) => t !== "admin_login_throttle",
 );
 
-/** The twenty-one domain tables present in the 0005 tenant-identity baseline. */
-export const EXPECTED_TABLES_V4 = [...EXPECTED_TABLES];
+/** The twenty-one tables present in the 0006 ownership baseline (no new table until 0007). */
+export const EXPECTED_TABLES_V5 = [...EXPECTED_TABLES_V4];
+
+/** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
+export const EXPECTED_TABLES_V3 = EXPECTED_TABLES_V4.filter(
+  (t) => !TENANT_TABLES.has(t),
+);
 
 /** The sixteen domain tables created by the 0000+0001+0002 schema (Phase 11 baseline). */
 export const EXPECTED_TABLES_V2 = EXPECTED_TABLES_V3.filter(
@@ -184,8 +191,8 @@ export const EXPECTED_INDEXES_V4 = [
   "store_membership_store_user_unique",
 ];
 
-/** Indexes the current chain requires, including the S1.2 ownership indexes. */
-export const EXPECTED_INDEXES = [
+/** Indexes present in the 0000..0006 ownership baseline. */
+export const EXPECTED_INDEXES_V5 = [
   ...EXPECTED_INDEXES_V4,
   "bot_setting_store_idx",
   "category_store_idx",
@@ -196,6 +203,9 @@ export const EXPECTED_INDEXES = [
   "seller_notification_setting_store_idx",
   "telegram_update_store_idx",
 ];
+
+/** Indexes the current chain requires (0007 adds no additional index). */
+export const EXPECTED_INDEXES = [...EXPECTED_INDEXES_V5];
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
 export const CRITICAL_CONSTRAINTS_V2 = [
@@ -242,8 +252,8 @@ export const CRITICAL_CONSTRAINTS_V4 = [
   "store_membership_user_id_app_user_id_fk",
 ];
 
-/** CHECK, domain and ownership constraints the current chain requires. */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, domain and ownership constraints present in the 0000..0006 baseline. */
+export const CRITICAL_CONSTRAINTS_V5 = [
   ...CRITICAL_CONSTRAINTS_V4,
   "bot_setting_store_id_store_id_fk",
   "category_store_id_store_id_fk",
@@ -253,6 +263,13 @@ export const CRITICAL_CONSTRAINTS = [
   "payment_method_store_id_store_id_fk",
   "seller_notification_setting_store_id_store_id_fk",
   "telegram_update_store_id_store_id_fk",
+];
+
+/** CHECK, domain and ownership constraints the current chain requires. */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V5,
+  "admin_login_throttle_singleton_check",
+  "admin_login_throttle_attempt_count_check",
 ];
 
 /** Notification update triggers created by migration 0003. */

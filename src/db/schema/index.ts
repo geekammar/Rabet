@@ -2,12 +2,12 @@
  * The complete Drizzle schema for Rabet, grouped by the domains of
  * DATA_MODEL.md §2.
  *
- * Seventeen tables in eight domains — Configuration, Content, Catalog,
- * Buttons, People, Conversations, Integration, Tenant — and no financial entity
- * anywhere (ADR-013). Import this barrel from the client and from tests; never
- * import an individual schema module, so a table cannot be silently left out
- * of the client's schema map (which is what makes `db.query.*` relation
- * helpers work).
+ * Twenty-two tables in nine domains — Configuration, Content, Catalog,
+ * Buttons, People, Conversations, Integration, Tenant, Security — and no
+ * financial entity anywhere (ADR-013). Import this barrel from the client and
+ * from tests; never import an individual schema module, so a table cannot be
+ * silently left out of the client's schema map (which is what makes
+ * `db.query.*` relation helpers work).
  *
  * The Tenant domain (`store`, `app_user`, `store_membership`) is the additive
  * foundation for the future invite-only SaaS. S1.2 adds nullable ownership
@@ -26,6 +26,7 @@
  */
 
 export * from "./actions";
+export * from "./auth";
 export * from "./catalog";
 export * from "./content";
 export * from "./customer";

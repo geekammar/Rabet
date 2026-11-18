@@ -1,4 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const throttle = vi.hoisted(() => ({
+  consumeLoginAttempt: vi.fn(),
+  resetLoginThrottle: vi.fn(),
+}));
+
+vi.mock("@/lib/auth/login-throttle", () => throttle);
 
 import { verifyAdminCredentials } from "@/lib/auth/credentials";
 
@@ -10,6 +17,16 @@ import { verifyAdminCredentials } from "@/lib/auth/credentials";
  */
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "test-password-12345678";
+
+beforeEach(() => {
+  throttle.consumeLoginAttempt.mockReset();
+  throttle.consumeLoginAttempt.mockResolvedValue({
+    allowed: true,
+    retryAfterSeconds: 0,
+  });
+  throttle.resetLoginThrottle.mockReset();
+  throttle.resetLoginThrottle.mockResolvedValue(undefined);
+});
 
 describe("verifyAdminCredentials", () => {
   it("accepts the correct email and password", async () => {
@@ -85,5 +102,25 @@ describe("verifyAdminCredentials", () => {
     expect(user).not.toBeNull();
     expect(JSON.stringify(user)).not.toContain(TEST_PASSWORD);
     expect(JSON.stringify(user)).not.toContain("argon2");
+  });
+
+  it("consumes one shared attempt per verification and resets on success", async () => {
+    const user = await verifyAdminCredentials(TEST_EMAIL, TEST_PASSWORD);
+
+    expect(user).not.toBeNull();
+    expect(throttle.consumeLoginAttempt).toHaveBeenCalledTimes(1);
+    expect(throttle.resetLoginThrottle).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects without verifying the password when the budget is exhausted", async () => {
+    throttle.consumeLoginAttempt.mockResolvedValueOnce({
+      allowed: false,
+      retryAfterSeconds: 600,
+    });
+
+    const user = await verifyAdminCredentials(TEST_EMAIL, TEST_PASSWORD);
+
+    expect(user).toBeNull();
+    expect(throttle.resetLoginThrottle).not.toHaveBeenCalled();
   });
 });

@@ -90,6 +90,15 @@ describe("login action — redirect allowlist", () => {
       expect.objectContaining({ redirectTo: "/overview" }),
     );
   });
+
+  it("hands each submission to Auth.js exactly once", async () => {
+    await login(undefined, formData(VALID));
+
+    // The action does not run a second limiter/count of its own: Auth.js calls
+    // the shared `verifyAdminCredentials` boundary once, which consumes one
+    // attempt. That is what keeps the form and the callback path on one budget.
+    expect(signIn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("login action — input validation", () => {

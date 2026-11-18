@@ -474,6 +474,26 @@ Deployment Protection should remain on.
 point a durable counter becomes a local concern rather than an external service and
 can be revisited alongside session revocation (ADR-009).
 
+> **Revision — durable admin-login throttling on the Render deployment.** The
+> current hosting target is a persistent Render container with PostgreSQL, not a
+> stateless Vercel function per request, so the database is a valid shared store
+> for a counter. Migration `0007_admin_login_throttle` adds one singleton row
+> (`admin_login_throttle`) and `verifyAdminCredentials()` consumes it through a
+> single atomic `INSERT … ON CONFLICT DO UPDATE` before Argon2 runs. Both entry
+> paths — the `/login` Server Action and `POST /api/auth/callback/credentials` —
+> call that same boundary exactly once, so they share one budget rather than
+> each maintaining a counter. The fixed window allows **5 attempts per 15
+> minutes** for the single environment-configured administrator; a verified
+> login resets it, attempts after the budget are denied even with the correct
+> password, and the next attempt after the window starts a fresh budget. The
+> table holds no submitted email and no IP, so arbitrary addresses cannot grow
+> storage, and no client-controlled proxy header participates. If the database
+> or table is unavailable the attempt is denied before password verification.
+> The original "no application limiter" decision above remains the historical
+> Phase 02 record; this revision supersedes it for the Render deployment.
+> Edge-level protections (Cloudflare Access/WAF) remain defence in depth, not a
+> prerequisite for this gap.
+
 ### ADR-012 — Phase 03A data model is designed, not implemented
 
 **Decision.** Phase 03A produces a reviewed **design only** — the entity model, integrity
@@ -737,11 +757,13 @@ production. Bot message templates remain clean for Phase 04-B.
   valid for up to its natural 7-day lifetime. Rotating `AUTH_SECRET` invalidates
   all outstanding sessions at once. This is a documented limitation, not a claim
   of revocation.
-- **No application rate limiting** (ADR-011). The memory-hard cost of Argon2id is
-  the per-attempt brake; a durable, externally enforced limiter (Vercel Firewall
-  rate limiting or Upstash Ratelimit) is the recommended prerequisite for
-  internet-facing access. An in-process counter is deliberately *not* used,
-  because it is unreliable across serverless function instances.
+- **Durable admin-login throttling** (ADR-011 revision). One PostgreSQL row
+  enforces a fixed five-attempt / fifteen-minute window atomically before Argon2
+  for the single administrator, shared by the login Server Action and the Auth.js
+  credentials callback. A verified login clears the budget; an unavailable
+  limiter denies the attempt. An in-process counter is still deliberately *not*
+  used, because it would not be shared across instances. See
+  [RENDER_DEPLOYMENT.md](./RENDER_DEPLOYMENT.md) §4 for the rollout order.
 - **Open-redirect protection.** Post-login destinations are validated against an
   internal allowlist; unvalidated values fall back to `/overview`.
 - Secrets are never committed; `.env*` is git-ignored and `.env.example` holds
