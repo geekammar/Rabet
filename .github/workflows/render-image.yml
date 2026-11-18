@@ -15,13 +15,54 @@ on:
         description: "Type PUBLISH_RENDER_IMAGE exactly to authorize GHCR publication."
         type: string
         required: true
+      deploy_to_render:
+        description: "After publishing, deploy the verified digest to Render and verify Live + /api/healthz. Requires the render-production environment."
+        type: boolean
+        default: false
 
-# Least-privilege default across all jobs. Only the final manual `publish` job
-# receives `packages: write`.
+# Least-privilege default across all jobs. Only `publish` receives
+# `packages: write`; only `deploy-render` receives the Render environment
+# secret. Automatic release/deploy is OFF unless the owner sets the repository
+# variable RABET_AUTO_DEPLOY_ENABLED=true after Checkpoint B review.
 permissions:
   contents: read
 
+# Serialize all release-path runs (push main, manual dispatch on main). PR
+# verification stays isolated per PR. Queued release runs re-check origin/main
+# before every irreversible step and stop if they are stale.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('render-image-pr-{0}', github.event.pull_request.number) || 'render-image-release-main' }}
+  cancel-in-progress: false
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Fast release-gate fixture tests. These are the same tests CI runs through
+  # `npm run test`; keeping this job in the image workflow makes the
+  # workflow-level gate evidence visible directly beside the build/smoke job.
+  # ---------------------------------------------------------------------------
+  release-gate-tests:
+    name: Release gate fixture tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run GHCR, Render, and workflow release-gate fixtures
+        run: npx vitest run tests/ghcr-release-gate.test.ts tests/render-deploy-gate.test.ts tests/render-image-workflow.test.ts
+
   # ---------------------------------------------------------------------------
   # Automatic PR and main verification — builds and smoke-tests the linux/amd64
   # runtime image with isolated PostgreSQL, synthetic credentials, dummy
@@ -123,16 +164,20 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # Manual main-only release gate + verified image build (NO packages:write).
-  # Serializes release runs, stops stale releases if origin/main has moved, and
-  # requires BOTH a completed successful `push` CI run AND a completed
-  # successful `Dependency Audit` run on `main` for the exact expected SHA.
+  # Manual or owner-activated automatic main-only release gate + verified image
+  # build (NO packages:write). Serializes release runs, stops stale releases if
+  # origin/main has moved, and requires BOTH a completed successful `push` CI
+  # run AND a completed successful `Dependency Audit` run on `main` for the
+  # exact expected SHA. Automatic mode additionally requires
+  # RABET_AUTO_DEPLOY_ENABLED=true.
   # ---------------------------------------------------------------------------
   prepare-release:
     name: Verify main provenance, CI + Audit status & smoke-test release image
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.RABET_AUTO_DEPLOY_ENABLED == 'true') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     concurrency:
       group: render-image-release
       cancel-in-progress: false
@@ -164,56 +209,78 @@ jobs:
           --health-retries 10
 
     steps:
-      - name: Validate manual dispatch inputs and execution context
+      - name: Resolve and validate release target
+        id: target
         env:
-          DISPATCH_EVENT: ${{ github.event_name }}
-          DISPATCH_REF: ${{ github.ref }}
-          DISPATCH_SHA: ${{ github.sha }}
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
           INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
           INPUT_CONFIRM: ${{ inputs.confirm }}
+          AUTO_RELEASE_ENABLED: ${{ vars.RABET_AUTO_DEPLOY_ENABLED }}
         run: |
           node - <<'NODE'
-            const eventName = process.env.DISPATCH_EVENT ?? "";
-            const ref = process.env.DISPATCH_REF ?? "";
-            const workflowSha = (process.env.DISPATCH_SHA ?? "").toLowerCase();
-            const expectedSha = (process.env.INPUT_EXPECTED_SHA ?? "").trim().toLowerCase();
+            const fs = require("node:fs");
+            const eventName = process.env.RELEASE_EVENT ?? "";
+            const ref = process.env.RELEASE_REF ?? "";
+            const workflowSha = (process.env.WORKFLOW_SHA ?? "").toLowerCase();
+            const inputSha = (process.env.INPUT_EXPECTED_SHA ?? "").trim().toLowerCase();
             const confirm = process.env.INPUT_CONFIRM ?? "";
+            const autoRelease = process.env.AUTO_RELEASE_ENABLED ?? "";
 
-            if (eventName !== "workflow_dispatch") {
-              console.error(`Refusing to publish: event "${eventName}" is not workflow_dispatch.`);
-              process.exit(1);
-            }
             if (ref !== "refs/heads/main") {
-              console.error(`Refusing to publish: ref "${ref}" is not refs/heads/main.`);
+              console.error(`Refusing to release: ref "${ref}" is not refs/heads/main.`);
               process.exit(1);
             }
-            if (confirm !== "PUBLISH_RENDER_IMAGE") {
-              console.error('Refusing to publish: confirm input must equal "PUBLISH_RENDER_IMAGE" exactly.');
+
+            let expectedSha;
+            if (eventName === "push") {
+              if (autoRelease !== "true") {
+                console.error("Refusing automatic release: RABET_AUTO_DEPLOY_ENABLED is not true.");
+                process.exit(1);
+              }
+              expectedSha = workflowSha;
+              console.log("Automatic release authorized for current main push SHA.");
+            } else if (eventName === "workflow_dispatch") {
+              if (confirm !== "PUBLISH_RENDER_IMAGE") {
+                console.error('Refusing to publish: confirm input must equal "PUBLISH_RENDER_IMAGE" exactly.');
+                process.exit(1);
+              }
+              if (!/^[0-9a-f]{40}$/.test(inputSha)) {
+                console.error(`Refusing to publish: expected_sha "${inputSha}" must be a full 40-char git SHA.`);
+                process.exit(1);
+              }
+              if (workflowSha !== inputSha) {
+                console.error(
+                  `Refusing to publish stale or mismatched dispatch: workflow SHA (${workflowSha}) !== expected_sha (${inputSha}).`,
+                );
+                process.exit(1);
+              }
+              expectedSha = inputSha;
+              console.log("Manual dispatch context valid for main.");
+            } else {
+              console.error(`Refusing to release: unsupported event "${eventName}".`);
               process.exit(1);
             }
+
             if (!/^[0-9a-f]{40}$/.test(expectedSha)) {
-              console.error(`Refusing to publish: expected_sha "${expectedSha}" must be a full 40-char git SHA.`);
+              console.error(`Refusing to release: resolved SHA "${expectedSha}" must be a full 40-char git SHA.`);
               process.exit(1);
             }
-            if (workflowSha !== expectedSha) {
-              console.error(
-                `Refusing to publish stale or mismatched dispatch: workflow SHA (${workflowSha}) !== expected_sha (${expectedSha}).`,
-              );
-              process.exit(1);
-            }
-            console.log(`Dispatch context valid for main SHA ${expectedSha}.`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `expected_sha=${expectedSha}\n`);
+            console.log(`Release target resolved to main SHA ${expectedSha}.`);
           NODE
 
-      - name: Checkout exact expected SHA
+      - name: Checkout exact resolved SHA
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.expected_sha }}
+          ref: ${{ steps.target.outputs.expected_sha }}
           fetch-depth: 1
 
       - name: Verify exact checkout SHA matches current remote origin/main
         id: provenance
         env:
-          INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          INPUT_EXPECTED_SHA: ${{ steps.target.outputs.expected_sha }}
           REPO_FULL_NAME: ${{ github.repository }}
         run: |
           EXPECTED_SHA="$(printf '%s' "${INPUT_EXPECTED_SHA}" | tr '[:upper:]' '[:lower:]' | xargs)"
@@ -252,22 +319,16 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Verify matching main push CI and Dependency Audit runs succeeded
+      - name: Wait for exact-SHA main push CI and Dependency Audit success
         id: workflow-gates
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFIED_SHA: ${{ steps.provenance.outputs.verified_sha }}
           REPO_FULL_NAME: ${{ github.repository }}
+          GATE_TIMEOUT_MS: "2400000"
+          GATE_POLL_INTERVAL_MS: "20000"
         run: |
-          CI_RUNS_JSON="$(gh api "/repos/${REPO_FULL_NAME}/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=${VERIFIED_SHA}&per_page=20")"
-          AUDIT_RUNS_JSON="$(gh api "/repos/${REPO_FULL_NAME}/actions/workflows/audit.yml/runs?branch=main&head_sha=${VERIFIED_SHA}&per_page=20")"
-
-          GATE_RESULT="$(
-            CI_RUNS_JSON="${CI_RUNS_JSON}" \
-            AUDIT_RUNS_JSON="${AUDIT_RUNS_JSON}" \
-            VERIFIED_SHA="${VERIFIED_SHA}" \
-            node scripts/ghcr-release-gate.mjs verify-workflows
-          )"
+          GATE_RESULT="$(node scripts/ghcr-release-gate.mjs wait-workflows)"
 
           CI_URL="$(GATE_RESULT="${GATE_RESULT}" node -e 'process.stdout.write(JSON.parse(process.env.GATE_RESULT).ciRunUrl)')"
           AUDIT_URL="$(GATE_RESULT="${GATE_RESULT}" node -e 'process.stdout.write(JSON.parse(process.env.GATE_RESULT).auditRunUrl)')"
@@ -279,6 +340,17 @@ jobs:
 
           echo "Verified successful main push CI run: ${CI_URL}"
           echo "Verified successful main Dependency Audit run: ${AUDIT_URL}"
+
+      - name: Re-verify origin/main did not move while waiting for gates
+        env:
+          VERIFIED_SHA: ${{ steps.provenance.outputs.verified_sha }}
+        run: |
+          REMOTE_MAIN_SHA="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          if [ "${REMOTE_MAIN_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "::error::Stopping stale release after workflow gates: ${VERIFIED_SHA} is no longer current origin/main (${REMOTE_MAIN_SHA})."
+            exit 1
+          fi
+          echo "Confirmed ${VERIFIED_SHA} remains current origin/main after CI and Audit passed."
 
       - name: Install host test runner dependencies
         run: npm ci
@@ -330,7 +402,7 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Manual main-only GHCR publication — the ONLY job granted `packages: write`.
+  # Main-only GHCR publication — the ONLY job granted `packages: write`.
   # Re-verifies origin/main freshness immediately prior to registry access.
   # Retry-safe: inspects GHCR via OCI v2 API first — if `sha-<SHA>` already
   # exists, verifies provenance (`linux/amd64`, OCI revision & source labels,
@@ -341,15 +413,24 @@ jobs:
   publish:
     name: Publish verified SHA image to GHCR
     needs: prepare-release
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: |
+      needs.prepare-release.result == 'success' &&
+      (
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.RABET_AUTO_DEPLOY_ENABLED == 'true')
+      )
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     concurrency:
       group: render-image-publish
       cancel-in-progress: false
     permissions:
       contents: read
       packages: write
+    outputs:
+      final_digest: ${{ steps.release-summary.outputs.final_digest }}
+      config_digest: ${{ steps.release-summary.outputs.config_digest }}
+      publish_mode: ${{ steps.release-summary.outputs.publish_mode }}
 
     steps:
       - name: Checkout release gate helper at exact verified SHA
@@ -404,8 +485,11 @@ jobs:
 
           if [ "${TAG_STATUS}" = "exists_verified" ]; then
             EXISTING_DIGEST="$(CHECK_JSON="${CHECK_JSON}" node -e 'process.stdout.write(JSON.parse(process.env.CHECK_JSON).repoDigest)')"
+            EXISTING_CONFIG_DIGEST="$(CHECK_JSON="${CHECK_JSON}" node -e 'process.stdout.write(JSON.parse(process.env.CHECK_JSON).configDigest)')"
             echo "existing_repo_digest=${EXISTING_DIGEST}" >> "$GITHUB_OUTPUT"
+            echo "existing_config_digest=${EXISTING_CONFIG_DIGEST}" >> "$GITHUB_OUTPUT"
             echo "Verified existing immutable tag on GHCR (will reuse without overwriting): ${EXISTING_DIGEST}"
+            echo "Verified existing image config digest: ${EXISTING_CONFIG_DIGEST}"
           elif [ "${TAG_STATUS}" = "missing" ]; then
             echo "Confirmed tag does not yet exist on GHCR (safe to push once)."
           else
@@ -442,13 +526,22 @@ jobs:
             echo "::error::Unexpected repo digest format: ${REPO_DIGEST}"
             exit 1
           fi
+          CONFIG_DIGEST="$(docker image inspect --format='{{.Id}}' "${IMAGE_TAG}")"
+          if ! printf '%s' "${CONFIG_DIGEST}" | grep -Eq "^sha256:[0-9a-f]{64}$"; then
+            echo "::error::Unexpected image config digest: ${CONFIG_DIGEST}"
+            exit 1
+          fi
           echo "repo_digest=${REPO_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "config_digest=${CONFIG_DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Verify GHCR digest and emit release summary
+        id: release-summary
         env:
           TAG_STATUS: ${{ steps.tag-check.outputs.tag_status }}
           EXISTING_DIGEST: ${{ steps.tag-check.outputs.existing_repo_digest }}
+          EXISTING_CONFIG_DIGEST: ${{ steps.tag-check.outputs.existing_config_digest }}
           PUSHED_DIGEST: ${{ steps.push-new.outputs.repo_digest }}
+          PUSHED_CONFIG_DIGEST: ${{ steps.push-new.outputs.config_digest }}
           IMAGE_REPO: ${{ needs.prepare-release.outputs.image_repo }}
           IMAGE_TAG: ${{ needs.prepare-release.outputs.image_tag }}
           VERIFIED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
@@ -457,9 +550,11 @@ jobs:
         run: |
           if [ "${TAG_STATUS}" = "exists_verified" ]; then
             FINAL_DIGEST="${EXISTING_DIGEST}"
+            FINAL_CONFIG_DIGEST="${EXISTING_CONFIG_DIGEST}"
             PUBLISH_MODE="Reused existing provenance-verified digest (retry-safe; tag was not overwritten)"
           else
             FINAL_DIGEST="${PUSHED_DIGEST}"
+            FINAL_CONFIG_DIGEST="${PUSHED_CONFIG_DIGEST}"
             PUBLISH_MODE="Published new immutable SHA-tagged image"
           fi
 
@@ -467,20 +562,112 @@ jobs:
             echo "::error::Invalid final GHCR digest reference: ${FINAL_DIGEST}"
             exit 1
           fi
+          if ! printf '%s' "${FINAL_CONFIG_DIGEST}" | grep -Eq "^sha256:[0-9a-f]{64}$"; then
+            echo "::error::Invalid final GHCR image config digest: ${FINAL_CONFIG_DIGEST}"
+            exit 1
+          fi
 
           # Confirm the immutable digest is resolvable on GHCR
           docker buildx imagetools inspect "${FINAL_DIGEST}" >/dev/null
+
+          {
+            echo "final_digest=${FINAL_DIGEST}"
+            echo "config_digest=${FINAL_CONFIG_DIGEST}"
+            echo "publish_mode=${PUBLISH_MODE}"
+          } >> "$GITHUB_OUTPUT"
 
           echo "Final verified GHCR digest: ${FINAL_DIGEST}"
           {
             echo "## Published Render Runtime Image"
             echo ""
             echo "- **Immutable GHCR Digest Reference (use this in Render):** \`${FINAL_DIGEST}\`"
+            echo "- **Image Config Digest (Render image.sha cross-check):** \`${FINAL_CONFIG_DIGEST}\`"
             echo "- **SHA Tag:** \`${IMAGE_TAG}\`"
             echo "- **Publish Mode:** ${PUBLISH_MODE}"
             echo "- **Source Commit SHA (\`main\`):** \`${VERIFIED_SHA}\`"
             echo "- **Verified \`main\` Push CI Run:** ${CI_RUN_URL}"
             echo "- **Verified \`main\` Dependency Audit Run:** ${AUDIT_RUN_URL}"
             echo "- **Platform:** \`linux/amd64\`"
-            echo "- **Rollback Policy:** Previous \`sha-*\` tags and \`@sha256:...\` digests remain retained in GHCR. No automatic Render deployment was triggered."
+            echo "- **Rollback Policy:** Previous \`sha-*\` tags and \`@sha256:...\` digests remain retained in GHCR."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Render promotion — only this job can read the render-production environment
+  # secret. Automatic deployment runs only when the owner has set the
+  # repository variable RABET_AUTO_DEPLOY_ENABLED=true. Manual release remains
+  # publish-only by default; an owner can opt into deployment per dispatch.
+  #
+  # The helper updates the service's SAVED image reference to the immutable
+  # digest and then deploys that same digest, so later dashboard "Deploy latest
+  # reference" actions cannot silently redeploy an older tag. It verifies the
+  # Render deploy reaches Live, its pinned image.ref exactly, its resolved
+  # image.sha against the GHCR config digest, and that /api/healthz returns the
+  # exact full main SHA. Automatic promotion also refuses migration-input
+  # changes versus the currently live SHA. A failed promotion restores the
+  # previous saved image reference when it is still safe to do so; that is not
+  # a live rollback.
+  # ---------------------------------------------------------------------------
+  deploy-render:
+    name: Deploy verified digest to Render and verify live SHA
+    needs: [prepare-release, publish]
+    if: |
+      needs.prepare-release.result == 'success' &&
+      needs.publish.result == 'success' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.RABET_AUTO_DEPLOY_ENABLED == 'true') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.deploy_to_render == true)
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: render-image-deploy
+      cancel-in-progress: false
+    environment:
+      name: render-production
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release gate helper at exact verified SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.verified_sha }}
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Re-verify target SHA is still current remote main
+        env:
+          VERIFIED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
+        run: |
+          CHECKOUT_SHA="$(git rev-parse HEAD)"
+          REMOTE_MAIN_SHA="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          if [ "${CHECKOUT_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "::error::Checkout HEAD (${CHECKOUT_SHA}) !== verified SHA (${VERIFIED_SHA})."
+            exit 1
+          fi
+          if [ "${REMOTE_MAIN_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "::error::Stopping stale release before Render deploy: ${VERIFIED_SHA} is behind current origin/main (${REMOTE_MAIN_SHA})."
+            exit 1
+          fi
+          echo "Confirmed ${VERIFIED_SHA} remains current origin/main before Render promotion."
+
+      - name: Update Render saved image, deploy digest, verify Live and /api/healthz
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+          RENDER_HEALTH_URL: ${{ vars.RENDER_HEALTH_URL }}
+          EXPECTED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
+          IMAGE_REPO: ${{ needs.prepare-release.outputs.repo_path }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.final_digest }}
+          IMAGE_CONFIG_DIGEST: ${{ needs.publish.outputs.config_digest }}
+          RENDER_PROMOTION_MODE: ${{ github.event_name == 'push' && 'automatic' || 'manual' }}
+          RENDER_DEPLOY_TIMEOUT_MS: "1200000"
+          RENDER_HEALTH_TIMEOUT_MS: "300000"
+          RENDER_POLL_INTERVAL_MS: "10000"
+        run: node scripts/render-deploy-gate.mjs deploy
