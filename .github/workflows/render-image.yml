@@ -60,8 +60,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run GHCR and Render release-gate fixtures
-        run: npx vitest run tests/ghcr-release-gate.test.ts tests/render-deploy-gate.test.ts
+      - name: Run GHCR, Render, and workflow release-gate fixtures
+        run: npx vitest run tests/ghcr-release-gate.test.ts tests/render-deploy-gate.test.ts tests/render-image-workflow.test.ts
 
   # ---------------------------------------------------------------------------
   # Automatic PR and main verification — builds and smoke-tests the linux/amd64
