@@ -58,16 +58,28 @@ verified here; those gaps are recorded in §3.7 and in the delivery document.
    path, not the target.
 8. **Managed Bot provisioning is gated by an unverified correlation proof.**
    Official Telegram behavior gives us the creating Telegram user and the new
-   bot, but no custom correlation parameter and no stable bot name. The design
-   binds the creating user to the authenticated merchant through a one-time
-   manager-bot deep link. This must be proven with a test-bot spike before
-   implementation; until then the correlation status is **UNVERIFIED**.
-9. **Arabic-first mobile onboarding and three frequent tasks.** The merchant
-   sees invite, setup, connect, test and share as one linear journey, then a
-   home screen centered on add product, edit price/availability and review an
-   inquiry. Advanced catalog, button trees, bot content and payment methods stay
-   secondary.
-10. **No isolation claim from this design or from the existing backfill.** A
+   bot, but no custom correlation parameter, no event attempt id and no stable
+   bot name. Creator identity is necessary but not sufficient proof of the exact
+   provisioning attempt. Automatic linking requires one unambiguous pending
+   attempt; every late, duplicate, expired or otherwise ambiguous event fails
+   closed to review or an approved fallback. The correlation status remains
+   **UNVERIFIED** until the test-bot spike passes.
+9. **Store lifecycle is explicit.** A merchant membership grants access to the
+   merchant's own store while it is `onboarding`, `active` or `suspended`
+   (read-only when suspended). Customer-facing serving, testing and sharing wait
+   for customer readiness: store `active` plus a `ready` Telegram connection.
+   Membership authorization is not the same as customer readiness.
+10. **Arabic-first mobile onboarding and three frequent tasks.** The merchant
+    sees invite, setup, connect, activate, test and share as one linear journey,
+    then a home screen centered on add product, edit price/availability and
+    review an inquiry. Advanced catalog, button trees, bot content and payment
+    methods stay secondary.
+11. **The first implementation slice is a catalog tenancy seam, not an auth or
+    UI slice.** It adds store-scoped product listing and availability update,
+    exercised only through the PostgreSQL fixture infrastructure with two
+    stores. Merchant invitations, credentials, sessions and UI are later; no new
+    production route and no browser-supplied store id are introduced.
+12. **No isolation claim from this design or from the existing backfill.** A
     successful backfill proves legacy rows at a point in time. It does not prove
     tenant isolation, and it must not be used to justify a second production
     store.
@@ -86,7 +98,7 @@ verified here; those gaps are recorded in §3.7 and in the delivery document.
 | Telegram connection | Merchant connects one Managed Bot to their store through the platform manager bot; exactly one active connection per store |
 | Customer catalog | Existing category/product/button-tree model, per-store scoped |
 | Customer inquiries | Existing inquiry and two-way message model, per-store scoped |
-| Merchant dashboard | Arabic-first mobile home; add product; edit price/availability; read and reply to inquiries; share store link; test store |
+| Merchant dashboard | Arabic-first mobile home; add product; edit price/availability; read and reply to inquiries; share/test when the store is customer-ready |
 | Languages | Existing English/Arabic content and fallback behavior, with per-store enablement |
 | Storefront menu | Existing configurable five-entry menu, per-store scoped |
 
@@ -276,8 +288,8 @@ database constraints.
   secret/token are available to the operator.
 - A verified Neon restore point or branch snapshot can be created before any
   cutover.
-- The legacy store is legitimately owned by the merchant who will receive the
-  first invitation, or is intentionally retained as an operator-managed store.
+- The legacy store's ownership is intentionally undecided; it is retained as an
+  operator-managed store until C1 and a separate approved cutover.
 
 **Evidence gaps**
 
@@ -365,15 +377,15 @@ sequenceDiagram
   A->>P: load app_user by lower(email)
   A->>A: verify Argon2id hash
   A->>P: read active store_membership for app_user
-  alt exactly one active membership and active store
+  alt exactly one active membership
     A-->>B: encrypted session (principal=merchant, user id, session version)
-  else zero or multiple memberships, or suspended store
+  else zero or multiple memberships, or membership revoked
     A-->>B: generic failure / operator-assisted resolution
   end
   B->>S: GET /home
   S->>A: read session
   S->>P: re-read app_user status, session_version, membership, store status
-  S-->>S: StoreScope { storeId, appUserId, role: owner }
+  S-->>S: StoreScope { storeId, appUserId, role: owner, storeStatus }
   S->>D: query(StoreScope, ...)
   D->>P: SELECT ... WHERE store_id = $1
 ```
@@ -382,18 +394,90 @@ Rules:
 
 - The session contains the `app_user` id and `session_version`, not an
   authoritative `store_id`. Every request re-reads the active membership and
-  store status from PostgreSQL, so revocation and suspension take effect without
-  waiting for JWT expiry.
+  store status from PostgreSQL, so revocation is denied immediately and
+  suspension becomes read-only without waiting for JWT expiry.
 - MVP expects exactly one active membership. Zero or more than one fails closed;
   there is no selector and no "first membership" fallback.
 - A dashboard URL may contain a store slug or id as a **hint**. It is compared
   with the resolved scope; a mismatch is a 404, never a switch. Hidden form
   fields and `FormData` store ids are ignored.
-- `requireMerchantStore()` is the only dashboard resolver. It returns a branded
-  `StoreScope`; data functions require that type. A raw `string` store id cannot
+- `requireMerchantScope()` is the only dashboard resolver. It returns a branded
+  `StoreScope` for `onboarding` and `active` stores, and a read-only scope for
+  `suspended`. Data functions require that type. A raw `string` store id cannot
   be passed accidentally without an explicit cast.
+- `requireCustomerReadyScope()` is a separate server check for customer-facing
+  actions. It requires `store.status = 'active'` and a `ready` connection; it is
+  not implied by merchant membership.
 - The current operator login remains a deployment/operations gate. It is not a
-  merchant identity and does not grant merchant data access.
+  merchant identity and does not grant access to merchant-owned stores. During
+  the transition it may continue managing the operator-managed legacy store
+  through the existing dashboard. That legacy store remains on the current path
+  until a separate ownership decision and approved cutover.
+
+#### 4.3.1 Store lifecycle and access
+
+`store.status` already has `onboarding`, `active` and `suspended`
+(`src/db/schema/tenant.ts:35-42`). "Customer-ready" is derived, not a fourth
+status.
+
+| State | Merchant membership | Merchant dashboard access | Customer bot | Test/share | Inquiries |
+| --- | --- | --- | --- | --- | --- |
+| Invited, not accepted | None yet | Invitation page only | No connection | No | None |
+| `onboarding` | Active owner | Setup, store profile, catalog draft CRUD, languages/storefront, Telegram connection setup | Does not serve; webhook rejects (connection may be pending or ready) | Disabled | Empty until a customer can reach the bot |
+| `active`, no ready connection | Active owner | Full own-store management | Does not serve | Disabled | Existing history only |
+| `active`, ready connection | Active owner | Full own-store management | Serves the store | Enabled | Live; merchant reads and replies |
+| `suspended` | Active owner | Sign-in and read-only notice; no writes | Webhook rejects | Disabled | Read-only |
+| Membership revoked | Revoked | No merchant access | Per connection state | Disabled | No access |
+| Legacy operator-managed | No merchant membership | Current operator dashboard only | Current single bot | Not part of merchant flow | Current operator flow |
+
+Activation is a merchant action that requires the store profile to be valid and
+at least one active product. Customer readiness additionally requires a ready
+Telegram connection. This keeps onboarding productive without exposing a
+half-built store to customers.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Invited
+  Invited --> Onboarding: invitation accepted
+  Onboarding --> Active: merchant activates (valid profile + at least one active product)
+  Active --> CustomerReady: connection ready
+  CustomerReady --> Active: connection revoked or disconnected
+  Active --> Suspended: Super Admin suspends
+  CustomerReady --> Suspended: Super Admin suspends
+  Suspended --> Active: Super Admin reactivates
+  Onboarding --> NoAccess: membership revoked
+  Active --> NoAccess: membership revoked
+  CustomerReady --> NoAccess: membership revoked
+  Suspended --> NoAccess: membership revoked
+
+  note right of Onboarding
+    Merchant may manage own store.
+    Bot does not serve. Test/share disabled.
+  end note
+  note right of CustomerReady
+    Derived state: store active + connection ready.
+    Bot serves. Test/share enabled.
+  end note
+  note right of NoAccess
+    No merchant access. Legacy operator path is separate.
+  end note
+```
+
+`CustomerReady` is a derived access state, not a value of `store.status`.
+`NoAccess` is the result of an active membership being revoked, not a new store
+status.
+
+#### 4.3.2 Merchant membership versus platform roles
+
+| Principal | Identity source | Allowed | Not allowed |
+| --- | --- | --- | --- |
+| Merchant owner | `app_user` + active `store_membership` | Manage exactly one own store; onboarding, catalog, inquiries, connection, test/share when customer-ready; read-only when suspended | Platform administration, another store, store switching, staff roles |
+| Platform Super Admin | `app_user.platform_role = 'super_admin'` | Create a store, send/revoke invitations, suspend/reactivate a store, view store lifecycle metadata | Read merchant catalog/inquiries, use a merchant bot token, impersonate a merchant, bypass membership |
+| Deployment operator | Current environment-configured operator login | Deploy, migrate, inspect, operate the runtime; continue managing the operator-owned legacy store during transition | Automatically become a merchant or Super Admin; grant product permissions |
+| Merchant staff | Not in MVP | None | Any store access |
+
+The legacy store is not converted into a merchant store by this design. It
+remains operator-managed until D1 is decided and a separate cutover is approved.
 
 ### 4.4 Trusted path B — incoming Telegram update
 
@@ -411,9 +495,9 @@ sequenceDiagram
   W->>W: validate shape before any write
   W->>C: load connection by public connection id
   C->>P: connection status, secret hash, store status
-  alt secret mismatch, revoked, disconnected, or store inactive
+  alt secret mismatch, revoked, disconnected, or store not active
     C-->>W: reject with no business write
-  else connection is ready
+  else connection ready and store active
     C-->>W: StoreScope { storeId, connectionId, provider: telegram }
   end
   W->>D: claim(connectionId, updateId) in the connection scope
@@ -444,8 +528,10 @@ Rules:
 
 | Path | Enforcement point | Failure mode |
 | --- | --- | --- |
-| Dashboard page read | `requireMerchantStore()` then every query takes `StoreScope` | Redirect to login or generic not-found |
-| Dashboard write | Server Action calls `requireMerchantStore()` before input parsing; data function re-checks relations | No write, generic error |
+| Merchant sign-in | `app_user` credential + exactly one active membership; onboarding is allowed, suspended is read-only | Generic failure or read-only scope |
+| Dashboard page read | `requireMerchantScope()` then every query takes `StoreScope` | Redirect to login or generic not-found |
+| Dashboard write in `onboarding` | `requireMerchantScope()` allows own-store draft/catalog/setup writes | No write if suspended/revoked; generic error |
+| Customer-facing action | `requireCustomerReadyScope()` (store `active` + connection `ready`) | Test/share/serving disabled until ready |
 | Record lookup by id | Query includes `store_id = scope.storeId`; a foreign id is indistinguishable from missing | 404 |
 | Relation write (product/category, action targets, inquiry customer/product) | Same-store composite FK where possible; explicit check where a composite FK is impractical | Constraint or `CROSS_STORE_REFERENCE` |
 | Telegram webhook | Connection id + secret -> store; claim and all writes use that scope | 401/404 with no business write |
@@ -508,6 +594,25 @@ domains. It must not reuse Telegram's managed-bot provisioning, callback-token
 grammar, message-size assumptions or credential model. No plugin framework or
 generic channel event bus is justified by one provider.
 
+### 4.9 Plan-capability boundary (future, not implemented)
+
+Tenant authorization and plan capability answer different questions:
+
+- **Tenant authorization:** who may manage this store? It is answered by the
+  authenticated `app_user`, the active membership and the resolved `StoreScope`.
+- **Store capability:** is this feature available to this store? It will be a
+  server-side capability evaluated for the store, for example
+  `product_image_upload` or a catalog size limit.
+
+A future capability check must run in the server action/API that performs the
+work, not only in the dashboard that renders the button. Presentation may hide an
+unavailable action, but the server remains authoritative. A browser cannot
+supply or upgrade a capability.
+
+This PR defines no plan names, prices, billing, subscriptions, permission engine
+or schema. It records only the separation so tenant scoping is not later mistaken
+for entitlement.
+
 ---
 
 ## 5. Target data model changes (design only, not implemented)
@@ -522,13 +627,19 @@ No SQL is authored or run by this PR.
      expiry, accepted/revoked timestamps, inviter, optional last-sent timestamp.
    - Accepting an invitation creates or reuses `app_user`, creates exactly one
      active `store_membership`, and consumes the token atomically.
+   - Store lifecycle stays `onboarding`, `active` or `suspended`; customer-ready
+     is derived from `active` + a ready connection. No fourth status and no plan
+     capability schema are introduced.
 2. **Telegram connection**
    - Add `telegram_connection`: store id, provider `telegram`, public connection
-     id, status (`pending`, `provisioning`, `ready`, `revoked`, `disconnected`),
-     bot user id, bot username, encrypted bot token, token key version, webhook
-     secret hash, manager event id, creator Telegram user id, timestamps.
+     id, status (`pending`, `provisioning`, `ready`, `needs_review`, `revoked`,
+     `disconnected`), attempt id and state, bot user id, bot username, encrypted
+     bot token, token key version, webhook secret hash, manager update id, creator
+     Telegram user id, timestamps.
    - Partial unique indexes: one non-revoked connection per store; one bot user
-     id globally; one pending correlation per creator Telegram user.
+     id globally; one active pending correlation per creator Telegram user.
+   - An attempt history is retained so a late event can be identified as
+     ambiguous rather than silently attached to a newer attempt.
 3. **Per-store configuration**
    - Replace the `bot_setting` singleton with `UNIQUE(store_id)` and remove the
      `id = 1` check.
@@ -563,9 +674,10 @@ No SQL is authored or run by this PR.
 | Component | Decision | Evidence | User impact | Transition dependency | Deletion condition |
 | --- | --- | --- | --- | --- | --- |
 | `store`, `app_user`, `store_membership` schema | **Keep** | `src/db/schema/tenant.ts`; `tests/db/tenant-identity.test.ts` | Store and identity foundation already exists | Add credential/invitation fields; no destructive rewrite | None |
-| Legacy `resolveLegacyStoreContext` | **Replace** | `src/lib/data/store-context.ts:56-118`; fails closed on two stores | Removes the single-store write outage risk | Merchant `StoreScope` and webhook connection scope must ship first | Delete when no `NULL` ownership remains and all runtime paths use explicit scopes |
+| Legacy `resolveLegacyStoreContext` | **Replace** | `src/lib/data/store-context.ts:56-118`; fails closed on two stores | Removes the single-store write outage risk | Scoped catalog slice + merchant/webhook scope sources + production backfill/verification | Delete when no `NULL` ownership remains and all runtime paths use explicit scopes |
 | Eight `store_id` roots | **Keep, tighten** | `drizzle/0006_tenant_ownership_expansion.sql`; `tests/db/tenant-ownership.test.ts:341` | Preserves existing ownership data | Backfill, `NOT NULL`, composite FKs | None |
-| Global catalog reads (`listCatalogCategories`, `listCatalogProducts`, `readCatalog*`) | **Refactor** | `src/lib/data/catalog.ts:163`, `:239`, `:326`, `:399` | Merchant sees only their catalog | `StoreScope`; per-store slugs | Old signatures removed when all callers pass scope |
+| Global catalog reads (`listCatalogCategories`, `listCatalogProducts`, `readCatalog*`) | **Refactor** | `src/lib/data/catalog.ts:163`, `:239`, `:326`, `:399` | Merchant sees only their catalog | First slice adds `listCatalogProductsForStore` + `StoreScope`; existing global functions stay until all callers migrate | Old signatures removed when all callers pass scope, after backfill and the scoped-read switch |
+| `updateCatalogProduct` availability path | **Refactor** | `src/lib/data/catalog.ts:1107` | Merchant can toggle own product availability | First slice adds `updateCatalogProductAvailabilityForStore` with a `store_id` predicate; existing path stays | Old path removed when all callers pass scope, after backfill and the scoped-read switch |
 | Catalog write ownership checks with NULL tolerance | **Replace** | `assertOwnershipCompatible` at `store-context.ts:125-131`; called from `catalog.ts` etc. | Cross-store relations become impossible | Backfill completes; no `NULL` rows | Remove NULL tolerance after `NOT NULL` |
 | `bot_setting` singleton | **Replace** | `src/db/schema/settings.ts:41`, `:76-78`; `settings.ts:139` | Merchant edits their own store identity, currency and language | Per-store settings migration and UI scoping | Old singleton table shape removed after all stores migrated |
 | `seller_notification_setting` singleton | **Replace** | `src/db/schema/seller-notifications.ts:51`, `:78-81` | Later milestone; current code stays dormant | Per-store row; deferred merchant enablement | Later notification milestone |
@@ -606,6 +718,11 @@ No SQL is authored or run by this PR.
 
 ### 7.2 Screen-by-screen journey
 
+The journey begins while the store is `onboarding`. The merchant can use the
+dashboard and manage the catalog before customer readiness; activation happens on
+Screen 4. Only the test and share actions wait for the customer-ready state
+(store `active` + `ready` connection) defined in §4.3.1.
+
 #### Screen 1 — Invitation
 
 | Item | Design |
@@ -627,7 +744,7 @@ No SQL is authored or run by this PR.
 | Minimum inputs | Store name, display name, slug, currency, default language |
 | Primary action | `متابعة` (Continue) |
 | Defaults | Store name from invitation; slug generated from the name and editable; currency from the platform default with the current allowlist; English default, Arabic optional |
-| Success | Store is saved idempotently and the merchant sees `تم حفظ بيانات المتجر`; continue to Telegram |
+| Success | Store is saved idempotently and remains `onboarding`; the merchant sees `تم حفظ بيانات المتجر` and continues to Telegram |
 | Waiting | Inline progress; the button shows `جارٍ الحفظ…`; no full-page spinner |
 | Failure | Field-level validation; a save conflict keeps the entered values and offers retry |
 | Resume | Server stores the store row and onboarding step; reopening returns to the same step. A local draft is an extra safety net, never the source of truth |
@@ -640,38 +757,39 @@ No SQL is authored or run by this PR.
 | Minimum inputs | None after setup; Telegram confirmation is provider-required |
 | Primary action | `ربط تيليجرام` (Connect Telegram) |
 | Defaults | Suggested bot name and username derived from the store; both editable by Telegram and never used as proof |
-| Success | `تم ربط البوت` with the bot `@username`; the customer bot is ready |
+| Success | `تم ربط البوت` with the bot `@username`; the connection is ready. The store may still be `onboarding`; customer serving and test/share wait for customer readiness (activation + ready connection) |
 | Waiting | `بانتظار تأكيد تيليجرام…` with a refresh action and a short explanation; server-side pending state expires in 15 minutes |
 | Failure | Cancelled, denied or expired: `لم يكتمل الربط. يمكنك المحاولة مرة أخرى.` A second attempt starts a new pending correlation; the old one is revoked |
 | Resume | The pending connection is server-side. Closing the tab, losing the session or returning from Telegram reopens the same step and polls/refreshes the same pending connection |
 
-#### Screen 4 — Test the store
+#### Screen 4 — Activate and test the store
 
 | Item | Design |
 | --- | --- |
-| Purpose | Let the merchant see the real customer experience before sharing |
-| Minimum inputs | None; the merchant opens the bot link |
-| Primary action | `تجربة المتجر` (Try the store) |
-| Defaults | Opens `https://t.me/<bot_username>` in Telegram; a secondary `إضافة أول منتج` is shown if the catalog is empty |
-| Success | Returning to the dashboard shows `تم فتح المتجر`; the first inbound `/start` can later mark the connection `verified` |
-| Waiting | The button opens Telegram immediately; the dashboard does not block on a message being sent |
-| Failure | If Telegram is unavailable, the link remains visible and copyable; the merchant can continue |
-| Resume | `test_opened_at` is stored when the merchant taps the link. Reopening the dashboard shows the same state. The test is not a prerequisite for the connection |
+| Purpose | Activate the store for customers, then see the real customer experience |
+| Minimum inputs | At least one active product; the store profile must be valid |
+| Primary action | `تفعيل المتجر` (Activate store) while `onboarding`; after activation, `تجربة المتجر` (Try the store) |
+| Defaults | If the catalog is empty, `إضافة أول منتج` is the prerequisite action. The test link is `https://t.me/<bot_username>` |
+| Success | `تم تفعيل المتجر`; the test link opens Telegram. Returning shows `تم فتح المتجر`; the first inbound `/start` can later mark the connection `verified` |
+| Waiting | Activation shows `جارٍ التفعيل…`; if the store is active but the connection is not ready, the screen shows `بانتظار ربط تيليجرام` instead of the test link |
+| Failure | Activation failure keeps the store `onboarding` with field-level reasons. If Telegram is unavailable, the link remains visible and copyable |
+| Resume | Activation and `test_opened_at` are server-side. Reopening the dashboard shows the same state. A failed or skipped test does not deactivate the store |
 
 #### Screen 5 — Share the store
 
 | Item | Design |
 | --- | --- |
-| Purpose | Give the merchant the public store link |
+| Purpose | Give the merchant the public store link after the store is customer-ready |
 | Minimum inputs | None |
 | Primary action | `نسخ رابط المتجر` (Copy store link) |
 | Defaults | `https://t.me/<bot_username>`; a native share action is secondary |
 | Success | Toast `تم نسخ الرابط`; the URL remains selectable if the clipboard is unavailable |
 | Waiting | Not applicable |
 | Failure | Show the link in a read-only field with `تعذر النسخ. حدد الرابط وانسخه يدوياً.` |
-| Resume | The link is derived from the ready connection and is always available on the home screen |
+| Resume | The link is derived from the ready connection and is always available on the home screen once the store is customer-ready |
 
-The share card appears on the Done screen after **either** the merchant taps the
+The share card appears on the Done screen only when the store is customer-ready
+(store `active` + connection `ready`) and after **either** the merchant taps the
 test link **or** taps `تخطي التجربة` (Skip test). It is not hidden behind a
 successful Telegram message. This makes "first test moment" and "share moment"
 measurable without pretending we can observe the merchant's Telegram app.
@@ -680,13 +798,26 @@ measurable without pretending we can observe the merchant's Telegram app.
 flowchart LR
   I["Invitation\nقبول الدعوة"] --> S["Store setup\nمتابعة"]
   S --> C["Connect Telegram\nربط تيليجرام"]
-  C -->|"ready"| T["Test store\nتجربة المتجر"]
+  C -->|"connection ready"| A["Activate store\nتفعيل المتجر"]
+  A -->|"active + ready"| T["Test store\nتجربة المتجر"]
   T -->|"link opened or skip"| H["Share store\nنسخ رابط المتجر"]
   C -->|"pending/expired"| C
+  A -->|"missing product or invalid profile"| P["Add product / fix setup\nإضافة منتج"]
+  P --> A
   H --> D["Merchant home\nإضافة منتج / صندوق الرسائل"]
 ```
 
+The flow shows the default order (connect, then activate). Activation itself
+requires only a valid profile and one active product; the test and share nodes
+additionally require the ready connection. A merchant who activates before
+connecting sees the test/share actions in their locked "waiting for Telegram"
+state.
+
 ### 7.3 The working dashboard
+
+While the store is `onboarding`, the merchant can already use catalog and setup
+tools; the share/test cards show a locked state with the missing readiness step.
+A suspended store shows the same shell read-only.
 
 The first visible level is deliberately small:
 
@@ -703,10 +834,10 @@ The first visible level is deliberately small:
 - Opens a bottom sheet or a focused page, not the full catalog editor.
 - Minimum: name, price, category. Category defaults to the last used category;
   if none exists, offer `إنشاء قسم` inline.
-- Availability defaults to **on** for a store whose bot is ready, with a clear
-  `إظهار في المتجر` switch. If this changes the current "born inactive" rule, the
-  reviewer must approve it; otherwise the primary action is `حفظ كمسودة` followed
-  by a one-tap `نشر`.
+- Availability defaults according to the approved product-creation rule; the
+  store cannot activate until at least one product is active. If this changes the
+  current "born inactive" rule, the reviewer must approve it; otherwise the
+  primary action is `حفظ كمسودة` followed by a one-tap `نشر` and then activation.
 - Advanced fields: slug (auto-generated), description, details, translations,
   button tree.
 - Success: `تمت إضافة المنتج` and the product is visible in the list.
@@ -718,7 +849,7 @@ The first visible level is deliberately small:
 - Tap a product row -> compact sheet with price and availability.
 - Primary: `حفظ` (Save). Success: `تم الحفظ`. Failure: `تعذر الحفظ. حاول مرة أخرى.`
 - The sheet shows the last server value and warns if another device saved first.
-  The first implementation may use `updated_at` as a version check; no silent
+  A later UI implementation may use `updated_at` as a version check; no silent
   last-write-wins across devices.
 
 #### Review and reply to an inquiry
@@ -791,11 +922,20 @@ steps and must not be compressed into a false dashboard tap count.
 
 **Other acceptance checks**
 
-- First test moment: the `تجربة المتجر` action is enabled when the connection is
-  `ready`, even if the catalog is empty.
-- Share moment: the share card is shown after the test link is opened or the
-  merchant skips the test; the link is `https://t.me/<bot_username>` and is
-  copyable.
+- Onboarding access: an authenticated merchant with an active membership can
+  sign in, save store setup, create/edit own-store products and start the
+  Telegram connection while the store is `onboarding`.
+- First test moment: `تجربة المتجر` is enabled only when the store is `active`
+  and the connection is `ready`; activation requires at least one active product.
+- Share moment: the share card is shown only in the customer-ready state and
+  after the test link is opened or the merchant skips the test; the link is
+  `https://t.me/<bot_username>` and is copyable.
+- Membership versus platform role: a merchant cannot invoke Super Admin actions;
+  a Super Admin cannot read merchant catalog/inquiries or impersonate a merchant.
+- Suspended store: merchant access is read-only; test/share and customer serving
+  are disabled.
+- Legacy store: it remains operator-managed and is not pulled into the merchant
+  onboarding flow before D1 and the approved cutover.
 - Add product: ≤ 2 taps from home to the form, plus typing; save is one tap.
   Publish is at most one additional tap if the draft-first rule is kept.
 - Edit price/availability: ≤ 3 taps from home to a saved change, plus typing.
@@ -804,7 +944,8 @@ steps and must not be compressed into a false dashboard tap count.
 - Failure: every server action has a safe, generic error and a retry path; no
   token, SQL or customer prose leaks into an error surface.
 - Resume: after closing the browser during the Telegram wait, signing in returns
-  to the same pending connection or its explicit expired state.
+  to the same pending connection or its explicit expired state. Onboarding
+  progress and activation state survive the interruption.
 
 ---
 
@@ -820,15 +961,20 @@ Sources:
 - <https://core.telegram.org/bots/api#getmanagedbottoken>
 - <https://core.telegram.org/bots/api#setwebhook>
 
-Confirmed behavior:
+Confirmed behavior, re-checked against the current official pages on
+2026-11-18 while writing this revision:
 
 - A manager bot must have Bot Management Mode enabled in BotFather's Mini App.
 - A user can be sent a creation link in the form
   `https://t.me/newbot/{manager_bot_username}/{new_username}?name={new_name}`.
   Both the username and display name are **pre-filled but editable**.
 - When the user confirms, the manager bot receives a `managed_bot` update with a
-  `ManagedBotUpdated` object containing `user` (the user that created the bot)
-  and `bot` (the new bot).
+  `ManagedBotUpdated` object containing `user` ("User that created the bot") and
+  `bot` (the new bot).
+- The current Update documentation describes `managed_bot` as "A new bot was
+  created to be managed by the bot, or token or owner of a managed bot was
+  changed". `ManagedBotUpdated` itself does not expose a separate event kind or
+  attempt id.
 - `getManagedBotToken` returns the token for a managed bot by `user_id`.
   `replaceManagedBotToken` revokes the current token and returns a new one.
 - A bot can also send a reply-keyboard button with `request_managed_bot`
@@ -843,6 +989,9 @@ Not documented as a correlation mechanism:
   `KeyboardButtonRequestManagedBot`.
 - There is no documented custom `start` parameter on the `newbot` creation link.
 - The bot's final name and username can be edited, so neither is proof.
+- The creator user identifies a Telegram account, not the exact Rabet
+  provisioning attempt. `managed_bot` also carries token-change and owner-change
+  events, not only creation.
 
 ### 8.2 Proposed provisioning flow
 
@@ -856,23 +1005,31 @@ sequenceDiagram
   participant N as New managed bot
 
   M->>S: POST /telegram/connect (authenticated merchant)
-  S->>S: create pending connection + nonce hash + 15 min expiry
+  S->>S: create pending attempt A + nonce hash + 15 min expiry
   S-->>M: deep link t.me/<manager_bot>?start=connect_<nonce>
   M->>U: open deep link
   U->>MB: /start connect_<nonce>
-  MB->>S: validate nonce, bind creator user id, store pending
+  MB->>S: validate nonce, bind creator user id to attempt A
   MB-->>U: creation link / request_managed_bot button
   U->>T: confirm name and username
   T->>MB: managed_bot update {user=creator, bot=new bot}
   MB->>S: forward event (server-to-server) or process in same app
-  S->>S: require event.user.id == pending.creator_user_id
-  S->>T: getManagedBotToken(user_id=bot.id)
-  S->>T: getMe with token (verify bot id/username)
-  S->>T: setWebhook(per-connection URL, secret_token)
-  S->>T: getWebhookInfo (verify URL)
-  S->>S: mark ready
-  M->>S: poll/refresh status
-  S-->>M: ready + @username + share link
+  S->>S: dedup event; require creator match; check A/B ambiguity
+  alt exactly one unambiguous pending attempt for this creator
+    S->>T: getManagedBotToken(user_id=bot.id)
+    S->>T: getMe with token (verify bot id/username)
+    S->>T: setWebhook(per-connection URL, secret_token)
+    S->>T: getWebhookInfo (verify URL)
+    S->>S: mark ready for that attempt only
+  else late, duplicate, expired, owner/token-change, or ambiguous
+    S->>S: quarantine event; do not fetch token or register webhook
+    S-->>M: needs operator review or approved fallback
+  end
+  opt connection is ready
+    M->>S: poll/refresh status
+    S-->>M: ready + @username
+    Note over M,S: Share remains disabled until store is active
+  end
 ```
 
 The manager bot may live in the same deployable and use the same database. The
@@ -881,46 +1038,86 @@ manager bot's own webhook in the same application.
 
 ### 8.3 Correlation proof: status UNVERIFIED
 
-**What can be proven using documented behavior**
+**Creator identity is necessary, not sufficient**
 
-The only documented correlation evidence is the creating Telegram user:
-`ManagedBotUpdated.user`. The proposed proof is:
+The documented event can prove that a `managed_bot` update came from a Telegram
+account that we previously bound to a pending attempt. It does **not** prove that
+the event belongs to that exact attempt:
+
+- `ManagedBotUpdated` has no attempt id, nonce or `request_id`.
+- `user` is "User that created the bot"; it does not identify which Rabet
+  provisioning attempt the new bot belongs to.
+- The same `managed_bot` update type also covers token and owner changes, not
+  only creation.
+- A late event from attempt A can arrive while attempt B is pending for the same
+  Telegram account. With the documented fields, A and B are not distinguishable.
+
+The proposed automatic-link proof is therefore all of the following:
 
 1. The merchant is authenticated and has exactly one store.
-2. The server creates a pending connection with a random nonce and binds it to
-   that store and merchant.
+2. The server creates pending attempt A with a random nonce and binds it to that
+   store and merchant.
 3. The merchant opens the manager bot with the nonce. The manager bot verifies the
    nonce, the pending state and the store, then records the **Telegram user id**
-   that sent `/start` as `pending.creator_user_id`.
+   that sent `/start` as A's `creator_user_id`.
 4. The creation UI is only sent to that Telegram chat.
-5. When the `managed_bot` event arrives, its `user.id` must equal
-   `pending.creator_user_id`. If it does not, the event is ignored and the bot is
-   not connected.
-6. The bot id and username are taken from the event only as data to verify with
+5. When the `managed_bot` event arrives, its `user.id` equals the creator id of
+   **exactly one** active, unexpired, unambiguous attempt. There is no other
+   active, expired-but-possible or canceled attempt for that creator inside the
+   defined ambiguity window.
+6. The event has not already been consumed by another attempt, the bot id is not
+   bound to another store, and the event is not an owner/token-change event that
+   contradicts a fresh creation.
+7. The bot id and username are taken from the event only as data to verify with
    `getMe`; they are never proof of store ownership.
-7. The token is fetched only after steps 5 and 6.
+8. The token is fetched only after steps 5–7, and `getMe` returns the same bot id
+   and username.
 
-**Why this is still UNVERIFIED**
+**Fail-closed rule for ambiguous events**
 
-- No live test proves that `ManagedBotUpdated.user.id` is always the Telegram
-  account that opened the manager-bot deep link, especially if the user forwards
-  the link or creates the bot from another device/account.
-- No live test proves delivery timing, retries, duplicate `managed_bot` events or
-  behavior when the user edits the suggested name/username.
-- `request_id` is not echoed in `ManagedBotUpdated`, so the keyboard-button route
-  cannot be correlated by request id alone.
+If any of the following is true, the event is **not** auto-linked. The
+connection stays unready, no token is fetched, no webhook is registered, and the
+event is recorded for operator review or an approved fallback:
+
+- zero or more than one candidate pending attempt for the creator;
+- a late event that could belong to a canceled, expired or superseded attempt;
+- duplicate delivery to a different attempt;
+- an ownership or token-change event, or a bot id already bound elsewhere;
+- a creator mismatch, missing creator, or `getMe` mismatch;
+- the event arrives after attempt expiry;
+- the manager bot cannot prove which attempt the event belongs to.
+
+**Why the correlation remains UNVERIFIED**
+
+- No live test proves `ManagedBotUpdated.user.id` is always the Telegram account
+  that opened the manager-bot deep link, especially if the link is forwarded or
+  creation happens on another device/account.
+- No live test proves delivery timing, duplicate delivery, late events across
+  attempts, or the exact behavior after editing the suggested name/username.
+- No live test proves how token-change and owner-change events populate `user`
+  and whether they can be distinguished from creation.
 - `getManagedBotToken` accepts only a bot `user_id`; it does not prove which Rabet
   store initiated the creation.
 
-**If the spike fails:** do not ship auto-provisioning. Use the smallest safe
-fallback: operator-assisted connection (the operator creates/attaches the bot and
-enters the token server-side; the merchant only sees the connected bot and the
-share link), or a documented manual handoff with explicit operator approval.
-Never accept a merchant-supplied bot token from the browser.
+**Evidence that would justify automatic linking:** a passing spike that shows all
+of the following for two accounts and two attempts: event delivery; creator id
+stability; no attempt-id ambiguity in late/duplicate cases; edited names still
+link by bot id; token/owner-change events are distinguishable or fail closed;
+`getManagedBotToken`, `getMe`, `setWebhook` and `getWebhookInfo` agree. Until
+then, automatic linking is not approved.
+
+**Outcomes requiring an explicit fallback design decision:** multiple candidate
+attempts; late event from canceled/expired attempt A while B is pending;
+duplicate events across attempts; owner/token-change event; creator mismatch;
+missing creator; event after expiry; `getMe`/token mismatch. The fallback options
+are operator-assisted provisioning (operator creates/attaches the bot and enters
+the token server-side), an operator approval queue, or no bot provisioning in the
+first pilot. Never accept a merchant-supplied bot token from the browser.
 
 ### 8.4 Smallest test-bot spike (not run in this session)
 
-Objective: prove the correlation and lifecycle before implementation.
+Objective: prove or falsify the correlation and lifecycle before implementation.
+This PR does not run it.
 
 1. Create one disposable manager bot with Bot Management Mode enabled in a test
    workspace. Do not use production.
@@ -930,15 +1127,26 @@ Objective: prove the correlation and lifecycle before implementation.
 4. Confirm:
    - the `managed_bot` update is delivered to the manager bot;
    - `ManagedBotUpdated.user.id` equals the account that opened the deep link;
-   - the event still arrives after a name/username edit;
+   - the event still arrives after a name/username edit and can still be linked
+     by bot id, not by name;
    - `getManagedBotToken` succeeds for the new bot id;
    - `setWebhook` with a per-test secret succeeds and `getWebhookInfo` matches;
-   - duplicate and delayed events are observable.
+   - duplicate delivery is observable and deduplicable;
+   - a **late event from canceled/expired attempt A** can arrive while attempt B
+     is pending for the same Telegram account, and the event payload alone cannot
+     distinguish A from B;
+   - an ownership-change or token-change `managed_bot` event is observable and
+     distinguishable from a fresh creation, or is safely quarantined;
+   - the manager bot receives enough evidence to enforce the fail-closed rule.
 5. Record whether a user can complete creation without opening the deep link. If
-   yes, the user-id binding is the only documented proof and the pending state
-   must reject an event with no matching creator id.
+   yes, the user-id binding is necessary but still not attempt proof, so an
+   ambiguous event must fail closed.
 6. Destroy the test bots and endpoint. No production bot, webhook or credential is
    touched.
+
+The spike outcome must state one of: automatic linking approved for a defined
+unambiguous case; automatic linking rejected and fallback chosen; or a specific
+new question that needs a product/security decision.
 
 ### 8.5 Lifecycle, cancellation and duplicates
 
@@ -947,22 +1155,34 @@ Proposed connection states:
 ```text
 pending -> provisioning -> ready -> revoked | disconnected
    |             |
-   +-> expired   +-> failed
+   |             +-> needs_review -> provisioning | revoked
+   +-> expired
 ```
 
 - **One pending correlation per store** and **one per creator Telegram user**.
   Starting a second attempt revokes the first nonce and leaves the old state
-  auditable.
+  auditable, but the late-event ambiguity remains until the spike proves a safe
+  rule.
 - **Expiry:** 15 minutes. An expired pending connection cannot be completed by a
   late event. The merchant sees a retry action.
 - **Cancellation:** no event or a dismissed Telegram window leaves the pending
   state to expire. The store is not marked ready and no token is fetched.
-- **Duplicate events:** deduplicate on the manager bot's `update_id` and on
-  `(bot_user_id)`. A duplicate `managed_bot` for an already-ready connection is a
-  no-op.
+- **Late event from attempt A while attempt B is pending:** treat as ambiguous,
+  quarantine, and fail closed. Do not attach the event to B and do not revive A
+  without an approved operator decision.
+- **Duplicate events:** deduplicate on the manager bot's `update_id` and on the
+  bot id. A duplicate that resolves to the same unambiguous attempt is a no-op; a
+  duplicate that could belong to a different attempt is ambiguous and fails
+  closed.
 - **Out-of-order events:** only forward transitions are allowed. A token retrieved
   before the correlation check is never accepted. A late event after expiry is
-  ignored.
+  ignored and queued for review, not auto-linked.
+- **Edited name/username:** never used for matching. The link decision uses the
+  bot id and the creator/attempt checks.
+- **Ownership or token change:** `managed_bot` also covers these events. An
+  owner-change event invalidates the connection and requires review; a
+  token-change event requires re-verification/rotation before the connection is
+  ready again. Neither is silently treated as a fresh creation.
 - **Retries:** `getManagedBotToken`, `getMe`, `setWebhook` and `getWebhookInfo`
   are idempotent and retryable with bounded backoff. A failed webhook
   registration leaves the connection `provisioning`, not `ready`.
@@ -1012,20 +1232,27 @@ pending -> provisioning -> ready -> revoked | disconnected
 
 **Readiness condition**
 
-A customer connection is `ready` only when all of these are true:
+A connection is `ready` only when all of these are true:
 
-1. The `managed_bot` event's creator user id matches the pending connection.
-2. `getManagedBotToken` succeeds for the bot id.
-3. `getMe` with the token returns the same bot id and a username.
-4. `setWebhook` succeeds for the per-connection URL with a fresh secret.
-5. `getWebhookInfo` reports the same URL and no active error.
-6. The connection row and the store are active.
+1. The `managed_bot` event resolves to exactly one unambiguous pending attempt
+   and its creator user id matches that attempt.
+2. The event can be established as a fresh creation, not an owner/token-change
+   event, using documented fields or the approved spike; if the kind cannot be
+   distinguished, fail closed. The bot id is not already bound to another store.
+3. `getManagedBotToken` succeeds for the bot id.
+4. `getMe` with the token returns the same bot id and a username.
+5. `setWebhook` succeeds for the per-connection URL with a fresh secret.
+6. `getWebhookInfo` reports the same URL and no active error.
+7. The connection row is not revoked, disconnected or in `needs_review`. The
+   store may still be `onboarding`; customer serving separately requires
+   `store.status = 'active'` (customer-ready).
 
-`ready` does **not** prove that a customer message can be delivered. The merchant
-test step can later record `verified_at` when the bot receives its first private
-`/start`, but sharing is allowed at `ready` because all server-controlled
-conditions have passed. This distinction must be shown honestly in the UI:
-`تم ربط البوت` vs `تم اختبار المتجر`.
+`ready` does **not** prove that a customer message can be delivered, and it does
+not activate the store. The merchant test step can later record `verified_at`
+when the bot receives its first private `/start`. Test and share are enabled only
+in the derived customer-ready state (store `active` + connection `ready`). This
+distinction must be shown honestly in the UI: `تم ربط البوت` vs
+`تم تفعيل المتجر` vs `تم اختبار المتجر`.
 
 ### 8.8 Open decisions for Telegram
 
@@ -1038,9 +1265,15 @@ conditions have passed. This distinction must be shown honestly in the UI:
 - Whether a merchant may disconnect and reconnect a bot without operator help in
   the MVP.
 - The precise evidence retained for a connection audit (event id, creator user
-  id, bot id, timestamps; never the token).
-- The fallback policy if the correlation spike fails: operator-assisted
-  provisioning, or no provisioning in the first pilot.
+  id, bot id, bot username, event kind if derivable, timestamps; never the
+  token).
+- The ambiguity window and whether a late event from attempt A can ever be
+  auto-linked when attempt B is pending. The recommended default is no.
+- The fallback policy if the correlation spike fails or an ambiguous event
+  occurs: operator-assisted provisioning, an operator approval queue, or no
+  provisioning in the first pilot.
+- How owner-change and token-change events are surfaced to the merchant without
+  exposing provider internals.
 
 ---
 
@@ -1048,16 +1281,17 @@ conditions have passed. This distinction must be shown honestly in the UI:
 
 | # | Decision | Why it blocks | Recommended default |
 | --- | --- | --- | --- |
-| D1 | Who owns the legacy store after cutover: the first invited merchant, or the operator | Determines membership, invitation and backfill timing | Treat it as an operator-managed legacy store until the first merchant is explicitly invited |
+| D1 | Who owns the legacy store after cutover: the first invited merchant, or the operator | Determines membership, invitation and backfill timing | Keep it operator-managed until C1 and a separate approved cutover; do not auto-invite the merchant |
 | D2 | Is one active membership per merchant enforced in the service only, or also by a partial unique index | Affects schema and future multi-store flexibility | Service-enforced for MVP; no destructive global unique |
 | D3 | Does Super Admin read merchant catalog/inquiry data | Privacy and support expectations | No business-data access in MVP; store lifecycle only |
 | D4 | Product creation default: draft-first or active-on-save | Changes the current "born inactive" behavior | Draft-first unless the reviewer explicitly approves active-on-save |
 | D5 | Arabic-first scope: new onboarding only, or the whole dashboard | Localization effort and consistency | New onboarding and frequent tasks first; advanced screens follow |
-| D6 | Managed Bot correlation acceptance | Blocks provisioning implementation | Require the test-bot spike; otherwise operator-assisted fallback |
+| D6 | Managed Bot correlation acceptance | Blocks provisioning implementation | Require the test-bot spike; auto-link only an exactly-one-unambiguous-attempt case; otherwise operator-assisted fallback or review queue |
 | D7 | Per-store settings and language migration shape | Blocks per-store configuration | Additive `store_language` and per-store settings rows; no destructive rewrite |
 | D8 | Inquiry materialized `store_id` vs pure derivation | Affects read performance and constraint design | Materialize `store_id`, keep derived messages |
 | D9 | Seller notifications in MVP | Not in product scope | Keep code dormant and scoped; enable in a later milestone |
 | D10 | Payment methods visibility | Not in product scope | Hide from merchant navigation; retain code until the checkout decision |
+| D11 | Store activation authority | Determines the lifecycle boundary | Merchant activation after profile + one active product; Super Admin only suspends/reactivates |
 
 ---
 
