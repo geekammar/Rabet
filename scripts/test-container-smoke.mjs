@@ -17,6 +17,7 @@
  *        - `GET /manifest.webmanifest` + all PWA icons + `/favicon.ico` -> 200
  *        - `/sw.js` & `/service-worker.js` -> 404 (ADR-008)
  *        - Signed-out dashboard paths + `/api/admin` redirect to `/login`
+ *        - Operator Basic gate rejects missing/invalid access with a 401
  *        - Login page privacy + missing-CSRF rejection
  *        - Unconfigured webhook `503` fail-closed
  *   3. Reverse-proxy HTTPS + isolated PostgreSQL + dummy Telegram webhook
@@ -26,9 +27,9 @@
  *          redirects cleanly to `https://rabet-proxy.example.test/login` (never
  *          `0.0.0.0:4311`), issues `__Secure-authjs.session-token` (`Secure`),
  *          and renders seeded store data from isolated PostgreSQL on `/overview`
- *        - Invalid & valid login with synthetic Argon2id credentials through the
- *          real durable login limiter, authenticated dashboard cache policy,
- *          admin API, and logout invalidation
+ *        - Unauthorized submissions rejected before SQL; invalid & valid login
+ *          with synthetic Argon2id credentials through the real durable login
+ *          limiter; authenticated dashboard cache policy, admin API, logout
  *        - `POST /api/telegram/webhook` with missing or wrong secret returns
  *          `401 Unauthorized` with 0 SQL queries, 0 DB writes, and 0 outbound
  *          Telegram API calls
@@ -56,6 +57,12 @@ const CLOSED_PORT = 4312;
 
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "container-smoke-argon2-password-99!";
+const TEST_OPERATOR_ACCESS_KEY =
+  "container-smoke-operator-access-key-32-characters";
+const OPERATOR_AUTHORIZATION = `Basic ${Buffer.from(
+  `operator:${TEST_OPERATOR_ACCESS_KEY}`,
+  "utf8",
+).toString("base64")}`;
 const PROXY_ORIGIN = "https://rabet-proxy.example.test";
 
 const CONTAINERS = [
@@ -178,19 +185,32 @@ async function waitForHealthz(port, containerName, timeoutMs = 25_000) {
 }
 
 async function rawRequest(baseUrl, urlPath, init = {}) {
-  const jar = init.jar ?? {};
+  const {
+    jar: initialJar,
+    operatorAccess,
+    authorization,
+    ...requestInit
+  } = init;
+  const jar = initialJar ?? {};
   const cookieHeader = Object.entries(jar)
     .map(([k, v]) => `${k}=${v}`)
     .join("; ");
+  const accessHeader =
+    authorization !== undefined
+      ? authorization
+      : operatorAccess === false
+        ? null
+        : OPERATOR_AUTHORIZATION;
 
   const headers = {
-    ...(init.headers ?? {}),
+    ...(requestInit.headers ?? {}),
+    ...(accessHeader ? { Authorization: accessHeader } : {}),
     ...(cookieHeader ? { Cookie: cookieHeader } : {}),
   };
 
   const res = await fetch(`${baseUrl}${urlPath}`, {
-    method: init.method ?? "GET",
-    body: init.body,
+    method: requestInit.method ?? "GET",
+    body: requestInit.body,
     redirect: "manual",
     headers,
   });
@@ -293,6 +313,7 @@ async function main() {
     "NEXTAUTH_SECRET=",
     "ADMIN_EMAIL=",
     "ADMIN_PASSWORD_HASH=",
+    "RABET_OPERATOR_ACCESS_KEY=",
     "DATABASE_URL=",
     "TELEGRAM_BOT_TOKEN=",
     "TELEGRAM_WEBHOOK_SECRET=",
@@ -415,6 +436,8 @@ async function main() {
     "-e",
     `ADMIN_PASSWORD_HASH=${passwordHash}`,
     "-e",
+    `RABET_OPERATOR_ACCESS_KEY=${TEST_OPERATOR_ACCESS_KEY}`,
+    "-e",
     `AUTH_URL=${pureBase}`,
     IMAGE,
   ]);
@@ -488,6 +511,38 @@ async function main() {
     assert.equal(res.body.includes("Quick actions"), false);
     assert.equal(res.body.includes("Store-wide configuration"), false);
   }
+
+  // Operator access gate: missing and invalid access are rejected before any
+  // Auth.js or login-budget work, with a standard Basic challenge.
+  const missingAccessLogin = await rawRequest(pureBase, "/login", {
+    operatorAccess: false,
+  });
+  assert.equal(missingAccessLogin.status, 401);
+  assert.match(missingAccessLogin.headers.get("www-authenticate") ?? "", /^Basic /);
+
+  const invalidAuthorization = `Basic ${Buffer.from(
+    "operator:definitely-wrong-operator-key",
+    "utf8",
+  ).toString("base64")}`;
+  const invalidAccessCallback = await rawRequest(
+    pureBase,
+    "/api/auth/callback/credentials",
+    {
+      authorization: invalidAuthorization,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+      }).toString(),
+    },
+  );
+  assert.equal(invalidAccessCallback.status, 401);
+  assert.match(invalidAccessCallback.headers.get("www-authenticate") ?? "", /^Basic /);
+  assert.equal(
+    Object.keys(invalidAccessCallback.jar).some((k) => k.includes("session-token")),
+    false,
+  );
 
   // Login page cache policy & privacy
   const loginPageRes = await rawRequest(pureBase, "/login");
@@ -676,6 +731,8 @@ async function main() {
     "-e",
     `ADMIN_PASSWORD_HASH=${passwordHash}`,
     "-e",
+    `RABET_OPERATOR_ACCESS_KEY=${TEST_OPERATOR_ACCESS_KEY}`,
+    "-e",
     `AUTH_URL=${PROXY_ORIGIN}`,
     "-e",
     `APP_URL=${PROXY_ORIGIN}`,
@@ -719,6 +776,65 @@ async function main() {
     unauthProxyOverview.location,
     `${PROXY_ORIGIN}/login`,
     `Reverse-proxy unauthenticated redirect must target ${PROXY_ORIGIN}/login, got ${unauthProxyOverview.location}`,
+  );
+
+  // Unauthorized submissions must be rejected by the proxy before the real
+  // limiter executes a single SQL query.
+  const sqlBeforeUnauthorizedAuth = sqlQueryCount;
+  {
+    const missing = await rawRequest(
+      proxyLocalBase,
+      "/api/auth/callback/credentials",
+      {
+        operatorAccess: false,
+        method: "POST",
+        headers: {
+          ...proxyHeaders,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          email: TEST_EMAIL,
+          password: TEST_PASSWORD,
+        }).toString(),
+      },
+    );
+    assert.equal(missing.status, 401);
+    assert.match(missing.headers.get("www-authenticate") ?? "", /^Basic /);
+
+    const invalid = await rawRequest(
+      proxyLocalBase,
+      "/api/auth/callback/credentials",
+      {
+        authorization: invalidAuthorization,
+        method: "POST",
+        headers: {
+          ...proxyHeaders,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          email: TEST_EMAIL,
+          password: TEST_PASSWORD,
+        }).toString(),
+      },
+    );
+    assert.equal(invalid.status, 401);
+    assert.match(invalid.headers.get("www-authenticate") ?? "", /^Basic /);
+
+    const loginPost = await rawRequest(proxyLocalBase, "/login", {
+      operatorAccess: false,
+      method: "POST",
+      headers: {
+        ...proxyHeaders,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: "email=admin%40example.test&password=irrelevant",
+    });
+    assert.equal(loginPost.status, 401);
+  }
+  assert.equal(
+    sqlQueryCount,
+    sqlBeforeUnauthorizedAuth,
+    "Rejected operator-access requests must not execute any SQL",
   );
 
   // Invalid credentials exercise Argon2id + the real durable login limiter on
@@ -984,6 +1100,8 @@ async function main() {
     `AUTH_SECRET=${authSecret}`,
     "-e",
     `AUTH_URL=${closedBase}`,
+    "-e",
+    `RABET_OPERATOR_ACCESS_KEY=${TEST_OPERATOR_ACCESS_KEY}`,
     IMAGE,
   ]);
 

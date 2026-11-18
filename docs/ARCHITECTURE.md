@@ -491,8 +491,14 @@ can be revisited alongside session revocation (ADR-009).
 > or table is unavailable the attempt is denied before password verification.
 > The original "no application limiter" decision above remains the historical
 > Phase 02 record; this revision supersedes it for the Render deployment.
-> Edge-level protections (Cloudflare Access/WAF) remain defence in depth, not a
-> prerequisite for this gap.
+> An independent operator access gate protects that budget: `/login` and the
+> Auth.js credentials callback require HTTP Basic access with the fixed
+> username `operator` and a high-entropy `RABET_OPERATOR_ACCESS_KEY` held only in
+> the runtime environment. Missing, invalid or unconfigured access returns the
+> same 401 before Auth.js, the limiter or Argon2 runs; public pages,
+> `/api/healthz` and the Telegram webhook stay outside the gate. Edge-level
+> protections (Cloudflare Access/WAF) remain defence in depth, not a prerequisite
+> for this gap.
 
 ### ADR-012 — Phase 03A data model is designed, not implemented
 
@@ -757,13 +763,16 @@ production. Bot message templates remain clean for Phase 04-B.
   valid for up to its natural 7-day lifetime. Rotating `AUTH_SECRET` invalidates
   all outstanding sessions at once. This is a documented limitation, not a claim
   of revocation.
-- **Durable admin-login throttling** (ADR-011 revision). One PostgreSQL row
-  enforces a fixed five-attempt / fifteen-minute window atomically before Argon2
-  for the single administrator, shared by the login Server Action and the Auth.js
-  credentials callback. A verified login clears the budget; an unavailable
-  limiter denies the attempt. An in-process counter is still deliberately *not*
-  used, because it would not be shared across instances. See
-  [RENDER_DEPLOYMENT.md](./RENDER_DEPLOYMENT.md) §4 for the rollout order.
+- **Operator access + durable admin-login throttling** (ADR-011 revision).
+  `/login` and the Auth.js credentials callback require the independent HTTP
+  Basic operator key before any credential work; missing or invalid access gets
+  the same 401 and performs no throttle write or Argon2 verification. Authorized
+  attempts then share one PostgreSQL row enforcing a fixed five-attempt /
+  fifteen-minute window atomically before Argon2. A verified login clears the
+  budget; an unavailable limiter denies the attempt. An in-process counter is
+  still deliberately *not* used, because it would not be shared across
+  instances. See [RENDER_DEPLOYMENT.md](./RENDER_DEPLOYMENT.md) §4 for the
+  rollout order.
 - **Open-redirect protection.** Post-login destinations are validated against an
   internal allowlist; unvalidated values fall back to `/overview`.
 - Secrets are never committed; `.env*` is git-ignored and `.env.example` holds

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Unit tests for the login / logout Server Actions.
@@ -14,6 +14,17 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  * arguments the action hands to Auth.js instead of performing a real sign-in.
  * No real secret, password or hash is used or printed here.
  */
+
+const requestState = vi.hoisted(() => ({ authorization: "" }));
+
+vi.mock("next/headers", () => ({
+  headers: async () =>
+    new Headers(
+      requestState.authorization
+        ? { Authorization: requestState.authorization }
+        : {},
+    ),
+}));
 
 vi.mock("@/auth", () => ({
   signIn: vi.fn(),
@@ -49,6 +60,22 @@ const VALID = {
   email: "admin@example.test",
   password: "test-password-12345678",
 };
+
+const TEST_OPERATOR_ACCESS_KEY =
+  "action-test-operator-access-key-32-characters";
+const OPERATOR_AUTHORIZATION = `Basic ${Buffer.from(
+  `operator:${TEST_OPERATOR_ACCESS_KEY}`,
+  "utf8",
+).toString("base64")}`;
+
+beforeEach(() => {
+  vi.stubEnv("RABET_OPERATOR_ACCESS_KEY", TEST_OPERATOR_ACCESS_KEY);
+  requestState.authorization = OPERATOR_AUTHORIZATION;
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("login action — redirect allowlist", () => {
   beforeEach(() => {
@@ -122,6 +149,21 @@ describe("login action — input validation", () => {
     const state = await login(undefined, formData({ ...VALID, callbackUrl: "/overview" }));
 
     expect(state.message).toBe("Incorrect email or password.");
+  });
+
+  it("rejects missing or invalid operator access before calling Auth.js", async () => {
+    requestState.authorization = "";
+    const missing = await login(undefined, formData(VALID));
+    expect(missing.message).toBe("Incorrect email or password.");
+    expect(signIn).not.toHaveBeenCalled();
+
+    requestState.authorization = `Basic ${Buffer.from(
+      `operator:wrong-${TEST_OPERATOR_ACCESS_KEY}`,
+      "utf8",
+    ).toString("base64")}`;
+    const invalid = await login(undefined, formData(VALID));
+    expect(invalid.message).toBe("Incorrect email or password.");
+    expect(signIn).not.toHaveBeenCalled();
   });
 
   it("re-throws unexpected errors instead of rendering a success-looking page", async () => {

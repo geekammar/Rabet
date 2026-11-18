@@ -43,6 +43,7 @@ import {
 // unconfigured `npm run test` behaves exactly as before.
 const PORT = process.env.RABET_TEST_PORT ?? "3210";
 const CLOSED_PORT = process.env.RABET_TEST_PORT_2 ?? "3211";
+const NO_ACCESS_PORT = process.env.RABET_TEST_PORT_3 ?? "3212";
 const BASE = `http://localhost:${PORT}`;
 
 const shouldRun = hasTestCluster();
@@ -52,6 +53,12 @@ let neonBridge: NeonHttpBridge | null = null;
 
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "integration-test-password-99";
+const TEST_OPERATOR_ACCESS_KEY =
+  "integration-test-operator-access-key-32-characters";
+const OPERATOR_AUTHORIZATION = `Basic ${Buffer.from(
+  `operator:${TEST_OPERATOR_ACCESS_KEY}`,
+  "utf8",
+).toString("base64")}`;
 
 type CookieJar = Record<string, string>;
 
@@ -193,6 +200,7 @@ function track(child: ChildProcess): ChildProcess {
  * file, and never printed.
  */
 let testAuthSecret = "";
+let testPasswordHash = "";
 
 async function buildOnce(): Promise<void> {
   // Reuse the already-built .next output when present (the CI matrix builds
@@ -251,6 +259,7 @@ beforeAll(async () => {
     timeCost: 2,
     parallelism: 1,
   });
+  testPasswordHash = passwordHash;
 
   // Write a throwaway env file. The values exist only for this process tree
   // and are never committed or logged.
@@ -273,6 +282,7 @@ beforeAll(async () => {
       `ADMIN_PASSWORD_HASH='${passwordHash}'`,
       `AUTH_URL=${BASE}`,
       `AUTH_TRUST_HOST=true`,
+      `RABET_OPERATOR_ACCESS_KEY=${TEST_OPERATOR_ACCESS_KEY}`,
       `DATABASE_URL=${neonBridge.url}`,
       `NODE_OPTIONS='--import ${neonBridge.preloadPath}'`,
     ].join("\n") + "\n",
@@ -328,6 +338,7 @@ afterAll(async () => {
   }
   freePort(Number(PORT));
   freePort(Number(CLOSED_PORT));
+  freePort(Number(NO_ACCESS_PORT));
 
   // Remove the throwaway env directory so no test-only hash or secret is left
   // behind in the OS temp dir. `force` makes this a no-op when the directory
@@ -352,21 +363,40 @@ beforeEach(async () => {
   await authDb.db.execute(sql`DELETE FROM admin_login_throttle`);
 });
 
+type RawOptions = RequestInit & {
+  jar?: CookieJar;
+  operatorAccess?: boolean;
+  authorization?: string | null;
+};
+
 /** Fetch with redirect-following disabled so redirects can be inspected. */
 async function raw(
   url: string,
-  init: RequestInit & { jar?: CookieJar } = {},
+  init: RawOptions = {},
 ): Promise<{ status: number; location: string | null; body: string; headers: Headers; jar: CookieJar }> {
-  const jar = init.jar ?? {};
+  const {
+    jar: initialJar,
+    operatorAccess,
+    authorization,
+    ...requestInit
+  } = init;
+  const jar = initialJar ?? {};
   const cookieHeader = Object.entries(jar)
     .map(([name, value]) => `${name}=${value}`)
     .join("; ");
+  const accessHeader =
+    authorization !== undefined
+      ? authorization
+      : operatorAccess === false
+        ? null
+        : OPERATOR_AUTHORIZATION;
 
   const response = await fetch(BASE + url, {
-    ...init,
+    ...requestInit,
     redirect: "manual",
     headers: {
-      ...(init.headers ?? {}),
+      ...(requestInit.headers ?? {}),
+      ...(accessHeader ? { Authorization: accessHeader } : {}),
       ...(cookieHeader ? { Cookie: cookieHeader } : {}),
     },
   });
@@ -489,8 +519,200 @@ describe.skipIf(!shouldRun)("unauthenticated access is blocked", () => {
   });
 });
 
+describe.skipIf(!shouldRun)("operator access gate", () => {
+  const invalidAuthorization = `Basic ${Buffer.from(
+    `operator:wrong-${TEST_OPERATOR_ACCESS_KEY}`,
+    "utf8",
+  ).toString("base64")}`;
+
+  it("rejects missing access on both credential paths without consuming budget", async () => {
+    const loginPage = await raw("/login", { operatorAccess: false });
+    expect(loginPage.status).toBe(401);
+    expect(loginPage.headers.get("www-authenticate")).toMatch(/^Basic /);
+    expect(await throttleRowCount()).toBe(0);
+
+    const loginPost = await raw("/login", {
+      operatorAccess: false,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+      }).toString(),
+    });
+    expect(loginPost.status).toBe(401);
+    expect(loginPost.headers.get("www-authenticate")).toMatch(/^Basic /);
+
+    const callback = await raw("/api/auth/callback/credentials", {
+      operatorAccess: false,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+      }).toString(),
+    });
+    expect(callback.status).toBe(401);
+    expect(callback.headers.get("www-authenticate")).toMatch(/^Basic /);
+    expect(
+      Object.keys(callback.jar).some((name) => name.includes("session-token")),
+    ).toBe(false);
+    expect(await throttleRowCount()).toBe(0);
+  });
+
+  it("rejects invalid access on both credential paths without consuming budget", async () => {
+    for (const path of ["/login", "/api/auth/callback/credentials"]) {
+      const res = await raw(path, {
+        authorization: invalidAuthorization,
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          email: TEST_EMAIL,
+          password: TEST_PASSWORD,
+        }).toString(),
+      });
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get("www-authenticate")).toMatch(/^Basic /);
+      expect(
+        Object.keys(res.jar).some((name) => name.includes("session-token")),
+      ).toBe(false);
+    }
+
+    expect(await throttleRowCount()).toBe(0);
+  });
+
+  it("does not let repeated unauthorized submissions block valid owner sign-in", async () => {
+    for (let i = 0; i < 20; i += 1) {
+      const path =
+        i % 2 === 0 ? "/login" : "/api/auth/callback/credentials";
+      const res = await raw(path, {
+        operatorAccess: false,
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          email: TEST_EMAIL,
+          password: TEST_PASSWORD,
+        }).toString(),
+      });
+      expect(res.status).toBe(401);
+    }
+
+    expect(await throttleRowCount()).toBe(0);
+
+    const owner = await signIn({});
+    expect([301, 302, 303]).toContain(owner.status);
+    expect(owner.location).toContain("/overview");
+    expect(
+      Object.keys(owner.jar).some((name) => name.includes("session-token")),
+    ).toBe(true);
+    expect((await throttleRow())?.attempt_count).toBe(0);
+  });
+
+  it("fails closed when the operator access key is not configured", async () => {
+    const base = `http://localhost:${NO_ACCESS_PORT}`;
+    const envFile = path.join(envDirRef.dir, "no-operator-access.env");
+
+    writeFileSync(
+      envFile,
+      [
+        `AUTH_SECRET=${Buffer.from(
+          globalThis.crypto.getRandomValues(new Uint8Array(32)),
+        ).toString("base64")}`,
+        `ADMIN_EMAIL=${TEST_EMAIL}`,
+        `ADMIN_PASSWORD_HASH='${testPasswordHash}'`,
+        `AUTH_URL=${base}`,
+        `AUTH_TRUST_HOST=true`,
+      ].join("\n") + "\n",
+    );
+
+    await freePort(Number(NO_ACCESS_PORT));
+
+    const proc = track(
+      spawn(
+        "bash",
+        [
+          "-c",
+          `unset RABET_OPERATOR_ACCESS_KEY; set -a; . ${envFile}; set +a; exec npx next start -p ${NO_ACCESS_PORT}`,
+        ],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          cwd: process.cwd(),
+          detached: true,
+        },
+      ),
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("no-access server did not start")),
+        60_000,
+      );
+      const onData = (data: Buffer) => {
+        if (data.toString().includes("Ready")) {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+      proc.stdout?.on("data", onData);
+      proc.stderr?.on("data", onData);
+      proc.stdout?.on("error", () => {});
+      proc.stderr?.on("error", () => {});
+      proc.on("error", () => {});
+    });
+
+    try {
+      const login = await fetch(`${base}/login`, { redirect: "manual" });
+      expect(login.status).toBe(401);
+      expect(login.headers.get("www-authenticate")).toMatch(/^Basic /);
+
+      const callback = await fetch(`${base}/api/auth/callback/credentials`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: OPERATOR_AUTHORIZATION,
+        },
+        body: new URLSearchParams({
+          email: TEST_EMAIL,
+          password: TEST_PASSWORD,
+        }).toString(),
+      });
+      expect(callback.status).toBe(401);
+      expect(callback.headers.get("www-authenticate")).toMatch(/^Basic /);
+      expect(
+        callback.headers
+          .getSetCookie()
+          .some((cookie) => cookie.includes("session-token")),
+      ).toBe(false);
+      expect(await throttleRowCount()).toBe(0);
+    } finally {
+      await killTree(proc);
+    }
+  }, 90_000);
+
+  it("keeps public pages, healthz and Telegram outside the gate", async () => {
+    const home = await raw("/", { operatorAccess: false });
+    expect(home.status).toBe(200);
+    expect(home.headers.get("www-authenticate")).toBeNull();
+
+    const health = await raw("/api/healthz", { operatorAccess: false });
+    expect(health.status).toBe(200);
+    expect(health.headers.get("www-authenticate")).toBeNull();
+
+    const webhook = await raw("/api/telegram/webhook", {
+      operatorAccess: false,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ update_id: 1 }),
+    });
+    expect(webhook.status).toBe(503);
+    expect(webhook.headers.get("www-authenticate")).toBeNull();
+  });
+});
+
 describe.skipIf(!shouldRun)("login", () => {
-  it("serves the sign-in page publicly", async () => {
+  it("serves the sign-in page to an operator with access", async () => {
     const res = await raw("/login");
     expect(res.status).toBe(200);
     expect(res.body).toContain('id="email"');
@@ -801,6 +1023,7 @@ describe.skipIf(!shouldRun)("missing admin configuration fails closed", () => {
         ).toString("base64")}`,
         `AUTH_URL=${base}`,
         `AUTH_TRUST_HOST=true`,
+        `RABET_OPERATOR_ACCESS_KEY=${TEST_OPERATOR_ACCESS_KEY}`,
       ].join("\n") + "\n",
     );
 
@@ -860,6 +1083,7 @@ describe.skipIf(!shouldRun)("missing admin configuration fails closed", () => {
         redirect: "manual",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: OPERATOR_AUTHORIZATION,
           Cookie: Object.entries(jar)
             .map(([name, value]) => `${name}=${value}`)
             .join("; "),

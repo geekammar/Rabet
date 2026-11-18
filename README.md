@@ -150,10 +150,16 @@ npx auth secret
 #    never written anywhere)
 node scripts/generate-admin-hash.mjs
 
-# 3. In .env.local, set ADMIN_EMAIL and paste the hash into ADMIN_PASSWORD_HASH
+# 3. Generate the independent operator access key used by the login gate
+openssl rand -base64 32
+
+# 4. In .env.local, set ADMIN_EMAIL, paste the hash into ADMIN_PASSWORD_HASH,
+#    and set RABET_OPERATOR_ACCESS_KEY to the generated key
 ```
 
-Then `npm run dev` and sign in at `/login`.
+Then `npm run dev`. Visiting `/login` prompts for HTTP Basic access with the
+fixed username `operator` and that key before the admin sign-in form appears; the
+admin email/password form follows.
 
 ## Scripts
 
@@ -394,11 +400,12 @@ operator runbook is in
 
 ## Environment variables
 
-`AUTH_SECRET`, `ADMIN_EMAIL` and `ADMIN_PASSWORD_HASH` are **required** in every
+`AUTH_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH` and
+`RABET_OPERATOR_ACCESS_KEY` are **required** for admin sign-in in every
 environment (local, preview and production). `DATABASE_URL` is required only by
-the database layer and the migration scripts — the app **builds and serves every
-current route without it**, and `getDb()` fails loudly with a credential-free
-message on first use when it is absent. `.env.example` documents every variable
+the database layer, the login limiter and the migration scripts — the app
+**builds and serves public routes without it**, and `getDb()` fails loudly with
+a credential-free message on first use when it is absent. `.env.example` documents every variable
 with placeholders and is the single source of truth; copy it to `.env.local` and
 fill in real values.
 
@@ -529,6 +536,10 @@ What Phase 02 provides, and what it deliberately does not.
   stored, logged or compared in the clear.
 - Fail-closed configuration — a missing or invalid `ADMIN_PASSWORD_HASH` disables
   sign-in entirely. No default account, no bypass.
+- Independent operator access gate — `/login` and the Auth.js credentials
+  callback require HTTP Basic access (`operator` + `RABET_OPERATOR_ACCESS_KEY`)
+  before the login budget is touched. Missing, invalid or unconfigured access is
+  rejected with the same 401 before any database write or Argon2 verification.
 - Layered authorization: an optimistic `proxy.ts` redirect plus an authoritative
   `requireAdmin()` used by every protected layout, Server Action and Route Handler.
 - Encrypted, `HttpOnly`, `Secure`, `SameSite=lax` session cookie with a 7-day
@@ -543,12 +554,12 @@ What Phase 02 provides, and what it deliberately does not.
   expire.** Logout clears the browser cookie; a cookie that has already left the
   device remains valid up to 7 days. Rotating `AUTH_SECRET` invalidates all
   outstanding sessions at once. See ADR-009.
-- **There is no application rate limiter.** The memory-hard cost of Argon2id is
-  the only per-attempt brake, and an in-process counter is *not* reliable across
-  Vercel serverless instances, so none is shipped or claimed. Before
-  internet-facing access, enable a durable, externally enforced limit — a Vercel
-  Firewall rate-limit rule on the sign-in endpoints (no code required) or Upstash
-  Ratelimit. Until then, keep Vercel Deployment Protection on. See ADR-011.
+- **Admin login throttling is durable but intentionally simple.** One PostgreSQL
+  row enforces five attempts per 15-minute fixed window for the single admin,
+  shared by the Server Action and the Auth.js credentials callback and consumed
+  atomically before Argon2. The independent operator access gate prevents
+  anonymous traffic from spending that budget. An in-process counter is still
+  *not* used. Edge protections remain defence in depth. See ADR-011.
 
 **Dependency advisories.** `npm audit` reports 9 high-severity advisories. Every
 one traces to a single root package (`braces`, a stack-exhaustion DoS) reached
