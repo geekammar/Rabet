@@ -53,9 +53,16 @@ const FAILED_DEPLOY_STATUSES = new Set([
   "pre_deploy_failed",
 ]);
 
+// Paths that define the production Drizzle migration inputs. Automatic
+// promotion is refused when these differ from the currently live revision.
+export const MIGRATION_INPUT_PATHS = Object.freeze([
+  "drizzle",
+  "drizzle.config.ts",
+]);
+
 export class RenderDeployError extends Error {
   /**
-   * @param {"INVALID_INPUT" | "STALE_MAIN" | "MAIN_LOOKUP_FAILED" | "SERVICE_MISMATCH" | "IMAGE_MISMATCH" | "RENDER_API_ERROR" | "DEPLOY_FAILED" | "DEPLOY_TIMEOUT" | "HEALTH_MISMATCH"} code
+   * @param {"INVALID_INPUT" | "STALE_MAIN" | "MAIN_LOOKUP_FAILED" | "SERVICE_MISMATCH" | "IMAGE_MISMATCH" | "RENDER_API_ERROR" | "DEPLOY_FAILED" | "DEPLOY_TIMEOUT" | "HEALTH_MISMATCH" | "LIVE_REVISION_UNKNOWN" | "MIGRATION_CHANGED" | "MIGRATION_COMPARISON_FAILED"} code
    * @param {string} message
    */
   constructor(code, message) {
@@ -240,9 +247,20 @@ export function verifyDeployImage({
   deploy,
   expectedDigest,
   expectedImageRef,
+  expectedConfigDigest,
 }) {
-  const expected = normalizeDigest(expectedDigest, "expectedDigest");
+  const expectedManifestDigest = normalizeDigest(expectedDigest, "expectedDigest");
   const expectedRef = String(expectedImageRef ?? "").trim().toLowerCase();
+  if (!expectedRef) {
+    throw new RenderDeployError(
+      "INVALID_INPUT",
+      "expectedImageRef is required to verify the pinned Render image reference.",
+    );
+  }
+  const expectedConfig = expectedConfigDigest
+    ? normalizeDigest(expectedConfigDigest, "expectedConfigDigest")
+    : null;
+
   if (!deploy || typeof deploy !== "object") {
     throw new RenderDeployError(
       "DEPLOY_FAILED",
@@ -258,37 +276,72 @@ export function verifyDeployImage({
     );
   }
 
-  let actualDigest;
-  try {
-    actualDigest = normalizeDigest(image.sha ?? image.ref, "deploy image digest");
-  } catch (err) {
+  // Render's image.ref is the reference used for the deploy. Because this
+  // workflow always deploys an immutable @sha256:<manifest digest> reference,
+  // this must carry the exact expected pinned reference. Render's image.sha is
+  // allowed to be the pulled image ID (config digest), which is NOT the same
+  // digest as the registry manifest; do not prioritise it over image.ref.
+  const actualRef = String(image.ref ?? "").trim().toLowerCase();
+  if (!actualRef) {
     throw new RenderDeployError(
       "IMAGE_MISMATCH",
-      `Render deploy ${deploy.id ?? "<unknown>"} did not report a usable image digest: ${err instanceof Error ? err.message : String(err)}`,
+      `Render deploy ${deploy.id ?? "<unknown>"} did not report a pinned image reference (image.ref).`,
     );
   }
-  if (actualDigest !== expected) {
+  if (actualRef !== expectedRef) {
     throw new RenderDeployError(
       "IMAGE_MISMATCH",
-      `Render deploy ${deploy.id ?? "<unknown>"} resolved to ${actualDigest}, expected ${expected}.`,
+      `Render deploy ${deploy.id ?? "<unknown>"} used image reference "${image.ref}", expected "${expectedImageRef}".`,
     );
   }
 
-  if (expectedRef) {
-    const actualRef = String(image.ref ?? "").trim().toLowerCase();
-    if (actualRef && actualRef !== expectedRef) {
+  let referenceDigest;
+  try {
+    referenceDigest = normalizeDigest(actualRef, "deploy image.ref");
+  } catch (err) {
+    throw new RenderDeployError(
+      "IMAGE_MISMATCH",
+      `Render deploy ${deploy.id ?? "<unknown>"} image.ref is not a pinned sha256 reference: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (referenceDigest !== expectedManifestDigest) {
+    throw new RenderDeployError(
+      "IMAGE_MISMATCH",
+      `Render deploy ${deploy.id ?? "<unknown>"} pinned reference digest ${referenceDigest}, expected manifest digest ${expectedManifestDigest}.`,
+    );
+  }
+
+  const rawImageSha = String(image.sha ?? "").trim().toLowerCase();
+  let imageSha = null;
+  if (rawImageSha) {
+    try {
+      imageSha = normalizeDigest(rawImageSha, "deploy image.sha");
+    } catch (err) {
       throw new RenderDeployError(
         "IMAGE_MISMATCH",
-        `Render deploy ${deploy.id ?? "<unknown>"} used image reference "${image.ref}", expected "${expectedImageRef}".`,
+        `Render deploy ${deploy.id ?? "<unknown>"} image.sha is not a sha256 digest: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (
+      expectedConfig &&
+      imageSha !== expectedConfig &&
+      imageSha !== expectedManifestDigest
+    ) {
+      throw new RenderDeployError(
+        "IMAGE_MISMATCH",
+        `Render deploy ${deploy.id ?? "<unknown>"} image.sha ${imageSha} does not match the GHCR config digest ${expectedConfig} (or manifest digest ${expectedManifestDigest}).`,
       );
     }
   }
 
-  return actualDigest;
+  return {
+    pinnedRef: actualRef,
+    manifestDigest: expectedManifestDigest,
+    imageSha,
+  };
 }
 
-export function verifyHealthPayload({ httpStatus, payload, expectedSha }) {
-  const sha = normalizeSha(expectedSha, "expectedSha");
+export function readHealthRevision({ httpStatus, payload }) {
   if (httpStatus !== 200) {
     throw new RenderDeployError(
       "HEALTH_MISMATCH",
@@ -314,6 +367,12 @@ export function verifyHealthPayload({ httpStatus, payload, expectedSha }) {
       `GET /api/healthz did not return a full 40-character sha (got "${payload.sha ?? ""}").`,
     );
   }
+  return reportedSha;
+}
+
+export function verifyHealthPayload({ httpStatus, payload, expectedSha }) {
+  const sha = normalizeSha(expectedSha, "expectedSha");
+  const reportedSha = readHealthRevision({ httpStatus, payload });
   if (reportedSha !== sha) {
     throw new RenderDeployError(
       "HEALTH_MISMATCH",
@@ -321,6 +380,53 @@ export function verifyHealthPayload({ httpStatus, payload, expectedSha }) {
     );
   }
   return { status: "ok", sha: reportedSha };
+}
+
+export function assertNoMigrationChanges({
+  liveSha,
+  expectedSha,
+  changedPaths,
+}) {
+  const live = normalizeSha(liveSha, "liveSha");
+  const expected = normalizeSha(expectedSha, "expectedSha");
+  if (live === expected) {
+    return {
+      liveSha: live,
+      expectedSha: expected,
+      changedPaths: [],
+      migrationChanges: [],
+    };
+  }
+  if (!Array.isArray(changedPaths)) {
+    throw new RenderDeployError(
+      "MIGRATION_COMPARISON_FAILED",
+      `Cannot compare migration inputs between live revision ${live} and ${expected}: changed paths were not established.`,
+    );
+  }
+
+  const paths = changedPaths
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+  const migrationChanges = paths.filter(
+    (file) =>
+      file === "drizzle" ||
+      file === "drizzle.config.ts" ||
+      file.startsWith("drizzle/"),
+  );
+
+  if (migrationChanges.length > 0) {
+    throw new RenderDeployError(
+      "MIGRATION_CHANGED",
+      `Automatic promotion is blocked: migration inputs differ between live revision ${live} and ${expected} (${migrationChanges.join(", ")}). Use the owner-approved manual migration and release path.`,
+    );
+  }
+
+  return {
+    liveSha: live,
+    expectedSha: expected,
+    changedPaths: paths,
+    migrationChanges: [],
+  };
 }
 
 function defaultSleep(ms) {
@@ -385,6 +491,7 @@ async function waitForDeploy({
   deployId,
   expectedDigest,
   expectedImageRef,
+  expectedConfigDigest,
   timeoutMs,
   pollIntervalMs,
   sleepImpl,
@@ -400,8 +507,13 @@ async function waitForDeploy({
     if (typeof onStatus === "function") onStatus(lastStatus);
 
     if (lastStatus === "live") {
-      verifyDeployImage({ deploy, expectedDigest, expectedImageRef });
-      return deploy;
+      const verifiedImage = verifyDeployImage({
+        deploy,
+        expectedDigest,
+        expectedImageRef,
+        expectedConfigDigest,
+      });
+      return { deploy, verifiedImage };
     }
 
     if (classifyDeployStatus(lastStatus) === "failed") {
@@ -502,6 +614,92 @@ async function waitForHealth({
   }
 }
 
+async function waitForLiveRevision({
+  fetchImpl,
+  healthUrl,
+  timeoutMs,
+  pollIntervalMs,
+  sleepImpl,
+  nowImpl,
+}) {
+  const deadline = nowImpl() + timeoutMs;
+  let lastError = "no health response received";
+
+  while (true) {
+    try {
+      const res = await fetchImpl(healthUrl, {
+        method: "GET",
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+        signal: AbortSignal.timeout(15_000),
+      });
+      const text = await res.text();
+      let payload = null;
+      if (text.trim()) {
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = null;
+        }
+      }
+      return readHealthRevision({ httpStatus: res.status, payload });
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+
+    if (nowImpl() >= deadline) {
+      throw new RenderDeployError(
+        "LIVE_REVISION_UNKNOWN",
+        `Cannot establish the currently live revision from /api/healthz: ${lastError}`,
+      );
+    }
+    await sleepImpl(pollIntervalMs);
+  }
+}
+
+function readChangedMigrationPaths({ liveSha, expectedSha }) {
+  const live = normalizeSha(liveSha, "liveSha");
+  const expected = normalizeSha(expectedSha, "expectedSha");
+  if (live === expected) return [];
+
+  try {
+    execFileSync(
+      "git",
+      ["fetch", "--no-tags", "--depth=1", "origin", live],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (err) {
+    throw new RenderDeployError(
+      "MIGRATION_COMPARISON_FAILED",
+      `Unable to fetch live revision ${live} for migration comparison: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  try {
+    const output = execFileSync(
+      "git",
+      [
+        "diff",
+        "--name-only",
+        live,
+        expected,
+        "--",
+        ...MIGRATION_INPUT_PATHS,
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch (err) {
+    throw new RenderDeployError(
+      "MIGRATION_COMPARISON_FAILED",
+      `Unable to compare migration inputs between ${live} and ${expected}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 /**
  * Promotes one verified GHCR digest to Render and verifies the live SHA.
  *
@@ -512,8 +710,12 @@ async function waitForHealth({
  *   expectedSha: string,
  *   imageRepo: string,
  *   imageDigestRef: string,
+ *   imageConfigDigest?: string,
  *   healthUrl: string,
+ *   promotionMode?: "automatic" | "manual",
  *   getCurrentMainSha: () => Promise<string> | string,
+ *   getLiveRevision?: () => Promise<string> | string,
+ *   getChangedPaths?: (params: { liveSha: string, expectedSha: string }) => Promise<string[]> | string[],
  *   fetchImpl?: typeof fetch,
  *   sleepImpl?: (ms: number) => Promise<void>,
  *   nowImpl?: () => number,
@@ -530,8 +732,12 @@ export async function runRenderDeployment({
   expectedSha,
   imageRepo,
   imageDigestRef,
+  imageConfigDigest,
   healthUrl,
+  promotionMode = "manual",
   getCurrentMainSha,
+  getLiveRevision,
+  getChangedPaths,
   fetchImpl = globalThis.fetch,
   sleepImpl = defaultSleep,
   nowImpl = () => Date.now(),
@@ -541,6 +747,13 @@ export async function runRenderDeployment({
   logger = console,
 }) {
   const sha = normalizeSha(expectedSha, "expectedSha");
+  const mode = String(promotionMode ?? "").trim().toLowerCase();
+  if (mode !== "automatic" && mode !== "manual") {
+    throw new RenderDeployError(
+      "INVALID_INPUT",
+      `promotionMode must be "automatic" or "manual" (got "${promotionMode}").`,
+    );
+  }
   const normalizedServiceId = String(serviceId ?? "").trim();
   if (!SERVICE_ID_RE.test(normalizedServiceId)) {
     throw new RenderDeployError(
@@ -585,7 +798,29 @@ export async function runRenderDeployment({
 
   const canonicalRepo = normalizeImageRepo(imageRepo, "imageRepo");
   const digest = normalizeDigest(imageDigestRef, "imageDigestRef");
+  const configDigest = imageConfigDigest
+    ? normalizeDigest(imageConfigDigest, "imageConfigDigest")
+    : null;
   const imageRef = `ghcr.io/${canonicalRepo}@${digest}`;
+
+  if (mode === "automatic" && !configDigest) {
+    throw new RenderDeployError(
+      "INVALID_INPUT",
+      "IMAGE_CONFIG_DIGEST is required for automatic promotion so Render's resolved image.sha can be cross-checked.",
+    );
+  }
+  if (mode === "automatic" && typeof getLiveRevision !== "function") {
+    throw new RenderDeployError(
+      "INVALID_INPUT",
+      "getLiveRevision callback is required for automatic promotion.",
+    );
+  }
+  if (mode === "automatic" && typeof getChangedPaths !== "function") {
+    throw new RenderDeployError(
+      "INVALID_INPUT",
+      "getChangedPaths callback is required for automatic promotion.",
+    );
+  }
 
   if (String(imageDigestRef).includes("@")) {
     const providedRepository = parseImageRepository(imageDigestRef);
@@ -599,17 +834,22 @@ export async function runRenderDeployment({
 
   const summary = {
     expectedSha: sha,
+    promotionMode: mode,
     imageRepo: canonicalRepo,
     imageRef,
     digest,
+    configDigest,
     serviceId: normalizedServiceId,
     healthUrl: parsedHealthUrl.toString(),
+    liveShaBefore: null,
+    migrationCheck: null,
     previousImagePath: null,
     appliedImagePath: null,
     savedImageUpdated: false,
     deployId: null,
     deployStatus: null,
     deployImageRef: null,
+    deployImageSha: null,
     healthHttpStatus: null,
     healthSha: null,
     verified: false,
@@ -625,8 +865,66 @@ export async function runRenderDeployment({
     return currentMainSha;
   };
 
+  const assertMigrationException = async () => {
+    if (mode === "manual") {
+      summary.migrationCheck = {
+        skipped: true,
+        reason: "owner-approved manual promotion path",
+      };
+      logger.log(
+        "Manual promotion path: migration comparison is owner-managed; automatic migration exception is not applied.",
+      );
+      return;
+    }
+
+    let liveSha;
+    try {
+      liveSha = normalizeSha(await getLiveRevision(), "live revision");
+    } catch (err) {
+      if (err instanceof RenderDeployError && err.code === "LIVE_REVISION_UNKNOWN") {
+        throw err;
+      }
+      throw new RenderDeployError(
+        "LIVE_REVISION_UNKNOWN",
+        `Cannot establish the currently live revision for migration comparison: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    summary.liveShaBefore = liveSha;
+
+    let changedPaths;
+    try {
+      changedPaths =
+        liveSha === sha
+          ? []
+          : await getChangedPaths({ liveSha, expectedSha: sha });
+    } catch (err) {
+      if (
+        err instanceof RenderDeployError &&
+        err.code === "MIGRATION_COMPARISON_FAILED"
+      ) {
+        throw err;
+      }
+      throw new RenderDeployError(
+        "MIGRATION_COMPARISON_FAILED",
+        `Cannot compare migration inputs between live revision ${liveSha} and ${sha}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    summary.migrationCheck = assertNoMigrationChanges({
+      liveSha,
+      expectedSha: sha,
+      changedPaths,
+    });
+    logger.log(
+      liveSha === sha
+        ? `Migration check passed: live revision already equals ${sha}.`
+        : `Migration check passed: no migration input changes between live ${liveSha} and ${sha}.`,
+    );
+  };
+
   try {
     await assertStillCurrentMain();
+    await assertMigrationException();
 
     const service = await renderApi({
       apiKey,
@@ -684,7 +982,7 @@ export async function runRenderDeployment({
     summary.deployId = String(deploy.id);
     summary.deployStatus = String(deploy.status ?? "unknown");
 
-    const finalDeploy = await waitForDeploy({
+    const { verifiedImage } = await waitForDeploy({
       getDeploy: (deployId) =>
         renderApi({
           apiKey,
@@ -707,6 +1005,7 @@ export async function runRenderDeployment({
       deployId: summary.deployId,
       expectedDigest: digest,
       expectedImageRef: imageRef,
+      expectedConfigDigest: configDigest,
       timeoutMs: deployTimeoutMs,
       pollIntervalMs,
       sleepImpl,
@@ -717,7 +1016,8 @@ export async function runRenderDeployment({
     });
 
     summary.deployStatus = "live";
-    summary.deployImageRef = String(finalDeploy?.image?.ref ?? "");
+    summary.deployImageRef = verifiedImage.pinnedRef;
+    summary.deployImageSha = verifiedImage.imageSha;
 
     const health = await waitForHealth({
       fetchImpl,
@@ -881,20 +1181,41 @@ function writeStepSummary(summary, success) {
     lines.push("## Render Deployment Verified");
     lines.push("");
     lines.push(`- **Commit SHA:** \`${summary.expectedSha}\``);
+    lines.push(`- **Promotion Mode:** \`${summary.promotionMode ?? "unknown"}\``);
     lines.push(`- **Immutable GHCR Digest:** \`${summary.imageRef}\``);
+    lines.push(`- **GHCR Config Digest:** \`${summary.configDigest ?? "<not provided>"}\``);
     lines.push(`- **Render Service:** \`${summary.serviceId}\``);
     lines.push(`- **Saved Render Image Reference:** \`${summary.appliedImagePath}\``);
+    if (summary.liveShaBefore) {
+      lines.push(`- **Live Revision Before:** \`${summary.liveShaBefore}\``);
+    }
+    if (summary.migrationCheck?.skipped) {
+      lines.push(`- **Migration Check:** skipped — ${summary.migrationCheck.reason}`);
+    } else if (summary.migrationCheck) {
+      lines.push(`- **Migration Check:** passed against live revision \`${summary.migrationCheck.liveSha}\``);
+    }
     lines.push(`- **Render Deploy:** \`${summary.deployId}\` (status: \`${summary.deployStatus}\`)`);
     lines.push(`- **Live Image Reference:** \`${summary.deployImageRef}\``);
+    lines.push(`- **Live Render image.sha:** \`${summary.deployImageSha ?? "<missing>"}\``);
     lines.push(`- **/api/healthz:** HTTP \`${summary.healthHttpStatus}\`, full SHA \`${summary.healthSha}\``);
     lines.push("- **Result:** Render reached Live and the live SHA matches the verified main SHA.");
   } else {
     lines.push("## Render Deployment FAILED");
     lines.push("");
     lines.push(`- **Commit SHA:** \`${summary.expectedSha}\``);
+    lines.push(`- **Promotion Mode:** \`${summary.promotionMode ?? "unknown"}\``);
     lines.push(`- **Immutable GHCR Digest:** \`${summary.imageRef}\``);
+    lines.push(`- **GHCR Config Digest:** \`${summary.configDigest ?? "<not provided>"}\``);
     lines.push(`- **Render Service:** \`${summary.serviceId}\``);
     lines.push(`- **Error:** ${summary.error ?? "unknown error"}`);
+    if (summary.liveShaBefore) {
+      lines.push(`- **Live Revision Before:** \`${summary.liveShaBefore}\``);
+    }
+    if (summary.migrationCheck?.skipped) {
+      lines.push(`- **Migration Check:** skipped — ${summary.migrationCheck.reason}`);
+    } else if (summary.migrationCheck) {
+      lines.push(`- **Migration Check:** passed against live revision \`${summary.migrationCheck.liveSha}\``);
+    }
     if (summary.previousImagePath) {
       lines.push(`- **Previous Saved Image Reference:** \`${summary.previousImagePath}\``);
     }
@@ -903,6 +1224,12 @@ function writeStepSummary(summary, success) {
     }
     if (summary.deployId) {
       lines.push(`- **Render Deploy:** \`${summary.deployId}\` (last status: \`${summary.deployStatus ?? "unknown"}\`)`);
+    }
+    if (summary.deployImageRef) {
+      lines.push(`- **Live/Pinned Image Reference:** \`${summary.deployImageRef}\``);
+    }
+    if (summary.deployImageSha) {
+      lines.push(`- **Live Render image.sha:** \`${summary.deployImageSha}\``);
     }
     if (summary.healthHttpStatus !== null) {
       lines.push(`- **Last /api/healthz:** HTTP \`${summary.healthHttpStatus}\`, sha \`${summary.healthSha || "<missing>"}\``);
@@ -931,13 +1258,19 @@ function writeStepSummary(summary, success) {
 function emptySummary() {
   return {
     expectedSha: process.env.EXPECTED_SHA ?? "",
+    promotionMode: process.env.RENDER_PROMOTION_MODE ?? "unknown",
     imageRef: process.env.IMAGE_DIGEST ?? "",
+    configDigest: process.env.IMAGE_CONFIG_DIGEST ?? null,
     serviceId: process.env.RENDER_SERVICE_ID ?? "",
     healthUrl: process.env.RENDER_HEALTH_URL ?? "",
+    liveShaBefore: null,
+    migrationCheck: null,
     previousImagePath: null,
     appliedImagePath: null,
     deployId: null,
     deployStatus: null,
+    deployImageRef: null,
+    deployImageSha: null,
     healthHttpStatus: null,
     healthSha: null,
     verified: false,
@@ -964,6 +1297,35 @@ async function runCli() {
   const healthUrl = requireEnv("RENDER_HEALTH_URL");
   const apiBaseUrl =
     process.env.RENDER_API_BASE_URL ?? "https://api.render.com/v1";
+  const promotionMode = String(
+    process.env.RENDER_PROMOTION_MODE ?? "manual",
+  ).toLowerCase();
+  const imageConfigDigest = String(
+    process.env.IMAGE_CONFIG_DIGEST ?? "",
+  ).trim();
+  if (mode === "deploy" && !imageConfigDigest) {
+    throw new RenderDeployError(
+      "INVALID_INPUT",
+      "IMAGE_CONFIG_DIGEST is required for deployment verification.",
+    );
+  }
+
+  const deployTimeoutMs = parsePositiveInteger(
+    process.env.RENDER_DEPLOY_TIMEOUT_MS,
+    20 * 60 * 1000,
+  );
+  const healthTimeoutMs = parsePositiveInteger(
+    process.env.RENDER_HEALTH_TIMEOUT_MS,
+    5 * 60 * 1000,
+  );
+  const liveRevisionTimeoutMs = parsePositiveInteger(
+    process.env.RENDER_LIVE_REVISION_TIMEOUT_MS,
+    60_000,
+  );
+  const pollIntervalMs = parsePositiveInteger(
+    process.env.RENDER_POLL_INTERVAL_MS,
+    10_000,
+  );
 
   const common = {
     apiKey,
@@ -972,20 +1334,27 @@ async function runCli() {
     expectedSha,
     imageRepo,
     imageDigestRef,
+    imageConfigDigest: imageConfigDigest || undefined,
     healthUrl,
+    promotionMode,
     getCurrentMainSha: readOriginMainSha,
-    deployTimeoutMs: parsePositiveInteger(
-      process.env.RENDER_DEPLOY_TIMEOUT_MS,
-      20 * 60 * 1000,
-    ),
-    healthTimeoutMs: parsePositiveInteger(
-      process.env.RENDER_HEALTH_TIMEOUT_MS,
-      5 * 60 * 1000,
-    ),
-    pollIntervalMs: parsePositiveInteger(
-      process.env.RENDER_POLL_INTERVAL_MS,
-      10_000,
-    ),
+    getLiveRevision: () =>
+      waitForLiveRevision({
+        fetchImpl: globalThis.fetch,
+        healthUrl,
+        timeoutMs: liveRevisionTimeoutMs,
+        pollIntervalMs,
+        sleepImpl: defaultSleep,
+        nowImpl: () => Date.now(),
+      }),
+    getChangedPaths: async ({ liveSha, expectedSha: targetSha }) =>
+      readChangedMigrationPaths({
+        liveSha,
+        expectedSha: targetSha,
+      }),
+    deployTimeoutMs,
+    healthTimeoutMs,
+    pollIntervalMs,
   };
 
   if (mode === "check-target") {
@@ -1011,6 +1380,10 @@ async function runCli() {
         previousImagePath: target.previousImagePath,
         registryCredentialId: target.registryCredentialId,
         healthCheckPath: target.healthCheckPath,
+        autoDeploy: service.autoDeploy ?? null,
+        autoDeployTrigger: service.autoDeployTrigger ?? null,
+        suspended: service.suspended ?? null,
+        runtime: service.serviceDetails?.runtime ?? service.serviceDetails?.env ?? null,
         expectedImageRef: imageRef,
         currentMainSha,
         mutationPerformed: false,

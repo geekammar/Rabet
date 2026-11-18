@@ -35,6 +35,7 @@ describe("render-image workflow safety contract", () => {
     expect(publish).toContain("github.event_name == 'push'");
     expect(publish).not.toContain("github.event_name == 'pull_request'");
     expect(publish).toContain("packages: write");
+    expect(publish).toContain("config_digest");
   });
 
   it("scopes the Render credential to the protected deploy job only", () => {
@@ -42,6 +43,8 @@ describe("render-image workflow safety contract", () => {
     expect(deploy).toContain("environment:\n      name: render-production");
     expect(deploy).toContain("secrets.RENDER_API_KEY");
     expect(deploy).toContain("needs.publish.outputs.final_digest");
+    expect(deploy).toContain("needs.publish.outputs.config_digest");
+    expect(deploy).toContain("RENDER_PROMOTION_MODE");
     expect(deploy).toContain("needs.prepare-release.outputs.repo_path");
 
     for (const other of [

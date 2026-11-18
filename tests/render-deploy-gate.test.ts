@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertFreshMain,
+  assertNoMigrationChanges,
   buildImageRef,
   classifyDeployStatus,
   RenderDeployError,
@@ -13,8 +14,13 @@ import {
 
 const SAMPLE_SHA = "f30a29d66ecad4f174195e04f71a791d2c782fc2";
 const OTHER_SHA = "0000000000000000000000000000000000000000";
-const DIGEST = `sha256:${"a".repeat(64)}`;
+// Sanitized representative Render response: image.ref is the pinned GHCR
+// manifest digest; image.sha is the pulled image ID (config digest), not the
+// same digest as the manifest.
+const DIGEST = `sha256:8bd590f2${"0".repeat(56)}`;
+const CONFIG_DIGEST = `sha256:7f2fa1b2${"0".repeat(56)}`;
 const OTHER_DIGEST = `sha256:${"b".repeat(64)}`;
+const OTHER_CONFIG_DIGEST = `sha256:${"d".repeat(64)}`;
 const IMAGE_REPO = "geekammar/rabet";
 const IMAGE_REF = `ghcr.io/${IMAGE_REPO}@${DIGEST}`;
 const PREVIOUS_IMAGE = "ghcr.io/geekammar/rabet:sha-previous";
@@ -57,6 +63,14 @@ type Scenario = {
   cancelStatus?: number;
   restorePatchStatus?: number;
   restoreGetService?: Record<string, unknown>;
+  imageRef?: string;
+  imageSha?: string;
+  configDigest?: string;
+  liveRevision?: string;
+  changedPaths?: string[];
+  liveRevisionError?: string;
+  changedPathsError?: string;
+  promotionMode?: "automatic" | "manual";
 };
 
 function scenarioFetch(scenario: Scenario) {
@@ -67,6 +81,8 @@ function scenarioFetch(scenario: Scenario) {
   let mainIndex = 0;
   let deployAttempted = false;
   const deployStatuses = scenario.deployStatuses ?? ["queued", "live"];
+  const returnedImageRef = scenario.imageRef ?? IMAGE_REF;
+  const returnedImageSha = scenario.imageSha ?? CONFIG_DIGEST;
 
   const fetchImpl = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = new URL(String(input));
@@ -107,7 +123,7 @@ function scenarioFetch(scenario: Scenario) {
       return json({
         id: "dep-1",
         status: "queued",
-        image: { ref: body.imageUrl, sha: DIGEST },
+        image: { ref: body.imageUrl, sha: returnedImageSha },
       });
     }
 
@@ -117,7 +133,7 @@ function scenarioFetch(scenario: Scenario) {
       return json({
         id: "dep-1",
         status,
-        image: { ref: IMAGE_REF, sha: DIGEST },
+        image: { ref: returnedImageRef, sha: returnedImageSha },
       });
     }
 
@@ -142,9 +158,21 @@ function scenarioFetch(scenario: Scenario) {
     return value;
   };
 
+  const getLiveRevision = async () => {
+    if (scenario.liveRevisionError) throw new Error(scenario.liveRevisionError);
+    return scenario.liveRevision ?? OTHER_SHA;
+  };
+
+  const getChangedPaths = async () => {
+    if (scenario.changedPathsError) throw new Error(scenario.changedPathsError);
+    return scenario.changedPaths ?? [];
+  };
+
   return {
     fetchImpl,
     getCurrentMainSha,
+    getLiveRevision,
+    getChangedPaths,
     calls,
     getSavedImagePath: () => savedImagePath,
   };
@@ -163,8 +191,12 @@ async function runScenario(scenario: Scenario) {
       expectedSha: SAMPLE_SHA,
       imageRepo: IMAGE_REPO,
       imageDigestRef: IMAGE_REF,
+      imageConfigDigest: scenario.configDigest ?? CONFIG_DIGEST,
       healthUrl: HEALTH_URL,
+      promotionMode: scenario.promotionMode ?? "automatic",
       getCurrentMainSha: harness.getCurrentMainSha,
+      getLiveRevision: harness.getLiveRevision,
+      getChangedPaths: harness.getChangedPaths,
       fetchImpl: harness.fetchImpl,
       sleepImpl: async () => {},
       nowImpl: (() => {
@@ -186,6 +218,11 @@ async function runScenario(scenario: Scenario) {
     }
     throw err;
   }
+}
+
+function expectGateError(err: unknown, code: string) {
+  expect(err).toBeInstanceOf(RenderDeployError);
+  expect((err as RenderDeployError).code).toBe(code);
 }
 
 describe("render deploy gate inputs", () => {
@@ -233,7 +270,25 @@ describe("render deploy gate inputs", () => {
     ).toThrow(/sha256 digest/);
   });
 
-  it("requires a live deploy to resolve to the expected digest and reference", () => {
+  it("accepts the real Render response shape: pinned image.ref + config image.sha", () => {
+    expect(
+      verifyDeployImage({
+        deploy: {
+          id: "dep-1",
+          image: { ref: IMAGE_REF, sha: CONFIG_DIGEST },
+        },
+        expectedDigest: DIGEST,
+        expectedImageRef: IMAGE_REF,
+        expectedConfigDigest: CONFIG_DIGEST,
+      }),
+    ).toEqual({
+      pinnedRef: IMAGE_REF,
+      manifestDigest: DIGEST,
+      imageSha: CONFIG_DIGEST,
+    });
+
+    // A Render response that resolves image.sha to the manifest digest is also
+    // acceptable; only the pinned image.ref is authoritative.
     expect(
       verifyDeployImage({
         deploy: {
@@ -242,27 +297,62 @@ describe("render deploy gate inputs", () => {
         },
         expectedDigest: DIGEST,
         expectedImageRef: IMAGE_REF,
-      }),
+        expectedConfigDigest: CONFIG_DIGEST,
+      }).imageSha,
     ).toBe(DIGEST);
+  });
 
+  it("rejects a wrong or missing pinned image reference", () => {
+    for (const [label, deploy] of [
+      [
+        "missing image.ref",
+        { id: "dep-1", image: { sha: CONFIG_DIGEST } },
+      ],
+      [
+        "wrong pinned digest",
+        {
+          id: "dep-1",
+          image: {
+            ref: `ghcr.io/${IMAGE_REPO}@${OTHER_DIGEST}`,
+            sha: CONFIG_DIGEST,
+          },
+        },
+      ],
+      [
+        "tag instead of digest",
+        {
+          id: "dep-1",
+          image: {
+            ref: `ghcr.io/${IMAGE_REPO}:sha-${SAMPLE_SHA}`,
+            sha: CONFIG_DIGEST,
+          },
+        },
+      ],
+    ] as const) {
+      expect(() =>
+        verifyDeployImage({
+          deploy,
+          expectedDigest: DIGEST,
+          expectedImageRef: IMAGE_REF,
+          expectedConfigDigest: CONFIG_DIGEST,
+        }),
+        label,
+      ).toThrow(/pinned|image reference|reference digest/);
+    }
+  });
+
+  it("rejects an image.sha that matches neither the GHCR config nor manifest digest", () => {
     expect(() =>
       verifyDeployImage({
         deploy: {
           id: "dep-1",
-          image: { ref: `ghcr.io/${IMAGE_REPO}@${OTHER_DIGEST}`, sha: OTHER_DIGEST },
+          image: { ref: IMAGE_REF, sha: OTHER_CONFIG_DIGEST },
         },
         expectedDigest: DIGEST,
         expectedImageRef: IMAGE_REF,
+        expectedConfigDigest: CONFIG_DIGEST,
       }),
-    ).toThrow(/resolved to/);
-
-    expect(() =>
-      verifyDeployImage({
-        deploy: { id: "dep-1" },
-        expectedDigest: DIGEST,
-        expectedImageRef: IMAGE_REF,
-      }),
-    ).toThrow(/no image provenance/);
+    ).toThrow(/does not match the GHCR config digest/);
   });
 
   it("requires /api/healthz to return status ok and the exact full SHA", () => {
@@ -299,6 +389,40 @@ describe("render deploy gate inputs", () => {
     expect(classifyDeployStatus("deactivated")).toBe("failed");
     expect(classifyDeployStatus("something-new")).toBe("unknown");
   });
+
+  it("enforces the migration exception against the live revision", () => {
+    expect(
+      assertNoMigrationChanges({
+        liveSha: SAMPLE_SHA,
+        expectedSha: OTHER_SHA,
+        changedPaths: ["src/app/page.tsx", "docs/README.md"],
+      }).migrationChanges,
+    ).toEqual([]);
+
+    expect(
+      assertNoMigrationChanges({
+        liveSha: SAMPLE_SHA,
+        expectedSha: SAMPLE_SHA,
+        changedPaths: undefined,
+      }).migrationChanges,
+    ).toEqual([]);
+
+    expect(() =>
+      assertNoMigrationChanges({
+        liveSha: SAMPLE_SHA,
+        expectedSha: OTHER_SHA,
+        changedPaths: ["drizzle/0008_new_migration.sql"],
+      }),
+    ).toThrow(/migration inputs differ/);
+
+    expect(() =>
+      assertNoMigrationChanges({
+        liveSha: SAMPLE_SHA,
+        expectedSha: OTHER_SHA,
+        changedPaths: undefined,
+      }),
+    ).toThrow(/changed paths were not established/);
+  });
 });
 
 describe("runRenderDeployment", () => {
@@ -308,11 +432,16 @@ describe("runRenderDeployment", () => {
     });
 
     expect(summary.verified).toBe(true);
+    expect(summary.promotionMode).toBe("automatic");
     expect(summary.expectedSha).toBe(SAMPLE_SHA);
     expect(summary.imageRef).toBe(IMAGE_REF);
+    expect(summary.configDigest).toBe(CONFIG_DIGEST);
+    expect(summary.liveShaBefore).toBe(OTHER_SHA);
+    expect(summary.migrationCheck.migrationChanges).toEqual([]);
     expect(summary.deployId).toBe("dep-1");
     expect(summary.deployStatus).toBe("live");
     expect(summary.deployImageRef).toBe(IMAGE_REF);
+    expect(summary.deployImageSha).toBe(CONFIG_DIGEST);
     expect(summary.healthHttpStatus).toBe(200);
     expect(summary.healthSha).toBe(SAMPLE_SHA);
     expect(getSavedImagePath()).toBe(IMAGE_REF);
@@ -326,10 +455,121 @@ describe("runRenderDeployment", () => {
       },
     });
     const deploy = calls.find(
-      (call) =>
-        call.method === "POST" && call.path.endsWith("/deploys"),
+      (call) => call.method === "POST" && call.path.endsWith("/deploys"),
     );
     expect(deploy?.body).toEqual({ imageUrl: IMAGE_REF });
+  });
+
+  it("allows the owner-approved manual path without the automatic migration comparison", async () => {
+    const { summary } = await runScenario({
+      promotionMode: "manual",
+      liveRevisionError: "manual path does not read live revision",
+      changedPaths: ["drizzle/0008_new_migration.sql"],
+      health: [() => healthy(SAMPLE_SHA)],
+    });
+
+    expect(summary.verified).toBe(true);
+    expect(summary.promotionMode).toBe("manual");
+    expect(summary.migrationCheck).toMatchObject({ skipped: true });
+  });
+
+  it("blocks automatic promotion before any Render mutation when migration inputs changed", async () => {
+    const harness = scenarioFetch({
+      changedPaths: ["drizzle/0008_new_migration.sql", "src/app/page.tsx"],
+      health: [() => healthy(SAMPLE_SHA)],
+    });
+
+    let failure: unknown;
+    try {
+      await runRenderDeployment({
+        apiKey: "rnd_synthetic_test_key",
+        serviceId: SERVICE_ID,
+        expectedSha: SAMPLE_SHA,
+        imageRepo: IMAGE_REPO,
+        imageDigestRef: IMAGE_REF,
+        imageConfigDigest: CONFIG_DIGEST,
+        healthUrl: HEALTH_URL,
+        promotionMode: "automatic",
+        getCurrentMainSha: harness.getCurrentMainSha,
+        getLiveRevision: harness.getLiveRevision,
+        getChangedPaths: harness.getChangedPaths,
+        fetchImpl: harness.fetchImpl,
+        sleepImpl: async () => {},
+        pollIntervalMs: 1,
+        logger: { log: () => {}, error: () => {} },
+      });
+    } catch (err) {
+      failure = err;
+    }
+
+    expectGateError(failure, "MIGRATION_CHANGED");
+    expect(harness.calls).toEqual([]);
+  });
+
+  it("blocks automatic promotion when the live revision cannot be established", async () => {
+    const harness = scenarioFetch({
+      liveRevisionError: "health response has no full SHA",
+      health: [() => healthy(SAMPLE_SHA)],
+    });
+
+    let failure: unknown;
+    try {
+      await runRenderDeployment({
+        apiKey: "rnd_synthetic_test_key",
+        serviceId: SERVICE_ID,
+        expectedSha: SAMPLE_SHA,
+        imageRepo: IMAGE_REPO,
+        imageDigestRef: IMAGE_REF,
+        imageConfigDigest: CONFIG_DIGEST,
+        healthUrl: HEALTH_URL,
+        promotionMode: "automatic",
+        getCurrentMainSha: harness.getCurrentMainSha,
+        getLiveRevision: harness.getLiveRevision,
+        getChangedPaths: harness.getChangedPaths,
+        fetchImpl: harness.fetchImpl,
+        sleepImpl: async () => {},
+        pollIntervalMs: 1,
+        logger: { log: () => {}, error: () => {} },
+      });
+    } catch (err) {
+      failure = err;
+    }
+
+    expectGateError(failure, "LIVE_REVISION_UNKNOWN");
+    expect(harness.calls).toEqual([]);
+  });
+
+  it("blocks automatic promotion when migration comparison cannot be established", async () => {
+    const harness = scenarioFetch({
+      changedPathsError: "live commit is not fetchable",
+      health: [() => healthy(SAMPLE_SHA)],
+    });
+
+    let failure: unknown;
+    try {
+      await runRenderDeployment({
+        apiKey: "rnd_synthetic_test_key",
+        serviceId: SERVICE_ID,
+        expectedSha: SAMPLE_SHA,
+        imageRepo: IMAGE_REPO,
+        imageDigestRef: IMAGE_REF,
+        imageConfigDigest: CONFIG_DIGEST,
+        healthUrl: HEALTH_URL,
+        promotionMode: "automatic",
+        getCurrentMainSha: harness.getCurrentMainSha,
+        getLiveRevision: harness.getLiveRevision,
+        getChangedPaths: harness.getChangedPaths,
+        fetchImpl: harness.fetchImpl,
+        sleepImpl: async () => {},
+        pollIntervalMs: 1,
+        logger: { log: () => {}, error: () => {} },
+      });
+    } catch (err) {
+      failure = err;
+    }
+
+    expectGateError(failure, "MIGRATION_COMPARISON_FAILED");
+    expect(harness.calls).toEqual([]);
   });
 
   it("does not touch Render when origin/main has moved before promotion", async () => {
@@ -345,8 +585,12 @@ describe("runRenderDeployment", () => {
         expectedSha: SAMPLE_SHA,
         imageRepo: IMAGE_REPO,
         imageDigestRef: IMAGE_REF,
+        imageConfigDigest: CONFIG_DIGEST,
         healthUrl: HEALTH_URL,
+        promotionMode: "automatic",
         getCurrentMainSha: harness.getCurrentMainSha,
+        getLiveRevision: harness.getLiveRevision,
+        getChangedPaths: harness.getChangedPaths,
         fetchImpl: harness.fetchImpl,
         sleepImpl: async () => {},
         pollIntervalMs: 1,
@@ -373,8 +617,12 @@ describe("runRenderDeployment", () => {
         expectedSha: SAMPLE_SHA,
         imageRepo: IMAGE_REPO,
         imageDigestRef: IMAGE_REF,
+        imageConfigDigest: CONFIG_DIGEST,
         healthUrl: HEALTH_URL,
+        promotionMode: "automatic",
         getCurrentMainSha: harness.getCurrentMainSha,
+        getLiveRevision: harness.getLiveRevision,
+        getChangedPaths: harness.getChangedPaths,
         fetchImpl: harness.fetchImpl,
         sleepImpl: async () => {},
         pollIntervalMs: 1,
@@ -403,12 +651,11 @@ describe("runRenderDeployment", () => {
       failure = err;
     }
 
-    expect(failure).toBeInstanceOf(RenderDeployError);
+    expectGateError(failure, "DEPLOY_FAILED");
     const gateError = failure as RenderDeployError & {
       summary: { verified: boolean; error: string };
       harness: ReturnType<typeof scenarioFetch>;
     };
-    expect(gateError.code).toBe("DEPLOY_FAILED");
     expect(gateError.summary.verified).toBe(false);
     expect(gateError.summary.error).toMatch(/build_failed/);
 
@@ -455,8 +702,12 @@ describe("runRenderDeployment", () => {
         expectedSha: SAMPLE_SHA,
         imageRepo: IMAGE_REPO,
         imageDigestRef: IMAGE_REF,
+        imageConfigDigest: CONFIG_DIGEST,
         healthUrl: HEALTH_URL,
+        promotionMode: "automatic",
         getCurrentMainSha: harness.getCurrentMainSha,
+        getLiveRevision: harness.getLiveRevision,
+        getChangedPaths: harness.getChangedPaths,
         fetchImpl: harness.fetchImpl,
         sleepImpl: async () => {},
         pollIntervalMs: 1,

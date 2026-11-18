@@ -82,13 +82,13 @@ Automatic release uses the same `prepare-release` and `publish` jobs as the manu
 1. `release-gate-tests` runs the GHCR, Render, and workflow-contract fixtures (`tests/ghcr-release-gate.test.ts`, `tests/render-deploy-gate.test.ts`, `tests/render-image-workflow.test.ts`).
 2. `verify-image` builds and smoke-tests the PR/main image without publication permissions.
 3. `prepare-release` resolves `github.sha`, verifies it is still current `origin/main`, then **waits** for the exact-SHA `push` CI run and Dependency Audit run to complete successfully. Missing, failed, canceled, or timed-out gates fail closed. After the gates pass it re-checks `origin/main`, builds the release image, runs the existing container smoke suite, and uploads the verified archive.
-4. `publish` re-checks `origin/main`, publishes or reuses the immutable `sha-<SHA>` GHCR tag, verifies provenance, and emits the final `@sha256:...` digest.
-5. `deploy-render` re-checks `origin/main` again, then:
+4. `publish` re-checks `origin/main`, publishes or reuses the immutable `sha-<SHA>` GHCR tag, verifies provenance, and emits the final `@sha256:...` manifest digest plus the linux/amd64 **image config digest** used by Render for its resolved `image.sha`.
+5. `deploy-render` re-checks `origin/main` again. On the automatic path it first reads the **currently live revision** from `/api/healthz` and compares migration inputs (`drizzle/**`, `drizzle.config.ts`) between that live SHA and the verified SHA. It blocks automatic promotion if migrations differ or the live revision/comparison cannot be established. It then:
    - reads the existing Render service and refuses anything other than the configured image-backed `web_service`;
    - updates the service's **saved image reference** (`PATCH /v1/services/{serviceId}` → `image.imagePath`) to the immutable digest;
    - deploys that same digest with `POST /v1/services/{serviceId}/deploys` → `imageUrl`;
-   - polls `GET /v1/services/{serviceId}/deploys/{deployId}` until `live`, verifies the deploy's resolved image digest/reference, and polls `GET /api/healthz` until it returns the exact full 40-character SHA;
-   - fails the run if Render fails, the deploy is superseded/canceled, the digest differs, the health SHA differs, or `origin/main` moves before promotion.
+   - polls `GET /v1/services/{serviceId}/deploys/{deployId}` until `live`, verifies the deploy's **pinned `image.ref`** exactly and cross-checks Render's resolved `image.sha` against the GHCR config/manifest digest, then polls `GET /api/healthz` until it returns the exact full 40-character SHA;
+   - fails the run if Render fails, the deploy is superseded/canceled, the pinned reference or resolved image differs, the health SHA differs, migration inputs changed, or `origin/main` moves before promotion.
 
 The workflow writes a **success summary only after** the Render deploy is Live and `/api/healthz` matches. A failed or stale run writes a failure summary and exits non-zero.
 
@@ -97,7 +97,14 @@ The workflow writes a **success summary only after** the Render deploy is Live a
 Render's official documentation distinguishes the two references:
 
 - Triggering a deploy with an `imageUrl` uses that image **for that deploy**, but [future manual deploys continue to use the image stored in the service settings](https://render.com/docs/deploying-an-image#triggering-a-deploy). Updating only the live deploy would let a later dashboard **Deploy latest reference** silently redeploy an older saved tag.
-- [Update service](https://api-docs.render.com/reference/update-service) can change the saved `image` configuration, and its documentation states that configuration changes are **not deployed automatically**. Therefore the workflow updates the saved reference first, then explicitly triggers the deploy with the same digest.
+- [Update service](https://api-docs.render.com/reference/update-service) accepts an `image` object (`ownerId`, `imagePath`, optional `registryCredentialId`) and its documentation states that configuration changes are **not deployed automatically**. Therefore the workflow updates the saved reference first, then explicitly triggers the deploy with the same digest.
+
+Render's deploy object also exposes two different fields, confirmed against the live service response and the [Retrieve deploy](https://api-docs.render.com/reference/retrieve-deploy) contract:
+
+- `image.ref` is the image reference used for that deploy. Because this workflow always passes an immutable `@sha256:<manifest digest>` reference, it must match that pinned reference exactly.
+- `image.sha` is the SHA Render resolved the image to. A real live deploy returned `image.ref` pinned to the GHCR manifest digest (`8bd590f2…`) while `image.sha` was the pulled image ID/config digest (`7f2fa1b2…`). They are **not required to be equal**. The helper therefore treats `image.ref` as authoritative, rejects a missing/wrong pinned reference, and cross-checks `image.sha` against the GHCR manifest config digest (or the manifest digest) emitted by `publish`.
+
+**Saved reference vs live deploy:** restoring the saved image reference after a failed promotion only changes what a *future* manual deploy will pull. It does **not** revert the container that is already Live. Reverting Live requires deploying or rolling back the previous digest and verifying `/api/healthz`, as in §6.3. Canceling a pending deploy similarly prevents a new rollout; it is not a rollback of the current Live container.
 
 Official mechanism references:
 
@@ -119,9 +126,9 @@ If a promotion fails after the saved reference was changed, `scripts/render-depl
 
 ### 1A.4 Manual path remains available
 
-Manual **Render Image → Run workflow** still requires `expected_sha` plus `PUBLISH_RENDER_IMAGE`, publishes exactly as before, and does **not** deploy by default. Set the optional `deploy_to_render` boolean to `true` only when the owner intentionally wants that manual run to use the same Render promotion and verification pipeline.
+Manual **Render Image → Run workflow** still requires `expected_sha` plus `PUBLISH_RENDER_IMAGE`, publishes exactly as before, and does **not** deploy by default. Set the optional `deploy_to_render` boolean to `true` only when the owner intentionally wants that manual run to use the same Render pinned-digest/Live/health verification. The manual promotion path deliberately skips the automatic migration comparison; the owner is responsible for the separate migration procedure first.
 
-Automatic release performs **no database migration, backfill, Telegram change, or admin credential change**. Any release that requires a production schema change must stay under the existing manual Neon migration procedure (`neon-prod-migrate.yml`: inspect → record restore point → migrate) before the new image is promoted.
+Automatic release performs **no database migration, backfill, Telegram change, or admin credential change**. On automatic promotion the helper compares `drizzle/**` and `drizzle.config.ts` between the verified SHA and the currently live SHA; any difference, or an unknown/unreachable live revision, blocks automatic promotion. A release that requires a production schema change must stay under the existing manual Neon migration procedure (`neon-prod-migrate.yml`: inspect → record restore point → migrate), followed by the owner-approved manual release path.
 
 ---
 
@@ -155,44 +162,63 @@ Reference: [Render — Deploying an Image](https://render.com/docs/deploying-an-
    - Render validates pull access to `ghcr.io/geekammar/rabet@sha256:...` before creating or updating the service.
 3. **Verification before service creation:** From any machine without ambient repo tokens, verify pullability with that `read:packages` token (or inspect package settings at `https://github.com/users/geekammar/packages/container/package/rabet`).
 
-### 2.3 Owner-Only Activation Checklist for Automatic Deployment
+### 2.3 Owner-Only Activation Checklist (First Supervised Deploy vs Ongoing Unattended)
 
-Do **not** enable this until Checkpoint B has been accepted and the release PR has been reviewed. The default state is off: no repository variable is set and the `deploy-render` job never runs.
+Do **not** enable unattended deployment until Checkpoint B has been accepted, the release PR has been reviewed, and one supervised deployment has succeeded. The default state is off: no repository variable is set and the `deploy-render` job never runs.
 
-1. **Confirm the Render service is ready**
-   - Service type is **Web Service** with runtime **image** (image-backed), not Git-backed.
-   - **Auto-Deploy** is **Off** / manual.
-   - Image URL is `ghcr.io/geekammar/rabet@sha256:<known-good-digest>` (or a `sha-<commit>` tag during initial setup).
-   - A working `read:packages` registry credential is attached.
-   - Health Check Path is `/api/healthz`.
-   - Workspace **Overlapping Deploy Policy** is understood; **Wait** is recommended.
-2. **Create the protected GitHub environment**
-   - GitHub → repository **Settings → Environments → New environment**: `render-production`.
-   - Add the owner as a **Required reviewer** (and consider limiting deployment branches to `main`).
-   - Add environment **secret** `RENDER_API_KEY`: a Render API key from the owner account. Keep it only in this environment; never put it in repository secrets, `.env`, docs, or logs.
-   - Add environment **variables**:
-     - `RENDER_SERVICE_ID` — the existing `srv-...` service ID.
-     - `RENDER_HEALTH_URL` — the exact HTTPS health URL, e.g. `https://<origin>/api/healthz`.
-3. **Validate the target without mutating production**
-   - From a checked-out `main`, with the environment values exported locally in a secure shell, run:
-     ```bash
-     EXPECTED_SHA="$(git rev-parse HEAD)" \
-     IMAGE_REPO="geekammar/rabet" \
-     IMAGE_DIGEST="ghcr.io/geekammar/rabet@sha256:<known-good-digest>" \
-     RENDER_SERVICE_ID="<srv-id>" \
-     RENDER_HEALTH_URL="https://<origin>/api/healthz" \
-     node scripts/render-deploy-gate.mjs check-target
-     ```
-     This performs reads only: it verifies current `origin/main`, the service type/runtime, the image repository, and prints the saved image reference that would be replaced. It never deploys.
-4. **Enable the switch**
-   - GitHub → repository **Settings → Secrets and variables → Actions → Variables → New repository variable**:
-     - Name: `RABET_AUTO_DEPLOY_ENABLED`
-     - Value: `true`
-   - To disable automatic release/deploy immediately, delete the variable or set it to anything other than `true`. In-flight runs still re-check `origin/main` and fail closed if stale; a Render deploy already in progress is not canceled by disabling the variable.
-5. **First activation run**
-   - Merge (or push) one reviewed commit to `main`, then open the **Render Image** workflow run for that exact SHA.
-   - Confirm `release-gate-tests`, `verify-image`, `prepare-release`, `publish`, and `deploy-render` all appear. `deploy-render` should wait for the `render-production` environment approval if required reviewers are configured.
-   - Do not approve the environment until the GHCR digest in the run summary is the expected one.
+#### A. Verify the Render target settings before touching automation
+
+1. In the Render Dashboard confirm:
+   - the service is a **Web Service** with runtime **image** (image-backed), not Git-backed;
+   - the service is **not suspended**;
+   - **Auto-Deploy is Off** / manual;
+   - **Health Check Path** is `/api/healthz`;
+   - the saved Image URL is `ghcr.io/geekammar/rabet@sha256:<known-good-digest>` (or a `sha-<commit>` tag during initial setup);
+   - a working `read:packages` registry credential is attached if the GHCR package is private;
+   - the workspace **Overlapping Deploy Policy** is **Wait** (recommended) or otherwise understood.
+2. Run the read-only target check from a checked-out `main` with the owner's environment values exported in a secure shell:
+   ```bash
+   EXPECTED_SHA="$(git rev-parse HEAD)" \
+   IMAGE_REPO="geekammar/rabet" \
+   IMAGE_DIGEST="ghcr.io/geekammar/rabet@sha256:<known-good-digest>" \
+   RENDER_SERVICE_ID="<srv-id>" \
+   RENDER_HEALTH_URL="https://<origin>/api/healthz" \
+   node scripts/render-deploy-gate.mjs check-target
+   ```
+   Confirm the output reports `runtime: "image"`, `suspended: "not_suspended"`, `autoDeployTrigger: "off"` (or `autoDeploy: "no"`), `healthCheckPath: "/api/healthz"`, the expected service/image repository, and `mutationPerformed: false`. This command performs reads only.
+
+#### B. Create the protected GitHub environment and understand plan limits
+
+1. GitHub → repository **Settings → Environments → New environment**: `render-production`. Create it **before** enabling automation; a workflow referencing a missing environment can create it implicitly without protection rules.
+2. Add environment **secret** `RENDER_API_KEY`: a Render API key from the owner account. Keep it only in this environment; never put it in repository secrets, `.env`, docs, or logs.
+3. Add environment **variables**:
+   - `RENDER_SERVICE_ID` — the existing `srv-...` service ID.
+   - `RENDER_HEALTH_URL` — the exact HTTPS health URL, e.g. `https://<origin>/api/healthz`.
+4. Configure protection appropriate to the repository's GitHub plan:
+   - **Public repository:** required reviewers are available on GitHub Free, Pro, and Team. Add the owner as a required reviewer and consider enabling **Prevent self-review**.
+   - **Private repository:** required reviewers are only available on GitHub Enterprise. GitHub Free/Pro/Team can create environments and use environment secrets for private repositories, but **cannot require reviewers**. See [Deployments and environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#required-reviewers).
+   - If required reviewers are unavailable, do **not** enable unattended automatic deployment. Keep `RABET_AUTO_DEPLOY_ENABLED` unset and use the supervised manual dispatch in step C. The environment still scopes the secret, but it is not an approval gate.
+   - Consider limiting deployment branches to `main` on plans where deployment branch rules are available.
+
+#### C. First supervised deployment (automatic switch still OFF)
+
+1. If this release needs a schema change, complete the existing owner-approved Neon migration workflow first; automatic promotion is not used for schema changes.
+2. Keep `RABET_AUTO_DEPLOY_ENABLED` unset. Run **Render Image → Run workflow** on `main` with the exact SHA, `PUBLISH_RENDER_IMAGE`, and `deploy_to_render = true`. This manual path is owner-supervised and skips the automatic migration comparison, so the owner must have already handled any migration.
+3. Watch `deploy-render` to completion. Confirm:
+   - the Render deploy reaches **Live**;
+   - the deploy's pinned `image.ref` is the emitted immutable digest;
+   - the saved Render Image URL is the same digest;
+   - `/api/healthz` returns the exact full SHA.
+4. Record that live SHA and digest as the known-good baseline. The automatic path uses the live `/api/healthz` SHA as the comparison point for migration changes, so **do not enable unattended deployment until a live revision with a full SHA exists**.
+
+#### D. Ongoing unattended deployment (owner enables only after C succeeds)
+
+1. GitHub → repository **Settings → Secrets and variables → Actions → Variables → New repository variable**:
+   - Name: `RABET_AUTO_DEPLOY_ENABLED`
+   - Value: `true`
+2. Subsequent pushes to `main` release only after exact-SHA CI + Audit success, exact image smoke tests, an immutable GHCR digest, a live revision/migration comparison that establishes no migration changes, a successful Render Live promotion, and the exact `/api/healthz` SHA.
+3. To disable automatic deployment immediately, delete the variable or set it to anything other than `true`. In-flight runs still re-check `origin/main`, and a pending Render deploy is canceled if `origin/main` moves; a deploy already Live is not reverted by disabling the variable.
+4. If a future release needs migration changes, keep automation off: run the manual Neon migration procedure, then perform another supervised manual dispatch (step C), then re-enable the variable only if desired.
 
 **Credential scope:** `packages: write` exists only on `publish`. `RENDER_API_KEY` exists only on `deploy-render` through the `render-production` environment. Build and smoke-test jobs get neither. No migration, Neon, Telegram, or admin credential is used by this workflow.
 
@@ -495,6 +521,9 @@ Use this after the owner enables `RABET_AUTO_DEPLOY_ENABLED` and a reviewed merg
 ### 6.3 Standard Rollback to the Previous Known-Good Digest
 
 Because `render-image.yml` publishes immutable `sha-<commit>` tags and never overwrites or prunes prior digests in GHCR, the previous digest remains available.
+
+> [!IMPORTANT]
+> A saved-image `PATCH` is **not** a live rollback. It only changes what a later manual deploy will pull. The workflow's failure-time restore of the saved reference is likewise not a revert of the Live container. To restore Live service, explicitly deploy the previous digest (dashboard Save / Deploy or the PATCH + deploy calls below) and verify `/api/healthz`.
 
 1. Identify the last known-good `ghcr.io/geekammar/rabet@sha256:<previous-digest>` and its full commit SHA from **Render Dashboard → Events**, the previous **GitHub Actions → Render Image** summary, or GHCR package versions.
 2. **Roll back both Render references.** Use either:

@@ -441,7 +441,7 @@ async function fetchVerifiedJsonByDigest(fetchImpl, url, expectedDigest, token, 
  * }} params
  * @returns {Promise<
  *   | { status: "missing" }
- *   | { status: "exists_verified", repoDigest: string, digest: string }
+ *   | { status: "exists_verified", repoDigest: string, digest: string, configDigest: string }
  * >}
  */
 export async function inspectExistingGhcrTag({
@@ -724,6 +724,7 @@ export async function inspectExistingGhcrTag({
     status: "exists_verified",
     digest: computedTopDigest,
     repoDigest: `ghcr.io/${normalizedRepo}@${computedTopDigest}`,
+    configDigest: String(configDigest).toLowerCase(),
   };
 }
 

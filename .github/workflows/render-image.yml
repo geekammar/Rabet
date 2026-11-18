@@ -429,6 +429,7 @@ jobs:
       packages: write
     outputs:
       final_digest: ${{ steps.release-summary.outputs.final_digest }}
+      config_digest: ${{ steps.release-summary.outputs.config_digest }}
       publish_mode: ${{ steps.release-summary.outputs.publish_mode }}
 
     steps:
@@ -484,8 +485,11 @@ jobs:
 
           if [ "${TAG_STATUS}" = "exists_verified" ]; then
             EXISTING_DIGEST="$(CHECK_JSON="${CHECK_JSON}" node -e 'process.stdout.write(JSON.parse(process.env.CHECK_JSON).repoDigest)')"
+            EXISTING_CONFIG_DIGEST="$(CHECK_JSON="${CHECK_JSON}" node -e 'process.stdout.write(JSON.parse(process.env.CHECK_JSON).configDigest)')"
             echo "existing_repo_digest=${EXISTING_DIGEST}" >> "$GITHUB_OUTPUT"
+            echo "existing_config_digest=${EXISTING_CONFIG_DIGEST}" >> "$GITHUB_OUTPUT"
             echo "Verified existing immutable tag on GHCR (will reuse without overwriting): ${EXISTING_DIGEST}"
+            echo "Verified existing image config digest: ${EXISTING_CONFIG_DIGEST}"
           elif [ "${TAG_STATUS}" = "missing" ]; then
             echo "Confirmed tag does not yet exist on GHCR (safe to push once)."
           else
@@ -522,14 +526,22 @@ jobs:
             echo "::error::Unexpected repo digest format: ${REPO_DIGEST}"
             exit 1
           fi
+          CONFIG_DIGEST="$(docker image inspect --format='{{.Id}}' "${IMAGE_TAG}")"
+          if ! printf '%s' "${CONFIG_DIGEST}" | grep -Eq "^sha256:[0-9a-f]{64}$"; then
+            echo "::error::Unexpected image config digest: ${CONFIG_DIGEST}"
+            exit 1
+          fi
           echo "repo_digest=${REPO_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "config_digest=${CONFIG_DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Verify GHCR digest and emit release summary
         id: release-summary
         env:
           TAG_STATUS: ${{ steps.tag-check.outputs.tag_status }}
           EXISTING_DIGEST: ${{ steps.tag-check.outputs.existing_repo_digest }}
+          EXISTING_CONFIG_DIGEST: ${{ steps.tag-check.outputs.existing_config_digest }}
           PUSHED_DIGEST: ${{ steps.push-new.outputs.repo_digest }}
+          PUSHED_CONFIG_DIGEST: ${{ steps.push-new.outputs.config_digest }}
           IMAGE_REPO: ${{ needs.prepare-release.outputs.image_repo }}
           IMAGE_TAG: ${{ needs.prepare-release.outputs.image_tag }}
           VERIFIED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
@@ -538,14 +550,20 @@ jobs:
         run: |
           if [ "${TAG_STATUS}" = "exists_verified" ]; then
             FINAL_DIGEST="${EXISTING_DIGEST}"
+            FINAL_CONFIG_DIGEST="${EXISTING_CONFIG_DIGEST}"
             PUBLISH_MODE="Reused existing provenance-verified digest (retry-safe; tag was not overwritten)"
           else
             FINAL_DIGEST="${PUSHED_DIGEST}"
+            FINAL_CONFIG_DIGEST="${PUSHED_CONFIG_DIGEST}"
             PUBLISH_MODE="Published new immutable SHA-tagged image"
           fi
 
           if ! printf '%s' "${FINAL_DIGEST}" | grep -Eq "^${IMAGE_REPO}@sha256:[0-9a-f]{64}$"; then
             echo "::error::Invalid final GHCR digest reference: ${FINAL_DIGEST}"
+            exit 1
+          fi
+          if ! printf '%s' "${FINAL_CONFIG_DIGEST}" | grep -Eq "^sha256:[0-9a-f]{64}$"; then
+            echo "::error::Invalid final GHCR image config digest: ${FINAL_CONFIG_DIGEST}"
             exit 1
           fi
 
@@ -554,6 +572,7 @@ jobs:
 
           {
             echo "final_digest=${FINAL_DIGEST}"
+            echo "config_digest=${FINAL_CONFIG_DIGEST}"
             echo "publish_mode=${PUBLISH_MODE}"
           } >> "$GITHUB_OUTPUT"
 
@@ -562,6 +581,7 @@ jobs:
             echo "## Published Render Runtime Image"
             echo ""
             echo "- **Immutable GHCR Digest Reference (use this in Render):** \`${FINAL_DIGEST}\`"
+            echo "- **Image Config Digest (Render image.sha cross-check):** \`${FINAL_CONFIG_DIGEST}\`"
             echo "- **SHA Tag:** \`${IMAGE_TAG}\`"
             echo "- **Publish Mode:** ${PUBLISH_MODE}"
             echo "- **Source Commit SHA (\`main\`):** \`${VERIFIED_SHA}\`"
@@ -580,9 +600,12 @@ jobs:
   # The helper updates the service's SAVED image reference to the immutable
   # digest and then deploys that same digest, so later dashboard "Deploy latest
   # reference" actions cannot silently redeploy an older tag. It verifies the
-  # Render deploy reaches Live, its resolved image digest, and that
-  # /api/healthz returns the exact full main SHA. A failed promotion restores
-  # the previous saved image reference when it is still safe to do so.
+  # Render deploy reaches Live, its pinned image.ref exactly, its resolved
+  # image.sha against the GHCR config digest, and that /api/healthz returns the
+  # exact full main SHA. Automatic promotion also refuses migration-input
+  # changes versus the currently live SHA. A failed promotion restores the
+  # previous saved image reference when it is still safe to do so; that is not
+  # a live rollback.
   # ---------------------------------------------------------------------------
   deploy-render:
     name: Deploy verified digest to Render and verify live SHA
@@ -642,6 +665,8 @@ jobs:
           EXPECTED_SHA: ${{ needs.prepare-release.outputs.verified_sha }}
           IMAGE_REPO: ${{ needs.prepare-release.outputs.repo_path }}
           IMAGE_DIGEST: ${{ needs.publish.outputs.final_digest }}
+          IMAGE_CONFIG_DIGEST: ${{ needs.publish.outputs.config_digest }}
+          RENDER_PROMOTION_MODE: ${{ github.event_name == 'push' && 'automatic' || 'manual' }}
           RENDER_DEPLOY_TIMEOUT_MS: "1200000"
           RENDER_HEALTH_TIMEOUT_MS: "300000"
           RENDER_POLL_INTERVAL_MS: "10000"

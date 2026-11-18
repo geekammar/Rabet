@@ -522,6 +522,7 @@ describe("inspectExistingGhcrTag", () => {
       status: "exists_verified",
       digest: indexDigest,
       repoDigest: `ghcr.io/geekammar/rabet@${indexDigest}`,
+      configDigest,
     });
   });
 
