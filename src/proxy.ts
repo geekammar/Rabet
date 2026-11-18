@@ -63,9 +63,10 @@ export const config = {
     /*
      * Run on every route except:
      * - api/auth/...   the Auth.js route handler (must stay public)
+     * - api/healthz    unauthenticated container liveness check (must not invoke Auth.js)
      * - _next/static, _next/image, favicon.ico and other static assets, so
      *   the PWA shell, icons and manifest always load while signed out
      */
-    "/((?!api/auth|_next/static|_next/image|favicon.ico|icons|manifest.webmanifest|robots.txt|sitemap.xml).*)",
+    "/((?!api/auth|api/healthz|_next/static|_next/image|favicon.ico|icons|manifest.webmanifest|robots.txt|sitemap.xml).*)",
   ],
 };

@@ -33,6 +33,7 @@ const dashboardPaths = [
 ];
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   cacheComponents: true,
   partialPrefetching: true,
   async headers() {

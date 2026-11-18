@@ -1,0 +1,365 @@
+# Rabet — Render Image Deployment & Cutover Runbook
+
+> **Scope:** Single-store Rabet runtime (`geekammar/Rabet`) deployed as an **immutable GHCR container image** on a **Render Starter Web Service** in **Ohio (`us-east`)** inside the owner's **Hobby** workspace, connected to the existing **Neon `Rabet_prod`** PostgreSQL database and Telegram bot.
+>
+> **Separation of Concerns:** GitHub Actions builds, smoke-tests, and manually publishes immutable `linux/amd64` images to GitHub Container Registry (`ghcr.io`). Render runs the reviewed `@sha256:...` digest directly (`node server.js`) with **no** `npm install`, compilation, or database migrations at container startup. No automatic Render deploy webhook or Render API key is configured in GitHub.
+
+---
+
+## 1. End-to-End Provenance: Merge SHA → GHCR Digest → Running Render Digest
+
+Every production candidate follows an auditable three-link chain:
+
+```mermaid
+flowchart LR
+  A["Reviewed PR merged to main\n(40-char Merge SHA)"] --> B["Main CI + Render Image\nverification pass"]
+  B --> C["Manual Render Image publish\n(ghcr.io/geekammar/rabet@sha256:...)"]
+  C --> D["Manual Render Dashboard deploy\n(Existing Image pinned by digest)"]
+  D --> E["GET /api/healthz returns\nstatus: ok + exact Merge SHA"]
+```
+
+### Step 1 — Record the Verified `main` Merge SHA
+
+1. Merge the reviewed PR into `main` on GitHub.
+2. Record the exact 40-character commit SHA on `main`:
+   ```bash
+   git fetch origin main
+   git rev-parse origin/main
+   ```
+3. Confirm both required workflows succeeded on `main` for that exact SHA:
+   - **CI** (`.github/workflows/ci.yml`) — `verify`, `db`, `browser`, and `baseline-touch` all `success`.
+   - **Render Image** (`.github/workflows/render-image.yml` → `verify-image` job) — `success`.
+
+### Step 2 — Manually Publish the Immutable Image to GHCR
+
+1. Open **GitHub → Actions → Render Image → Run workflow**.
+2. Set:
+   - **Use workflow from:** `Branch: main`
+   - **`expected_sha`:** paste the exact 40-character `main` commit SHA.
+   - **`confirm`:** type `PUBLISH_RENDER_IMAGE` (exact match).
+3. Before granting `packages: write`, the workflow automatically enforces:
+   - `GITHUB_EVENT_NAME == "workflow_dispatch"` and `GITHUB_REF == "refs/heads/main"`.
+   - Checked-out `HEAD` equals `expected_sha` **and** matches current `origin/main` (stopping stale releases).
+   - The latest `push` run of `ci.yml` on `main` for `expected_sha` completed with `conclusion == "success"`.
+   - The exact `linux/amd64` image passes the full container smoke-test suite (`scripts/test-container-smoke.mjs`).
+   - Immediately before `docker push`, `origin/main` is checked a second time so a release superseded mid-run stops cleanly.
+4. Copy the emitted **Immutable GHCR Digest Reference** from the workflow run summary:
+   ```text
+   ghcr.io/geekammar/rabet@sha256:<64-hex-digest>
+   ```
+   *(Always deploy by `@sha256:...` digest, never by a mutable tag. Previous `sha-<commit>` tags and `@sha256:...` digests remain retained in GHCR for rollback.)*
+
+### Step 3 — Promote the Digest on Render and Verify Running Identity
+
+1. In the [Render Dashboard](https://dashboard.render.com), select the Rabet Web Service (or create it per §2 below).
+2. Paste the exact `ghcr.io/geekammar/rabet@sha256:<64-hex-digest>` reference into **Image URL** and save/deploy.
+3. Once Render reports the deploy **Live**, verify both:
+   - **Render Dashboard → Events / Settings:** deployed image matches the exact `@sha256:<64-hex-digest>`.
+   - **HTTP Liveness Probe:** `GET https://<origin>/api/healthz` returns HTTP `200` with:
+     ```json
+     {
+       "status": "ok",
+       "sha": "<exact-40-char-merge-sha>"
+     }
+     ```
+
+---
+
+## 2. Render Web Service & GHCR Registry Configuration
+
+Reference: [Render — Deploying an Image](https://render.com/docs/deploying-an-image)
+
+### 2.1 Service Settings
+
+| Setting | Value | Rationale |
+| --- | --- | --- |
+| **Workspace** | Owner's **Hobby** workspace | Confirmed account & credit target |
+| **Service Type** | **Web Service** → **Deploy an existing image from a registry** | Runs prebuilt GHCR image; no source build on Render |
+| **Region** | **Ohio (`us-east`)** | Target region near `us-east` Neon `Rabet_prod` |
+| **Instance Type** | **Starter** (1 instance) | Persistent container with zero spin-down cold starts so Telegram webhooks respond well within deadline |
+| **Image URL** | `ghcr.io/geekammar/rabet@sha256:<digest>` | Pinned immutable digest from GitHub Actions summary |
+| **Port / Host** | Default `PORT=10000` (injected by Render), bound to `0.0.0.0` | `Dockerfile` sets `HOSTNAME=0.0.0.0` and `CMD ["node", "server.js"]`, which respects any Render-supplied `PORT` |
+| **Start Command** | *(Leave blank — use image default)* | Runs `node server.js` as non-root user `nextjs` (`1001:1001`); zero install, build, or migration on boot |
+| **Health Check Path** | `/api/healthz` | Returns `200 OK` (`Cache-Control: no-store`) without contacting Neon or Telegram |
+| **Auto-Deploy** | **Off / Manual digest promotion** | Every deploy promotes a reviewed `@sha256:...` digest |
+
+### 2.2 GHCR Registry Access
+
+1. **First-push package visibility:** Even when the GitHub repository (`geekammar/Rabet`) is public, GitHub Container Registry creates new personal container packages (`ghcr.io/geekammar/rabet`) as **Private** by default on first push.
+2. **Recommended setup (keep GHCR package Private + read-only credential on Render):**
+   - Generate a dedicated GitHub Personal Access Token (classic) on the owner account with **only** the **`read:packages`** scope (do **not** grant `write:packages`, `delete:packages`, `repo`, or `workflow`).
+   - In Render service creation / **Settings → Registry Credentials**, add a credential:
+     - **Registry:** `GitHub Container Registry (ghcr.io)`
+     - **Username:** `geekammar`
+     - **Password / Token:** `<read:packages PAT>`
+   - Render validates pull access to `ghcr.io/geekammar/rabet@sha256:...` before creating or updating the service.
+3. **Verification before service creation:** From any machine without ambient repo tokens, verify pullability with that `read:packages` token (or inspect package settings at `https://github.com/users/geekammar/packages/container/package/rabet`).
+
+---
+
+## 3. Environment Variables, Build-Time vs Runtime, and Reverse-Proxy URL Handling
+
+### 3.1 URL & Reverse-Proxy Architecture Review
+
+1. **Notification URL resolution order (`src/lib/telegram/seller-notifications.ts`):**
+   `getTrustedDashboardInquiryUrl()` checks environment variables in exact order:
+   ```text
+   1. process.env.APP_URL
+   2. process.env.NEXT_PUBLIC_APP_URL
+   3. process.env.AUTH_URL
+   ```
+   In `NODE_ENV=production`, it requires `https:` and rejects `localhost`, `127.*`, `0.0.0.0`, and `::1`.
+2. **Why `NEXT_PUBLIC_APP_URL` is build-time while `APP_URL` and `AUTH_URL` are runtime:**
+   - Next.js inlines `process.env.NEXT_PUBLIC_*` references during `next build`. Because the GHCR image is built once on `main` without baking environment-specific URLs into the image, `NEXT_PUBLIC_APP_URL` is intentionally **unset at Docker build time**; setting `NEXT_PUBLIC_APP_URL` only at runtime on Render will **not** update compiled bundles.
+   - `APP_URL` and `AUTH_URL` have no `NEXT_PUBLIC_` prefix and are evaluated from `process.env` at **runtime** on every request.
+3. **Reverse-proxy host, scheme, and redirect safety on Render:**
+   - Render terminates public HTTPS at its edge proxy and forwards HTTP to the container on `0.0.0.0:$PORT` with `Host` and `X-Forwarded-Proto: https`.
+   - Inside standalone `server.js`, Next.js initializes internal request URLs from `HOSTNAME:PORT` (`0.0.0.0:10000`) unless overridden.
+   - Setting **`AUTH_URL=https://<canonical-public-origin>`** at runtime on Render does three essential things simultaneously in `next-auth@5.0.0-beta.32`:
+     1. Enables `trustHost` (`!!process.env.AUTH_URL`) without needing `VERCEL=1`.
+     2. Rewrites `req.nextUrl.origin` via `reqWithEnvURL()` before `src/proxy.ts` runs, guaranteeing signed-out dashboard redirects go to `https://<canonical-public-origin>/login` (never `https://0.0.0.0:10000/login` and never an attacker-supplied `X-Forwarded-Host`).
+     3. Pins Auth.js action URLs (`csrf`, `signin`, `callback`, `signout`, `session`) to `https://`, ensuring the session cookie uses the `__Secure-authjs.session-token` (`Secure; HttpOnly; SameSite=Lax`) contract.
+   - Next.js Server Actions (`POST /login`) compare the browser `Origin` header host against the incoming `Host` / `X-Forwarded-Host` header. Attaching any custom domain directly under **Render → Settings → Custom Domains** preserves matching `Host` and `Origin` end-to-end.
+4. **Build-time secret hygiene:**
+   - `Dockerfile` passes **no** `AUTH_SECRET` (real or synthetic) during `npm run build`, and CI verifies `Config.Env` and `/app` inside the built image contain zero secrets and zero `.env*` files.
+
+### 3.2 Production Environment Variable Matrix (Render Dashboard)
+
+Configure these as individual Environment Variables on the Render Web Service (never commit `.env` files or use shared preview groups):
+
+| Variable | Phase / Stage | Required | Safe Source / Format |
+| --- | --- | --- | --- |
+| `APP_URL` | Checkpoint A+ | **Yes** | Exact HTTPS public origin with no trailing slash (e.g., `https://admin.example.com`, or `https://<service>.onrender.com` during Checkpoint A). Checked **1st** by seller notification links. |
+| `AUTH_URL` | Checkpoint A+ | **Yes** | Exact same HTTPS public origin as `APP_URL`. Required for Auth.js reverse-proxy host/scheme handling, `__Secure-` cookies, and safe `/login` redirects. |
+| `AUTH_SECRET` | Checkpoint A+ | **Yes** | Fresh 32-byte random base64 secret generated locally via `openssl rand -base64 32` (or existing production secret if preserving session continuity is explicitly desired; a fresh secret is recommended on host migration). |
+| `ADMIN_EMAIL` | **Checkpoint B+** *(withhold until ingress is accepted — see §4)* | **Yes (at Checkpoint B)** | Owner's single administrator sign-in email. Leave **unset** during public Checkpoint A so `getAdminConfig()` fails closed. |
+| `ADMIN_PASSWORD_HASH` | **Checkpoint B+** *(withhold until ingress is accepted — see §4)* | **Yes (at Checkpoint B)** | Argon2id PHC string (`$argon2id$...`) generated locally via `node scripts/generate-admin-hash.mjs`. Never store plaintext passwords. Wrap carefully / paste exact value in Render UI without shell expansion. |
+| `DATABASE_URL` | Checkpoint B+ | **Yes (at Checkpoint B)** | Existing Neon **`Rabet_prod` pooled** connection string (`-pooler` hostname) with `?sslmode=require`, e.g. `postgresql://<role>:<password>@ep-cool-pooler-12345.us-east-2.aws.neon.tech/<dbname>?sslmode=require`. *(Never use `Rabet_dev`.)* |
+| `TELEGRAM_BOT_TOKEN` | Checkpoint C *(or pre-staged before webhook switch)* | **Yes (at Checkpoint C)** | Existing production customer bot token from `@BotFather` / current production vault. |
+| `TELEGRAM_WEBHOOK_SECRET` | Checkpoint C *(or pre-staged before webhook switch)* | **Yes (at Checkpoint C)** | Existing `secret_token` registered on the production Telegram webhook (preserve to avoid rejecting in-flight updates during cutover, or rotate atomically inside one `setWebhook` call). |
+| `TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN` | Optional (Checkpoint C) | Only if seller notifications are enabled | Existing seller-notification bot token (`src/lib/telegram/seller-notifications.ts`). |
+
+**Variables that MUST remain UNSET on Render Production:**
+- `MANUAL_PAYMENT_PROTOTYPE_ENABLED` — synthetic prototype flag; never enable in Production (ADR-005 / ADR-013).
+- `RABET_TEST_PG_URL` — test-only cluster variable.
+- `NEXT_PUBLIC_APP_URL` — build-time variable; not relied upon at runtime (use `APP_URL` + `AUTH_URL`).
+
+---
+
+## 4. Admin Ingress Protection Review (ADR-011) & Direct-Origin Bypass Assessment
+
+### 4.1 Code Review of Credential Entry & Boundary Paths
+
+ADR-011 documents that Rabet ships **no in-application login rate limiter** and relies on Argon2id cost (`19 MiB`, `timeCost: 2` on every attempt including unknown emails), single-admin fail-closed config, and external edge/entry protection. Reviewing the codebase confirms **two** HTTP entry paths invoke `verifyAdminCredentials()` (`src/lib/auth/credentials.ts`):
+
+1. **Login Server Action (`src/app/actions/auth.ts` → `login()`):**
+   - Invoked by `<LoginForm />` as `POST /login` carrying a `Next-Action` header.
+   - Validates `email`/`password` with `signInSchema`, constrains `callbackUrl` via `safeLoginRedirect()`, and calls Auth.js `signIn("credentials", ...)` → `verifyAdminCredentials()`.
+   - Note: In Next.js App Router, a client holding the compiled action ID can send a `Next-Action` `POST` to any route handled by the App Router unless an edge policy or origin check gates non-webhook routes.
+2. **Auth.js Credentials Callback (`src/app/api/auth/[...nextauth]/route.ts`):**
+   - Invoked at `POST /api/auth/callback/credentials` (excluded from `src/proxy.ts` matcher so unauthenticated sign-in works).
+   - Enforces Auth.js double-submit CSRF cookie/token (`MissingCSRF` on mismatch) before calling `Credentials.authorize()` → `verifyAdminCredentials()`.
+
+**Protected Dashboard & Cache Boundaries:**
+- Every dashboard path (`/overview`, `/products`, `/categories`, `/storefront`, `/catalog`, `/payment-methods`, `/inquiries`, `/customers`, `/bot-content`, `/telegram`, `/settings`) is gated twice (ADR-010): optimistically in `src/proxy.ts` and authoritatively via `await requireAdmin()` in `src/app/(dashboard)/layout.tsx`, Server Actions, and `/api/admin`.
+- `next.config.ts` statically applies `Cache-Control: private, no-store, must-revalidate` and `Pragma: no-cache` to all 11 dashboard route trees, preventing browser and CDN/proxy caching of personalized responses.
+
+**Public Webhook & Health Boundaries:**
+- `POST /api/telegram/webhook` **must remain publicly reachable** from Telegram's delivery servers without interactive login or Cloudflare Access human challenges. It enforces constant-time `X-Telegram-Bot-Api-Secret-Token` verification (`safeCompareSecret` in `src/lib/telegram/webhook.ts`) **before** parsing JSON, touching Neon, or calling Telegram (`401 Unauthorized` on missing/wrong secret; `503` if unconfigured).
+- `GET /api/healthz` is excluded from `src/proxy.ts` so Render's internal health probe succeeds without authentication or database queries.
+
+### 4.2 Direct-Origin Bypass Assessment & Exact Blocker on Render Hobby + Starter
+
+> [!WARNING]
+> **Deployment-only configuration on Render Hobby + Starter CANNOT prevent direct-origin bypass.** Keep real `ADMIN_EMAIL` and `ADMIN_PASSWORD_HASH` **out** of the public Render service until the reviewer approves and lands one of the small follow-ups below (or upgrades the workspace tier).
+
+Why deployment-only changes fall short on Render Hobby + Starter:
+
+1. **No native Render WAF or rate limiting** exists for Web Services on Hobby/Starter.
+2. **No Render Inbound IP Allowlist** exists on Hobby/Starter Web Services (restricting inbound traffic to Cloudflare IP ranges requires a Render **Scale** or **Enterprise** plan).
+3. **No custom client mTLS (Cloudflare Authenticated Origin Pulls)** can be configured on Render's managed TLS termination layer on Hobby/Starter.
+4. **Why disabling `*.onrender.com` alone does not stop direct-origin bypass:**
+   Even if an owned custom domain (e.g., `rabet.example.com`) is proxied (orange-clouded) through **Cloudflare Access + Cloudflare WAF Rate Limiting** and the default `<service>.onrender.com` subdomain is disabled (`renderSubdomainPolicy: disabled` / Render Dashboard toggle), Render terminates TLS for `rabet.example.com` on Render's public anycast ingress IP (`216.24.57.1`). An attacker can send requests directly to Render's IP with matching TLS SNI and `Host: rabet.example.com`:
+   ```bash
+   curl --resolve rabet.example.com:443:216.24.57.1 https://rabet.example.com/api/auth/callback/credentials -X POST ...
+   ```
+   That request bypasses Cloudflare WAF and Cloudflare Access completely and reaches Rabet's origin directly.
+
+### 4.3 Smallest Viable Render Ingress Option & Proposed Follow-Up
+
+**Recommended Architecture (Cloudflare Access on an Owned Custom Domain + Origin JWT Verification Follow-Up):**
+
+1. **Edge Layer (Cloudflare Free + Zero Trust Access Free on owned custom domain `rabet.example.com`):**
+   - Attach `rabet.example.com` under **Render → Settings → Custom Domains**, verify TLS in DNS-only mode (no `AAAA` records), then enable Cloudflare Proxy (**Orange Cloud**) with SSL/TLS mode **Full (Strict)**, and disable the `<service>.onrender.com` subdomain in Render.
+   - Configure **Cloudflare Access** self-hosted application for `rabet.example.com`:
+     - **Policy 1 (Bypass):** path `rabet.example.com/api/telegram/webhook` → Action **Bypass** (`Everyone`), leaving Telegram's `X-Telegram-Bot-Api-Secret-Token` validation authoritative.
+     - **Policy 2 (Allow Owner Only):** entire `rabet.example.com/*` (covering `/login`, `/api/auth/*`, `/overview`, all dashboard paths, and Server Actions) → Action **Allow** restricted to the owner's email OTP / identity provider.
+   - Configure **Cloudflare Cache Rule** respecting origin `Cache-Control` (Bypass cache for `/login`, `/api/*`, and all dashboard paths).
+   - Optionally add a **Cloudflare WAF Rate Limiting Rule** on `POST` where URI Path is in `{"/login", "/api/auth/callback/credentials"}` (5 requests / 60s per IP).
+2. **Smallest Code Follow-Up Required to Close Direct-Origin Bypass (~35 lines, separate focused PR):**
+   - Verify Cloudflare Access's asymmetrically signed `Cf-Access-Jwt-Assertion` request header against `https://<CF_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` (`POLICY_AUD = CF_ACCESS_POLICY_AUD`) in `src/proxy.ts` (and before `verifyAdminCredentials()` so `/api/auth/callback/credentials` is also covered) whenever `CF_ACCESS_POLICY_AUD` is set, exempting only `/api/healthz` (Render internal probe) and `/api/telegram/webhook` (`X-Telegram-Bot-Api-Secret-Token`).
+   - With that check in place, any direct-to-Render `curl --resolve` bypass lacks a valid Cloudflare-signed JWT and is rejected with `403 Forbidden` at the origin before Argon2 or Auth.js runs.
+   - *(Alternative if no custom domain is desired: a small durable PostgreSQL rate-limit guard inside `verifyAdminCredentials()` using the existing `Rabet_prod` database, closing ADR-011 across both `POST /login` and `POST /api/auth/callback/credentials` even on `*.onrender.com`.)*
+
+### 4.4 How to Verify Ingress Once Applied
+
+Run all four checks from an unauthenticated external terminal before loading real `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH`:
+
+1. **Default `onrender.com` subdomain blocked:**
+   ```bash
+   curl -i https://<service>.onrender.com/login
+   # Expected: 404 / connection refused / disabled subdomain response
+   ```
+2. **Cloudflare Access blocks unauthenticated public entry on custom domain:**
+   ```bash
+   curl -i https://rabet.example.com/login
+   curl -i -X POST https://rabet.example.com/api/auth/callback/credentials
+   # Expected: 302 redirect to Cloudflare Access login / 403 (never Rabet HTML)
+   ```
+3. **Direct-origin bypass blocked at Render origin IP:**
+   ```bash
+   RENDER_ORIGIN_IP="$(dig +short <service>.onrender.com | head -n1)"
+   curl -i --resolve "rabet.example.com:443:${RENDER_ORIGIN_IP}" https://rabet.example.com/login
+   curl -i --resolve "rabet.example.com:443:${RENDER_ORIGIN_IP}" -X POST https://rabet.example.com/api/auth/callback/credentials
+   # Expected (after origin-verification follow-up): 403 Forbidden (never 200 or 302 MissingCSRF)
+   ```
+4. **Telegram webhook remains publicly reachable and enforces its secret:**
+   ```bash
+   # Missing secret -> 401 Unauthorized (reaches origin through Access Bypass, rejected by Rabet)
+   curl -i -X POST https://rabet.example.com/api/telegram/webhook \
+     -H "Content-Type: application/json" \
+     -d '{"update_id":1}'
+   ```
+
+---
+
+## 5. Three Separate Acceptance Checkpoints
+
+Never combine boot verification, database verification, and live Telegram cutover into a single unverified jump.
+
+### Checkpoint A — Image Boots and Serves HTTP (No Admin Credentials, No Live Cutover)
+
+**Preconditions:** Service created in Ohio (`Starter`), pinned to reviewed `ghcr.io/geekammar/rabet@sha256:...` digest, only `APP_URL`, `AUTH_URL`, and `AUTH_SECRET` set. `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, `DATABASE_URL`, and `TELEGRAM_*` remain **unset**.
+
+**Verify:**
+1. Render deploy reaches **Live** and internal health check passes.
+2. `curl -sS https://<origin>/api/healthz` returns `200` with `{"status":"ok","sha":"<40-char-sha>"}` and `Cache-Control: no-store`.
+3. `GET https://<origin>/` returns `200` with styled landing page (`/_next/static/*.css` returns `200`).
+4. `GET https://<origin>/manifest.webmanifest` and `/icons/icon-192x192.png` return `200`.
+5. `GET https://<origin>/overview` redirects (`302`) to `https://<origin>/login` (confirming `AUTH_URL` reverse-proxy origin resolution).
+6. `GET https://<origin>/login` renders `"Sign-in is unavailable"` (confirming fail-closed admin config).
+7. `POST https://<origin>/api/telegram/webhook` returns `503` (`{"error":"Telegram webhook is not configured."}`).
+
+### Checkpoint B — Authenticated Dashboard Reads Expected Neon Database (Read-Only Check)
+
+**Preconditions:** Reviewer has accepted admin ingress (§4). Configure `DATABASE_URL` (existing `Rabet_prod` `-pooler` URL with `?sslmode=require`), `ADMIN_EMAIL`, and `ADMIN_PASSWORD_HASH` on Render. **Do not** switch the Telegram webhook yet.
+
+> [!IMPORTANT]
+> `GET /api/healthz` deliberately **never** connects to Neon. Actual Neon `Rabet_prod` connectivity is proven exclusively through the **read-only authenticated dashboard check** below.
+
+**Verify (strictly read-only — do not submit settings/catalog forms):**
+1. Open an incognito browser window to `https://<origin>/login`.
+2. Sign in with the administrator credentials:
+   - Confirm redirect lands on `https://<origin>/overview`.
+   - In DevTools → Network / Application, confirm cookie `__Secure-authjs.session-token` has `Secure`, `HttpOnly`, and `SameSite=Lax`, and `/overview` response headers carry `Cache-Control: private, no-store, must-revalidate` and `Pragma: no-cache`.
+3. **Prove real `Rabet_prod` read connectivity on `/overview` and `/settings`:**
+   - `/overview` renders `OverviewData.kind === "ready"` showing the existing **`Rabet_prod` store display name** and exact product, category, payment-method, and active-inquiry counts (confirming neither `"Database setup required"` nor `"The database is not reachable right now"` appears).
+   - Navigate to `/settings` and `/inquiries` (read-only page loads) and confirm existing `Rabet_prod` configuration and historical inquiries match expected production state.
+
+### Checkpoint C — Live Telegram Bot Cutover (Owner-Approved Execution Only)
+
+**Preconditions:** Checkpoints A and B passed. Set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` (matching the currently registered `secret_token`), and (if used) `TELEGRAM_SELLER_NOTIFICATION_BOT_TOKEN` on Render. Confirm `APP_URL` and `AUTH_URL` equal the final HTTPS origin.
+
+#### C.1 Inspect & Record Existing Webhook State Before Cutover
+
+Run from a secure operator shell (keeping `TELEGRAM_BOT_TOKEN` in an unlogged shell variable, never on the command line history):
+
+```bash
+curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" | jq .
+```
+
+Record:
+- Previous `result.url`
+- `result.pending_update_count`
+- `result.max_connections` (if customized; Telegram default is `40`)
+- `result.allowed_updates` (if explicitly set)
+- `result.has_custom_certificate`
+
+#### C.2 Switch Webhook While Preserving Pending Updates & Existing Settings
+
+Call `setWebhook` with **`drop_pending_updates=false`** and the preserved `secret_token` (plus any previously configured `allowed_updates` / `max_connections`):
+
+```bash
+curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n \
+    --arg url "${APP_URL}/api/telegram/webhook" \
+    --arg secret "${TELEGRAM_WEBHOOK_SECRET}" \
+    '{
+      url: $url,
+      secret_token: $secret,
+      drop_pending_updates: false
+    }')" | jq .
+```
+*(If step C.1 showed explicit `allowed_updates` or non-default `max_connections`, include those exact fields in the JSON body above.)*
+
+Because Rabet's `telegram_update` table claims each `update_id` atomically (`claimTelegramUpdate`), any update redelivered across the cutover boundary is safely deduplicated without duplicate customer messages or duplicate inquiries.
+
+#### C.3 Post-Cutover Live Verification Checklist
+
+1. **Webhook health & queue drain:**
+   ```bash
+   curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" | jq '{url: .result.url, pending_update_count: .result.pending_update_count, last_error_date: .result.last_error_date, last_error_message: .result.last_error_message}'
+   ```
+   Confirm `url` matches `${APP_URL}/api/telegram/webhook`, `last_error_message` is null/absent, and `pending_update_count` drains to `0`.
+2. **Webhook secret gate on live endpoint:**
+   Confirm `POST ${APP_URL}/api/telegram/webhook` without `X-Telegram-Bot-Api-Secret-Token` returns `401 Unauthorized`.
+3. **Live customer bot check:**
+   From a test Telegram account, send `/start`, browse a category/product, and open or reply to a test inquiry; confirm prompt bot responses and dashboard inbox visibility.
+4. **Seller notification deep-link check:**
+   Trigger a seller notification (or inspect the delivered notification button `"View Inquiry in Dashboard"` / `"عرض الاستفسار في لوحة التحكم"`) and confirm the button URL starts with `https://<new-origin>/inquiries/<id>` (proving `APP_URL` resolution on the new origin).
+5. **Fresh admin login check:**
+   Sign out from the dashboard, confirm `/overview` redirects to `/login`, and complete a fresh login on the new origin.
+6. **Mobile PWA verification on the new origin:**
+   - Confirm `https://<new-origin>/manifest.webmanifest` (`start_url: "/overview"`, `display: "standalone"`) and all icons (`/icons/icon-192x192.png`, `/icons/icon-512x512.png`, maskable icons, `/icons/apple-touch-icon.png`) load `200 OK`.
+   - Install / re-add the PWA to the mobile home screen on the new origin (existing home-screen shortcuts bound to the old Vercel domain must be replaced because PWA scope is origin-bound), launch in standalone mode, verify safe-area layout, and confirm `navigator.serviceWorker.getRegistrations()` remains empty (ADR-008).
+
+---
+
+## 6. Monitoring, Digest Rollback, and First-Deploy Stop Procedure
+
+### 6.1 Ongoing Monitoring
+
+- **Render Health Checks & Auto-Restart:** Render probes `GET /api/healthz` continuously; non-2xx/3xx responses mark the container unhealthy and restart or halt rollout automatically.
+- **Render Logs & Metrics:** Monitor **Render Dashboard → Logs, Events, and Metrics** for memory headroom (Starter provides 512 MiB RAM; Argon2id uses ~19 MiB per login verification), HTTP 5xx spikes, or container exits.
+- **Telegram Delivery Health:** Periodically check `getWebhookInfo` (`pending_update_count`, `last_error_date`, `last_error_message`) or the dashboard `/telegram` diagnostics page.
+- **Neon Console:** Monitor `Rabet_prod` active compute status and error rates in the Neon Dashboard.
+
+### 6.2 Standard Rollback (When a Previously Healthy Render Digest Exists)
+
+Because `render-image.yml` publishes immutable `sha-<commit>` tags and never overwrites or prunes prior digests in GHCR:
+
+1. Identify the last known-good `ghcr.io/geekammar/rabet@sha256:<previous-digest>` from **Render Dashboard → Events** or prior **GitHub Actions → Render Image** summaries.
+2. In **Render Dashboard → Settings → Image URL**, paste that previous `@sha256:<previous-digest>` and click **Save / Deploy**.
+3. Wait for Render to swap traffic to the rolled-back container (zero-downtime rolling replacement once `/api/healthz` returns `200`).
+4. Verify `GET https://<origin>/api/healthz` reports `"sha": "<previous-40-char-sha>"` and check `getWebhookInfo`.
+
+### 6.3 First-Deploy Stop Procedure (No Prior Healthy Render Digest & Vercel Still Disabled)
+
+If the **initial** Render deployment encounters a critical failure when **no** previously healthy Render digest exists and the old Vercel deployment remains disabled:
+
+1. **Failure during Checkpoint A or B (Telegram webhook has NOT been pointed at Render yet):**
+   - In **Render Dashboard → Settings → Suspend Web Service**, suspend the service immediately so no public traffic is served.
+   - Customer Telegram state is unaffected because the webhook was not switched.
+   - Diagnose and fix on a new reviewed PR → publish a new GHCR digest → resume from Checkpoint A.
+2. **Failure during Checkpoint C (after `setWebhook` pointed Telegram at Render, with no fallback host active):**
+   - **Preserve customer updates — NEVER run `deleteWebhook` with `drop_pending_updates=true`!**
+   - Pause incoming webhook delivery **without losing queued customer messages** by calling `deleteWebhook` with `drop_pending_updates=false`:
+     ```bash
+     curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook" \
+       -H "Content-Type: application/json" \
+       -d '{"drop_pending_updates": false}' | jq .
+     ```
+     Telegram will hold pending customer updates safely in its server queue (up to 24 hours) without hammering the broken endpoint.
+   - Suspend the Render Web Service (**Settings → Suspend Web Service**).
+   - Once a fixed PR is merged, smoke-tested, published to GHCR as a new `@sha256:...` digest, and verified through Checkpoints A and B on Render, re-enable the webhook via `setWebhook` with `drop_pending_updates=false` (§5 C.2) so all queued customer updates drain cleanly into `Rabet_prod`.
