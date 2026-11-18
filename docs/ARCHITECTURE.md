@@ -5,6 +5,14 @@ architectural decisions behind them. It is updated as phases are delivered.
 
 Related: [PROGRESS.md](./PROGRESS.md) for phase status.
 
+> **Proposed SaaS MVP direction (design only, not implemented).** The invite-only
+> merchant model, per-store ownership, mobile onboarding and Telegram Managed Bot
+> design are recorded in [SAAS_MVP_ARCHITECTURE.md](./SAAS_MVP_ARCHITECTURE.md).
+> The contract gates, legacy backfill review and staged delivery sequence are in
+> [SAAS_MVP_DELIVERY_AND_BACKFILL.md](./SAAS_MVP_DELIVERY_AND_BACKFILL.md).
+> These documents do not change the current single-store runtime or claim tenant
+> isolation.
+
 ---
 
 ## 1. Overview
