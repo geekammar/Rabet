@@ -344,6 +344,7 @@ async function main() {
     bootstrapFile,
     `import postgres from "${postgresModuleUrl}";\n` +
       `const originalFetch = globalThis.fetch;\n` +
+      `const formatVal = (v) => typeof v === "boolean" ? (v ? "t" : "f") : v;\n` +
       `let pg = null;\n` +
       `globalThis.fetch = async (input, init) => {\n` +
       `  const url = typeof input === "string" ? input : (input ? input.url : "");\n` +
@@ -359,7 +360,7 @@ async function main() {
       `      const rows = await pg.unsafe(query, params || []);\n` +
       `      const cols = rows.columns || [];\n` +
       `      const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
-      `      const rowArrays = rows.map((r) => cols.map((c) => r[c.name]));\n` +
+      `      const rowArrays = rows.map((r) => cols.map((c) => formatVal(r[c.name])));\n` +
       `      return new Response(JSON.stringify({ rows: rowArrays, fields }), {\n` +
       `        status: 200,\n` +
       `        headers: { "content-type": "application/json" },\n` +
