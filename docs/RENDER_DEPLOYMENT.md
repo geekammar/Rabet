@@ -79,7 +79,7 @@ Automatic release uses the same `prepare-release` and `publish` jobs as the manu
 
 ### 1A.1 Release sequence for a push/merge to `main`
 
-1. `release-gate-tests` runs the GHCR and Render release-gate fixtures.
+1. `release-gate-tests` runs the GHCR, Render, and workflow-contract fixtures (`tests/ghcr-release-gate.test.ts`, `tests/render-deploy-gate.test.ts`, `tests/render-image-workflow.test.ts`).
 2. `verify-image` builds and smoke-tests the PR/main image without publication permissions.
 3. `prepare-release` resolves `github.sha`, verifies it is still current `origin/main`, then **waits** for the exact-SHA `push` CI run and Dependency Audit run to complete successfully. Missing, failed, canceled, or timed-out gates fail closed. After the gates pass it re-checks `origin/main`, builds the release image, runs the existing container smoke suite, and uploads the verified archive.
 4. `publish` re-checks `origin/main`, publishes or reuses the immutable `sha-<SHA>` GHCR tag, verifies provenance, and emits the final `@sha256:...` digest.
