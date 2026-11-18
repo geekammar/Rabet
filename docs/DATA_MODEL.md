@@ -30,6 +30,12 @@ Related: [ARCHITECTURE.md](./ARCHITECTURE.md) for the stack and ADRs,
 > not transfer ownership, runtime writes do not backfill history, and reads are
 > still unfiltered until S1.3-B. See
 > [S1.3A_SAAS_DATA_ARCHITECTURE.md](./S1.3A_SAAS_DATA_ARCHITECTURE.md).
+>
+> **Admin-login throttling.** `drizzle/0007_admin_login_throttle.sql` adds the
+> additive security singleton `admin_login_throttle` (one row, attempt count and
+> fixed-window start). It is not a business entity, stores no submitted email or
+> IP, and does not change any existing table or data. Rollout is documented in
+> [RENDER_DEPLOYMENT.md](./RENDER_DEPLOYMENT.md) §4.5.
 
 ---
 

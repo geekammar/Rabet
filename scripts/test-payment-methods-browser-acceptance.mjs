@@ -25,6 +25,12 @@ const APP_PORT = 3350;
 const CDP_PORT = 9339;
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const TEST_EMAIL = "admin@example.test";
+const TEST_OPERATOR_ACCESS_KEY =
+  "browser-test-operator-access-key-32-characters";
+const OPERATOR_AUTHORIZATION = `Basic ${Buffer.from(
+  `operator:${TEST_OPERATOR_ACCESS_KEY}`,
+  "utf8",
+).toString("base64")}`;
 const TEST_PASSWORD = "test-password-123";
 const SCREENSHOT_DIR =
   process.env.SCREENSHOT_DIR ||
@@ -447,6 +453,7 @@ async function main() {
       `export AUTH_TRUST_HOST='true'`,
       `export ADMIN_EMAIL='${TEST_EMAIL}'`,
       `export ADMIN_PASSWORD_HASH='${passwordHash}'`,
+      `export RABET_OPERATOR_ACCESS_KEY='${TEST_OPERATOR_ACCESS_KEY}'`,
       `export PORT=${APP_PORT}`,
       `export NODE_ENV=production`,
       `export NODE_OPTIONS='--import ${bootstrapFile}'`,
@@ -469,7 +476,9 @@ async function main() {
   let serverReady = false;
   for (let i = 0; i < 40; i++) {
     try {
-      const res = await fetch(`${BASE_URL}/login`);
+      const res = await fetch(`${BASE_URL}/login`, {
+        headers: { Authorization: OPERATOR_AUTHORIZATION },
+      });
       if (res.status === 200) {
         serverReady = true;
         break;
@@ -523,6 +532,10 @@ async function main() {
 
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
+  await cdp.send("Network.enable");
+  await cdp.send("Network.setExtraHTTPHeaders", {
+    headers: { Authorization: OPERATOR_AUTHORIZATION },
+  });
 
   // Log in as Admin
   log("Authenticating admin session at /login...");

@@ -137,6 +137,7 @@ Configure these as individual Environment Variables on the Render Web Service (n
 | `AUTH_SECRET` | Checkpoint A+ | **Yes** | Fresh 32-byte random base64 secret generated locally via `openssl rand -base64 32` (or existing production secret if preserving session continuity is explicitly desired; a fresh secret is recommended on host migration). |
 | `ADMIN_EMAIL` | **Checkpoint B+** *(withhold until ingress is accepted — see §4)* | **Yes (at Checkpoint B)** | Owner's single administrator sign-in email. Leave **unset** during public Checkpoint A so `getAdminConfig()` fails closed. |
 | `ADMIN_PASSWORD_HASH` | **Checkpoint B+** *(withhold until ingress is accepted — see §4)* | **Yes (at Checkpoint B)** | Argon2id PHC string (`$argon2id$...`) generated locally via `node scripts/generate-admin-hash.mjs`. Never store plaintext passwords. Wrap carefully / paste exact value in Render UI without shell expansion. |
+| `RABET_OPERATOR_ACCESS_KEY` | **Before the first image with the operator gate** | **Yes (for admin login)** | High-entropy 32-byte random value, base64 encoded (`openssl rand -base64 32`). Used as the HTTP Basic password with the fixed non-secret username `operator` for `/login` and the credentials callback. Keep it out of URLs, logs and the repository. Rotating it invalidates the browser's cached Basic credential; the admin then re-enters the new key. |
 | `DATABASE_URL` | Checkpoint B+ | **Yes (at Checkpoint B)** | Existing Neon **`Rabet_prod` pooled** connection string (`-pooler` hostname) with `?sslmode=require`, e.g. `postgresql://<role>:<password>@ep-cool-pooler-12345.us-east-2.aws.neon.tech/<dbname>?sslmode=require`. *(Never use `Rabet_dev`.)* |
 | `TELEGRAM_BOT_TOKEN` | Checkpoint C *(or pre-staged before webhook switch)* | **Yes (at Checkpoint C)** | Existing production customer bot token from `@BotFather` / current production vault. |
 | `TELEGRAM_WEBHOOK_SECRET` | Checkpoint C *(or pre-staged before webhook switch)* | **Yes (at Checkpoint C)** | Existing `secret_token` registered on the production Telegram webhook (preserve to avoid rejecting in-flight updates during cutover, or rotate atomically inside one `setWebhook` call). |
@@ -153,7 +154,7 @@ Configure these as individual Environment Variables on the Render Web Service (n
 
 ### 4.1 Code Review of Credential Entry & Boundary Paths
 
-ADR-011 documents that Rabet ships **no in-application login rate limiter** and relies on Argon2id cost (`19 MiB`, `timeCost: 2` on every attempt including unknown emails), single-admin fail-closed config, and external edge/entry protection. Reviewing the codebase confirms **two** HTTP entry paths invoke `verifyAdminCredentials()` (`src/lib/auth/credentials.ts`):
+ADR-011 originally shipped **no in-application login rate limiter** and relied on Argon2id cost (`19 MiB`, `timeCost: 2` on every attempt including unknown emails), single-admin fail-closed config, and external edge protection. The current Render branch closes that gap with an independent operator access gate plus a durable PostgreSQL limiter (migration `0007_admin_login_throttle`), while still keeping the Argon2id cost. Reviewing the codebase confirms **two** HTTP entry paths invoke `verifyAdminCredentials()` (`src/lib/auth/credentials.ts`), which is where the shared attempt is counted:
 
 1. **Login Server Action (`src/app/actions/auth.ts` → `login()`):**
    - Invoked by `<LoginForm />` as `POST /login` carrying a `Next-Action` header.
@@ -162,6 +163,20 @@ ADR-011 documents that Rabet ships **no in-application login rate limiter** and 
 2. **Auth.js Credentials Callback (`src/app/api/auth/[...nextauth]/route.ts`):**
    - Invoked at `POST /api/auth/callback/credentials` (excluded from `src/proxy.ts` matcher so unauthenticated sign-in works).
    - Enforces Auth.js double-submit CSRF cookie/token (`MissingCSRF` on mismatch) before calling `Credentials.authorize()` → `verifyAdminCredentials()`.
+
+**Operator access gate (independent of the admin identity):**
+- `src/proxy.ts` requires HTTP Basic access for `/login` and `POST /api/auth/callback/credentials` before Auth.js, the limiter or Argon2 runs. The username is the fixed non-secret `operator`; the password is `RABET_OPERATOR_ACCESS_KEY` from the runtime environment. Mobile browsers prompt natively over Render HTTPS, and the login Server Action carries the same header.
+- Missing, malformed, wrong or unconfigured access all return the same `401` with `WWW-Authenticate: Basic` and `Cache-Control: no-store`. A rejected request performs **zero throttle writes and zero Argon2 calls**; repeated anonymous submissions therefore cannot spend the owner's five-attempt budget.
+- The Server Action also re-checks the header itself, so a compiled action id posted through another route cannot bypass the gate. The key is never placed in a URL or committed file and is not logged.
+- Public pages, `/api/healthz` and `/api/telegram/webhook` remain outside this gate.
+
+**Shared durable login budget (migration `0007_admin_login_throttle`):**
+- `verifyAdminCredentials()` calls `consumeLoginAttempt()` (`src/lib/auth/login-throttle.ts`) exactly once per submitted credential pair, **before** the Argon2 verification. Both paths above therefore draw from one budget; neither path keeps a second counter.
+- **Limit and window:** 5 attempts per 15 minutes, fixed window anchored at the first attempt. A verified credential pair resets the row. After the window expires the next attempt starts a fresh budget, so the administrator can retry without operator action. Five attempts covers normal typo/caps-lock retries; the window caps a remote guesser at 20 attempts/hour even under concurrency.
+- **Atomicity:** the decision is one `INSERT … ON CONFLICT DO UPDATE … RETURNING` statement. PostgreSQL serializes writers on the singleton row, so concurrent requests cannot all pass on the same count.
+- **Bounded storage and source independence:** one row (`id = 1`) holds `attempt_count` and `window_started_at`. No row is created per submitted email or IP, no client-controlled proxy header is read, and the count is capped at the budget plus one, so the table cannot grow or overflow.
+- **Fail closed:** a missing table, missing `DATABASE_URL`, or unreachable database denies the attempt before Argon2 runs. The response stays the generic “Incorrect email or password.”; no credential, hash or connection string is logged.
+- This guard covers only admin credential verification. Public pages, `/api/healthz` and `/api/telegram/webhook` do not touch it.
 
 **Protected Dashboard & Cache Boundaries:**
 - Every dashboard path (`/overview`, `/products`, `/categories`, `/storefront`, `/catalog`, `/payment-methods`, `/inquiries`, `/customers`, `/bot-content`, `/telegram`, `/settings`) is gated twice (ADR-010): optimistically in `src/proxy.ts` and authoritatively via `await requireAdmin()` in `src/app/(dashboard)/layout.tsx`, Server Actions, and `/api/admin`.
@@ -174,7 +189,7 @@ ADR-011 documents that Rabet ships **no in-application login rate limiter** and 
 ### 4.2 Direct-Origin Bypass Assessment & Exact Blocker on Render Hobby + Starter
 
 > [!WARNING]
-> **Deployment-only configuration on Render Hobby + Starter CANNOT prevent direct-origin bypass.** Keep real `ADMIN_EMAIL` and `ADMIN_PASSWORD_HASH` **out** of the public Render service until the reviewer approves and lands one of the small follow-ups below (or upgrades the workspace tier).
+> **Deployment-only configuration on Render Hobby + Starter CANNOT prevent direct-origin bypass.** The origin-side login limiter added in this branch bounds credential guessing on both credential paths even through the direct origin, but it does not restrict who can reach the dashboard. Keep the remaining ingress hardening (Cloudflare Access and origin-JWT verification) as the control that decides *who* may reach the service; do not treat an edge-only rule as covering the `*.onrender.com` origin.
 
 Why deployment-only changes fall short on Render Hobby + Starter:
 
@@ -202,11 +217,11 @@ Why deployment-only changes fall short on Render Hobby + Starter:
 2. **Smallest Code Follow-Up Required to Close Direct-Origin Bypass (~35 lines, separate focused PR):**
    - Verify Cloudflare Access's asymmetrically signed `Cf-Access-Jwt-Assertion` request header against `https://<CF_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` (`POLICY_AUD = CF_ACCESS_POLICY_AUD`) in `src/proxy.ts` (and before `verifyAdminCredentials()` so `/api/auth/callback/credentials` is also covered) whenever `CF_ACCESS_POLICY_AUD` is set, exempting only `/api/healthz` (Render internal probe) and `/api/telegram/webhook` (`X-Telegram-Bot-Api-Secret-Token`).
    - With that check in place, any direct-to-Render `curl --resolve` bypass lacks a valid Cloudflare-signed JWT and is rejected with `403 Forbidden` at the origin before Argon2 or Auth.js runs.
-   - *(Alternative if no custom domain is desired: a small durable PostgreSQL rate-limit guard inside `verifyAdminCredentials()` using the existing `Rabet_prod` database, closing ADR-011 across both `POST /login` and `POST /api/auth/callback/credentials` even on `*.onrender.com`.)*
+   - *(The no-custom-domain alternative is now implemented in this branch: the durable PostgreSQL limiter inside `verifyAdminCredentials()` closes ADR-011 across both `POST /login` and `POST /api/auth/callback/credentials` even on `*.onrender.com`. Cloudflare Access/origin-JWT verification remains a separate later hardening step, because it also governs non-credential access.)*
 
 ### 4.4 How to Verify Ingress Once Applied
 
-Run all four checks from an unauthenticated external terminal before loading real `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH`:
+Run all four checks from an unauthenticated external terminal before loading real `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH` / `RABET_OPERATOR_ACCESS_KEY`:
 
 1. **Default `onrender.com` subdomain blocked:**
    ```bash
@@ -226,13 +241,26 @@ Run all four checks from an unauthenticated external terminal before loading rea
    curl -i --resolve "rabet.example.com:443:${RENDER_ORIGIN_IP}" -X POST https://rabet.example.com/api/auth/callback/credentials
    # Expected (after origin-verification follow-up): 403 Forbidden (never 200 or 302 MissingCSRF)
    ```
-4. **Telegram webhook remains publicly reachable and enforces its secret:**
+4. **Credential entry requires operator access:** a direct request to `/login` or `POST /api/auth/callback/credentials` without the operator Basic credential returns `401` with `WWW-Authenticate: Basic` and performs no login-throttle write. With the correct key, the normal admin login flow continues.
+5. **Telegram webhook remains publicly reachable and enforces its secret:**
    ```bash
    # Missing secret -> 401 Unauthorized (reaches origin through Access Bypass, rejected by Rabet)
    curl -i -X POST https://rabet.example.com/api/telegram/webhook \
      -H "Content-Type: application/json" \
      -d '{"update_id":1}'
    ```
+
+### 4.5 Rollout Order for Admin-Login Throttling (Migration `0007`)
+
+The limiter **fails closed** when its table is missing, so apply the additive database migration before promoting a new image. The old image ignores the extra table; the new image needs it.
+
+1. **Merge the reviewed PR to `main`.** Record the exact 40-character merge SHA.
+2. **Inspect production first (read-only).** GitHub → Actions → **Neon PROD database** (`.github/workflows/neon-prod-migrate.yml`) → Run workflow → branch `main` → mode `inspect`. The runner verifies the target identity, refuses drift, validates the supported prior release (`0006_tenant_ownership_expansion`) and reports `0007_admin_login_throttle` as pending. No DDL or ledger writes happen.
+3. **Record a verified restore point**, then run the same workflow in `migrate` mode from `main` and type `MIGRATE_RABET_PROD` exactly. The approved runner executes `npm run db:migrate` against the unpooled Production URL from the `Production` GitHub Environment, then re-inspects the live schema, ledger hashes/objects and the new singleton table. It never runs `drizzle-kit push` and never migrates from the application image or at boot.
+4. **Confirm the runner reports the full chain applied** (8 migrations, `admin_login_throttle` present, prior tables/data intact) before continuing.
+5. **Configure `RABET_OPERATOR_ACCESS_KEY` on Render before promoting the image.** Generate it locally with `openssl rand -base64 32` and paste it into the Render environment. The previous image ignores the variable; the new image fails closed until it is present. Never put the key in a URL, command history, ticket or log.
+6. **Publish and promote the image.** Run **Render Image** with the exact `main` SHA and `PUBLISH_RENDER_IMAGE`, then pin the emitted `ghcr.io/geekammar/rabet@sha256:...` digest on Render. The image smoke test uses isolated PostgreSQL and exercises missing/invalid operator access, then invalid and valid logins through the real limiter.
+7. **Acceptance after deploy:** `/login` prompts for Basic access with username `operator`; missing/wrong access gets `401` without spending the budget; the correct access plus admin login succeeds; five wrong attempts followed by the correct password are rejected; the same correct password succeeds after the 15-minute window expires; `/api/healthz` and the Telegram webhook remain unaffected. Until these pass, do not change Telegram, DNS or branding.
 
 ---
 
@@ -242,7 +270,7 @@ Never combine boot verification, database verification, and live Telegram cutove
 
 ### Checkpoint A — Image Boots and Serves HTTP (No Admin Credentials, No Live Cutover)
 
-**Preconditions:** Service created in Ohio (`Starter`), pinned to reviewed `ghcr.io/geekammar/rabet@sha256:...` digest, only `APP_URL`, `AUTH_URL`, and `AUTH_SECRET` set. `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, `DATABASE_URL`, and `TELEGRAM_*` remain **unset**.
+**Preconditions:** Service created in Ohio (`Starter`), pinned to reviewed `ghcr.io/geekammar/rabet@sha256:...` digest, only `APP_URL`, `AUTH_URL`, `AUTH_SECRET`, and `RABET_OPERATOR_ACCESS_KEY` set. `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, `DATABASE_URL`, and `TELEGRAM_*` remain **unset**.
 
 **Verify:**
 1. Render deploy reaches **Live** and internal health check passes.
@@ -250,19 +278,18 @@ Never combine boot verification, database verification, and live Telegram cutove
 3. `GET https://<origin>/` returns `200` with styled landing page (`/_next/static/*.css` returns `200`).
 4. `GET https://<origin>/manifest.webmanifest` and `/icons/icon-192x192.png` return `200`.
 5. `GET https://<origin>/overview` redirects (`302`) to `https://<origin>/login` (confirming `AUTH_URL` reverse-proxy origin resolution).
-6. `GET https://<origin>/login` renders `"Sign-in is unavailable"` (confirming fail-closed admin config).
+6. `GET https://<origin>/login` without the operator Basic credential returns `401` with `WWW-Authenticate: Basic`; with the operator credential it renders `"Sign-in is unavailable"` (confirming fail-closed admin config).
 7. `POST https://<origin>/api/telegram/webhook` returns `503` (`{"error":"Telegram webhook is not configured."}`).
 
 ### Checkpoint B — Authenticated Dashboard Reads Expected Neon Database (Read-Only Check)
 
-**Preconditions:** Reviewer has accepted admin ingress (§4). Configure `DATABASE_URL` (existing `Rabet_prod` `-pooler` URL with `?sslmode=require`), `ADMIN_EMAIL`, and `ADMIN_PASSWORD_HASH` on Render. **Do not** switch the Telegram webhook yet.
+**Preconditions:** Reviewer has accepted admin ingress (§4). Configure `DATABASE_URL` (existing `Rabet_prod` `-pooler` URL with `?sslmode=require`), `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, and `RABET_OPERATOR_ACCESS_KEY` on Render. **Do not** switch the Telegram webhook yet.
 
 > [!IMPORTANT]
 > `GET /api/healthz` deliberately **never** connects to Neon. Actual Neon `Rabet_prod` connectivity is proven exclusively through the **read-only authenticated dashboard check** below.
 
 **Verify (strictly read-only — do not submit settings/catalog forms):**
-1. Open an incognito browser window to `https://<origin>/login`.
-2. Sign in with the administrator credentials:
+1. Open an incognito browser window to `https://<origin>/login`. Enter the HTTP Basic operator access (`operator` + the configured key), then sign in with the administrator credentials:
    - Confirm redirect lands on `https://<origin>/overview`.
    - In DevTools → Network / Application, confirm cookie `__Secure-authjs.session-token` has `Secure`, `HttpOnly`, and `SameSite=Lax`, and `/overview` response headers carry `Cache-Control: private, no-store, must-revalidate` and `Pragma: no-cache`.
 3. **Prove real `Rabet_prod` read connectivity on `/overview` and `/settings`:**

@@ -1,8 +1,10 @@
 "use server";
 
 import { AuthError } from "next-auth";
+import { headers } from "next/headers";
 
 import { signIn, signOut } from "@/auth";
+import { checkOperatorAccess } from "@/lib/auth/operator-access";
 import { safeLoginRedirect } from "@/lib/auth/redirect";
 import { signInSchema } from "@/lib/auth/schema";
 
@@ -35,6 +37,17 @@ export async function login(
   _prevState: LoginState | undefined,
   formData: FormData,
 ): Promise<LoginState> {
+  // Defence in depth for the Server Action itself. The proxy already rejects
+  // `/login` and the credentials callback without operator access, but a
+  // compiled Server Action can be posted with its action id from another
+  // route; checking here means such a request also cannot spend the shared
+  // login budget or reach Argon2.
+  const authorization = (await headers()).get("authorization");
+
+  if (!checkOperatorAccess(authorization)) {
+    return { message: "Incorrect email or password." };
+  }
+
   const rawCallbackUrl = formData.get("callbackUrl");
   const callbackUrl = safeLoginRedirect(rawCallbackUrl);
 

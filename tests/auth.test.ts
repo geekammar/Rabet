@@ -13,23 +13,52 @@
  * is printed by these tests.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess, execSync } from "node:child_process";
 import { writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { hash } from "@node-rs/argon2";
 import { encode as encodeJwt } from "@auth/core/jwt";
+import { sql } from "drizzle-orm";
+
+import {
+  LOGIN_MAX_ATTEMPTS,
+  LOGIN_WINDOW_SECONDS,
+  consumeLoginAttempt,
+} from "@/lib/auth/login-throttle";
+import {
+  asAppDb,
+  createTestDatabase,
+  hasTestCluster,
+  type TestDatabase,
+} from "./db/helpers";
+import {
+  startNeonHttpBridge,
+  type NeonHttpBridge,
+} from "./helpers/neon-http-bridge";
 
 // Configurable ports so CI and local runs (or two runs side by side) never
 // fight over a fixed address. Defaults keep the historic 3210/3211 so an
 // unconfigured `npm run test` behaves exactly as before.
 const PORT = process.env.RABET_TEST_PORT ?? "3210";
 const CLOSED_PORT = process.env.RABET_TEST_PORT_2 ?? "3211";
+const NO_ACCESS_PORT = process.env.RABET_TEST_PORT_3 ?? "3212";
 const BASE = `http://localhost:${PORT}`;
+
+const shouldRun = hasTestCluster();
+
+let authDb: TestDatabase | null = null;
+let neonBridge: NeonHttpBridge | null = null;
 
 const TEST_EMAIL = "admin@example.test";
 const TEST_PASSWORD = "integration-test-password-99";
+const TEST_OPERATOR_ACCESS_KEY =
+  "integration-test-operator-access-key-32-characters";
+const OPERATOR_AUTHORIZATION = `Basic ${Buffer.from(
+  `operator:${TEST_OPERATOR_ACCESS_KEY}`,
+  "utf8",
+).toString("base64")}`;
 
 type CookieJar = Record<string, string>;
 
@@ -171,6 +200,7 @@ function track(child: ChildProcess): ChildProcess {
  * file, and never printed.
  */
 let testAuthSecret = "";
+let testPasswordHash = "";
 
 async function buildOnce(): Promise<void> {
   // Reuse the already-built .next output when present (the CI matrix builds
@@ -201,6 +231,18 @@ async function buildOnce(): Promise<void> {
 }
 
 beforeAll(async () => {
+  if (!shouldRun) return;
+
+  // Auth now has a durable login limiter, so this suite needs the isolated
+  // PostgreSQL cluster the DB suites use. Each run gets a brand-new database
+  // with the committed migration chain applied, and drops it afterwards.
+  authDb = await createTestDatabase("auth");
+  // The application uses the Neon HTTP driver. Put a loopback HTTP endpoint in
+  // front of the throwaway database so the spawned server exercises the real
+  // production client, not a different driver.
+  neonBridge = await startNeonHttpBridge(authDb.url);
+  process.env.DATABASE_URL = neonBridge.url;
+
   await buildOnce();
 
   // A previous crashed run can leave a server bound to the port. Try to free
@@ -217,6 +259,7 @@ beforeAll(async () => {
     timeCost: 2,
     parallelism: 1,
   });
+  testPasswordHash = passwordHash;
 
   // Write a throwaway env file. The values exist only for this process tree
   // and are never committed or logged.
@@ -239,6 +282,9 @@ beforeAll(async () => {
       `ADMIN_PASSWORD_HASH='${passwordHash}'`,
       `AUTH_URL=${BASE}`,
       `AUTH_TRUST_HOST=true`,
+      `RABET_OPERATOR_ACCESS_KEY=${TEST_OPERATOR_ACCESS_KEY}`,
+      `DATABASE_URL=${neonBridge.url}`,
+      `NODE_OPTIONS='--import ${neonBridge.preloadPath}'`,
     ].join("\n") + "\n",
   );
 
@@ -278,6 +324,8 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  if (!shouldRun) return;
+
   // Signal the whole process group, not just the `npx` wrapper, so the
   // `next-server` grandchild dies and releases port 3210, and wait for the
   // process tree to actually be gone before the worker tears down.
@@ -290,6 +338,7 @@ afterAll(async () => {
   }
   freePort(Number(PORT));
   freePort(Number(CLOSED_PORT));
+  freePort(Number(NO_ACCESS_PORT));
 
   // Remove the throwaway env directory so no test-only hash or secret is left
   // behind in the OS temp dir. `force` makes this a no-op when the directory
@@ -298,23 +347,56 @@ afterAll(async () => {
     rmSync(envDirRef.dir, { recursive: true, force: true });
     envDirRef.dir = "";
   }
+
+  await neonBridge?.close();
+  neonBridge = null;
+  await authDb?.close();
+  authDb = null;
+  delete process.env.DATABASE_URL;
 });
+
+beforeEach(async () => {
+  if (!authDb) return;
+
+  // Each test starts with a clear budget. The throttle tests that exhaust or
+  // expire the window do so explicitly inside the test.
+  await authDb.db.execute(sql`DELETE FROM admin_login_throttle`);
+});
+
+type RawOptions = RequestInit & {
+  jar?: CookieJar;
+  operatorAccess?: boolean;
+  authorization?: string | null;
+};
 
 /** Fetch with redirect-following disabled so redirects can be inspected. */
 async function raw(
   url: string,
-  init: RequestInit & { jar?: CookieJar } = {},
+  init: RawOptions = {},
 ): Promise<{ status: number; location: string | null; body: string; headers: Headers; jar: CookieJar }> {
-  const jar = init.jar ?? {};
+  const {
+    jar: initialJar,
+    operatorAccess,
+    authorization,
+    ...requestInit
+  } = init;
+  const jar = initialJar ?? {};
   const cookieHeader = Object.entries(jar)
     .map(([name, value]) => `${name}=${value}`)
     .join("; ");
+  const accessHeader =
+    authorization !== undefined
+      ? authorization
+      : operatorAccess === false
+        ? null
+        : OPERATOR_AUTHORIZATION;
 
   const response = await fetch(BASE + url, {
-    ...init,
+    ...requestInit,
     redirect: "manual",
     headers: {
-      ...(init.headers ?? {}),
+      ...(requestInit.headers ?? {}),
+      ...(accessHeader ? { Authorization: accessHeader } : {}),
       ...(cookieHeader ? { Cookie: cookieHeader } : {}),
     },
   });
@@ -365,6 +447,27 @@ async function signIn(jar: CookieJar, email = TEST_EMAIL, password = TEST_PASSWO
   });
 }
 
+type ThrottleRow = {
+  attempt_count: number;
+  window_started_at: string;
+};
+
+async function throttleRow(): Promise<ThrottleRow | undefined> {
+  const result = await authDb!.db.execute<ThrottleRow>(sql`
+    SELECT attempt_count, window_started_at::text AS window_started_at
+    FROM admin_login_throttle
+    WHERE id = 1
+  `);
+  return result[0];
+}
+
+async function throttleRowCount(): Promise<number> {
+  const result = await authDb!.db.execute<{ count: number }>(sql`
+    SELECT count(*)::int AS count FROM admin_login_throttle
+  `);
+  return result[0]?.count ?? 0;
+}
+
 async function signOut(jar: CookieJar) {
   const { csrf, jar: jarWithCsrf } = await withCsrf(jar);
   return raw("/api/auth/signout", {
@@ -392,7 +495,7 @@ const DASHBOARD_PATHS = [
   "/settings",
 ];
 
-describe("unauthenticated access is blocked", () => {
+describe.skipIf(!shouldRun)("unauthenticated access is blocked", () => {
   it.each(DASHBOARD_PATHS)("redirects %s to /login", async (path) => {
     const res = await raw(path);
     expect([301, 302, 303, 307, 308]).toContain(res.status);
@@ -416,8 +519,200 @@ describe("unauthenticated access is blocked", () => {
   });
 });
 
-describe("login", () => {
-  it("serves the sign-in page publicly", async () => {
+describe.skipIf(!shouldRun)("operator access gate", () => {
+  const invalidAuthorization = `Basic ${Buffer.from(
+    `operator:wrong-${TEST_OPERATOR_ACCESS_KEY}`,
+    "utf8",
+  ).toString("base64")}`;
+
+  it("rejects missing access on both credential paths without consuming budget", async () => {
+    const loginPage = await raw("/login", { operatorAccess: false });
+    expect(loginPage.status).toBe(401);
+    expect(loginPage.headers.get("www-authenticate")).toMatch(/^Basic /);
+    expect(await throttleRowCount()).toBe(0);
+
+    const loginPost = await raw("/login", {
+      operatorAccess: false,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+      }).toString(),
+    });
+    expect(loginPost.status).toBe(401);
+    expect(loginPost.headers.get("www-authenticate")).toMatch(/^Basic /);
+
+    const callback = await raw("/api/auth/callback/credentials", {
+      operatorAccess: false,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        email: TEST_EMAIL,
+        password: TEST_PASSWORD,
+      }).toString(),
+    });
+    expect(callback.status).toBe(401);
+    expect(callback.headers.get("www-authenticate")).toMatch(/^Basic /);
+    expect(
+      Object.keys(callback.jar).some((name) => name.includes("session-token")),
+    ).toBe(false);
+    expect(await throttleRowCount()).toBe(0);
+  });
+
+  it("rejects invalid access on both credential paths without consuming budget", async () => {
+    for (const path of ["/login", "/api/auth/callback/credentials"]) {
+      const res = await raw(path, {
+        authorization: invalidAuthorization,
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          email: TEST_EMAIL,
+          password: TEST_PASSWORD,
+        }).toString(),
+      });
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get("www-authenticate")).toMatch(/^Basic /);
+      expect(
+        Object.keys(res.jar).some((name) => name.includes("session-token")),
+      ).toBe(false);
+    }
+
+    expect(await throttleRowCount()).toBe(0);
+  });
+
+  it("does not let repeated unauthorized submissions block valid owner sign-in", async () => {
+    for (let i = 0; i < 20; i += 1) {
+      const path =
+        i % 2 === 0 ? "/login" : "/api/auth/callback/credentials";
+      const res = await raw(path, {
+        operatorAccess: false,
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          email: TEST_EMAIL,
+          password: TEST_PASSWORD,
+        }).toString(),
+      });
+      expect(res.status).toBe(401);
+    }
+
+    expect(await throttleRowCount()).toBe(0);
+
+    const owner = await signIn({});
+    expect([301, 302, 303]).toContain(owner.status);
+    expect(owner.location).toContain("/overview");
+    expect(
+      Object.keys(owner.jar).some((name) => name.includes("session-token")),
+    ).toBe(true);
+    expect((await throttleRow())?.attempt_count).toBe(0);
+  });
+
+  it("fails closed when the operator access key is not configured", async () => {
+    const base = `http://localhost:${NO_ACCESS_PORT}`;
+    const envFile = path.join(envDirRef.dir, "no-operator-access.env");
+
+    writeFileSync(
+      envFile,
+      [
+        `AUTH_SECRET=${Buffer.from(
+          globalThis.crypto.getRandomValues(new Uint8Array(32)),
+        ).toString("base64")}`,
+        `ADMIN_EMAIL=${TEST_EMAIL}`,
+        `ADMIN_PASSWORD_HASH='${testPasswordHash}'`,
+        `AUTH_URL=${base}`,
+        `AUTH_TRUST_HOST=true`,
+      ].join("\n") + "\n",
+    );
+
+    await freePort(Number(NO_ACCESS_PORT));
+
+    const proc = track(
+      spawn(
+        "bash",
+        [
+          "-c",
+          `unset RABET_OPERATOR_ACCESS_KEY; set -a; . ${envFile}; set +a; exec npx next start -p ${NO_ACCESS_PORT}`,
+        ],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          cwd: process.cwd(),
+          detached: true,
+        },
+      ),
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("no-access server did not start")),
+        60_000,
+      );
+      const onData = (data: Buffer) => {
+        if (data.toString().includes("Ready")) {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+      proc.stdout?.on("data", onData);
+      proc.stderr?.on("data", onData);
+      proc.stdout?.on("error", () => {});
+      proc.stderr?.on("error", () => {});
+      proc.on("error", () => {});
+    });
+
+    try {
+      const login = await fetch(`${base}/login`, { redirect: "manual" });
+      expect(login.status).toBe(401);
+      expect(login.headers.get("www-authenticate")).toMatch(/^Basic /);
+
+      const callback = await fetch(`${base}/api/auth/callback/credentials`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: OPERATOR_AUTHORIZATION,
+        },
+        body: new URLSearchParams({
+          email: TEST_EMAIL,
+          password: TEST_PASSWORD,
+        }).toString(),
+      });
+      expect(callback.status).toBe(401);
+      expect(callback.headers.get("www-authenticate")).toMatch(/^Basic /);
+      expect(
+        callback.headers
+          .getSetCookie()
+          .some((cookie) => cookie.includes("session-token")),
+      ).toBe(false);
+      expect(await throttleRowCount()).toBe(0);
+    } finally {
+      await killTree(proc);
+    }
+  }, 90_000);
+
+  it("keeps public pages, healthz and Telegram outside the gate", async () => {
+    const home = await raw("/", { operatorAccess: false });
+    expect(home.status).toBe(200);
+    expect(home.headers.get("www-authenticate")).toBeNull();
+
+    const health = await raw("/api/healthz", { operatorAccess: false });
+    expect(health.status).toBe(200);
+    expect(health.headers.get("www-authenticate")).toBeNull();
+
+    const webhook = await raw("/api/telegram/webhook", {
+      operatorAccess: false,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ update_id: 1 }),
+    });
+    expect(webhook.status).toBe(503);
+    expect(webhook.headers.get("www-authenticate")).toBeNull();
+  });
+});
+
+describe.skipIf(!shouldRun)("login", () => {
+  it("serves the sign-in page to an operator with access", async () => {
     const res = await raw("/login");
     expect(res.status).toBe(200);
     expect(res.body).toContain('id="email"');
@@ -461,7 +756,89 @@ describe("login", () => {
   });
 });
 
-describe("CSRF protection", () => {
+describe.skipIf(!shouldRun)("login throttling", () => {
+  it("counts exactly one attempt for a single failed callback", async () => {
+    // Both entry paths converge on `verifyAdminCredentials`; Auth.js calls it
+    // once per submitted credential pair, so one attempt is counted once.
+    const res = await signIn({}, TEST_EMAIL, "wrong-password");
+
+    expect(res.location).toContain("CredentialsSignin");
+    expect(await throttleRowCount()).toBe(1);
+    expect((await throttleRow())?.attempt_count).toBe(1);
+  });
+
+  it("still accepts the valid admin while attempts remain", async () => {
+    for (let i = 0; i < LOGIN_MAX_ATTEMPTS - 1; i += 1) {
+      const decision = await consumeLoginAttempt(asAppDb(authDb!.db));
+      expect(decision.allowed).toBe(true);
+    }
+
+    const res = await signIn({});
+
+    expect([301, 302, 303]).toContain(res.status);
+    expect(res.location).toContain("/overview");
+    expect(
+      Object.keys(res.jar).some((name) => name.includes("session-token")),
+    ).toBe(true);
+    // A verified login clears the budget.
+    expect((await throttleRow())?.attempt_count).toBe(0);
+  });
+
+  it("denies the valid admin after the budget is exhausted, then accepts after the window expires", async () => {
+    for (let i = 0; i < LOGIN_MAX_ATTEMPTS; i += 1) {
+      const res = await signIn({}, TEST_EMAIL, "wrong-password");
+      expect(res.location).toContain("CredentialsSignin");
+    }
+
+    const denied = await signIn({});
+    expect(denied.location).toContain("CredentialsSignin");
+    expect(
+      Object.keys(denied.jar).some((name) => name.includes("session-token")),
+    ).toBe(false);
+    expect((await throttleRow())?.attempt_count).toBe(LOGIN_MAX_ATTEMPTS + 1);
+
+    // Move the fixed window into the past instead of waiting fifteen minutes.
+    await authDb!.db.execute(sql`
+      UPDATE admin_login_throttle
+      SET window_started_at = now() - make_interval(secs => ${LOGIN_WINDOW_SECONDS + 1})
+      WHERE id = 1
+    `);
+
+    const retried = await signIn({});
+    expect([301, 302, 303]).toContain(retried.status);
+    expect(retried.location).toContain("/overview");
+    expect(
+      Object.keys(retried.jar).some((name) => name.includes("session-token")),
+    ).toBe(true);
+  });
+
+  it("does not exceed the budget under concurrent attempts", async () => {
+    const decisions = await Promise.all(
+      Array.from({ length: LOGIN_MAX_ATTEMPTS * 3 }, () =>
+        consumeLoginAttempt(asAppDb(authDb!.db)),
+      ),
+    );
+
+    expect(decisions.filter((decision) => decision.allowed)).toHaveLength(
+      LOGIN_MAX_ATTEMPTS,
+    );
+    const row = await throttleRow();
+    expect(row?.attempt_count).toBe(LOGIN_MAX_ATTEMPTS + 1);
+  });
+
+  it("keeps storage bounded for arbitrary submitted emails", async () => {
+    for (let i = 0; i < LOGIN_MAX_ATTEMPTS + 20; i += 1) {
+      await signIn({}, `intruder-${i}@example.test`, "wrong-password");
+    }
+
+    expect(await throttleRowCount()).toBe(1);
+    expect((await throttleRow())?.attempt_count).toBe(
+      LOGIN_MAX_ATTEMPTS + 1,
+    );
+  });
+});
+
+describe.skipIf(!shouldRun)("CSRF protection", () => {
   it("rejects a sign-in POST without a CSRF token", async () => {
     // No csrfToken cookie or body field: Auth.js must short-circuit with
     // MissingCSRF and never evaluate the credentials.
@@ -498,7 +875,7 @@ describe("CSRF protection", () => {
   });
 });
 
-describe("open-redirect protection", () => {
+describe.skipIf(!shouldRun)("open-redirect protection", () => {
   it("does not follow an external callbackUrl off the site's origin", async () => {
     // An attacker-supplied `callbackUrl` must never steer the redirect off the
     // origin. Auth.js itself collapses it to the origin; the application layer
@@ -546,7 +923,7 @@ describe("open-redirect protection", () => {
   });
 });
 
-describe("authenticated access", () => {
+describe.skipIf(!shouldRun)("authenticated access", () => {
   it("renders dashboard content with a valid session", async () => {
     const loginRes = await signIn({});
     const res = await raw("/overview", { jar: loginRes.jar });
@@ -630,7 +1007,7 @@ describe("authenticated access", () => {
   });
 });
 
-describe("missing admin configuration fails closed", () => {
+describe.skipIf(!shouldRun)("missing admin configuration fails closed", () => {
   it("rejects every sign-in attempt when no admin is provisioned", async () => {
     // Start a second server that has AUTH_SECRET but no ADMIN_EMAIL /
     // ADMIN_PASSWORD_HASH. Sign-in must be impossible on it: nobody can log
@@ -646,6 +1023,7 @@ describe("missing admin configuration fails closed", () => {
         ).toString("base64")}`,
         `AUTH_URL=${base}`,
         `AUTH_TRUST_HOST=true`,
+        `RABET_OPERATOR_ACCESS_KEY=${TEST_OPERATOR_ACCESS_KEY}`,
       ].join("\n") + "\n",
     );
 
@@ -705,6 +1083,7 @@ describe("missing admin configuration fails closed", () => {
         redirect: "manual",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: OPERATOR_AUTHORIZATION,
           Cookie: Object.entries(jar)
             .map(([name, value]) => `${name}=${value}`)
             .join("; "),
@@ -740,7 +1119,7 @@ describe("missing admin configuration fails closed", () => {
   }, 90_000);
 });
 
-describe("logout", () => {
+describe.skipIf(!shouldRun)("logout", () => {
   it("invalidates the session and blocks subsequent access", async () => {
     const loginRes = await signIn({});
     const authed = await raw("/overview", { jar: loginRes.jar });
@@ -761,7 +1140,7 @@ describe("logout", () => {
   });
 });
 
-describe("PWA assets stay reachable while signed out", () => {
+describe.skipIf(!shouldRun)("PWA assets stay reachable while signed out", () => {
   // The installed PWA must always be able to present the login screen, so the
   // proxy must never gate the manifest, the icons or the Auth.js handler.
   it("serves the web app manifest", async () => {
@@ -802,7 +1181,7 @@ describe("PWA assets stay reachable while signed out", () => {
   });
 });
 
-describe("no credential material leaks", () => {
+describe.skipIf(!shouldRun)("no credential material leaks", () => {
   it("never returns the admin password or its hash in any response", async () => {
     const login = await signIn({});
     const overview = await raw("/overview", { jar: login.jar });

@@ -40,6 +40,12 @@ const APP_PORT = isBaselineMode ? 3389 : 3388;
 const CDP_PORT = isBaselineMode ? 9389 : 9388;
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const TEST_EMAIL = "admin@example.test";
+const TEST_OPERATOR_ACCESS_KEY =
+  "browser-test-operator-access-key-32-characters";
+const OPERATOR_AUTHORIZATION = `Basic ${Buffer.from(
+  `operator:${TEST_OPERATOR_ACCESS_KEY}`,
+  "utf8",
+).toString("base64")}`;
 const TEST_PASSWORD = "test-password-123";
 
 let appServer = null;
@@ -924,6 +930,7 @@ async function main() {
     bootstrapFile,
     `import postgres from "${postgresModuleUrl}";\n` +
       `const originalFetch = globalThis.fetch;\n` +
+      `const formatVal = (v) => typeof v === "boolean" ? (v ? "t" : "f") : v;\n` +
       `let pg = null;\n` +
       `globalThis.fetch = async (input, init) => {\n` +
       `  const url = typeof input === "string" ? input : (input ? input.url : "");\n` +
@@ -939,7 +946,7 @@ async function main() {
       `      const rows = await pg.unsafe(query, params || []);\n` +
       `      const cols = rows.columns || [];\n` +
       `      const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
-      `      const rowArrays = rows.map((r) => cols.map((c) => r[c.name]));\n` +
+      `      const rowArrays = rows.map((r) => cols.map((c) => formatVal(r[c.name])));\n` +
       `      return new Response(JSON.stringify({ rows: rowArrays, fields }), {\n` +
       `        status: 200,\n` +
       `        headers: { "content-type": "application/json" },\n` +
@@ -979,6 +986,7 @@ async function main() {
       `export AUTH_SECRET='${authSecret}'`,
       `export ADMIN_EMAIL='${TEST_EMAIL}'`,
       `export ADMIN_PASSWORD_HASH='${passwordHash}'`,
+      `export RABET_OPERATOR_ACCESS_KEY='${TEST_OPERATOR_ACCESS_KEY}'`,
       `export AUTH_URL='${BASE_URL}'`,
       `export AUTH_TRUST_HOST='true'`,
       `export NODE_OPTIONS='--import ${bootstrapFile}'`,
@@ -1010,7 +1018,9 @@ async function main() {
   for (let i = 0; i < 40; i++) {
     await sleep(500);
     try {
-      const res = await fetch(`${BASE_URL}/login`);
+      const res = await fetch(`${BASE_URL}/login`, {
+        headers: { Authorization: OPERATOR_AUTHORIZATION },
+      });
       if (res.status === 200 || res.status === 307) {
         serverReady = true;
         break;
@@ -1041,6 +1051,7 @@ async function main() {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: OPERATOR_AUTHORIZATION,
       Cookie: initialCookies,
     },
     body: signinBody.toString(),
@@ -1099,6 +1110,9 @@ async function main() {
   await cdp.send("Runtime.enable");
   await cdp.send("DOM.enable");
   await cdp.send("Network.enable");
+  await cdp.send("Network.setExtraHTTPHeaders", {
+    headers: { Authorization: OPERATOR_AUTHORIZATION },
+  });
 
   // Set session cookie
   await cdp.send("Network.setCookie", {

@@ -1,4 +1,9 @@
 import { auth } from "@/auth";
+import {
+  checkOperatorAccess,
+  isOperatorAccessPath,
+  operatorAccessChallenge,
+} from "@/lib/auth/operator-access";
 
 /**
  * Optimistic authorization redirect for the dashboard (Next.js 16 Proxy).
@@ -14,14 +19,15 @@ import { auth } from "@/auth";
  * protected Server Component, Server Action and Route Handler calls — see
  * docs/ARCHITECTURE.md (ADR-010).
  *
- * Scope: only dashboard routes are gated here. The public landing page, the
- * sign-in page, the Auth.js route handler and static/PWA assets stay reachable
- * while signed out, so the installed PWA can always present the login screen.
+ * Scope: dashboard routes get the optimistic session redirect. The two paths
+ * that can spend the shared admin login budget — `/login` (the Server Action)
+ * and the Auth.js credentials callback — additionally require the operator
+ * access credential. Public pages, `/api/healthz` and the Telegram webhook do
+ * not pass through this gate. Static/PWA assets stay reachable while signed
+ * out, so the installed PWA can always present the login screen.
  *
- * The matcher excludes static assets and the Auth.js route handler. Note that
- * excluding a path also skips Server Function (Server Action) invocations on
- * that path, which is exactly why each Server Action re-verifies the session
- * itself instead of relying on this proxy.
+ * The matcher includes only the credentials callback from `/api/auth/*`; the
+ * rest of the Auth.js handler stays outside the proxy.
  */
 
 /** Dashboard sections that require an authenticated administrator. */
@@ -46,6 +52,17 @@ function isProtectedPath(pathname: string): boolean {
 }
 
 export const proxy = auth((req) => {
+  // Operator access is checked before Auth.js or any credential work. This
+  // applies to both the login Server Action path and the direct credentials
+  // callback, and returns the same 401 for missing, invalid or unconfigured
+  // access. Rejected requests never reach the limiter or Argon2.
+  if (
+    isOperatorAccessPath(req.nextUrl.pathname) &&
+    !checkOperatorAccess(req.headers.get("authorization"))
+  ) {
+    return operatorAccessChallenge();
+  }
+
   // `req.auth` is the session resolved by Auth.js, or `null`. Reading it here
   // is the optimistic cookie read — cheap, and never a database lookup.
   if (!req.auth && isProtectedPath(req.nextUrl.pathname)) {
@@ -62,11 +79,11 @@ export const config = {
   matcher: [
     /*
      * Run on every route except:
-     * - api/auth/...   the Auth.js route handler (must stay public)
+     * - api/auth/* except callback/credentials  the other Auth.js endpoints
      * - api/healthz    unauthenticated container liveness check (must not invoke Auth.js)
      * - _next/static, _next/image, favicon.ico and other static assets, so
      *   the PWA shell, icons and manifest always load while signed out
      */
-    "/((?!api/auth|api/healthz|_next/static|_next/image|favicon.ico|icons|manifest.webmanifest|robots.txt|sitemap.xml).*)",
+    "/((?!api/auth/(?!callback/credentials)|api/healthz|_next/static|_next/image|favicon.ico|icons|manifest.webmanifest|robots.txt|sitemap.xml).*)",
   ],
 };
