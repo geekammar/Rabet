@@ -376,9 +376,10 @@ async function main() {
 
   // -------------------------------------------------------------------------
   // 2. Container #1: Unmodified image on non-default PORT=4310
+  //    (Uses `localhost` because Next.js NextURL normalizes 127.0.0.1 -> localhost)
   // -------------------------------------------------------------------------
   log(`Booting pure unmodified container on non-default PORT=${PURE_PORT}...`);
-  const pureBase = `http://127.0.0.1:${PURE_PORT}`;
+  const pureBase = `http://localhost:${PURE_PORT}`;
   runDocker([
     "run",
     "-d",
@@ -931,7 +932,7 @@ async function main() {
   // 4. Container #3: Fail-closed without ADMIN_EMAIL / ADMIN_PASSWORD_HASH
   // -------------------------------------------------------------------------
   log(`Booting fail-closed (no admin credentials) container on PORT=${CLOSED_PORT}...`);
-  const closedBase = `http://127.0.0.1:${CLOSED_PORT}`;
+  const closedBase = `http://localhost:${CLOSED_PORT}`;
   runDocker([
     "run",
     "-d",

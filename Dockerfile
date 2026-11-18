@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
+ARG TARGETPLATFORM=linux/amd64
 
 # -----------------------------------------------------------------------------
 # Stage 1: Install locked dependencies on Node 22 (linux/amd64, Debian glibc)
 # -----------------------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-bookworm-slim AS deps
+FROM --platform=${TARGETPLATFORM} node:22-bookworm-slim AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -14,7 +15,7 @@ RUN npm ci --no-audit --no-fund
 # No runtime secrets (no AUTH_SECRET, ADMIN_*, DATABASE_URL, or TELEGRAM_*)
 # are passed to or persisted in the build.
 # -----------------------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-bookworm-slim AS builder
+FROM --platform=${TARGETPLATFORM} node:22-bookworm-slim AS builder
 WORKDIR /app
 
 ENV NODE_ENV=production
@@ -36,7 +37,7 @@ RUN npm run build \
 # Runs precompiled standalone server directly — no install, build, or migrate
 # on container startup.
 # -----------------------------------------------------------------------------
-FROM --platform=linux/amd64 node:22-bookworm-slim AS runner
+FROM --platform=${TARGETPLATFORM} node:22-bookworm-slim AS runner
 WORKDIR /app
 
 ARG GIT_SHA=""
