@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 
@@ -20,6 +20,7 @@ import {
   listCatalogProducts,
   listCatalogProductsForStore,
   updateCatalogProductAvailabilityForStore,
+  updateCatalogProductPriceForStore,
 } from "@/lib/data";
 import type { StoreScope } from "@/lib/data/store-scope";
 import {
@@ -721,6 +722,218 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
     expect(statement.query).toContain("returning");
   });
 
+  it("updates only the price for an owned product and returns the exact stored decimal, including zero", async () => {
+    const before = await readProductState(fixture.productAOneId);
+    expect(before.row.price).toBe("11.00");
+    expect(before.row.isActive).toBe(true);
+
+    observer!.queries.length = 0;
+    const updated = await updateCatalogProductPriceForStore(
+      observer!.db,
+      scopeA,
+      fixture.productAOneId,
+      "19.9",
+    );
+    const writeQueries = updateQueries(observer!.queries);
+    const authorizationReads = observer!.queries.filter((entry) =>
+      /^select/.test(entry.query),
+    );
+
+    expect(updated).toBe(true);
+    expect(authorizationReads).toHaveLength(0);
+    expect(writeQueries).toHaveLength(1);
+
+    const statement = writeQueries[0];
+    expect(statement.query).toMatch(/^update "product"/);
+    expect(statement.query).toMatch(/"price"\s*=\s*\$\d+/);
+    expect(statement.query).not.toContain('"is_active"');
+    expect(statement.query).toMatch(/"product"\."store_id"\s*=\s*\$\d+/);
+    expect(statement.query).toContain('"product"."deleted_at" is null');
+    expect(statement.query).toContain("exists");
+    expect(statement.query).toMatch(/"category"\."store_id"\s*=\s*\$\d+/);
+    expect(statement.query).toContain('"category"."deleted_at" is null');
+    expect(statement.query).toContain("returning");
+    expect(statement.parameters).toContain("19.90");
+
+    const after = await readProductState(fixture.productAOneId);
+    expect(after.row.price).toBe("19.90");
+    expect(after.row.isActive).toBe(before.row.isActive);
+    expect(after.row.slug).toBe(before.row.slug);
+    expect(after.row.categoryId).toBe(before.row.categoryId);
+    expect(after.row.storeId).toBe(fixture.storeAId);
+    expect(after.row.createdAt).toEqual(before.row.createdAt);
+    expect(after.row.updatedAt.getTime()).toBeGreaterThanOrEqual(
+      before.row.updatedAt.getTime(),
+    );
+    expect(after.translations).toEqual(before.translations);
+    expect(after.actions).toEqual(before.actions);
+
+    const scoped = await listCatalogProductsForStore(observer!.db, scopeA);
+    expect(
+      scoped.find((p) => p.id === fixture.productAOneId)?.price,
+    ).toBe("19.90");
+
+    observer!.queries.length = 0;
+    const zeroUpdated = await updateCatalogProductPriceForStore(
+      observer!.db,
+      scopeA,
+      fixture.productAOneId,
+      "0",
+    );
+
+    expect(zeroUpdated).toBe(true);
+    expect(updateQueries(observer!.queries)).toHaveLength(1);
+    expect(
+      observer!.queries.filter((entry) => /^select/.test(entry.query)),
+    ).toHaveLength(0);
+
+    const zeroState = await readProductState(fixture.productAOneId);
+    expect(zeroState.row.price).toBe("0.00");
+    expect(zeroState.row.isActive).toBe(before.row.isActive);
+    expect(zeroState.translations).toEqual(before.translations);
+    expect(zeroState.actions).toEqual(before.actions);
+
+    const zeroScoped = await listCatalogProductsForStore(observer!.db, scopeA);
+    expect(
+      zeroScoped.find((p) => p.id === fixture.productAOneId)?.price,
+    ).toBe("0.00");
+  });
+
+  it("gives the same no-match price outcome for B's product and a missing product, leaving B's full fixture state unchanged", async () => {
+    const before = await readProductState(fixture.productBId);
+    const actionIds = before.actions.map((action) => action.id);
+    const actionTranslationsBefore =
+      actionIds.length > 0
+        ? await testDb!.db
+            .select()
+            .from(productActionTranslation)
+            .where(inArray(productActionTranslation.actionId, actionIds))
+            .orderBy(productActionTranslation.id)
+        : [];
+    const [categoryBefore] = await testDb!.db
+      .select()
+      .from(category)
+      .where(eq(category.id, fixture.categoryBId));
+
+    observer!.queries.length = 0;
+    const foreignResult = await updateCatalogProductPriceForStore(
+      observer!.db,
+      scopeA,
+      fixture.productBId,
+      "1.00",
+    );
+    const foreignQueries = [...observer!.queries];
+
+    observer!.queries.length = 0;
+    const missingResult = await updateCatalogProductPriceForStore(
+      observer!.db,
+      scopeA,
+      globalThis.crypto.randomUUID(),
+      "1.00",
+    );
+    const missingQueries = [...observer!.queries];
+
+    expect(foreignResult).toBe(false);
+    expect(missingResult).toBe(false);
+
+    const foreignUpdates = updateQueries(foreignQueries);
+    const missingUpdates = updateQueries(missingQueries);
+    expect(foreignUpdates).toHaveLength(1);
+    expect(missingUpdates).toHaveLength(1);
+    expect(foreignUpdates[0].query).toBe(missingUpdates[0].query);
+    expect(foreignUpdates[0].query).toMatch(/^update "product"/);
+    expect(foreignUpdates[0].query).toContain("returning");
+    expect(
+      foreignQueries.filter((entry) => /^select/.test(entry.query)),
+    ).toHaveLength(0);
+    expect(
+      missingQueries.filter((entry) => /^select/.test(entry.query)),
+    ).toHaveLength(0);
+
+    const after = await readProductState(fixture.productBId);
+    expect(after).toEqual(before);
+    expect(after.row.price).toBe("22.00");
+    expect(after.row.isActive).toBe(true);
+
+    const actionTranslationsAfter =
+      actionIds.length > 0
+        ? await testDb!.db
+            .select()
+            .from(productActionTranslation)
+            .where(inArray(productActionTranslation.actionId, actionIds))
+            .orderBy(productActionTranslation.id)
+        : [];
+    expect(actionTranslationsAfter).toEqual(actionTranslationsBefore);
+    expect(
+      await testDb!.db
+        .select()
+        .from(category)
+        .where(eq(category.id, fixture.categoryBId)),
+    ).toEqual([categoryBefore]);
+  });
+
+  it("refuses price updates for deleted, NULL-owned, cross-linked, unowned-category and soft-deleted-category products", async () => {
+    const deniedProductIds = [
+      fixture.deletedProductId,
+      fixture.nullOwnedProductId,
+      fixture.crossLinkedProductId,
+      fixture.unownedCategoryProductId,
+      fixture.productUnderDeletedCategoryId,
+    ];
+
+    for (const productId of deniedProductIds) {
+      const before = await readProductState(productId);
+
+      observer!.queries.length = 0;
+      const updated = await updateCatalogProductPriceForStore(
+        observer!.db,
+        scopeA,
+        productId,
+        "9.99",
+      );
+      const writes = updateQueries(observer!.queries);
+
+      expect(updated).toBe(false);
+      expect(writes).toHaveLength(1);
+      expect(writes[0].query).toMatch(/^update "product"/);
+      expect(writes[0].query).toContain("exists");
+      expect(writes[0].query).toContain('"category"."deleted_at" is null');
+      expect(
+        observer!.queries.filter((entry) => /^select/.test(entry.query)),
+      ).toHaveLength(0);
+      expect(await readProductState(productId)).toEqual(before);
+    }
+  });
+
+  it("rejects invalid prices before any SQL write", async () => {
+    const before = await readProductState(fixture.productATwoId);
+    const invalidPrices: unknown[] = [
+      42,
+      "-1.00",
+      "1e2",
+      "10.123",
+      "12345678901234567.00",
+    ];
+
+    for (const invalidPrice of invalidPrices) {
+      observer!.queries.length = 0;
+
+      await expect(
+        updateCatalogProductPriceForStore(
+          observer!.db,
+          scopeA,
+          fixture.productATwoId,
+          invalidPrice,
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+      expect(observer!.queries).toHaveLength(0);
+    }
+
+    expect(await readProductState(fixture.productATwoId)).toEqual(before);
+    expect(before.row.price).toBe("12.50");
+  });
+
   it("gives the same no-match outcome for B's product and a missing product, leaving B byte-for-byte unchanged", async () => {
     const before = await readProductState(fixture.productBId);
 
@@ -901,6 +1114,16 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
         ),
       ).rejects.toMatchObject({ code: "TENANT_CONTEXT_INVALID" });
       expect(observer!.queries).toHaveLength(0);
+
+      await expect(
+        updateCatalogProductPriceForStore(
+          observer!.db,
+          hostile as StoreScope,
+          fixture.productBId,
+          "1.00",
+        ),
+      ).rejects.toMatchObject({ code: "TENANT_CONTEXT_INVALID" });
+      expect(observer!.queries).toHaveLength(0);
     }
 
     expect(await readProductState(fixture.productBId)).toEqual(bBefore);
@@ -956,6 +1179,7 @@ describe("Phase 1 scoped-operation surface", () => {
       if (
         source.includes("listCatalogProductsForStore") ||
         source.includes("updateCatalogProductAvailabilityForStore") ||
+        source.includes("updateCatalogProductPriceForStore") ||
         source.includes("createStoreScopeForExistingStore")
       ) {
         offenders.push(relative);
