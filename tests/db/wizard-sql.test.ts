@@ -60,7 +60,7 @@ async function run(text: string) {
 }
 
 describe.skipIf(!shouldRun)("wizard inspection SQL on a migrated database", () => {
-  it("reports the twenty-two expected tables and no others", async () => {
+  it("reports the twenty-four expected tables and no others", async () => {
     const rows = await run(wizard.QUERIES.appTables);
     const tables = rows.map((row) => String(row.name));
 
