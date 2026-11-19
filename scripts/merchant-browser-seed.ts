@@ -2,9 +2,16 @@ import crypto from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 
-import { appUser, merchantInvitation } from "@/db/schema";
+import {
+  appUser,
+  category,
+  language,
+  merchantInvitation,
+  product,
+  productTranslation,
+} from "@/db/schema";
 import { createTransactionClient } from "@/db/transaction-client";
 import {
   acceptMerchantInvitation,
@@ -73,6 +80,153 @@ async function main() {
       "browser-store-b",
     );
 
+    await db
+      .insert(language)
+      .values([
+        {
+          code: "ar",
+          label: "العربية",
+          textDirection: "rtl",
+          isEnabled: true,
+        },
+        {
+          code: "en",
+          label: "English",
+          textDirection: "ltr",
+          isEnabled: true,
+        },
+      ])
+      .onConflictDoNothing();
+
+    const languages = await db
+      .select({ id: language.id, code: language.code })
+      .from(language)
+      .where(inArray(language.code, ["ar", "en"]));
+
+    const arabicLanguageId = languages.find(
+      (entry) => entry.code === "ar",
+    )?.id;
+    const englishLanguageId = languages.find(
+      (entry) => entry.code === "en",
+    )?.id;
+
+    if (!arabicLanguageId || !englishLanguageId) {
+      throw new Error("The seed languages were not created.");
+    }
+
+    const arLanguageId = arabicLanguageId;
+    const enLanguageId = englishLanguageId;
+
+    async function seedCatalog(input: {
+      storeId: string;
+      storeKey: string;
+      rootSortOrder: number;
+      productNames: {
+        one: { ar: string; en: string };
+        two: { en: string };
+      };
+    }) {
+      const [storeCategory] = await db
+        .insert(category)
+        .values({
+          storeId: input.storeId,
+          slug: `${input.storeKey}-category`,
+          sortOrder: input.rootSortOrder,
+          isActive: true,
+        })
+        .returning({ id: category.id });
+
+      const [productOne] = await db
+        .insert(product)
+        .values({
+          storeId: input.storeId,
+          categoryId: storeCategory.id,
+          slug: `${input.storeKey}-product-one`,
+          price: "10.00",
+          isActive: true,
+          sortOrder: 10,
+        })
+        .returning({ id: product.id });
+
+      const [productTwo] = await db
+        .insert(product)
+        .values({
+          storeId: input.storeId,
+          categoryId: storeCategory.id,
+          slug: `${input.storeKey}-product-two`,
+          price: "20.00",
+          isActive: true,
+          sortOrder: 20,
+        })
+        .returning({ id: product.id });
+
+      const [productFallback] = await db
+        .insert(product)
+        .values({
+          storeId: input.storeId,
+          categoryId: storeCategory.id,
+          slug: `${input.storeKey}-product-fallback`,
+          price: "30.00",
+          isActive: true,
+          sortOrder: 30,
+        })
+        .returning({ id: product.id });
+
+      await db.insert(productTranslation).values([
+        {
+          productId: productOne.id,
+          languageId: arLanguageId,
+          name: input.productNames.one.ar,
+        },
+        {
+          productId: productOne.id,
+          languageId: enLanguageId,
+          name: input.productNames.one.en,
+        },
+        {
+          productId: productTwo.id,
+          languageId: enLanguageId,
+          name: input.productNames.two.en,
+        },
+      ]);
+
+      return {
+        categoryId: storeCategory.id,
+        one: { id: productOne.id, price: "10.00" },
+        two: { id: productTwo.id, price: "20.00" },
+        fallback: {
+          id: productFallback.id,
+          price: "30.00",
+          slug: `${input.storeKey}-product-fallback`,
+        },
+      };
+    }
+
+    const catalogA = await seedCatalog({
+      storeId: a.storeId,
+      storeKey: "browser-store-a",
+      rootSortOrder: 0,
+      productNames: {
+        one: {
+          ar: "منتج النور الأول",
+          en: "Al Noor Product One",
+        },
+        two: { en: "Al Noor Product Two" },
+      },
+    });
+    const catalogB = await seedCatalog({
+      storeId: b.storeId,
+      storeKey: "browser-store-b",
+      rootSortOrder: 1,
+      productNames: {
+        one: {
+          ar: "منتج القمر الأول",
+          en: "Al Qamar Product One",
+        },
+        two: { en: "Al Qamar Product Two" },
+      },
+    });
+
     const expired = await issue(
       "expired.fixture@example.test",
       "متجر منتهي",
@@ -126,6 +280,7 @@ async function main() {
         storeName: "متجر النور",
         email: a.invitedEmail,
         token: a.token,
+        products: catalogA,
       },
       b: {
         invitationId: b.invitationId,
@@ -134,6 +289,7 @@ async function main() {
         storeName: "متجر القمر",
         email: b.invitedEmail,
         token: b.token,
+        products: catalogB,
       },
       throttle: {
         invitationId: throttle.invitationId,

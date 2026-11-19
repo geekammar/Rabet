@@ -363,12 +363,13 @@ jobs:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run test:browser:simple-catalog
 
-      # Phase 2B-2: real browser invitation acceptance, merchant sign-in,
-      # one-store resolution and session invalidation at a 360 px viewport.
-      # The suite seeds through the transactional invitation service, uses a
-      # disposable loopback database and starts the app with the merchant gate
-      # enabled only for the life of this step.
-      - name: Run Merchant invitation and setup browser acceptance suite
+      # Phase 2B-2/2B-3: real browser invitation acceptance, merchant sign-in,
+      # one-store resolution, session invalidation, the own-store product list
+      # and exact price saving at a 360 px viewport. The suite seeds through
+      # the transactional invitation service, uses a disposable loopback
+      # database and starts the app with the merchant gate enabled only for the
+      # life of this step.
+      - name: Run Merchant invitation, setup and product price browser acceptance suite
         env:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
         run: npm run test:browser:merchant

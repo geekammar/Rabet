@@ -1,9 +1,12 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { connection } from "next/server";
 import { notFound } from "next/navigation";
+import { Package } from "lucide-react";
 
 import { Logo } from "@/components/brand/logo";
 import { MerchantLogoutButton } from "@/components/merchant/merchant-logout-button";
+import { Button } from "@/components/ui/button";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
 import type { StoreStatus } from "@/db/schema/tenant";
@@ -104,6 +107,23 @@ export default async function MerchantSetupPage() {
               </dd>
             </div>
           </dl>
+        </section>
+
+        <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <h2 className="font-heading text-lg font-semibold">المنتجات</h2>
+              <p className="text-sm text-muted-foreground">
+                راجع منتجات متجرك وحدّث سعر كل منتج.
+              </p>
+            </div>
+            <Button asChild className="min-h-11">
+              <Link href="/app/products" data-testid="merchant-products-link">
+                <Package className="size-4" aria-hidden="true" />
+                إدارة المنتجات
+              </Link>
+            </Button>
+          </div>
         </section>
 
         {access.readOnly ? (
