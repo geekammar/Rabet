@@ -48,7 +48,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
 
     // The twenty-four domain tables. `__drizzle_migrations` lives in the separate
     // `drizzle` schema and is not counted here.
-    expect(rows[0].count).toBe(24);
+    expect(rows[0].count).toBe(25);
   });
 
   it("records every migration in the journal", async () => {
@@ -56,7 +56,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
       sql`select count(*)::int as count from drizzle.__drizzle_migrations`,
     );
 
-    expect(rows[0].count).toBe(9);
+    expect(rows[0].count).toBe(10);
   });
 
   it("re-applying the chain is a no-op that duplicates no objects", async () => {
@@ -165,7 +165,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
     // applied before this run, so the journal still holds them — the point is
     // that the broken migration was *not* recorded and built nothing.
     expect(probes[0].count).toBe(0);
-    expect(applied[0].count).toBe(9);
+    expect(applied[0].count).toBe(10);
 
     // The committed schema is intact, not half-dropped.
     const tables = await db.execute<{ count: number }>(
@@ -173,7 +173,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
         where table_schema = 'public'`,
     );
 
-    expect(tables[0].count).toBe(24);
+    expect(tables[0].count).toBe(25);
 
     await pool.end();
     rmSync(path.dirname(broken), { recursive: true, force: true });

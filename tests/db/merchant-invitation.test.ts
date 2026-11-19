@@ -1305,7 +1305,7 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
     expect(pgErrorCode(duplicateCredential)).toBe("23505");
   });
 
-  it("has no production route, Server Action or dashboard caller", () => {
+  it("has no unauthorized production caller", () => {
     const sourceRoot = path.resolve(import.meta.dirname, "../../src");
     const files = readdirSync(sourceRoot, { recursive: true })
       .map((entry) => String(entry))
@@ -1317,9 +1317,17 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
     );
     const marker =
       /merchant-invitation|issueMerchantInvitation|acceptMerchantInvitation|revokeMerchantInvitation/;
-    const offenders = files.filter(
-      (file) => file !== servicePath && marker.test(readFileSync(file, "utf8")),
-    );
+    const allowed = new Set([
+      servicePath,
+      path.join(sourceRoot, "app/api/merchant-invitations/accept/route.ts"),
+      path.join(sourceRoot, "app/api/merchant-invitations/preview/route.ts"),
+      path.join(sourceRoot, "components/merchant/invitation-acceptance.tsx"),
+    ]);
+    const offenders = files.filter((file) => {
+      if (allowed.has(file)) return false;
+      if (file.includes(`${path.sep}__tests__${path.sep}`)) return false;
+      return marker.test(readFileSync(file, "utf8"));
+    });
 
     expect(offenders).toEqual([]);
     expect(

@@ -119,6 +119,14 @@ export type AcceptedMerchantInvitation = {
   email: string;
 };
 
+export type MerchantInvitationPreview = {
+  invitationId: string;
+  storeId: string;
+  storeName: string;
+  invitedEmail: string;
+  expiresAt: Date;
+};
+
 function rejection(cause?: unknown): MerchantInvitationError {
   return new MerchantInvitationError(
     "INVITATION_REJECTED",
@@ -168,6 +176,10 @@ function parseToken(raw: unknown): string {
   }
 
   return raw;
+}
+
+function tryParseToken(raw: unknown): string | null {
+  return typeof raw === "string" && TOKEN_PATTERN.test(raw) ? raw : null;
 }
 
 function parseInvitationId(raw: unknown): string {
@@ -424,6 +436,47 @@ export async function revokeMerchantInvitation(
 
     throw rejection(error);
   }
+}
+
+/**
+ * Read-only invitation inspection.
+ *
+ * Returns the invited email and store name only while the invitation is
+ * pending, unexpired and unrevoked. Invalid, expired, revoked and consumed
+ * invitations all return `null`, so callers can serve one generic response.
+ *
+ * This function never writes: opening, refreshing or prefetching an invitation
+ * link cannot consume it. Acceptance remains the transactional service's job.
+ */
+export async function previewMerchantInvitation(
+  db: MerchantInvitationDb,
+  rawToken: unknown,
+): Promise<MerchantInvitationPreview | null> {
+  const token = tryParseToken(rawToken);
+
+  if (token === null) return null;
+
+  const rows = await db
+    .select({
+      invitationId: merchantInvitation.id,
+      storeId: merchantInvitation.storeId,
+      storeName: store.name,
+      invitedEmail: merchantInvitation.invitedEmail,
+      expiresAt: merchantInvitation.expiresAt,
+    })
+    .from(merchantInvitation)
+    .innerJoin(store, eq(store.id, merchantInvitation.storeId))
+    .where(
+      and(
+        eq(merchantInvitation.tokenDigest, digestToken(token)),
+        isNull(merchantInvitation.acceptedAt),
+        isNull(merchantInvitation.revokedAt),
+        sql`${merchantInvitation.expiresAt} > clock_timestamp()`,
+      ),
+    )
+    .limit(1);
+
+  return rows[0] ?? null;
 }
 
 export async function acceptMerchantInvitation(

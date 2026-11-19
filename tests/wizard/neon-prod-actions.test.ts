@@ -1124,6 +1124,7 @@ describe("production runner flows and execution", () => {
       "0006_tenant_ownership_expansion",
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
+      "0009_merchant_auth_throttle",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
     expect(output()).toContain("0005_tenant_identity_foundation");
@@ -1178,6 +1179,7 @@ describe("production runner flows and execution", () => {
     expect(result.state?.pending).toEqual([
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
+      "0009_merchant_auth_throttle",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1215,6 +1217,7 @@ describe("production runner flows and execution", () => {
     expect(commandsRun).toBe(0);
     expect(result.state?.pending).toEqual([
       "0008_merchant_invitations_and_credentials",
+      "0009_merchant_auth_throttle",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1253,6 +1256,7 @@ describe("production runner flows and execution", () => {
     ).toHaveLength(1);
     expect(result.writes.migrationsApplied).toEqual([
       "0008_merchant_invitations_and_credentials",
+      "0009_merchant_auth_throttle",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0007_admin_login_throttle)",
@@ -1349,6 +1353,7 @@ describe("production runner flows and execution", () => {
       "0006_tenant_ownership_expansion",
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
+      "0009_merchant_auth_throttle",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1444,6 +1449,7 @@ describe("production runner flows and execution", () => {
       "0006_tenant_ownership_expansion",
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
+      "0009_merchant_auth_throttle",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0005_tenant_identity_foundation)",
@@ -1506,6 +1512,7 @@ describe("production runner flows and execution", () => {
     expect(result.writes.migrationsApplied).toEqual([
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
+      "0009_merchant_auth_throttle",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0006_tenant_ownership_expansion)",

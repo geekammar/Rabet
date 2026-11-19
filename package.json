@@ -25,7 +25,8 @@
     "db:check": "drizzle-kit check",
     "db:setup:dev": "node scripts/setup-neon-dev.mjs",
     "db:dev:actions": "node scripts/neon-dev-actions.mjs",
-    "db:prod:actions": "node scripts/neon-prod-actions.mjs"
+    "db:prod:actions": "node scripts/neon-prod-actions.mjs",
+    "test:browser:merchant": "node scripts/test-merchant-browser-acceptance.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",
@@ -53,6 +54,7 @@
     "eslint-config-next": "16.4.6",
     "shadcn": "^4.21.4",
     "tailwindcss": "^4",
+    "tsx": "^4.23.15",
     "typescript": "^5",
     "vitest": "4.1.11"
   }

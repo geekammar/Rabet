@@ -64,6 +64,13 @@
       "when": 1795102251297,
       "tag": "0008_merchant_invitations_and_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795113954041,
+      "tag": "0009_merchant_auth_throttle",
+      "breakpoints": true
     }
   ]
 }
