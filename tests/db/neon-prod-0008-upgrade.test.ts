@@ -158,6 +158,7 @@ describe.skipIf(!shouldRun)("real production runner 0008 to 0009 upgrade", () =>
         confirm: actions.MIGRATE_CONFIRMATION,
         env: {
           ...process.env,
+          GITHUB_ACTIONS: "false",
           [actions.PROD_URL_ENV]: databaseUrl,
           [actions.EXPECTED_HOST_ENV]: new URL(databaseUrl).hostname,
           [actions.EXPECTED_DB_NAME_ENV]: databaseName,
