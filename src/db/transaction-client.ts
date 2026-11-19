@@ -19,11 +19,15 @@ import * as schema from "./schema";
  *
  * **Runtime contract.** The client reads the existing `DATABASE_URL`
  * environment variable, so both drivers always target the same database. The
- * value keeps its original semantics: a PostgreSQL URL, with `sslmode=require`
- * for a Neon endpoint. Connection strings for `*.neon.tech` are forced to TLS
- * (`ssl: "require"`) even when the URL omits `sslmode` or asks for an
- * insecure mode; an explicit `sslmode=verify-full` is left intact. Other hosts
- * (including the disposable local test cluster) use their URL as written.
+ * value keeps its original semantics. For `*.neon.tech` hosts the client
+ * passes an explicit `ssl: "verify-full"` driver option, which postgres-js
+ * 3.4.9 gives precedence over the URL. An existing Neon URL with the usual
+ * `sslmode=require` — or no `sslmode`, a weaker mode, or duplicate/conflicting
+ * TLS options — therefore encrypts and verifies the server certificate and
+ * hostname without editing the secret. An explicit `sslmode=verify-full`
+ * stays verified. The driver's own `require` mode only encrypts, so it is
+ * never allowed to win for Neon. Other hosts (including the disposable local
+ * test cluster) use their URL as written.
  *
  * **Lazy initialization.** Importing this module neither requires
  * `DATABASE_URL` nor opens a connection. `getTransactionDb()` reads and
@@ -50,7 +54,6 @@ const MAX_LIFETIME_SECONDS = 5 * 60;
 type ParsedDatabaseUrl = {
   url: string;
   hostname: string;
-  sslMode: string | null;
 };
 
 let sharedClient: TransactionClient | null = null;
@@ -102,7 +105,6 @@ function parseDatabaseUrl(
   return {
     url,
     hostname: parsed.hostname.toLowerCase(),
-    sslMode: parsed.searchParams.get("sslmode"),
   };
 }
 
@@ -111,19 +113,13 @@ function isNeonHostname(hostname: string): boolean {
 }
 
 function connectionOptions(parsed: ParsedDatabaseUrl) {
-  const insecurelyConfigured =
-    parsed.sslMode === null ||
-    parsed.sslMode === "disable" ||
-    parsed.sslMode === "allow" ||
-    parsed.sslMode === "prefer";
-
   return {
     max: POOL_MAX_CONNECTIONS,
     connect_timeout: CONNECT_TIMEOUT_SECONDS,
     idle_timeout: IDLE_TIMEOUT_SECONDS,
     max_lifetime: MAX_LIFETIME_SECONDS,
-    ...(isNeonHostname(parsed.hostname) && insecurelyConfigured
-      ? { ssl: "require" as const }
+    ...(isNeonHostname(parsed.hostname)
+      ? { ssl: "verify-full" as const }
       : {}),
   };
 }

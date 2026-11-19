@@ -123,7 +123,7 @@ it("requires an explicit URL instead of reading DATABASE_URL", async () => {
   await explicit.close();
 });
 
-it("bounds the pool, times out connections, and keeps TLS on Neon", async () => {
+it("bounds the pool and connection timeouts", async () => {
   const { createTransactionClient } = await import(
     "@/db/transaction-client"
   );
@@ -136,17 +136,71 @@ it("bounds the pool, times out connections, and keeps TLS on Neon", async () => 
   expect(neon.db.$client.options.connect_timeout).toBe(10);
   expect(neon.db.$client.options.idle_timeout).toBe(20);
   expect(neon.db.$client.options.max_lifetime).toBe(300);
-  expect(neon.db.$client.options.ssl).toBe("require");
 
   await neon.close();
+});
 
-  const verified = createTransactionClient(
-    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=verify-full",
+it("verifies TLS on Neon when the URL uses the ordinary sslmode=require", async () => {
+  const { createTransactionClient } = await import(
+    "@/db/transaction-client"
   );
 
-  expect(verified.db.$client.options.ssl).toBe("verify-full");
+  const neon = createTransactionClient(
+    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=require",
+  );
 
-  await verified.close();
+  expect(neon.db.$client.options.ssl).toBe("verify-full");
+
+  await neon.close();
+});
+
+it("verifies TLS on Neon when sslmode is missing or weaker", async () => {
+  const { createTransactionClient } = await import(
+    "@/db/transaction-client"
+  );
+
+  const urls = [
+    "postgresql://user:pass@ep-example.neon.tech/rabet",
+    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=disable",
+    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=allow",
+    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=prefer",
+  ];
+
+  for (const url of urls) {
+    const client = createTransactionClient(url);
+
+    expect(client.db.$client.options.ssl).toBe("verify-full");
+
+    await client.close();
+  }
+});
+
+it("keeps explicit verify-full and overrides duplicate or conflicting URL TLS options", async () => {
+  const { createTransactionClient } = await import(
+    "@/db/transaction-client"
+  );
+
+  const urls = [
+    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=verify-full",
+    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=require&sslmode=disable",
+    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=disable&sslmode=require",
+    "postgresql://user:pass@ep-example.neon.tech/rabet?sslmode=disable&ssl=require",
+    "postgresql://user:pass@ep-example.neon.tech/rabet?ssl=prefer&sslmode=disable",
+  ];
+
+  for (const url of urls) {
+    const client = createTransactionClient(url);
+
+    expect(client.db.$client.options.ssl).toBe("verify-full");
+
+    await client.close();
+  }
+});
+
+it("leaves a plain loopback URL without TLS", async () => {
+  const { createTransactionClient } = await import(
+    "@/db/transaction-client"
+  );
 
   const local = createTransactionClient(
     "postgresql://user:pass@127.0.0.1:5432/rabet",

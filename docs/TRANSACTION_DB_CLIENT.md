@@ -21,18 +21,35 @@ returns the real Drizzle client plus a `close()` that releases the pool before
 the test database is dropped. The explicit path never falls back to the
 runtime variable.
 
-## Verified connection assumptions
+## Effective TLS configuration
 
-- `postgres` 3.4.9 reads `sslmode` from the connection URL. Neon URLs keep
-  their `?sslmode=require` behaviour.
-- A `*.neon.tech` host is also forced to `ssl: "require"` when the URL omits
-  `sslmode` or requests an insecure mode. An explicit `sslmode=verify-full`
-  is left intact.
+The locked driver is `postgres` 3.4.9. It maps a URL's `sslmode` to its `ssl`
+driver option. In that version, `ssl: "require"`, `"allow"` and `"prefer"` all
+call `tls.connect` with `rejectUnauthorized: false`: the connection is
+encrypted, but the server certificate and hostname are not verified. An
+ordinary Neon URL with only `?sslmode=require` is therefore not equivalent to
+`verify-full`.
+
+For `*.neon.tech` hosts, `connectionOptions()` always passes the explicit
+driver option `ssl: "verify-full"`. postgres.js selects an explicit driver
+option ahead of the URL query, so the final options are verified TLS with
+certificate and hostname checking regardless of the URL:
+
+- An existing Neon `DATABASE_URL` with `?sslmode=require` needs no secret
+  edit; its effective driver option becomes `verify-full`.
+- An explicit `sslmode=verify-full` remains verified.
+- A missing `sslmode`, weaker modes such as `disable`, `allow` or `prefer`,
+  and duplicate or conflicting URL TLS parameters cannot weaken a Neon
+  connection. The explicit driver option is final.
 - Non-Neon hosts, including the disposable loopback cluster, use their URL as
   written, so the local test cluster stays plain TCP.
 - The client uses the existing Drizzle schema map and returns
   `PostgresJsDatabase<typeof schema>`, the type `MerchantInvitationDb` already
   declares. No cast is needed at the service call site.
+
+The tests assert the real postgres.js client's final `options.ssl` value. They
+do not perform a live TLS handshake against Neon, and no isolated Neon or
+Render target was used.
 
 ## Per-process limits
 
@@ -50,7 +67,9 @@ are unchanged.
 
 `tests/db/transaction-client.test.ts` covers lazy initialization, missing and
 invalid configuration, explicit construction without environment fallback,
-pool bounds and Neon TLS. `tests/db/merchant-invitation-transaction.test.ts`
+pool bounds, and the effective Neon TLS option for `sslmode=require`, no
+`sslmode`, weaker modes, explicit `verify-full`, duplicate/conflicting options
+and plain loopback. `tests/db/merchant-invitation-transaction.test.ts`
 runs the existing invitation service through the real client against a
 disposable PostgreSQL database migrated through `0008`, including acceptance,
 revocation and a terminal-update failure that rolls back the account,
