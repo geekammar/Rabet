@@ -18,6 +18,7 @@ import {
   productActionTranslation,
   productTranslation,
 } from "@/db/schema";
+import { validatePrice } from "@/lib/catalog/validation";
 import {
   mapDatabaseError,
   RabetDataError,
@@ -466,6 +467,38 @@ export async function listCatalogProductsForStore(
 }
 
 /**
+ * The shared eligibility predicate for scoped product mutations.
+ *
+ * A write is allowed only when the target product belongs to the scoped store,
+ * is not soft-deleted, and sits under a non-deleted category owned by the same
+ * store. Keeping this in a private helper means the availability and price
+ * mutations cannot drift apart.
+ */
+function storeOwnedProductWhere(
+  db: Database,
+  scope: StoreScope,
+  productId: string,
+) {
+  return and(
+    eq(product.id, productId),
+    eq(product.storeId, scope.storeId),
+    isNull(product.deletedAt),
+    exists(
+      db
+        .select({ id: category.id })
+        .from(category)
+        .where(
+          and(
+            eq(category.id, product.categoryId),
+            eq(category.storeId, scope.storeId),
+            isNull(category.deletedAt),
+          ),
+        ),
+    ),
+  );
+}
+
+/**
  * Updates one store-owned product's availability in a single guarded write.
  *
  * The `UPDATE` itself requires the target id, the scope's store id, a
@@ -489,25 +522,51 @@ export async function updateCatalogProductAvailabilityForStore(
     const updated = await db
       .update(product)
       .set({ isActive })
-      .where(
-        and(
-          eq(product.id, productId),
-          eq(product.storeId, scope.storeId),
-          isNull(product.deletedAt),
-          exists(
-            db
-              .select({ id: category.id })
-              .from(category)
-              .where(
-                and(
-                  eq(category.id, product.categoryId),
-                  eq(category.storeId, scope.storeId),
-                  isNull(category.deletedAt),
-                ),
-              ),
-          ),
-        ),
-      )
+      .where(storeOwnedProductWhere(db, scope, productId))
+      .returning({ id: product.id });
+
+    return updated.length > 0;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Updates one store-owned product's displayed price in a single guarded write.
+ *
+ * The price is validated with the same exact-decimal rules as the catalog
+ * editor (`validatePrice`): a string only, no exponent, no negative value, at
+ * most two decimal places, at most 16 integer digits, and zero is allowed.
+ * The normalized value (for example `"19.9"` → `"19.90"`) is passed to SQL as
+ * a string; it is never converted to a JavaScript number or rounded.
+ *
+ * The `UPDATE` requires the target id, the scope's store id, a non-deleted
+ * product, and a non-deleted category owned by the same store. There is no
+ * authorization `SELECT`, so a foreign or missing id is indistinguishable and
+ * writes nothing. Only `price` is set; availability, translations, actions,
+ * category, slug and ownership are left alone, and the database trigger still
+ * maintains `updated_at`.
+ *
+ * Returns `true` when the row was updated and `false` for every no-match case.
+ */
+export async function updateCatalogProductPriceForStore(
+  db: Database,
+  scope: StoreScope,
+  productId: string,
+  price: unknown,
+): Promise<boolean> {
+  assertStoreScope(scope);
+
+  const priceResult = validatePrice(price);
+  if (!priceResult.success) {
+    throw new RabetDataError("INVALID_INPUT", priceResult.error);
+  }
+
+  try {
+    const updated = await db
+      .update(product)
+      .set({ price: priceResult.data })
+      .where(storeOwnedProductWhere(db, scope, productId))
       .returning({ id: product.id });
 
     return updated.length > 0;
