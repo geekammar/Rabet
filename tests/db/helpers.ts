@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
@@ -199,6 +200,44 @@ export function pgErrorMessage(error: unknown): string | undefined {
   }
 
   return message;
+}
+
+/**
+ * Installs the controlled acceptance failure fixture.
+ *
+ * The trigger rejects the terminal `merchant_invitation` update, which the
+ * service performs only after it has inserted the account, credential and
+ * membership. The resulting error therefore proves the real transaction rolls
+ * all of those writes back, not merely that the last statement failed.
+ */
+export async function installAcceptanceRollbackFixture(
+  db: TestDatabase["db"],
+): Promise<void> {
+  await db.execute(sql`
+    create or replace function reject_merchant_invitation_update()
+    returns trigger language plpgsql as $$
+    begin
+      raise exception 'invitation update blocked';
+    end;
+    $$
+  `);
+  await db.execute(sql`
+    create trigger reject_merchant_invitation_update_trigger
+    before update on merchant_invitation
+    for each row execute function reject_merchant_invitation_update()
+  `);
+}
+
+/** Removes the fixture installed by `installAcceptanceRollbackFixture`. */
+export async function removeAcceptanceRollbackFixture(
+  db: TestDatabase["db"],
+): Promise<void> {
+  await db.execute(
+    sql`drop trigger if exists reject_merchant_invitation_update_trigger on merchant_invitation`,
+  );
+  await db.execute(
+    sql`drop function if exists reject_merchant_invitation_update()`,
+  );
 }
 
 /**
