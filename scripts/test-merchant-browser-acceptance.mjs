@@ -870,6 +870,69 @@ async function runJourney(cdp, fixture, authSecret) {
     "The price field should be editable again after the save completes",
   );
 
+  const aSecondConflict = `[data-testid="merchant-price-conflict-${a.products.two.id}"]`;
+  const aSecondConflictLatest = `[data-testid="merchant-price-conflict-latest-${a.products.two.id}"]`;
+  const aSecondUseLatest = `[data-testid="merchant-price-use-latest-${a.products.two.id}"]`;
+  const aSecondRetry = `[data-testid="merchant-price-retry-${a.products.two.id}"]`;
+
+  // Another device wins while this merchant's draft is open. The stale draft
+  // must not overwrite it, and the UI must offer explicit conflict choices.
+  await setValue(aSecondInput, "33.30");
+  await pgClient`
+    update product set price = '44.40' where id = ${a.products.two.id}
+  `;
+  await click(aSecondSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSecondConflict)})) && document.querySelector(${JSON.stringify(aSecondConflictLatest)})?.textContent === "44.40" && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "33.30"`,
+    "merchant stale price conflict and preserved draft",
+  );
+  await expectNoHorizontalScroll("merchant stale price conflict");
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.two.id}
+    `)[0].price === "44.40",
+    "The stale draft must not replace the winning price",
+  );
+
+  await click(aSecondUseLatest);
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aSecondInput)})?.value === "44.40" && !document.querySelector(${JSON.stringify(aSecondConflict)})`,
+    "use latest conflict resolution",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.two.id}
+    `)[0].price === "44.40",
+    "Using the latest price must not write a new value",
+  );
+
+  // A second conflict exposes the intentional retry path against the latest
+  // authorized revision and keeps the merchant's typed draft.
+  await setValue(aSecondInput, "55.50");
+  await pgClient`
+    update product set price = '66.60' where id = ${a.products.two.id}
+  `;
+  await click(aSecondSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSecondConflict)})) && document.querySelector(${JSON.stringify(aSecondConflictLatest)})?.textContent === "66.60" && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "55.50"`,
+    "second stale price conflict",
+  );
+  await click(aSecondRetry);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSecondSaved)})) && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "55.50" && !document.querySelector(${JSON.stringify(aSecondConflict)})`,
+    "intentional retry against latest revision",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.two.id}
+    `)[0].price === "55.50",
+    "Explicit retry should persist the merchant's reviewed draft",
+  );
+
   await setValue(aPriceInput, "10.123");
   await click(aSaveButton);
   await waitFor(

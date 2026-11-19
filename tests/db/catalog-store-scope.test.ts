@@ -1180,6 +1180,7 @@ describe("scoped-operation production surface", () => {
     const listOffenders: string[] = [];
     const priceOffenders: string[] = [];
     const merchantPriceOffenders: string[] = [];
+    const merchantPriceReadOffenders: string[] = [];
     const availabilityOffenders: string[] = [];
     const scopeIssuerOffenders: string[] = [];
 
@@ -1198,6 +1199,9 @@ describe("scoped-operation production surface", () => {
       if (source.includes("updateCatalogProductPriceForMerchant")) {
         merchantPriceOffenders.push(relative);
       }
+      if (source.includes("readCatalogProductPriceForMerchant")) {
+        merchantPriceReadOffenders.push(relative);
+      }
       if (source.includes("updateCatalogProductAvailabilityForStore")) {
         availabilityOffenders.push(relative);
       }
@@ -1213,6 +1217,7 @@ describe("scoped-operation production surface", () => {
     expect(listOffenders).toEqual([]);
     expect(priceOffenders).toEqual([]);
     expect(merchantPriceOffenders).toEqual([]);
+    expect(merchantPriceReadOffenders).toEqual([]);
     expect(availabilityOffenders).toEqual([]);
     expect(scopeIssuerOffenders).toEqual([]);
 
@@ -1221,6 +1226,7 @@ describe("scoped-operation production surface", () => {
     expect(page).toContain("listCatalogProductsForStore");
     expect(page).not.toContain("updateCatalogProductPriceForStore");
     expect(page).not.toContain("updateCatalogProductPriceForMerchant");
+    expect(page).not.toContain("readCatalogProductPriceForMerchant");
     expect(page).not.toContain("searchParams");
     expect(page).not.toContain("storeId");
 
@@ -1229,6 +1235,7 @@ describe("scoped-operation production surface", () => {
       "utf8",
     );
     expect(merchantModule).toContain("updateCatalogProductPriceForMerchant");
+    expect(merchantModule).toContain("readCatalogProductPriceForMerchant");
     expect(merchantModule).not.toContain("updateCatalogProductPriceForStore");
 
     const barrel = readFileSync(

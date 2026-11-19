@@ -79,6 +79,11 @@ export interface CatalogProductRecord {
   >;
 }
 
+export interface CatalogProductRecordWithRevision extends CatalogProductRecord {
+  /** Exact microsecond UTC `updated_at` revision, never a JavaScript Date. */
+  revision: string;
+}
+
 type BatchCapableDb = {
   batch: (queries: unknown[]) => Promise<unknown[]>;
 };
@@ -358,7 +363,7 @@ export async function listCatalogProductsForStore(
   db: Database,
   scope: StoreScope,
   categoryId?: string,
-): Promise<CatalogProductRecord[]> {
+): Promise<CatalogProductRecordWithRevision[]> {
   assertStoreScope(scope);
 
   try {
@@ -399,6 +404,7 @@ export async function listCatalogProductsForStore(
         sortOrder: product.sortOrder,
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
+        revision: productRevisionSql(),
         translationId: productTranslation.id,
         translationLanguageId: productTranslation.languageId,
         translationLanguageCode: language.code,
@@ -428,7 +434,7 @@ export async function listCatalogProductsForStore(
         productTranslation.languageId,
       );
 
-    const products = new Map<string, CatalogProductRecord>();
+    const products = new Map<string, CatalogProductRecordWithRevision>();
 
     for (const row of rows) {
       let record = products.get(row.id);
@@ -443,6 +449,7 @@ export async function listCatalogProductsForStore(
           sortOrder: row.sortOrder,
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
+          revision: row.revision,
           translations: {},
         };
         products.set(row.id, record);
@@ -584,6 +591,11 @@ export async function updateCatalogProductPriceForStore(
   }
 }
 
+/** The exact UTC revision expression shared by reads and guarded writes. */
+function productRevisionSql() {
+  return sql<string>`to_char(${product.updatedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+}
+
 /** The server-derived identity required to bind a merchant price write. */
 export type MerchantPriceWriteIdentity = {
   userId: string;
@@ -665,13 +677,19 @@ function merchantPriceWriteEligibilityWhere(
  * ownership are left alone, and the database trigger still maintains
  * `updated_at`.
  */
+export type MerchantPriceWriteResult = {
+  price: string;
+  revision: string;
+};
+
 export async function updateCatalogProductPriceForMerchant(
   db: Database,
   scope: StoreScope,
   identity: MerchantPriceWriteIdentity,
   productId: string,
   price: unknown,
-): Promise<boolean> {
+  expectedRevision: string,
+): Promise<MerchantPriceWriteResult | null> {
   assertStoreScope(scope);
 
   const priceResult = validatePrice(price);
@@ -687,11 +705,52 @@ export async function updateCatalogProductPriceForMerchant(
         and(
           storeOwnedProductWhere(db, scope, productId),
           merchantPriceWriteEligibilityWhere(db, scope, identity),
+          eq(productRevisionSql(), expectedRevision),
         ),
       )
-      .returning({ id: product.id });
+      .returning({
+        price: product.price,
+        revision: productRevisionSql(),
+      });
 
-    return updated.length > 0;
+    return updated[0] ?? null;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Reads the latest authorized price and revision after a guarded write lost its
+ * revision precondition.
+ *
+ * The same product/category and merchant eligibility predicates gate this read,
+ * so a revoked membership, suspended store, foreign product or ineligible row
+ * yields `null` and never discloses another row's price or revision.
+ */
+export async function readCatalogProductPriceForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  productId: string,
+): Promise<MerchantPriceWriteResult | null> {
+  assertStoreScope(scope);
+
+  try {
+    const rows = await db
+      .select({
+        price: product.price,
+        revision: productRevisionSql(),
+      })
+      .from(product)
+      .where(
+        and(
+          storeOwnedProductWhere(db, scope, productId),
+          merchantPriceWriteEligibilityWhere(db, scope, identity),
+        ),
+      )
+      .limit(1);
+
+    return rows[0] ?? null;
   } catch (error) {
     throw mapDatabaseError(error);
   }

@@ -207,6 +207,16 @@ async function readPrice(productId: string) {
   return row.price;
 }
 
+async function readRevision(productId: string) {
+  const [row] = await db()
+    .select({
+      revision: sql<string>`to_char(${product.updatedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+    })
+    .from(product)
+    .where(eq(product.id, productId));
+  return row.revision;
+}
+
 /**
  * Commits fixture changes through an independent postgres-js client, so the
  * write under test sees the change on its next statement snapshot exactly as
@@ -277,26 +287,39 @@ describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
     const accessA = await resolveMerchantAccess(db(), claims(a.userId));
     const bPriceBefore = await readPrice(b.productId);
     const deletedPriceBefore = await readPrice(a.deletedProductId);
+    const aRevision = await readRevision(a.productId);
 
     const missing = await updateMerchantCatalogProductPrice(
       appDb(),
       accessA!,
-      { productId: crypto.randomUUID(), price: "1.00" },
+      {
+        productId: crypto.randomUUID(),
+        price: "1.00",
+        revision: aRevision,
+      },
     );
     const foreign = await updateMerchantCatalogProductPrice(
       appDb(),
       accessA!,
-      { productId: b.productId, price: "1.00" },
+      {
+        productId: b.productId,
+        price: "1.00",
+        revision: await readRevision(b.productId),
+      },
     );
     const ineligible = await updateMerchantCatalogProductPrice(
       appDb(),
       accessA!,
-      { productId: a.deletedProductId, price: "1.00" },
+      {
+        productId: a.deletedProductId,
+        price: "1.00",
+        revision: await readRevision(a.deletedProductId),
+      },
     );
     const malformed = await updateMerchantCatalogProductPrice(
       appDb(),
       accessA!,
-      { productId: "not-a-uuid", price: "1.00" },
+      { productId: "not-a-uuid", price: "1.00", revision: aRevision },
     );
 
     expect(missing).toEqual({ ok: false, error: "NOT_FOUND" });
@@ -316,11 +339,13 @@ describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
     );
     const access = await resolveMerchantAccess(db(), claims(a.userId));
     const before = await readPrice(a.productId);
+    const revision = await readRevision(a.productId);
 
     for (const price of ["10.123", "-1.00", "1e2", 42, ""]) {
       const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
         productId: a.productId,
         price,
+        revision,
       });
 
       expect(result).toEqual({ ok: false, error: "INVALID_PRICE" });
@@ -339,22 +364,26 @@ describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
     const zero = await updateMerchantCatalogProductPrice(appDb(), access!, {
       productId: a.productId,
       price: "0",
+      revision: await readRevision(a.productId),
     });
     expect(zero).toEqual({
       ok: true,
       productId: a.productId,
       price: "0.00",
+      revision: await readRevision(a.productId),
     });
     expect(await readPrice(a.productId)).toBe("0.00");
 
     const cents = await updateMerchantCatalogProductPrice(appDb(), access!, {
       productId: a.secondProductId,
       price: "19.9",
+      revision: await readRevision(a.secondProductId),
     });
     expect(cents).toEqual({
       ok: true,
       productId: a.secondProductId,
       price: "19.90",
+      revision: await readRevision(a.secondProductId),
     });
     expect(await readPrice(a.secondProductId)).toBe("19.90");
 
@@ -388,6 +417,7 @@ describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
     const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
       productId: a.productId,
       price: "41.00",
+      revision: await readRevision(a.productId),
     });
 
     expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
@@ -418,6 +448,7 @@ describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
     const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
       productId: a.productId,
       price: "42.00",
+      revision: await readRevision(a.productId),
     });
 
     expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
@@ -445,10 +476,87 @@ describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
     const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
       productId: a.productId,
       price: "43.00",
+      revision: await readRevision(a.productId),
     });
 
     expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
     expect(await readPrice(a.productId)).toBe(before);
+  });
+
+  it("rejects missing or malformed product revisions before writing", async () => {
+    const a = await seedMerchant(
+      "catalog.revision.invalid@example.test",
+      "Invalid Revision Store",
+      "catalog-revision-invalid",
+    );
+    const access = await resolveMerchantAccess(db(), claims(a.userId));
+    const before = await readPrice(a.productId);
+
+    for (const revision of [
+      undefined,
+      null,
+      "",
+      "2026-11-19T22:42:44.123Z",
+      "2026-11-19T22:42:44.123456+00:00",
+      123456,
+    ]) {
+      const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
+        productId: a.productId,
+        price: "44.00",
+        revision,
+      });
+
+      expect(result).toEqual({ ok: false, error: "INVALID_REVISION" });
+      expect(await readPrice(a.productId)).toBe(before);
+    }
+  });
+
+  it("rejects a stale revision with the authorized winning price and accepts the current revision", async () => {
+    const a = await seedMerchant(
+      "catalog.revision.conflict@example.test",
+      "Conflict Store",
+      "catalog-revision-conflict",
+    );
+    const access = await resolveMerchantAccess(db(), claims(a.userId));
+    const startingRevision = await readRevision(a.productId);
+
+    await withSeparateConnection(async (separate) => {
+      await separate
+        .update(product)
+        .set({ price: "88.80" })
+        .where(eq(product.id, a.productId));
+    });
+
+    const winningRevision = await readRevision(a.productId);
+    expect(winningRevision).not.toBe(startingRevision);
+
+    const stale = await updateMerchantCatalogProductPrice(appDb(), access!, {
+      productId: a.productId,
+      price: "77.70",
+      revision: startingRevision,
+    });
+
+    expect(stale).toEqual({
+      ok: false,
+      error: "CONFLICT",
+      current: { price: "88.80", revision: winningRevision },
+    });
+    expect(await readPrice(a.productId)).toBe("88.80");
+    expect(await readRevision(a.productId)).toBe(winningRevision);
+
+    const current = await updateMerchantCatalogProductPrice(appDb(), access!, {
+      productId: a.productId,
+      price: "91.9",
+      revision: winningRevision,
+    });
+
+    expect(current).toEqual({
+      ok: true,
+      productId: a.productId,
+      price: "91.90",
+      revision: await readRevision(a.productId),
+    });
+    expect(await readPrice(a.productId)).toBe("91.90");
   });
 
   it("denies writes for a suspended store resolved at mutation time", async () => {
@@ -470,6 +578,7 @@ describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
     const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
       productId: a.productId,
       price: "99.00",
+      revision: await readRevision(a.productId),
     });
 
     expect(result).toEqual({ ok: false, error: "DENIED" });

@@ -19,9 +19,9 @@ import {
  * multi-store membership, a stale `session_version`, a disabled user and a
  * suspended store therefore deny the write even when the form is already open.
  *
- * Only `productId` and `price` are read from the submitted object. Any
- * submitted store, ownership or role field is ignored; the store scope is
- * minted from the current session.
+ * Only `productId`, `price` and the expected product `revision` are read from
+ * the submitted object. Any submitted store, ownership or role field is
+ * ignored; the store scope is minted from the current session.
  */
 export async function saveMerchantProductPrice(
   input: unknown,
@@ -44,6 +44,7 @@ export async function saveMerchantProductPrice(
   const result = await updateMerchantCatalogProductPrice(getDb(), access, {
     productId: submitted.productId,
     price: submitted.price,
+    revision: submitted.revision,
   });
 
   if (result.ok) {

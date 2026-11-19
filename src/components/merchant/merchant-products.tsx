@@ -17,20 +17,28 @@ export type MerchantProductItem = {
   id: string;
   name: string;
   price: string;
-  updatedAt: string;
+  revision: string;
 };
 
 type PriceDraft = {
   value: string;
-  baseUpdatedAt: string;
+  baseRevision: string;
   dirty: boolean;
 };
 
-function draftFor(product: MerchantProductItem, drafts: Record<string, PriceDraft>) {
+type PriceConflict = {
+  price: string;
+  revision: string;
+};
+
+function draftFor(
+  product: MerchantProductItem,
+  drafts: Record<string, PriceDraft>,
+): string {
   const entry = drafts[product.id];
 
   if (entry) {
-    if (entry.dirty || entry.baseUpdatedAt === product.updatedAt) {
+    if (entry.dirty || entry.baseRevision === product.revision) {
       return entry.value;
     }
   }
@@ -38,7 +46,12 @@ function draftFor(product: MerchantProductItem, drafts: Record<string, PriceDraf
   return product.price;
 }
 
-type PriceError = "UNAVAILABLE" | "DENIED" | "NOT_FOUND" | "INVALID_PRICE";
+type PriceError =
+  | "UNAVAILABLE"
+  | "DENIED"
+  | "NOT_FOUND"
+  | "INVALID_PRICE"
+  | "INVALID_REVISION";
 
 type Copy = {
   dir: "rtl" | "ltr";
@@ -58,9 +71,15 @@ type Copy = {
   logout: string;
   languageLabel: string;
   invalidPrice: string;
+  invalidRevision: string;
   notFound: string;
   denied: string;
   unavailable: string;
+  conflictTitle: string;
+  conflictBody: string;
+  latestPriceLabel: string;
+  useLatestPrice: string;
+  retryMyPrice: string;
 };
 
 const COPY: Record<MerchantLocale, Copy> = {
@@ -83,9 +102,16 @@ const COPY: Record<MerchantLocale, Copy> = {
     logout: "تسجيل الخروج",
     languageLabel: "لغة الصفحة",
     invalidPrice: "أدخل سعرًا صالحًا من رقمين عشريين على الأكثر.",
+    invalidRevision: "تعذر التحقق من نسخة السعر. أعد تحميل الصفحة.",
     notFound: "تعذر العثور على هذا المنتج في متجرك.",
     denied: "لم تعد تملك صلاحية تعديل هذا المتجر.",
     unavailable: "تعذر حفظ السعر الآن. حاول مرة أخرى بعد قليل.",
+    conflictTitle: "حفظ جهاز آخر سعرًا أحدث.",
+    conflictBody:
+      "لم يُحفظ سعرك حتى لا يستبدل السعر الأحدث. راجع السعر الأخير ثم اختر كيف تريد المتابعة.",
+    latestPriceLabel: "أحدث سعر محفوظ",
+    useLatestPrice: "استخدام أحدث سعر",
+    retryMyPrice: "إعادة المحاولة بسعري",
   },
   en: {
     dir: "ltr",
@@ -106,9 +132,16 @@ const COPY: Record<MerchantLocale, Copy> = {
     logout: "Sign out",
     languageLabel: "Page language",
     invalidPrice: "Enter a valid price with no more than two decimal places.",
+    invalidRevision: "The price revision could not be checked. Reload the page.",
     notFound: "This product could not be found in your store.",
     denied: "You can no longer edit this store.",
     unavailable: "The price could not be saved right now. Try again shortly.",
+    conflictTitle: "Another device saved a newer price.",
+    conflictBody:
+      "Your price was not saved so it could not replace the newer price. Review the latest price, then choose how to continue.",
+    latestPriceLabel: "Latest saved price",
+    useLatestPrice: "Use latest price",
+    retryMyPrice: "Retry my price",
   },
 };
 
@@ -116,6 +149,8 @@ function errorMessage(error: PriceError, copy: Copy): string {
   switch (error) {
     case "INVALID_PRICE":
       return copy.invalidPrice;
+    case "INVALID_REVISION":
+      return copy.invalidRevision;
     case "NOT_FOUND":
       return copy.notFound;
     case "DENIED":
@@ -139,6 +174,9 @@ export function MerchantProducts({
   const [errors, setErrors] = useState<Record<string, PriceError | undefined>>(
     {},
   );
+  const [conflicts, setConflicts] = useState<
+    Record<string, PriceConflict | undefined>
+  >({});
   const [savedId, setSavedId] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const pendingRef = useRef<string | null>(null);
@@ -146,13 +184,11 @@ export function MerchantProducts({
   const copy = COPY[locale];
   const saving = isPending || pendingId !== null;
 
-  function submitPrice(
-    event: React.FormEvent<HTMLFormElement>,
+  function savePrice(
     product: MerchantProductItem,
     draft: string,
+    expectedRevision: string,
   ) {
-    event.preventDefault();
-
     // The ref is set synchronously, before React can render the pending state,
     // so two rapid submissions in the same task can never start two writes.
     if (readOnly || pendingRef.current !== null) return;
@@ -161,6 +197,7 @@ export function MerchantProducts({
     pendingRef.current = productId;
 
     setErrors((current) => ({ ...current, [productId]: undefined }));
+    setConflicts((current) => ({ ...current, [productId]: undefined }));
     setSavedId(null);
     setPendingId(productId);
 
@@ -169,6 +206,7 @@ export function MerchantProducts({
         const result = await saveMerchantProductPrice({
           productId,
           price: draft,
+          revision: expectedRevision,
         });
 
         if (result.ok) {
@@ -179,11 +217,16 @@ export function MerchantProducts({
             ...current,
             [result.productId]: {
               value: result.price,
-              baseUpdatedAt: product.updatedAt,
+              baseRevision: product.revision,
               dirty: false,
             },
           }));
           setSavedId(result.productId);
+        } else if (result.error === "CONFLICT") {
+          setConflicts((current) => ({
+            ...current,
+            [productId]: result.current,
+          }));
         } else {
           setErrors((current) => ({
             ...current,
@@ -200,6 +243,46 @@ export function MerchantProducts({
         setPendingId(null);
       }
     });
+  }
+
+  function submitPrice(
+    event: React.FormEvent<HTMLFormElement>,
+    product: MerchantProductItem,
+    draft: string,
+  ) {
+    event.preventDefault();
+
+    const entry = drafts[product.id];
+    const expectedRevision =
+      entry?.dirty === true ? entry.baseRevision : product.revision;
+
+    savePrice(product, draft, expectedRevision);
+  }
+
+  function adoptLatestPrice(product: MerchantProductItem) {
+    const conflict = conflicts[product.id];
+
+    if (!conflict) return;
+
+    setDrafts((current) => ({
+      ...current,
+      [product.id]: {
+        value: conflict.price,
+        baseRevision: conflict.revision,
+        dirty: true,
+      },
+    }));
+    setConflicts((current) => ({ ...current, [product.id]: undefined }));
+    setErrors((current) => ({ ...current, [product.id]: undefined }));
+    setSavedId(null);
+  }
+
+  function retryDraft(product: MerchantProductItem, draft: string) {
+    const conflict = conflicts[product.id];
+
+    if (!conflict) return;
+
+    savePrice(product, draft, conflict.revision);
   }
 
   return (
@@ -278,6 +361,7 @@ export function MerchantProducts({
                 const inputId = `merchant-price-${product.id}`;
                 const errorId = `merchant-price-error-${product.id}`;
                 const error = errors[product.id];
+                const conflict = conflicts[product.id];
                 const rowSaving = pendingId === product.id;
                 const draft = draftFor(product, drafts);
 
@@ -339,14 +423,21 @@ export function MerchantProducts({
 
                               const value = event.target.value;
 
-                              setDrafts((current) => ({
-                                ...current,
-                                [product.id]: {
-                                  value,
-                                  baseUpdatedAt: product.updatedAt,
-                                  dirty: true,
-                                },
-                              }));
+                              setDrafts((current) => {
+                                const existing = current[product.id];
+
+                                return {
+                                  ...current,
+                                  [product.id]: {
+                                    value,
+                                    baseRevision:
+                                      existing?.dirty === true
+                                        ? existing.baseRevision
+                                        : product.revision,
+                                    dirty: true,
+                                  },
+                                };
+                              });
                               setSavedId(null);
                               setErrors((current) => ({
                                 ...current,
@@ -392,6 +483,48 @@ export function MerchantProducts({
                       >
                         {errorMessage(error, copy)}
                       </p>
+                    ) : null}
+
+                    {conflict ? (
+                      <div
+                        role="alert"
+                        className="mt-3 space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"
+                        data-testid={`merchant-price-conflict-${product.id}`}
+                      >
+                        <p className="font-semibold">{copy.conflictTitle}</p>
+                        <p>{copy.conflictBody}</p>
+                        <p className="flex flex-wrap items-baseline gap-2">
+                          <span>{copy.latestPriceLabel}:</span>
+                          <span
+                            dir="ltr"
+                            className="font-semibold tabular-nums"
+                            data-testid={`merchant-price-conflict-latest-${product.id}`}
+                          >
+                            {conflict.price}
+                          </span>
+                        </p>
+                        <div className="flex flex-col gap-2 pt-1 sm:flex-row">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="min-h-11 w-full sm:w-auto"
+                            disabled={saving}
+                            onClick={() => adoptLatestPrice(product)}
+                            data-testid={`merchant-price-use-latest-${product.id}`}
+                          >
+                            {copy.useLatestPrice}
+                          </Button>
+                          <Button
+                            type="button"
+                            className="min-h-11 w-full sm:w-auto"
+                            disabled={saving}
+                            onClick={() => retryDraft(product, draft)}
+                            data-testid={`merchant-price-retry-${product.id}`}
+                          >
+                            {copy.retryMyPrice}
+                          </Button>
+                        </div>
+                      </div>
                     ) : null}
 
                     {savedId === product.id ? (

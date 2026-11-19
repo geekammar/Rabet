@@ -2,8 +2,15 @@ import "server-only";
 
 import type { Database } from "@/db/client";
 import type { MerchantAccess } from "@/lib/auth/merchant-session";
-import { validatePrice, validateUuid } from "@/lib/catalog/validation";
-import { updateCatalogProductPriceForMerchant } from "@/lib/data/catalog";
+import {
+  validatePrice,
+  validateProductRevision,
+  validateUuid,
+} from "@/lib/catalog/validation";
+import {
+  readCatalogProductPriceForMerchant,
+  updateCatalogProductPriceForMerchant,
+} from "@/lib/data/catalog";
 import { RabetDataError } from "@/lib/data/errors";
 
 /**
@@ -17,27 +24,38 @@ import { RabetDataError } from "@/lib/data/errors";
  * - a suspended (read-only) store may not write;
  * - the product identifier must be a server-validated UUID;
  * - the price must pass the existing exact-decimal `validatePrice` contract;
+ * - the expected product revision is validated and compared in the same
+ *   guarded `UPDATE`, so a stale draft cannot overwrite a newer price;
  * - the guarded scoped update decides ownership, so a missing, ineligible or
  *   foreign product produces one indistinguishable not-found result.
  *
- * Only a product id and a price string cross this boundary. No store id,
- * membership role or ownership field is accepted; the `StoreScope` comes from
- * the server-side access result.
+ * Only a product id, an exact-decimal price string and the expected product
+ * revision cross this boundary. No store id, membership role or ownership
+ * field is accepted; the `StoreScope` comes from the server-side access
+ * result.
  */
 
 export type MerchantProductPriceError =
   | "UNAVAILABLE"
   | "DENIED"
   | "NOT_FOUND"
-  | "INVALID_PRICE";
+  | "INVALID_PRICE"
+  | "INVALID_REVISION"
+  | "CONFLICT";
 
 export type MerchantProductPriceResult =
-  | { ok: true; productId: string; price: string }
-  | { ok: false; error: MerchantProductPriceError };
+  | { ok: true; productId: string; price: string; revision: string }
+  | {
+      ok: false;
+      error: "CONFLICT";
+      current: { price: string; revision: string };
+    }
+  | { ok: false; error: Exclude<MerchantProductPriceError, "CONFLICT"> };
 
 export type MerchantProductPriceInput = {
   productId: unknown;
   price: unknown;
+  revision: unknown;
 };
 
 export async function updateMerchantCatalogProductPrice(
@@ -61,23 +79,51 @@ export async function updateMerchantCatalogProductPrice(
     return { ok: false, error: "INVALID_PRICE" };
   }
 
+  const revision = validateProductRevision(input.revision);
+
+  if (!revision.success) {
+    return { ok: false, error: "INVALID_REVISION" };
+  }
+
+  const identity = {
+    userId: access.userId,
+    sessionVersion: access.sessionVersion,
+  };
+
   try {
     const updated = await updateCatalogProductPriceForMerchant(
       db,
       access.scope,
-      {
-        userId: access.userId,
-        sessionVersion: access.sessionVersion,
-      },
+      identity,
       productId.data,
       price.data,
+      revision.data,
     );
 
-    if (!updated) {
-      return { ok: false, error: "NOT_FOUND" };
+    if (updated) {
+      return {
+        ok: true,
+        productId: productId.data,
+        price: updated.price,
+        revision: updated.revision,
+      };
     }
 
-    return { ok: true, productId: productId.data, price: price.data };
+    // The guarded write returned no row. Only an authorized, writable merchant
+    // looking at an eligible product may learn that this was a revision
+    // conflict; every other no-match path stays a generic not-found result.
+    const current = await readCatalogProductPriceForMerchant(
+      db,
+      access.scope,
+      identity,
+      productId.data,
+    );
+
+    if (current) {
+      return { ok: false, error: "CONFLICT", current };
+    }
+
+    return { ok: false, error: "NOT_FOUND" };
   } catch (error) {
     if (error instanceof RabetDataError && error.code === "INVALID_INPUT") {
       return { ok: false, error: "INVALID_PRICE" };

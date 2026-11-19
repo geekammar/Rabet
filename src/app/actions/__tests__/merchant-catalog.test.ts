@@ -27,6 +27,8 @@ const { saveMerchantProductPrice } = await import(
   "@/app/actions/merchant-catalog"
 );
 
+const REVISION = "2026-11-19T22:42:44.123456Z";
+
 const access = {
   userId: "11111111-1111-4111-8111-111111111111",
   email: "merchant@example.test",
@@ -84,17 +86,19 @@ describe("merchant catalog price action", () => {
     expect(state.updateMerchantCatalogProductPrice).not.toHaveBeenCalled();
   });
 
-  it("reads only productId and price, ignoring submitted ownership fields, and refreshes on success", async () => {
+  it("reads only productId, price and revision, ignoring submitted ownership fields, and refreshes on success", async () => {
     state.getMerchantAccess.mockResolvedValueOnce(access);
     state.updateMerchantCatalogProductPrice.mockResolvedValueOnce({
       ok: true,
       productId: "33333333-3333-4333-8333-333333333333",
       price: "10.00",
+      revision: REVISION,
     });
 
     const result = await saveMerchantProductPrice({
       productId: "33333333-3333-4333-8333-333333333333",
       price: "10.00",
+      revision: REVISION,
       storeId: "44444444-4444-4444-8444-444444444444",
       role: "super_admin",
       readOnly: false,
@@ -104,6 +108,7 @@ describe("merchant catalog price action", () => {
       ok: true,
       productId: "33333333-3333-4333-8333-333333333333",
       price: "10.00",
+      revision: REVISION,
     });
     expect(state.updateMerchantCatalogProductPrice).toHaveBeenCalledWith(
       { kind: "application-db" },
@@ -111,6 +116,7 @@ describe("merchant catalog price action", () => {
       {
         productId: "33333333-3333-4333-8333-333333333333",
         price: "10.00",
+        revision: REVISION,
       },
     );
     expect(state.refresh).toHaveBeenCalledTimes(1);
