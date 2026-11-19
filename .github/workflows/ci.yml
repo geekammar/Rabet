@@ -363,6 +363,16 @@ jobs:
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run test:browser:simple-catalog
 
+      # Phase 2B-2: real browser invitation acceptance, merchant sign-in,
+      # one-store resolution and session invalidation at a 360 px viewport.
+      # The suite seeds through the transactional invitation service, uses a
+      # disposable loopback database and starts the app with the merchant gate
+      # enabled only for the life of this step.
+      - name: Run Merchant invitation and setup browser acceptance suite
+        env:
+          RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
+        run: npm run test:browser:merchant
+
       - name: Run Android Mobile Touch Scrolling browser acceptance suite
         env:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres

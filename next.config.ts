@@ -32,12 +32,19 @@ const dashboardPaths = [
   "/settings",
 ];
 
+const merchantPaths = [
+  "/invite",
+  "/app",
+  "/api/merchant-invitations",
+  "/api/merchant-auth",
+];
+
 const nextConfig: NextConfig = {
   output: "standalone",
   cacheComponents: true,
   partialPrefetching: true,
   async headers() {
-    return dashboardPaths.flatMap((path) =>
+    return [...dashboardPaths, ...merchantPaths].flatMap((path) =>
       [path, `${path}/:path*`].map((source) => ({
         source,
         headers: [
@@ -49,6 +56,18 @@ const nextConfig: NextConfig = {
             key: "Pragma",
             value: "no-cache",
           },
+          ...(path === "/invite" || path === "/app"
+            ? [
+                {
+                  key: "Referrer-Policy",
+                  value: "no-referrer",
+                },
+                {
+                  key: "X-Robots-Tag",
+                  value: "noindex, nofollow",
+                },
+              ]
+            : []),
         ],
       })),
     );

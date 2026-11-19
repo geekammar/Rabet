@@ -1159,6 +1159,10 @@ describe("Phase 1 scoped-operation surface", () => {
     const allowed = new Set([
       path.join("lib", "data", "catalog.ts"),
       path.join("lib", "data", "store-scope.ts"),
+      // Phase 2B-2 adds the single production issuer: the authenticated
+      // merchant resolver. No page, action, route or loader calls the scoped
+      // catalog operations themselves.
+      path.join("lib", "auth", "merchant-session.ts"),
     ]);
 
     const walk = (dir: string): string[] =>

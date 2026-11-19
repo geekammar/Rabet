@@ -1,9 +1,12 @@
 import { sql } from "drizzle-orm";
 import {
   check,
+  index,
   integer,
   pgTable,
+  primaryKey,
   smallint,
+  text,
   timestamp,
 } from "drizzle-orm/pg-core";
 
@@ -40,6 +43,56 @@ export const adminLoginThrottle = pgTable(
     check("admin_login_throttle_singleton_check", sql`${table.id} = 1`),
     check(
       "admin_login_throttle_attempt_count_check",
+      sql`${table.attemptCount} >= 0`,
+    ),
+  ],
+);
+
+/**
+ * `merchant_auth_throttle` — durable, merchant-scoped retry state.
+ *
+ * This is deliberately separate from `admin_login_throttle`: the operator's
+ * singleton budget must never be spent by, or become shared with, merchant
+ * traffic. Rows are keyed by a scope plus a SHA-256 key digest so the table
+ * never stores a raw email address, invitation token or client address.
+ *
+ * Scopes:
+ * - `invitation_global`  — a coarse cap on all public invitation requests
+ * - `invitation_preview` — one pending invitation lookup per token
+ * - `invitation_accept`  — one invitation acceptance attempt per token (before Argon2)
+ * - `sign_in`            — one merchant identity's password attempts
+ * - `sign_in_global`     — a coarse cap on all merchant password attempts
+ *
+ * The fixed window is anchored at the first attempt in the same way as the
+ * operator limiter. Rows older than the retention horizon are pruned by the
+ * limiter itself, so arbitrary keys cannot grow the table forever.
+ */
+export const merchantAuthThrottle = pgTable(
+  "merchant_auth_throttle",
+  {
+    scope: text("scope").notNull(),
+    key: text("key").notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    windowStartedAt: timestamp("window_started_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.scope, table.key] }),
+    index("merchant_auth_throttle_window_idx").on(table.windowStartedAt),
+    check(
+      "merchant_auth_throttle_scope_check",
+      sql`${table.scope} IN ('invitation_global', 'invitation_preview', 'invitation_accept', 'sign_in', 'sign_in_global')`,
+    ),
+    check(
+      "merchant_auth_throttle_key_format_check",
+      sql`${table.key} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "merchant_auth_throttle_attempt_count_check",
       sql`${table.attemptCount} >= 0`,
     ),
   ],

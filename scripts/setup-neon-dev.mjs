@@ -77,7 +77,7 @@ import postgres from "postgres";
 
 const WIZARD = "rabet db:setup:dev";
 
-/** The twenty-four domain tables created by the committed chain. */
+/** The twenty-five domain tables created by the committed chain. */
 export const EXPECTED_TABLES = [
   "admin_login_throttle",
   "app_user",
@@ -88,6 +88,7 @@ export const EXPECTED_TABLES = [
   "inquiry",
   "inquiry_message",
   "language",
+  "merchant_auth_throttle",
   "merchant_credential",
   "merchant_invitation",
   "message_template",
@@ -116,6 +117,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0006_tenant_ownership_expansion",
   "0007_admin_login_throttle",
   "0008_merchant_invitations_and_credentials",
+  "0009_merchant_auth_throttle",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -123,10 +125,14 @@ const MERCHANT_INVITATION_TABLES = new Set([
   "merchant_credential",
   "merchant_invitation",
 ]);
+const MERCHANT_SESSION_TABLES = new Set(["merchant_auth_throttle"]);
 
 /** The twenty-one domain tables present in the 0005 tenant-identity baseline. */
 export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
-  (t) => t !== "admin_login_throttle" && !MERCHANT_INVITATION_TABLES.has(t),
+  (t) =>
+    t !== "admin_login_throttle" &&
+    !MERCHANT_INVITATION_TABLES.has(t) &&
+    !MERCHANT_SESSION_TABLES.has(t),
 );
 
 /** The twenty-one tables present in the 0006 ownership baseline (no new table until 0008). */
@@ -134,7 +140,15 @@ export const EXPECTED_TABLES_V5 = [...EXPECTED_TABLES_V4];
 
 /** The twenty-two tables present in the 0007 login-throttle baseline. */
 export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
-  (t) => !MERCHANT_INVITATION_TABLES.has(t),
+  (t) => !MERCHANT_INVITATION_TABLES.has(t) && !MERCHANT_SESSION_TABLES.has(t),
+);
+
+/**
+ * The exact twenty-four-table inventory through 0008:
+ * credential and invitation tables included, merchant_auth_throttle excluded.
+ */
+export const EXPECTED_TABLES_V7 = EXPECTED_TABLES.filter(
+  (t) => !MERCHANT_SESSION_TABLES.has(t),
 );
 
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
@@ -219,14 +233,21 @@ export const EXPECTED_INDEXES_V5 = [
 /** Indexes present in the 0000..0007 baseline. */
 export const EXPECTED_INDEXES_V6 = [...EXPECTED_INDEXES_V5];
 
-/** Indexes the current chain requires (0008 adds credential and invitation indexes). */
+
+/** Indexes the current chain requires (0008 adds credentials/invitations; 0009 adds throttle). */
 export const EXPECTED_INDEXES = [
   ...EXPECTED_INDEXES_V6,
   "merchant_credential_user_id_unique",
   "merchant_invitation_token_digest_unique",
   "merchant_invitation_store_idx",
   "merchant_invitation_invited_email_idx",
+  "merchant_auth_throttle_window_idx",
 ];
+
+/** Indexes present through 0008 (credentials and invitations, no 0009 throttle index). */
+export const EXPECTED_INDEXES_V7 = EXPECTED_INDEXES.filter(
+  (name) => name !== "merchant_auth_throttle_window_idx",
+);
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
 export const CRITICAL_CONSTRAINTS_V2 = [
@@ -293,8 +314,8 @@ export const CRITICAL_CONSTRAINTS_V6 = [
   "admin_login_throttle_attempt_count_check",
 ];
 
-/** CHECK, domain and ownership constraints the current chain requires. */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, domain and ownership constraints present through 0008. */
+export const CRITICAL_CONSTRAINTS_V7 = [
   ...CRITICAL_CONSTRAINTS_V6,
   "merchant_credential_password_hash_not_empty_check",
   "merchant_credential_password_hash_argon2id_check",
@@ -306,6 +327,15 @@ export const CRITICAL_CONSTRAINTS = [
   "merchant_invitation_terminal_state_check",
   "merchant_invitation_store_id_store_id_fk",
   "merchant_invitation_invited_by_user_id_app_user_id_fk",
+];
+
+/** CHECK, domain and ownership constraints the current chain requires (0009 adds throttle). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V7,
+  "merchant_auth_throttle_scope_key_pk",
+  "merchant_auth_throttle_scope_check",
+  "merchant_auth_throttle_key_format_check",
+  "merchant_auth_throttle_attempt_count_check",
 ];
 
 /** Notification update triggers created by migration 0003. */

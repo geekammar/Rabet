@@ -77,6 +77,7 @@ import {
   CRITICAL_CONSTRAINTS_V4,
   CRITICAL_CONSTRAINTS_V5,
   CRITICAL_CONSTRAINTS_V6,
+  CRITICAL_CONSTRAINTS_V7,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
@@ -84,6 +85,7 @@ import {
   EXPECTED_INDEXES_V4,
   EXPECTED_INDEXES_V5,
   EXPECTED_INDEXES_V6,
+  EXPECTED_INDEXES_V7,
   EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
@@ -92,6 +94,7 @@ import {
   EXPECTED_TABLES_V4,
   EXPECTED_TABLES_V5,
   EXPECTED_TABLES_V6,
+  EXPECTED_TABLES_V7,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -1385,6 +1388,28 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 9 &&
+        inspected.state.pending[0] === "0009_merchant_auth_throttle"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V7,
+          expectedIndexes: EXPECTED_INDEXES_V7,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V7,
+          expectedHashes: ctx.committedHashes.slice(0, 9).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 9 migrations recorded, " +
+              "but live schema does not match the supported prior release (0008_merchant_invitations_and_credentials).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 8 &&
         inspected.state.pending[0] === "0008_merchant_invitations_and_credentials"
       ) {
@@ -1569,6 +1594,9 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV8 =
+        inspected.state.appliedCount === 9 &&
+        inspected.state.pending[0] === "0009_merchant_auth_throttle";
       const isKnownPriorReleaseV7 =
         inspected.state.appliedCount === 8 &&
         inspected.state.pending[0] === "0008_merchant_invitations_and_credentials";
@@ -1591,7 +1619,33 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV7) {
+      if (isKnownPriorReleaseV8) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V7,
+          expectedIndexes: EXPECTED_INDEXES_V7,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V7,
+          expectedHashes: ctx.committedHashes.slice(0, 9).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0008_merchant_invitations_and_credentials). " +
+              "Proceeding with migration to 0009_merchant_auth_throttle.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV7) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V6,
