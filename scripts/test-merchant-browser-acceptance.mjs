@@ -618,8 +618,23 @@ async function runJourney(cdp, fixture, authSecret) {
     "A store hint for B must not switch merchant A's store",
   );
 
-  await navigate(`${BASE_URL}/overview`);
-  await waitForUrl("/login", "merchant session cannot open operator pages");
+  const cookieJar = await cdp.send("Network.getCookies", { urls: [BASE_URL] });
+  const merchantCookie = cookieJar.cookies.find((cookie) =>
+    String(cookie.name).startsWith("rabet-merchant.session-token"),
+  );
+  assert(merchantCookie, "Merchant session cookie should exist after sign-in");
+  const operatorProbe = await fetch(`${BASE_URL}/overview`, {
+    redirect: "manual",
+    headers: { Cookie: `rabet-merchant.session-token=${merchantCookie.value}` },
+  });
+  assert(
+    [302, 307, 308].includes(operatorProbe.status),
+    `Merchant session must not pass the operator proxy (status ${operatorProbe.status})`,
+  );
+  assert(
+    String(operatorProbe.headers.get("location")).includes("/login"),
+    "Merchant session should be redirected to the operator login gate",
+  );
 
   await navigate(`${BASE_URL}/app/setup`);
   await waitForUrl("/app/setup", "merchant A still signed in");
