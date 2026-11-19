@@ -379,9 +379,9 @@ the Phase 5 gate accrues and repeats them as one integrated acceptance run.
 | 2 | Merchant credential, invitation, merchant session, operator/merchant split, lifecycle/activation UI; scope the catalog call sites to the resolved membership; add this slice's two-store negative tests | A merchant can manage their own store while onboarding; membership is not customer readiness | Telegram connection; production isolation | UI strings; invitation content | Phase 1 gate; C1, C3, C9 |
 | 3 | Telegram connection model, per-connection webhook, Managed Bot spike first, then implementation; keep the legacy bot unchanged; add this slice's two-store/two-connection negative tests | Inbound updates resolve one connection to one store; ambiguous provisioning fails closed | Live correlation until spike passes; second-store safety | Test-bot spike (test accounts only) | C6; spike result; Phase 2 gate |
 | 4 | Production maintenance: confirm compatible writes live and scoped reads disabled; quiesce; backfill; verify content/ownership; switch scoped reads on; reconcile and monitor | The legacy rows are owned at cutover; scoped reads only start after zero NULL | Tenant isolation; second-store safety | Staging fixture preparation | Phase 1–3 gates; C1–C3, C7–C10 |
-| 5 | Integrated two-store/two-bot acceptance gate on staging, accrued from every slice's negative tests | Cross-store access is denied at the data layer, membership boundary, webhook and worker | Live Telegram production behavior; scale | Pilot preparation | Phases 2–4; full matrix |
+| 5 | Per-store uniqueness migration and the §6.6 same-slug tests, then the integrated two-store/two-bot acceptance gate on staging | Cross-store access is denied at the data layer, membership boundary, webhook and worker; same-slug stores coexist only under the approved schema | Live Telegram production behavior; scale | Pilot preparation | Phases 2–4; C4; full matrix |
 | 6 | Invite-only pilot: legacy store per C1, then a second production store only after Phase 5 | The real merchant journey works under isolation | Scale, billing, staff, WhatsApp | Monitoring and support | Phase 4 and Phase 5 gates |
-| 7 | Final hardening: `NOT NULL`, composite constraints, drop legacy resolver and old unique indexes; later notifications | The transitional code can be retired | Future product scope | Notification milestone | Zero NULL, zero cross-store mismatches, all stores migrated |
+| 7 | Final hardening: `NOT NULL`, composite constraints, drop superseded global unique indexes, drop legacy resolver; later notifications | The transitional code and global uniqueness assumptions can be retired | Future product scope | Notification milestone | Zero NULL, zero cross-store mismatches, all stores migrated; C4 migration verified |
 
 ### 5.1 What must not run in parallel or out of order
 
@@ -477,12 +477,24 @@ Create in an isolated PostgreSQL database (the existing
 **Phase 1 catalog-slice subset** needs only:
 
 - `store` A and B, both active, distinct slugs.
-- Categories/products with the same slug in A and B, different prices and
-  activation states.
+- Categories and products with **distinct valid slugs** in A and B. The current
+  schema has global unique constraints on `category.slug` and `product.slug`
+  (`src/db/schema/catalog.ts:68`, `:161`), so Phase 1 must not seed the same slug
+  in both stores. Visible product/category names may be reused; prices and
+  activation states may differ. Category fixtures must also use distinct root
+  sort orders under the current root-order unique index
+  (`category_root_sort_order_idx`).
+- A test-only legacy cross-link fixture that the current single-column FK allows
+  (`src/db/schema/catalog.ts:158-161`): product `store_id = A` with
+  `category_id = categoryB` (and optionally a `store_id = NULL` product). This
+  proves the scoped read does not rely on the product predicate alone.
 - A trusted `StoreScope` constructed in the test fixture from each store's
   server-side id; no browser, form, JWT or route supplies it.
 - No merchant credential, session, Telegram connection or bot is required for
   this slice.
+
+Do not relax the existing unique constraints or add a migration for Phase 1.
+The same-slug case belongs to the later per-store uniqueness milestone in §6.6.
 
 **Later-phase additions** for the integrated matrix:
 
@@ -496,22 +508,28 @@ Create in an isolated PostgreSQL database (the existing
 - One inquiry in A and one in B, plus one message and one delivery each.
 - One notification setting per store, both disabled.
 
-Do not use a real Telegram token. Use the existing injected transport/test seam
-(`tests/db/telegram-journey.test.ts` and `src/lib/telegram/webhook.ts:60-73`).
+These later additions assume the C4/C6 schema changes and are not valid against
+the current global unique constraints on `product.slug`, `customer.telegram_id`
+or `telegram_update.update_id`. Do not use a real Telegram token. Use the
+existing injected transport/test seam (`tests/db/telegram-journey.test.ts` and
+`src/lib/telegram/webhook.ts:60-73`).
 
 ### 6.2 Phase 1 catalog-slice cases
 
 | Case | Setup / call | Expected |
 | --- | --- | --- |
-| A lists A only | `listCatalogProductsForStore(db, scopeA)` | Exactly A's products; B's same-slug product is absent |
+| A lists A only | `listCatalogProductsForStore(db, scopeA)` | Exactly A's products; B's distinct-slug product is absent |
 | Scoped translations | A's list query | Only A-owned product translations are read; B's translation rows are not loaded |
-| Cross-store category hint | `listCatalogProductsForStore(db, scopeA, categoryB.id)` | No B products; no B translations |
+| Category belongs to scope | `listCatalogProductsForStore(db, scopeA, categoryA.id)` | Category A ownership is established before the product query; only A products in category A |
+| Cross-store category hint | `listCatalogProductsForStore(db, scopeA, categoryB.id)` | Category B is rejected before the product query; no B products and no B translations |
+| Legacy cross-link | Product `store_id = A` points at `categoryB` (allowed by the current single-column FK) | A's scoped read excludes the cross-linked product and its translations; the existing legacy global path is unchanged |
 | A cannot update B | `updateCatalogProductAvailabilityForStore(db, scopeA, productB.id, false)` | Not-found/no write; B's availability is unchanged |
 | Missing scope | Call the scoped function with `null`/`undefined`/unbranded id | Throws/denies before SQL; no write |
 | Invalid scope | Scope with a non-existent store id | Denied; no write |
 | B unchanged | Read B's product and activation after A's failed update | Byte-for-byte unchanged |
 | Existing single-store path | Existing `listCatalogProducts` / `updateCatalogProduct` suites | Pass without signature or behavior change |
 | No browser store id | The scoped functions take only a server-built `StoreScope` | There is no form/URL/header store-id parameter to trust |
+| No production route | Phase 1 module/export surface | Scoped operations are test-reachable only; no page, action or route invokes them |
 
 ### 6.3 Integrated matrix
 
@@ -520,10 +538,13 @@ Do not use a real Telegram token. Use the existing injected transport/test seam
 | Merchant session | A signs in; B's store id is placed in URL and form | A resolves A only; B id is 404, never a switch |
 | Membership | Revoke A's membership mid-session | A is denied on the next request; no cached scope survives |
 | Session version | Increment `app_user.session_version` | A's old JWT is rejected |
-| Onboarding lifecycle | A's store is `onboarding` with active membership | A can manage own catalog/setup; test/share and customer serving are denied |
+| Onboarding lifecycle | A's store is `onboarding` with active membership | A can manage own catalog/setup, including explicit own-store availability; test/share and customer serving are denied |
 | Suspended lifecycle | A's store is `suspended` with active membership | A gets read-only access; writes, test/share and customer serving are denied |
+| Activation | A's store is `onboarding` with a valid profile and at least one eligible available own-store product | Merchant can activate; test/share still wait for a ready connection |
 | Customer-ready | A's store is `active` and connection is `ready` | Test/share and customer serving are enabled |
-| Catalog read | A lists products/categories | Only A rows; B's same slug is invisible |
+| Catalog read | A lists products/categories | Only A rows; B's distinct rows are invisible |
+| Legacy cross-link | A's scoped read of a product whose `store_id = A` but whose category belongs to B | Cross-linked product and translations excluded from A's scoped read; legacy global path unchanged |
+| Category ownership | A filters by B's category id | Category rejected before the product query; no B rows or translations |
 | Catalog write | A updates B's product id | No write; generic not-found |
 | Relation | A creates a product under B's category | Constraint/ownership error; no write |
 | Template | A creates a key that exists in B | Creates A's own row; does not return B's |
@@ -553,7 +574,9 @@ never use production credentials.
 
 ### 6.5 Exit criteria before a second production store
 
-- Every matrix row passes in CI on the exact SHA to be deployed.
+- Every matrix row in §6.3 passes in CI on the exact SHA to be deployed.
+- Before the Phase 5 gate, the §6.6 same-slug cases pass on the C4 per-store
+  uniqueness schema; they are not required for Phase 1.
 - The full existing suite still passes (no regressions in catalog, inquiry,
   notifications or Telegram journeys).
 - The operator records the store/connection ids and the CI run URL.
@@ -561,6 +584,29 @@ never use production credentials.
   manual SQL insert.
 - Cross-store access is denied in staging with real sessions and two real
   connections before production gets the second store.
+
+### 6.6 Later per-store uniqueness milestone (not Phase 1)
+
+**Schema dependency:** C4 and a reviewed migration replacing the global unique
+constraints on `category.slug` and `product.slug` with store-scoped uniqueness
+(`(store_id, slug)` or equivalent), plus the required data backfill. The current
+schema is global unique (`src/db/schema/catalog.ts:68`, `:161`), so the same-slug
+case cannot run in Phase 1 and must not be made to pass by relaxing the
+constraint. This milestone must be complete before the Phase 5 integrated gate
+and before any second production store; Phase 7 only removes the superseded
+global indexes after all stores are migrated.
+
+After that migration, add the deferred case:
+
+| Case | Setup | Expected |
+| --- | --- | --- |
+| Same product slug in two stores | Product A and product B both use `shared-slug` after the store-scoped unique migration | Both rows are valid; A's scoped read returns A's row only |
+| Same category slug in two stores | Category A and category B both use `shared-category` after the migration | Both rows are valid; each category filter resolves in its own store |
+| Same slug before the migration | Attempt to seed the same product/category slug on current schema | Existing global unique constraint rejects it; this is expected and is not a Phase 1 failure |
+
+Do not copy a same-slug fixture into Phase 1. The later test is gated on the
+schema change and belongs with the per-store uniqueness milestone, not with the
+first catalog slice.
 
 ---
 
@@ -593,11 +639,22 @@ The narrowest design is an **additive seam**, not a rewrite:
   values. The type cannot be constructed from browser input.
 - `src/lib/data/catalog.ts` — add:
   - `listCatalogProductsForStore(db, scope, categoryId?)`, reusing the existing
-    record shape and translation assembly but adding `WHERE store_id = $1`.
-    The translation query must be scoped to store-owned product ids in SQL; do
-    not load every store's translations and filter in memory. A supplied
-    `categoryId` is verified against the scope (or applied together with
-    `store_id`), never trusted on its own.
+    record shape and translation assembly but adding `WHERE product.store_id =
+    $1`. The translation query must be scoped to store-owned product ids in SQL;
+    do not load every store's translations and filter in memory.
+  - **Category ownership is a separate gate.** When `categoryId` is supplied,
+    load that category first and require `category.store_id = scope.storeId`
+    before the product query. A product `store_id` predicate plus the requested
+    category id is insufficient: the current FK references `category(id)` only
+    (`src/db/schema/catalog.ts:158-161`) and does not enforce matching store
+    ownership. If the category is missing,
+    belongs to another store, or is a legacy cross-link, return no rows/not-found
+    before querying products.
+  - For every returned product, require its category to belong to the same store
+    (join `category` on `id` and `store_id = scope.storeId`). This excludes a
+    legacy product whose `store_id = A` points at a category owned by B. The
+    existing global legacy read remains unchanged until its reviewed cutover;
+    this slice does not remove or scope it.
   - `updateCatalogProductAvailabilityForStore(db, scope, productId, isActive)`,
     one `UPDATE ... WHERE id = $1 AND store_id = $2 AND deleted_at IS NULL
     RETURNING ...`.
@@ -641,9 +698,13 @@ merchant or create a production store.
 Use the existing isolated PostgreSQL test pattern with **two stores, A and B**,
 and a fixture-built server-side `StoreScope` for each.
 
-- A lists only A's products; B's product with the same slug is absent.
+- A lists only A's products; B's product with its own distinct valid slug is absent.
 - A's translation read is scoped in SQL and does not load B's translation rows.
-- A passing B's category id returns no B products and no B translations.
+- A passing B's category id is rejected before the product query and returns no
+  B products and no B translations.
+- A legacy product whose `store_id = A` points at B's category is excluded from
+  A's scoped read and its translations are not returned. The existing global
+  legacy read remains unchanged.
 - A's scoped availability update changes A's product.
 - A's scoped availability update targeting B's product id writes nothing and B's
   `is_active` is unchanged.
@@ -653,6 +714,8 @@ and a fixture-built server-side `StoreScope` for each.
   failed update.
 - The existing single-store `listCatalogProducts` and `updateCatalogProduct`
   suites pass unchanged.
+- The scoped operations are reachable only from tests/modules in the first PR;
+  no page, Server Action or production route invokes them.
 - The test helper and test file run in the existing `tests/db` CI job without
   new services, scripts or secrets.
 
@@ -676,6 +739,8 @@ Stop before implementation if any of the following is true:
 - It does not add a production route, page, Server Action or dashboard UI.
 - It does not wire the scoped functions to any browser path.
 - It does not update price (the immediate next field on the same seam).
+- It does not test duplicate cross-store slugs; that case waits for the C4
+  per-store uniqueness schema change in §6.6.
 - It does not change the legacy resolver or the eight ownership roots.
 - It does not add settings, per-store uniqueness, composite FKs or Telegram.
 - It does not run the backfill or create a second production store.

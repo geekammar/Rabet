@@ -66,9 +66,12 @@ verified here; those gaps are recorded in §3.7 and in the delivery document.
    **UNVERIFIED** until the test-bot spike passes.
 9. **Store lifecycle is explicit.** A merchant membership grants access to the
    merchant's own store while it is `onboarding`, `active` or `suspended`
-   (read-only when suspended). Customer-facing serving, testing and sharing wait
-   for customer readiness: store `active` plus a `ready` Telegram connection.
-   Membership authorization is not the same as customer readiness.
+   (read-only when suspended). New products are draft-first. During onboarding,
+   the authorized owner may explicitly make a valid own-store product available.
+   Activation requires a valid profile and at least one eligible available
+   product. Customer-facing serving, testing and sharing require store `active`
+   plus a `ready` Telegram connection. Membership authorization is not the same
+   as customer readiness.
 10. **Arabic-first mobile onboarding and three frequent tasks.** The merchant
     sees invite, setup, connect, activate, test and share as one linear journey,
     then a home screen centered on add product, edit price/availability and
@@ -423,23 +426,26 @@ status.
 | State | Merchant membership | Merchant dashboard access | Customer bot | Test/share | Inquiries |
 | --- | --- | --- | --- | --- | --- |
 | Invited, not accepted | None yet | Invitation page only | No connection | No | None |
-| `onboarding` | Active owner | Setup, store profile, catalog draft CRUD, languages/storefront, Telegram connection setup | Does not serve; webhook rejects (connection may be pending or ready) | Disabled | Empty until a customer can reach the bot |
-| `active`, no ready connection | Active owner | Full own-store management | Does not serve | Disabled | Existing history only |
+| `onboarding` | Active owner | Setup, store profile, draft-first catalog CRUD including explicit own-store product availability, languages/storefront, Telegram connection setup | Does not serve; webhook rejects (connection may be pending or ready) | Disabled | Empty until a customer can reach the bot |
+| `active`, no ready connection | Active owner | Full own-store management, including product availability | Does not serve | Disabled | Existing history only |
 | `active`, ready connection | Active owner | Full own-store management | Serves the store | Enabled | Live; merchant reads and replies |
 | `suspended` | Active owner | Sign-in and read-only notice; no writes | Webhook rejects | Disabled | Read-only |
 | Membership revoked | Revoked | No merchant access | Per connection state | Disabled | No access |
 | Legacy operator-managed | No merchant membership | Current operator dashboard only | Current single bot | Not part of merchant flow | Current operator flow |
 
 Activation is a merchant action that requires the store profile to be valid and
-at least one active product. Customer readiness additionally requires a ready
-Telegram connection. This keeps onboarding productive without exposing a
-half-built store to customers.
+at least one **eligible available product**: `store_id` matches the scope,
+`deleted_at IS NULL`, `is_active = true`, and its category belongs to the same
+store. Customer readiness additionally requires a ready Telegram connection.
+New products are created draft-first; the owner explicitly publishes or makes a
+product available while onboarding. This keeps onboarding productive without
+exposing a half-built store to customers.
 
 ```mermaid
 stateDiagram-v2
   [*] --> Invited
   Invited --> Onboarding: invitation accepted
-  Onboarding --> Active: merchant activates (valid profile + at least one active product)
+  Onboarding --> Active: merchant activates (valid profile + eligible available product)
   Active --> CustomerReady: connection ready
   CustomerReady --> Active: connection revoked or disconnected
   Active --> Suspended: Super Admin suspends
@@ -451,7 +457,7 @@ stateDiagram-v2
   Suspended --> NoAccess: membership revoked
 
   note right of Onboarding
-    Merchant may manage own store.
+    Merchant may manage own store, draft products and set own-store availability.
     Bot does not serve. Test/share disabled.
   end note
   note right of CustomerReady
@@ -530,7 +536,7 @@ Rules:
 | --- | --- | --- |
 | Merchant sign-in | `app_user` credential + exactly one active membership; onboarding is allowed, suspended is read-only | Generic failure or read-only scope |
 | Dashboard page read | `requireMerchantScope()` then every query takes `StoreScope` | Redirect to login or generic not-found |
-| Dashboard write in `onboarding` | `requireMerchantScope()` allows own-store draft/catalog/setup writes | No write if suspended/revoked; generic error |
+| Dashboard write in `onboarding` | `requireMerchantScope()` allows own-store draft/catalog/setup writes, including explicit product availability | No write if suspended/revoked; generic error |
 | Customer-facing action | `requireCustomerReadyScope()` (store `active` + connection `ready`) | Test/share/serving disabled until ready |
 | Record lookup by id | Query includes `store_id = scope.storeId`; a foreign id is indistinguishable from missing | 404 |
 | Relation write (product/category, action targets, inquiry customer/product) | Same-store composite FK where possible; explicit check where a composite FK is impractical | Constraint or `CROSS_STORE_REFERENCE` |
@@ -676,8 +682,8 @@ No SQL is authored or run by this PR.
 | `store`, `app_user`, `store_membership` schema | **Keep** | `src/db/schema/tenant.ts`; `tests/db/tenant-identity.test.ts` | Store and identity foundation already exists | Add credential/invitation fields; no destructive rewrite | None |
 | Legacy `resolveLegacyStoreContext` | **Replace** | `src/lib/data/store-context.ts:56-118`; fails closed on two stores | Removes the single-store write outage risk | Scoped catalog slice + merchant/webhook scope sources + production backfill/verification | Delete when no `NULL` ownership remains and all runtime paths use explicit scopes |
 | Eight `store_id` roots | **Keep, tighten** | `drizzle/0006_tenant_ownership_expansion.sql`; `tests/db/tenant-ownership.test.ts:341` | Preserves existing ownership data | Backfill, `NOT NULL`, composite FKs | None |
-| Global catalog reads (`listCatalogCategories`, `listCatalogProducts`, `readCatalog*`) | **Refactor** | `src/lib/data/catalog.ts:163`, `:239`, `:326`, `:399` | Merchant sees only their catalog | First slice adds `listCatalogProductsForStore` + `StoreScope`; existing global functions stay until all callers migrate | Old signatures removed when all callers pass scope, after backfill and the scoped-read switch |
-| `updateCatalogProduct` availability path | **Refactor** | `src/lib/data/catalog.ts:1107` | Merchant can toggle own product availability | First slice adds `updateCatalogProductAvailabilityForStore` with a `store_id` predicate; existing path stays | Old path removed when all callers pass scope, after backfill and the scoped-read switch |
+| Global catalog reads (`listCatalogCategories`, `listCatalogProducts`, `readCatalog*`) | **Refactor** | `src/lib/data/catalog.ts:163`, `:239`, `:326`, `:399` | Merchant sees only their catalog | First slice adds `listCatalogProductsForStore`, `StoreScope` and an explicit category-ownership gate; existing global functions stay until all callers migrate | Old signatures removed when all callers pass scope, after backfill and the scoped-read switch |
+| `updateCatalogProduct` availability path | **Refactor** | `src/lib/data/catalog.ts:1107` | Owner can explicitly make an own-store draft product available while onboarding | First slice adds `updateCatalogProductAvailabilityForStore` with a `store_id` predicate; existing path stays | Old path removed when all callers pass scope, after backfill and the scoped-read switch |
 | Catalog write ownership checks with NULL tolerance | **Replace** | `assertOwnershipCompatible` at `store-context.ts:125-131`; called from `catalog.ts` etc. | Cross-store relations become impossible | Backfill completes; no `NULL` rows | Remove NULL tolerance after `NOT NULL` |
 | `bot_setting` singleton | **Replace** | `src/db/schema/settings.ts:41`, `:76-78`; `settings.ts:139` | Merchant edits their own store identity, currency and language | Per-store settings migration and UI scoping | Old singleton table shape removed after all stores migrated |
 | `seller_notification_setting` singleton | **Replace** | `src/db/schema/seller-notifications.ts:51`, `:78-81` | Later milestone; current code stays dormant | Per-store row; deferred merchant enablement | Later notification milestone |
@@ -713,6 +719,9 @@ No SQL is authored or run by this PR.
 - **The browser is not the source of truth.** Pending Telegram work and onboarding
   progress live on the server. Closing the tab or the phone cannot create a
   half-connected store.
+- **Draft-first products.** A new product starts inactive. Publishing or making a
+  product available is an explicit own-store action, available during onboarding
+  to the authorized owner.
 - **One store, no switcher.** The store name is shown in the header; there is no
   store picker.
 
@@ -767,9 +776,9 @@ Screen 4. Only the test and share actions wait for the customer-ready state
 | Item | Design |
 | --- | --- |
 | Purpose | Activate the store for customers, then see the real customer experience |
-| Minimum inputs | At least one active product; the store profile must be valid |
+| Minimum inputs | At least one eligible available own-store product; the store profile must be valid |
 | Primary action | `تفعيل المتجر` (Activate store) while `onboarding`; after activation, `تجربة المتجر` (Try the store) |
-| Defaults | If the catalog is empty, `إضافة أول منتج` is the prerequisite action. The test link is `https://t.me/<bot_username>` |
+| Defaults | If the catalog is empty or has no eligible available product, `إضافة أول منتج` / `نشر المنتج` is the prerequisite action. The test link is `https://t.me/<bot_username>` |
 | Success | `تم تفعيل المتجر`; the test link opens Telegram. Returning shows `تم فتح المتجر`; the first inbound `/start` can later mark the connection `verified` |
 | Waiting | Activation shows `جارٍ التفعيل…`; if the store is active but the connection is not ready, the screen shows `بانتظار ربط تيليجرام` instead of the test link |
 | Failure | Activation failure keeps the store `onboarding` with field-level reasons. If Telegram is unavailable, the link remains visible and copyable |
@@ -808,16 +817,17 @@ flowchart LR
 ```
 
 The flow shows the default order (connect, then activate). Activation itself
-requires only a valid profile and one active product; the test and share nodes
-additionally require the ready connection. A merchant who activates before
+requires a valid profile and one eligible available product; the test and share
+nodes additionally require the ready connection. A merchant who activates before
 connecting sees the test/share actions in their locked "waiting for Telegram"
 state.
 
 ### 7.3 The working dashboard
 
 While the store is `onboarding`, the merchant can already use catalog and setup
-tools; the share/test cards show a locked state with the missing readiness step.
-A suspended store shows the same shell read-only.
+tools, including draft product creation and explicit own-store availability; the
+share/test cards show a locked state with the missing readiness step. A suspended
+store shows the same shell read-only.
 
 The first visible level is deliberately small:
 
@@ -834,13 +844,15 @@ The first visible level is deliberately small:
 - Opens a bottom sheet or a focused page, not the full catalog editor.
 - Minimum: name, price, category. Category defaults to the last used category;
   if none exists, offer `إنشاء قسم` inline.
-- Availability defaults according to the approved product-creation rule; the
-  store cannot activate until at least one product is active. If this changes the
-  current "born inactive" rule, the reviewer must approve it; otherwise the
-  primary action is `حفظ كمسودة` followed by a one-tap `نشر` and then activation.
+- New products are always **draft-first** and start unavailable. The primary
+  action saves a draft (`حفظ كمسودة`); the owner then explicitly publishes or
+  makes the product available (`نشر` / `إتاحة في المتجر`). During onboarding this
+  explicit availability action is allowed for a valid own-store product. The
+  store cannot activate until at least one eligible available product exists.
 - Advanced fields: slug (auto-generated), description, details, translations,
   button tree.
-- Success: `تمت إضافة المنتج` and the product is visible in the list.
+- Success: `تمت إضافة المنتج` and the product is visible in the merchant list as
+  a draft; it is not customer-visible until explicitly published/available.
 - Failure: inline validation; no partial product. The form keeps its values.
 - Draft: saved locally per store and user for 7 days; cleared on successful save.
 
@@ -923,10 +935,12 @@ steps and must not be compressed into a false dashboard tap count.
 **Other acceptance checks**
 
 - Onboarding access: an authenticated merchant with an active membership can
-  sign in, save store setup, create/edit own-store products and start the
-  Telegram connection while the store is `onboarding`.
+  sign in, save store setup, create/edit draft own-store products, explicitly
+  make a valid own-store product available, and start the Telegram connection
+  while the store is `onboarding`.
 - First test moment: `تجربة المتجر` is enabled only when the store is `active`
-  and the connection is `ready`; activation requires at least one active product.
+  and the connection is `ready`; activation requires a valid profile and at least
+  one eligible available product.
 - Share moment: the share card is shown only in the customer-ready state and
   after the test link is opened or the merchant skips the test; the link is
   `https://t.me/<bot_username>` and is copyable.
@@ -936,8 +950,9 @@ steps and must not be compressed into a false dashboard tap count.
   are disabled.
 - Legacy store: it remains operator-managed and is not pulled into the merchant
   onboarding flow before D1 and the approved cutover.
-- Add product: ≤ 2 taps from home to the form, plus typing; save is one tap.
-  Publish is at most one additional tap if the draft-first rule is kept.
+- Add product: ≤ 2 taps from home to the form, plus typing; save-as-draft is one
+  tap and explicit publish/availability is one additional tap. Draft-first is
+  required; a new product never starts available.
 - Edit price/availability: ≤ 3 taps from home to a saved change, plus typing.
 - Reply to an inquiry: ≤ 3 taps from home to send, plus typing.
 - RTL: no horizontal overflow at 360 px; all primary targets ≥ 44 px.
@@ -1277,21 +1292,21 @@ distinction must be shown honestly in the UI: `تم ربط البوت` vs
 
 ---
 
-## 9. Open owner decisions
+## 9. Owner decisions (open unless marked confirmed)
 
 | # | Decision | Why it blocks | Recommended default |
 | --- | --- | --- | --- |
 | D1 | Who owns the legacy store after cutover: the first invited merchant, or the operator | Determines membership, invitation and backfill timing | Keep it operator-managed until C1 and a separate approved cutover; do not auto-invite the merchant |
 | D2 | Is one active membership per merchant enforced in the service only, or also by a partial unique index | Affects schema and future multi-store flexibility | Service-enforced for MVP; no destructive global unique |
 | D3 | Does Super Admin read merchant catalog/inquiry data | Privacy and support expectations | No business-data access in MVP; store lifecycle only |
-| D4 | Product creation default: draft-first or active-on-save | Changes the current "born inactive" behavior | Draft-first unless the reviewer explicitly approves active-on-save |
+| D4 | Product creation default | Current schema products are born inactive; MVP must stay draft-first | **Confirmed:** create draft/unavailable; explicit own-store publish/availability action; no active-on-save |
 | D5 | Arabic-first scope: new onboarding only, or the whole dashboard | Localization effort and consistency | New onboarding and frequent tasks first; advanced screens follow |
 | D6 | Managed Bot correlation acceptance | Blocks provisioning implementation | Require the test-bot spike; auto-link only an exactly-one-unambiguous-attempt case; otherwise operator-assisted fallback or review queue |
 | D7 | Per-store settings and language migration shape | Blocks per-store configuration | Additive `store_language` and per-store settings rows; no destructive rewrite |
 | D8 | Inquiry materialized `store_id` vs pure derivation | Affects read performance and constraint design | Materialize `store_id`, keep derived messages |
 | D9 | Seller notifications in MVP | Not in product scope | Keep code dormant and scoped; enable in a later milestone |
 | D10 | Payment methods visibility | Not in product scope | Hide from merchant navigation; retain code until the checkout decision |
-| D11 | Store activation authority | Determines the lifecycle boundary | Merchant activation after profile + one active product; Super Admin only suspends/reactivates |
+| D11 | Store activation authority | Determines the lifecycle boundary | Merchant activation after valid profile + one eligible available product; Super Admin only suspends/reactivates |
 
 ---
 
