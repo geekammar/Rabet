@@ -1,6 +1,12 @@
 import "server-only";
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import {
+  and,
+  eq,
+  exists,
+  isNull,
+  sql,
+} from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -20,6 +26,7 @@ import {
   assertOwnershipCompatible,
   resolveLegacyStoreIdForWrite,
 } from "./store-context";
+import { assertStoreScope, type StoreScope } from "./store-scope";
 
 /**
  * ===========================================================================
@@ -315,6 +322,195 @@ export async function listCatalogProducts(
       updatedAt: p.updatedAt,
       translations: transByProdId.get(p.id) ?? {},
     }));
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Lists one store's products and translations from one SQL snapshot.
+ *
+ * This is the Phase 1 tenant-scoped read. It is intentionally separate from the
+ * legacy global `listCatalogProducts`: the operator dashboard keeps its current
+ * behavior until its reviewed cutover.
+ *
+ * Isolation has three gates:
+ *   1. the scope must be the exact server-minted object;
+ *   2. an optional category filter must name a live category owned by the same
+ *      store, checked before the product query, so a bad filter can never fall
+ *      through to an unfiltered read;
+ *   3. every returned product must have `store_id = scope.storeId` *and* a
+ *      non-deleted category owned by the same store. The latter excludes an
+ *      A-owned product whose category was cross-linked to B under the current
+ *      single-column FK, and a product under a soft-deleted category.
+ *
+ * Products and translations are fetched in one statement. The product-side
+ * predicates and the category ownership/deletion checks are part of that same
+ * statement, and the LEFT JOIN keeps an eligible product with no translation
+ * visible. No other store's translation rows are read at all.
+ */
+export async function listCatalogProductsForStore(
+  db: Database,
+  scope: StoreScope,
+  categoryId?: string,
+): Promise<CatalogProductRecord[]> {
+  assertStoreScope(scope);
+
+  try {
+    if (categoryId !== undefined) {
+      const ownedCategory = await db
+        .select({ id: category.id })
+        .from(category)
+        .where(
+          and(
+            eq(category.id, categoryId),
+            eq(category.storeId, scope.storeId),
+            isNull(category.deletedAt),
+          ),
+        )
+        .limit(1);
+
+      if (ownedCategory.length === 0) {
+        return [];
+      }
+    }
+
+    const conditions = [
+      eq(product.storeId, scope.storeId),
+      isNull(product.deletedAt),
+    ];
+
+    if (categoryId !== undefined) {
+      conditions.push(eq(product.categoryId, categoryId));
+    }
+
+    const rows = await db
+      .select({
+        id: product.id,
+        categoryId: product.categoryId,
+        slug: product.slug,
+        price: product.price,
+        isActive: product.isActive,
+        sortOrder: product.sortOrder,
+        createdAt: product.createdAt,
+        updatedAt: product.updatedAt,
+        translationId: productTranslation.id,
+        translationLanguageId: productTranslation.languageId,
+        translationLanguageCode: language.code,
+        translationName: productTranslation.name,
+        translationDescription: productTranslation.description,
+        translationDetails: productTranslation.details,
+      })
+      .from(product)
+      .innerJoin(
+        category,
+        and(
+          eq(product.categoryId, category.id),
+          eq(category.storeId, scope.storeId),
+          isNull(category.deletedAt),
+        ),
+      )
+      .leftJoin(
+        productTranslation,
+        eq(productTranslation.productId, product.id),
+      )
+      .leftJoin(language, eq(productTranslation.languageId, language.id))
+      .where(and(...conditions))
+      .orderBy(
+        product.sortOrder,
+        product.createdAt,
+        product.id,
+        productTranslation.languageId,
+      );
+
+    const products = new Map<string, CatalogProductRecord>();
+
+    for (const row of rows) {
+      let record = products.get(row.id);
+
+      if (record === undefined) {
+        record = {
+          id: row.id,
+          categoryId: row.categoryId,
+          slug: row.slug,
+          price: row.price,
+          isActive: row.isActive,
+          sortOrder: row.sortOrder,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          translations: {},
+        };
+        products.set(row.id, record);
+      }
+
+      if (
+        row.translationId !== null &&
+        row.translationLanguageId !== null &&
+        row.translationLanguageCode !== null &&
+        row.translationName !== null
+      ) {
+        record.translations[row.translationLanguageCode] = {
+          id: row.translationId,
+          languageId: row.translationLanguageId,
+          name: row.translationName,
+          description: row.translationDescription,
+          details: row.translationDetails,
+        };
+      }
+    }
+
+    return [...products.values()];
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Updates one store-owned product's availability in a single guarded write.
+ *
+ * The `UPDATE` itself requires the target id, the scope's store id, a
+ * non-deleted product, and a non-deleted category owned by the same store.
+ * There is no authorization `SELECT` before it, so a foreign or missing id is
+ * indistinguishable and writes nothing. Only `is_active` is set; price,
+ * translations and product actions are left alone, and the database trigger
+ * still maintains `updated_at`.
+ *
+ * Returns `true` when the row was updated and `false` for every no-match case.
+ */
+export async function updateCatalogProductAvailabilityForStore(
+  db: Database,
+  scope: StoreScope,
+  productId: string,
+  isActive: boolean,
+): Promise<boolean> {
+  assertStoreScope(scope);
+
+  try {
+    const updated = await db
+      .update(product)
+      .set({ isActive })
+      .where(
+        and(
+          eq(product.id, productId),
+          eq(product.storeId, scope.storeId),
+          isNull(product.deletedAt),
+          exists(
+            db
+              .select({ id: category.id })
+              .from(category)
+              .where(
+                and(
+                  eq(category.id, product.categoryId),
+                  eq(category.storeId, scope.storeId),
+                  isNull(category.deletedAt),
+                ),
+              ),
+          ),
+        ),
+      )
+      .returning({ id: product.id });
+
+    return updated.length > 0;
   } catch (error) {
     throw mapDatabaseError(error);
   }

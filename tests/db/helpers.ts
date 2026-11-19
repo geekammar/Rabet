@@ -7,6 +7,10 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 
 import type { Database } from "@/db/client";
 import * as schema from "@/db/schema";
+import {
+  createStoreScopeForExistingStore,
+  type StoreScope,
+} from "@/lib/data/store-scope";
 
 /**
  * ===========================================================================
@@ -245,4 +249,19 @@ export { schema };
  */
 export function asAppDb(pgDb: PostgresJsDatabase<typeof schema>): Database {
   return pgDb as unknown as Database;
+}
+
+/**
+ * Test-only scope fixture: reads the seeded store by id and returns the
+ * server-minted, branded `StoreScope` the scoped catalog operations require.
+ *
+ * There is deliberately no production constructor here. A missing store throws
+ * instead of yielding a scope, and the issuer is not exported from the data
+ * barrel, so no page, action or route can obtain a scope from browser input.
+ */
+export async function readStoreScopeForFixture(
+  db: TestDatabase["db"],
+  storeId: string,
+): Promise<StoreScope> {
+  return createStoreScopeForExistingStore(asAppDb(db), storeId);
 }
