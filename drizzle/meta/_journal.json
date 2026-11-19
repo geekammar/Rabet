@@ -57,6 +57,13 @@
       "when": 1795006639856,
       "tag": "0007_admin_login_throttle",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795102251297,
+      "tag": "0008_merchant_invitations_and_credentials",
+      "breakpoints": true
     }
   ]
 }

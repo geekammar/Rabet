@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   check,
+  index,
   integer,
   pgTable,
   text,
@@ -12,20 +13,23 @@ import {
 /**
  * Tenant identity foundation (S1.1).
  *
- * Three additive tables establish the ownership chain
- * `app_user -> store_membership -> store` without changing any existing
- * business table. The pilot still runs one store, one application and one
- * shared database; nothing here activates merchant authentication, onboarding,
- * invitations or bot provisioning.
+ * Three additive tenant tables establish the ownership chain
+ * `app_user -> store_membership -> store`. Phase 2A adds two more additive
+ * tables for merchant credentials and invitations. The pilot still runs one
+ * store, one application and one shared database; nothing here activates
+ * merchant authentication, onboarding UI, public routes or bot provisioning.
  *
  * The model is intentionally many-to-many: an `app_user` may hold a membership
  * in more than one store, and a store may have more than one member. No global
  * unique constraint on `store_membership.user_id` is allowed, so a future
- * multi-store owner needs no migration to the relationship itself.
+ * multi-store owner needs no migration to the relationship itself. The MVP
+ * service enforces one active membership per merchant and one active owner per
+ * store; the schema deliberately keeps the relationship flexible.
  *
- * `app_user` stores identity only. Passwords, hashes, invitation tokens and
- * secrets are out of scope; the existing environment-backed administrator is
- * unchanged.
+ * `app_user` stores identity only. Merchant password hashes live in the
+ * one-to-one `merchant_credential` table and invitation token digests live in
+ * `merchant_invitation`; the existing environment-backed operator identity,
+ * credentials, cookies and login path are unchanged.
  *
  * `store.slug` is a canonical lowercase ASCII slug: one or more alphanumeric
  * segments joined by single hyphens. Email is stored trimmed and is unique
@@ -168,6 +172,108 @@ export const storeMembership = pgTable(
     check(
       "store_membership_status_check",
       sql`${table.status} IN ('active', 'revoked')`,
+    ),
+  ],
+);
+
+/**
+ * `merchant_credential` — one Argon2id password hash per merchant identity.
+ *
+ * The credential is a separate table rather than an `app_user` column so every
+ * existing identity row (including Super Admin fixtures) remains valid without
+ * a backfill. The service that creates credentials is the only writer, and the
+ * database check rejects any stored value that is not an Argon2id PHC string.
+ * The plaintext password is never stored.
+ */
+export const merchantCredential = pgTable(
+  "merchant_credential",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => appUser.id, { onDelete: "restrict" }),
+    passwordHash: text("password_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("merchant_credential_user_id_unique").on(table.userId),
+    check(
+      "merchant_credential_password_hash_not_empty_check",
+      sql`btrim(${table.passwordHash}) <> ''`,
+    ),
+    check(
+      "merchant_credential_password_hash_argon2id_check",
+      sql`${table.passwordHash} LIKE '$argon2id$%'`,
+    ),
+  ],
+);
+
+/**
+ * `merchant_invitation` — a single-use, digest-only invitation to one store.
+ *
+ * The raw token is returned once to the authorized server caller and is never
+ * stored. `token_digest` is a SHA-256 hex digest; the unique index makes replay
+ * impossible even if two acceptance calls race. The invited email is stored
+ * trimmed and lowercased to match the case-insensitive `app_user` identity key.
+ *
+ * Pending invitations are additive: a store may have more than one invitation
+ * while no owner accepts, and the service serializes acceptance so exactly one
+ * active owner and one consumed invitation can result. `accepted_at` and
+ * `revoked_at` are terminal markers and are mutually exclusive.
+ */
+export const merchantInvitation = pgTable(
+  "merchant_invitation",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "restrict" }),
+    invitedEmail: text("invited_email").notNull(),
+    tokenDigest: text("token_digest").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" })
+      .notNull(),
+    invitedByUserId: uuid("invited_by_user_id")
+      .notNull()
+      .references(() => appUser.id, { onDelete: "restrict" }),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: "date" }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "date" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("merchant_invitation_token_digest_unique").on(
+      table.tokenDigest,
+    ),
+    index("merchant_invitation_store_idx").on(table.storeId),
+    index("merchant_invitation_invited_email_idx").on(table.invitedEmail),
+    check(
+      "merchant_invitation_email_not_empty_check",
+      sql`btrim(${table.invitedEmail}) <> ''`,
+    ),
+    check(
+      "merchant_invitation_email_normalized_check",
+      sql`${table.invitedEmail} = lower(btrim(${table.invitedEmail}))`,
+    ),
+    check(
+      "merchant_invitation_token_digest_format_check",
+      sql`${table.tokenDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "merchant_invitation_expiry_after_creation_check",
+      sql`${table.expiresAt} > ${table.createdAt}`,
+    ),
+    check(
+      "merchant_invitation_terminal_state_check",
+      sql`NOT (${table.acceptedAt} IS NOT NULL AND ${table.revokedAt} IS NOT NULL)`,
     ),
   ],
 );

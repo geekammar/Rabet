@@ -89,7 +89,7 @@ rabet/
 │   │   └── page-header.tsx # Reusable page header
 │   ├── db/                 # Database layer — server-only (Phase 03B)
 │   │   ├── client.ts       # `getDb()` — lazy neon-http Drizzle client
-│   │   └── schema/         # 22 tables in 9 domains + barrel index
+│   │   └── schema/         # 24 tables in 9 domains + barrel index
 │   ├── lib/
 │   │   ├── auth/           # admin-config, credentials, login-throttle, session, redirect, schema, cache
 │   │   ├── data/           # Server-only data access layer (Phase 03C-A)
