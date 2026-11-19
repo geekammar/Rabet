@@ -132,6 +132,11 @@ export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
 /** The twenty-one tables present in the 0006 ownership baseline (no new table until 0008). */
 export const EXPECTED_TABLES_V5 = [...EXPECTED_TABLES_V4];
 
+/** The twenty-two tables present in the 0007 login-throttle baseline. */
+export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
+  (t) => !MERCHANT_INVITATION_TABLES.has(t),
+);
+
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
 export const EXPECTED_TABLES_V3 = EXPECTED_TABLES_V4.filter(
   (t) => !TENANT_TABLES.has(t),

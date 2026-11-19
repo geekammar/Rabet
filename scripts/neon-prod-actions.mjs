@@ -91,6 +91,7 @@ import {
   EXPECTED_TABLES_V3,
   EXPECTED_TABLES_V4,
   EXPECTED_TABLES_V5,
+  EXPECTED_TABLES_V6,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -611,7 +612,9 @@ export async function validateTarget(ctx, options = {}) {
             ? CRITICAL_CONSTRAINTS_V4
             : expectedTables === EXPECTED_TABLES_V5
               ? CRITICAL_CONSTRAINTS_V5
-              : CRITICAL_CONSTRAINTS);
+              : expectedTables === EXPECTED_TABLES_V6
+                ? CRITICAL_CONSTRAINTS_V6
+                : CRITICAL_CONSTRAINTS);
   const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
 
   const prefixCount = options.expectedHashes
@@ -1387,7 +1390,7 @@ export async function runProdActions({
       ) {
         header("Validating prior release schema on target (read-only)");
         const validated = await validateTarget(ctx, {
-          expectedTables: EXPECTED_TABLES_V5,
+          expectedTables: EXPECTED_TABLES_V6,
           expectedIndexes: EXPECTED_INDEXES_V6,
           expectedConstraints: CRITICAL_CONSTRAINTS_V6,
           expectedHashes: ctx.committedHashes.slice(0, 8).map((e) => e.hash),
@@ -1591,7 +1594,7 @@ export async function runProdActions({
       if (isKnownPriorReleaseV7) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
-          expectedTables: EXPECTED_TABLES_V5,
+          expectedTables: EXPECTED_TABLES_V6,
           expectedIndexes: EXPECTED_INDEXES_V6,
           expectedConstraints: CRITICAL_CONSTRAINTS_V6,
           expectedHashes: ctx.committedHashes.slice(0, 8).map((e) => e.hash),

@@ -64,6 +64,31 @@ type Scenario = {
   throwOnValidationCheck?: boolean;
 };
 
+const HEALTHY_V7_TABLES = [
+  "admin_login_throttle",
+  "app_user",
+  "bot_setting",
+  "category",
+  "category_translation",
+  "customer",
+  "inquiry",
+  "inquiry_message",
+  "language",
+  "message_template",
+  "message_translation",
+  "payment_method",
+  "payment_method_translation",
+  "product",
+  "product_action",
+  "product_action_translation",
+  "product_translation",
+  "seller_notification_delivery",
+  "seller_notification_setting",
+  "store",
+  "store_membership",
+  "telegram_update",
+];
+
 function emptyScenario(): Scenario {
   return {
     dbName: FIXTURE_DB,
@@ -116,6 +141,31 @@ function applyMigrationsTo(scenario: Scenario) {
     ([table, name]) => ({ name, table_name: table }),
   );
   scenario.triggers = wizard.EXPECTED_NOTIFICATION_TRIGGERS.map((name) => ({ name }));
+}
+
+function healthyV7Scenario(): Scenario {
+  const scenario = emptyScenario();
+
+  scenario.ledgerExists = true;
+  scenario.applied = committed.slice(0, 8).map((entry, index) => ({
+    id: String(index + 1),
+    hash: entry.hash,
+    created_at: String(entry.when),
+  }));
+  scenario.appTables = [...HEALTHY_V7_TABLES];
+  scenario.indexes = [...wizard.EXPECTED_INDEXES_V6];
+  scenario.constraints = wizard.CRITICAL_CONSTRAINTS_V6.map((name) => ({
+    name,
+    type: "c",
+  }));
+  scenario.treeFks = Object.entries(wizard.EXPECTED_TREE_FKS).map(
+    ([table, name]) => ({ name, table_name: table }),
+  );
+  scenario.triggers = wizard.EXPECTED_NOTIFICATION_TRIGGERS.map((name) => ({
+    name,
+  }));
+
+  return scenario;
 }
 
 function createFakeSql(scenario: Scenario) {
@@ -1130,6 +1180,122 @@ describe("production runner flows and execution", () => {
       "0008_merchant_invitations_and_credentials",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
+  });
+
+  it("inspect mode validates the healthy 0007 baseline with 0008 pending and runs no migration", async () => {
+    const { io, output } = testIo();
+
+    expect(HEALTHY_V7_TABLES).toContain("admin_login_throttle");
+    expect(HEALTHY_V7_TABLES).not.toContain("merchant_credential");
+    expect(HEALTHY_V7_TABLES).not.toContain("merchant_invitation");
+
+    const scenario = healthyV7Scenario();
+    let commandsRun = 0;
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandsRun += 1;
+        return { code: 0 };
+      },
+      mode: "inspect",
+      env: {
+        [actions.PROD_URL_ENV]: GOOD_URL,
+        [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+        [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+      },
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("inspected");
+    expect(commandsRun).toBe(0);
+    expect(result.state?.pending).toEqual([
+      "0008_merchant_invitations_and_credentials",
+    ]);
+    expect(output()).toContain("Validating prior release schema on target");
+  });
+
+  it("migrate mode accepts the healthy 0007 baseline, runs db:migrate once, and verifies 0008", async () => {
+    const { io, output } = testIo();
+    const scenario = healthyV7Scenario();
+    const executedCommands: string[] = [];
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async (opts) => {
+        executedCommands.push(`${opts.command} ${opts.args.join(" ")}`);
+        if (opts.args.includes("db:migrate")) {
+          applyMigrationsTo(scenario);
+        }
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env: {
+        [actions.PROD_URL_ENV]: GOOD_URL,
+        [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+        [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+      },
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("migrated");
+    expect(
+      executedCommands.filter((command) => command.includes("db:migrate")),
+    ).toHaveLength(1);
+    expect(result.writes.migrationsApplied).toEqual([
+      "0008_merchant_invitations_and_credentials",
+    ]);
+    expect(output()).toContain(
+      "Verified healthy prior release (0007_admin_login_throttle)",
+    );
+    expect(output()).toContain(
+      "Proceeding with migration to 0008_merchant_invitations_and_credentials",
+    );
+    expect(output()).toContain("Production migration complete");
+  });
+
+  it("refuses a damaged 0007 baseline missing admin_login_throttle before any migration command", async () => {
+    const { io, output } = testIo();
+    const scenario = healthyV7Scenario();
+    scenario.appTables = HEALTHY_V7_TABLES.filter(
+      (table) => table !== "admin_login_throttle",
+    );
+    const executedCommands: string[] = [];
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async (opts) => {
+        executedCommands.push(`${opts.command} ${opts.args.join(" ")}`);
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env: {
+        [actions.PROD_URL_ENV]: GOOD_URL,
+        [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+        [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+      },
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(executedCommands).toEqual([]);
+    expect(output()).toContain(
+      "does not match the verified prior release schema",
+    );
   });
 
   it("still validates the 0004 baseline when both 0005 and 0006 are pending", async () => {

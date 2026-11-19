@@ -265,7 +265,7 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
     expect(await countRows("merchant_invitation")).toBe(1);
   });
 
-  it("only an active database Super Admin can revoke a pending invitation", async () => {
+  it("only an active database Super Admin can revoke a pending invitation by id", async () => {
     const superAdmin = await insertSuperAdmin();
     const regular = await insertIdentity();
     const disabledAdmin = await insertIdentity({
@@ -287,7 +287,7 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
       "admin@example.test",
     ]) {
       const error = await rejectionOf(
-        revokeMerchantInvitation(db(), { actorUserId, token: issued.token }),
+        revokeMerchantInvitation(db(), { actorUserId, invitationId: issued.invitationId }),
       );
 
       expect(error.code).toBe("FORBIDDEN");
@@ -302,7 +302,7 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
 
     const revoked = await revokeMerchantInvitation(db(), {
       actorUserId: superAdmin.id,
-      token: issued.token,
+      invitationId: issued.invitationId,
     });
 
     expect(revoked.invitationId).toBe(issued.invitationId);
@@ -343,7 +343,7 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
     const error = await rejectionOf(
       revokeMerchantInvitation(db(), {
         actorUserId: superAdmin.id,
-        token: issued.token,
+        invitationId: issued.invitationId,
       }),
     );
 
@@ -367,6 +367,77 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
       role: "owner",
       status: "active",
     });
+  });
+
+  it("requires a valid invitation id for revocation", async () => {
+    const superAdmin = await insertSuperAdmin();
+
+    for (const invitationId of [undefined, null, "", "not-a-uuid", 42]) {
+      const error = await rejectionOf(
+        revokeMerchantInvitation(db(), {
+          actorUserId: superAdmin.id,
+          invitationId,
+        }),
+      );
+
+      expect(error.code).toBe("INVALID_INPUT");
+    }
+
+    const missing = await rejectionOf(
+      revokeMerchantInvitation(db(), {
+        actorUserId: superAdmin.id,
+        invitationId: crypto.randomUUID(),
+      }),
+    );
+
+    expect(missing.code).toBe("INVITATION_REJECTED");
+  });
+
+  it("allows at most one terminal transition when accept and revoke race", async () => {
+    const superAdmin = await insertSuperAdmin();
+    const issued = await issueMerchantInvitation(db(), {
+      actorUserId: superAdmin.id,
+      storeName: "Accept Revoke Race Store",
+      storeSlug: `accept-revoke-race-${crypto.randomUUID()}`,
+      invitedEmail: "accept.revoke.race@example.test",
+    });
+
+    const settled = await Promise.allSettled([
+      acceptMerchantInvitation(db(), {
+        token: issued.token,
+        password: PASSWORD,
+      }),
+      revokeMerchantInvitation(db(), {
+        actorUserId: superAdmin.id,
+        invitationId: issued.invitationId,
+      }),
+    ]);
+
+    expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(
+      1,
+    );
+
+    const invitation = await db()
+      .select()
+      .from(merchantInvitation)
+      .where(eq(merchantInvitation.id, issued.invitationId));
+
+    expect(
+      Number(invitation[0].acceptedAt !== null) +
+        Number(invitation[0].revokedAt !== null),
+    ).toBe(1);
+
+    if (invitation[0].acceptedAt !== null) {
+      expect(invitation[0].revokedAt).toBeNull();
+      expect(await countMerchantIdentities()).toBe(1);
+      expect(await countRows("merchant_credential")).toBe(1);
+      expect(await countRows("store_membership")).toBe(1);
+    } else {
+      expect(invitation[0].revokedAt).not.toBeNull();
+      expect(await countMerchantIdentities()).toBe(0);
+      expect(await countRows("merchant_credential")).toBe(0);
+      expect(await countRows("store_membership")).toBe(0);
+    }
   });
 
   it("returns the raw token once and stores only its digest", async () => {
@@ -755,7 +826,7 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
     });
     await revokeMerchantInvitation(db(), {
       actorUserId: superAdmin.id,
-      token: revoked.token,
+      invitationId: revoked.invitationId,
     });
     const revokedError = await rejectionOf(
       acceptMerchantInvitation(db(), {
@@ -802,6 +873,101 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
         true,
       );
     }
+  });
+
+  it("rolls back acceptance when expiry is reached at the terminal database update", async () => {
+    const superAdmin = await insertSuperAdmin();
+    const issued = await issueMerchantInvitation(db(), {
+      actorUserId: superAdmin.id,
+      storeName: "Terminal Expiry Acceptance Store",
+      storeSlug: `terminal-expiry-accept-${crypto.randomUUID()}`,
+      invitedEmail: "terminal.expiry.accept@example.test",
+    });
+    const target = `'${issued.invitationId}'::uuid`;
+
+    await db().execute(sql.raw(`
+      create or replace function expire_invitation_during_accept()
+      returns trigger language plpgsql as $fn$
+      begin
+        update merchant_invitation
+        set created_at = now() - interval '1 second',
+            expires_at = now() + interval '1 microsecond'
+        where id = ${target};
+        perform pg_sleep(0.05);
+        return new;
+      end;
+      $fn$;
+    `));
+    await db().execute(sql.raw(`
+      create trigger expire_invitation_during_accept_trigger
+      before insert on store_membership
+      for each row execute function expire_invitation_during_accept();
+    `));
+
+    try {
+      const error = await rejectionOf(
+        acceptMerchantInvitation(db(), {
+          token: issued.token,
+          password: PASSWORD,
+        }),
+      );
+
+      expect(error.code).toBe("INVITATION_REJECTED");
+      expect(error.message).toBe(MERCHANT_INVITATION_REJECTION_MESSAGE);
+      expect(await countMerchantIdentities()).toBe(0);
+      expect(await countRows("merchant_credential")).toBe(0);
+      expect(await countRows("store_membership")).toBe(0);
+
+      const invitation = await db()
+        .select()
+        .from(merchantInvitation)
+        .where(eq(merchantInvitation.id, issued.invitationId));
+
+      expect(invitation[0].acceptedAt).toBeNull();
+      expect(invitation[0].revokedAt).toBeNull();
+      expect(invitation[0].expiresAt.getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      await db().execute(
+        sql`drop trigger if exists expire_invitation_during_accept_trigger on store_membership`,
+      );
+      await db().execute(
+        sql`drop function if exists expire_invitation_during_accept()`,
+      );
+    }
+  });
+
+  it("does not revoke an expired invitation", async () => {
+    const superAdmin = await insertSuperAdmin();
+    const issued = await issueMerchantInvitation(db(), {
+      actorUserId: superAdmin.id,
+      storeName: "Expired Revocation Store",
+      storeSlug: `expired-revoke-${crypto.randomUUID()}`,
+      invitedEmail: "expired.revoke@example.test",
+    });
+
+    await db().execute(sql`
+      update merchant_invitation
+      set created_at = clock_timestamp() - interval '2 days',
+          expires_at = clock_timestamp() - interval '1 day'
+      where id = ${issued.invitationId}
+    `);
+
+    const error = await rejectionOf(
+      revokeMerchantInvitation(db(), {
+        actorUserId: superAdmin.id,
+        invitationId: issued.invitationId,
+      }),
+    );
+
+    expect(error.code).toBe("INVITATION_REJECTED");
+
+    const invitation = await db()
+      .select()
+      .from(merchantInvitation)
+      .where(eq(merchantInvitation.id, issued.invitationId));
+
+    expect(invitation[0].acceptedAt).toBeNull();
+    expect(invitation[0].revokedAt).toBeNull();
   });
 
   it("leaves the invitation usable after invalid credential input", async () => {

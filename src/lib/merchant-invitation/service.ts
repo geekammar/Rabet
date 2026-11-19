@@ -99,7 +99,7 @@ export type IssuedMerchantInvitation = {
 
 export type RevokeMerchantInvitationInput = {
   actorUserId: unknown;
-  token: unknown;
+  invitationId: unknown;
 };
 
 export type RevokedMerchantInvitation = {
@@ -165,6 +165,17 @@ function createToken(): string {
 function parseToken(raw: unknown): string {
   if (typeof raw !== "string" || !TOKEN_PATTERN.test(raw)) {
     throw rejection();
+  }
+
+  return raw;
+}
+
+function parseInvitationId(raw: unknown): string {
+  if (typeof raw !== "string" || !UUID_PATTERN.test(raw)) {
+    throw new MerchantInvitationError(
+      "INVALID_INPUT",
+      "A valid invitation id is required.",
+    );
   }
 
   return raw;
@@ -357,8 +368,7 @@ export async function revokeMerchantInvitation(
   db: MerchantInvitationDb,
   input: RevokeMerchantInvitationInput,
 ): Promise<RevokedMerchantInvitation> {
-  const token = parseToken(input.token);
-  const tokenDigest = digestToken(token);
+  const invitationId = parseInvitationId(input.invitationId);
 
   try {
     return await db.transaction(async (tx) => {
@@ -373,7 +383,7 @@ export async function revokeMerchantInvitation(
           expiresAt: merchantInvitation.expiresAt,
         })
         .from(merchantInvitation)
-        .where(eq(merchantInvitation.tokenDigest, tokenDigest))
+        .where(eq(merchantInvitation.id, invitationId))
         .limit(1)
         .for("update");
 
@@ -391,12 +401,13 @@ export async function revokeMerchantInvitation(
 
       const updated = await tx
         .update(merchantInvitation)
-        .set({ revokedAt: sql`now()` })
+        .set({ revokedAt: sql`clock_timestamp()` })
         .where(
           and(
             eq(merchantInvitation.id, invitation.id),
             isNull(merchantInvitation.acceptedAt),
             isNull(merchantInvitation.revokedAt),
+            sql`${merchantInvitation.expiresAt} > clock_timestamp()`,
           ),
         )
         .returning({
@@ -510,13 +521,13 @@ export async function acceptMerchantInvitation(
 
       const consumed = await tx
         .update(merchantInvitation)
-        .set({ acceptedAt: sql`now()` })
+        .set({ acceptedAt: sql`clock_timestamp()` })
         .where(
           and(
             eq(merchantInvitation.id, invitation.id),
             isNull(merchantInvitation.acceptedAt),
             isNull(merchantInvitation.revokedAt),
-            sql`${merchantInvitation.expiresAt} > now()`,
+            sql`${merchantInvitation.expiresAt} > clock_timestamp()`,
           ),
         )
         .returning({ id: merchantInvitation.id });
