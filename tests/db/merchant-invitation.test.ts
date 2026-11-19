@@ -25,7 +25,9 @@ import {
 import {
   createTestDatabase,
   hasTestCluster,
+  installAcceptanceRollbackFixture,
   pgErrorCode,
+  removeAcceptanceRollbackFixture,
   type TestDatabase,
 } from "./helpers";
 
@@ -1010,19 +1012,7 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
       invitedEmail: "rollback.accept@example.test",
     });
 
-    await db().execute(sql`
-      create or replace function reject_merchant_invitation_update()
-      returns trigger language plpgsql as $$
-      begin
-        raise exception 'invitation update blocked';
-      end;
-      $$
-    `);
-    await db().execute(sql`
-      create trigger reject_merchant_invitation_update_trigger
-      before update on merchant_invitation
-      for each row execute function reject_merchant_invitation_update()
-    `);
+    await installAcceptanceRollbackFixture(db());
 
     try {
       const error = await rejectionOf(
@@ -1045,12 +1035,7 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
 
       expect(invitation[0].acceptedAt).toBeNull();
     } finally {
-      await db().execute(
-        sql`drop trigger if exists reject_merchant_invitation_update_trigger on merchant_invitation`,
-      );
-      await db().execute(
-        sql`drop function if exists reject_merchant_invitation_update()`,
-      );
+      await removeAcceptanceRollbackFixture(db());
     }
 
     const accepted = await acceptMerchantInvitation(db(), {
