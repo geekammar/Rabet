@@ -290,6 +290,7 @@ async function main() {
       `export TEST_REAL_PG_URL='${pgUrl}'`,
       `export AUTH_SECRET='${authSecret}'`,
       `export AUTH_URL='${BASE_URL}'`,
+      `export APP_URL='${BASE_URL}'`,
       `export AUTH_TRUST_HOST='true'`,
       `export ADMIN_EMAIL='${OPERATOR_EMAIL}'`,
       `export ADMIN_PASSWORD_HASH='${operatorPasswordHash}'`,
@@ -703,22 +704,36 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(usedAgain.status === 400, "Consumed invitation acceptance should be rejected");
   assert(usedAgain.json?.code === "INVITATION_REJECTED", "Consumed invitation response should be generic");
 
-  const throttleToken = crypto.randomBytes(32).toString("base64url");
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const response = await postJson("/api/merchant-invitations/accept", {
-      token: throttleToken,
-      password: fixture.password,
-      passwordConfirmation: fixture.password,
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const response = await postJson("/api/merchant-invitations/preview", {
+      token: fixture.throttle.token,
     });
-    assert(response.status === 400, "Unknown token should be rejected before hashing");
+    assert(
+      response.status === 200,
+      "A recognized invitation should remain previewable within its budget",
+    );
   }
-  const throttled = await postJson("/api/merchant-invitations/accept", {
-    token: throttleToken,
-    password: fixture.password,
-    passwordConfirmation: fixture.password,
+  const throttled = await postJson("/api/merchant-invitations/preview", {
+    token: fixture.throttle.token,
   });
-  assert(throttled.status === 429, "Invitation throttle should deny the sixth attempt");
+  assert(throttled.status === 429, "Invitation throttle should deny the eleventh preview");
   assert(Number(throttled.retryAfter) > 0, "Throttle response should include Retry-After");
+
+  await navigate(`${BASE_URL}/invite#token=${encodeURIComponent(fixture.throttle.token)}`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"invite-rate-limited\"]'))",
+    "invitation preview rate-limit state",
+  );
+  assert(
+    (await evaluate("document.body.innerText")).includes("محاولات كثيرة"),
+    "Rate-limited preview should show the Arabic temporary message",
+  );
+  await click('[data-testid="merchant-locale-en"]');
+  assert(
+    (await evaluate("document.body.innerText")).includes("Too many attempts"),
+    "Rate-limited preview should show the English temporary message",
+  );
 
   const bRows = await pgClient`
     select u.id as user_id, u.session_version, m.id as membership_id, m.status as membership_status

@@ -1877,3 +1877,283 @@ describe("production runner flows and execution", () => {
     expect(output()).toContain("unmanaged schema");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 0008 → 0009 upgrade regression — a literal 0008 baseline fixture, kept
+// independent of the production expectation constants used by the runner.
+// ---------------------------------------------------------------------------
+
+const UPGRADE_0008_TABLES = [
+  "admin_login_throttle",
+  "app_user",
+  "bot_setting",
+  "category",
+  "category_translation",
+  "customer",
+  "inquiry",
+  "inquiry_message",
+  "language",
+  "merchant_credential",
+  "merchant_invitation",
+  "message_template",
+  "message_translation",
+  "payment_method",
+  "payment_method_translation",
+  "product",
+  "product_action",
+  "product_action_translation",
+  "product_translation",
+  "seller_notification_delivery",
+  "seller_notification_setting",
+  "store",
+  "store_membership",
+  "telegram_update",
+];
+
+const UPGRADE_0008_INDEXES = [
+  "category_sibling_sort_order_idx",
+  "category_root_sort_order_idx",
+  "product_action_sibling_sort_order_idx",
+  "product_action_root_sort_order_idx",
+  "inquiry_active_per_customer_product_idx",
+  "category_slug_unique",
+  "product_slug_unique",
+  "language_code_unique",
+  "message_template_key_unique",
+  "customer_telegram_id_unique",
+  "telegram_update_update_id_unique",
+  "inquiry_reference_unique",
+  "inquiry_message_telegram_message_idx",
+  "category_translation_category_language_idx",
+  "product_translation_product_language_idx",
+  "product_action_translation_action_language_idx",
+  "message_translation_template_language_idx",
+  "payment_method_translation_method_language_idx",
+  "seller_notification_delivery_event_inquiry_idx",
+  "seller_notification_delivery_reference_unique",
+  "seller_notification_delivery_status_idx",
+  "seller_notification_delivery_created_at_idx",
+  "app_user_email_lower_unique",
+  "store_slug_unique",
+  "store_membership_store_user_unique",
+  "bot_setting_store_idx",
+  "category_store_idx",
+  "product_store_idx",
+  "message_template_store_idx",
+  "customer_store_idx",
+  "payment_method_store_idx",
+  "seller_notification_setting_store_idx",
+  "telegram_update_store_idx",
+  "merchant_credential_user_id_unique",
+  "merchant_invitation_token_digest_unique",
+  "merchant_invitation_store_idx",
+  "merchant_invitation_invited_email_idx",
+];
+
+const UPGRADE_0008_CONSTRAINTS = [
+  "bot_setting_singleton_check",
+  "bot_setting_currency_allowlist_check",
+  "category_no_self_parent_check",
+  "product_action_no_self_parent_check",
+  "product_price_nonnegative_check",
+  "product_action_url_https_check",
+  "product_action_navigation_target_exclusive_check",
+  "product_action_navigation_target_type_check",
+  "language_text_direction_check",
+  "inquiry_message_body_length_check",
+  "message_translation_body_length_check",
+  "product_action_translation_label_length_check",
+  "seller_notification_setting_singleton_check",
+  "seller_notification_setting_language_check",
+  "seller_notification_setting_destination_check",
+  "seller_notification_delivery_status_check",
+  "seller_notification_delivery_inquiry_id_fk",
+  "store_name_not_empty_check",
+  "store_slug_format_check",
+  "store_status_check",
+  "app_user_email_not_empty_check",
+  "app_user_email_trimmed_check",
+  "app_user_status_check",
+  "app_user_platform_role_check",
+  "app_user_session_version_nonnegative_check",
+  "store_membership_role_check",
+  "store_membership_status_check",
+  "store_membership_store_id_store_id_fk",
+  "store_membership_user_id_app_user_id_fk",
+  "bot_setting_store_id_store_id_fk",
+  "category_store_id_store_id_fk",
+  "product_store_id_store_id_fk",
+  "message_template_store_id_store_id_fk",
+  "customer_store_id_store_id_fk",
+  "payment_method_store_id_store_id_fk",
+  "seller_notification_setting_store_id_store_id_fk",
+  "telegram_update_store_id_store_id_fk",
+  "admin_login_throttle_singleton_check",
+  "admin_login_throttle_attempt_count_check",
+  "merchant_credential_password_hash_not_empty_check",
+  "merchant_credential_password_hash_argon2id_check",
+  "merchant_credential_user_id_app_user_id_fk",
+  "merchant_invitation_email_not_empty_check",
+  "merchant_invitation_email_normalized_check",
+  "merchant_invitation_token_digest_format_check",
+  "merchant_invitation_expiry_after_creation_check",
+  "merchant_invitation_terminal_state_check",
+  "merchant_invitation_store_id_store_id_fk",
+  "merchant_invitation_invited_by_user_id_app_user_id_fk",
+];
+
+const UPGRADE_0009_INDEXES = ["merchant_auth_throttle_window_idx"];
+
+const UPGRADE_0009_CONSTRAINTS = [
+  "merchant_auth_throttle_scope_key_pk",
+  "merchant_auth_throttle_scope_check",
+  "merchant_auth_throttle_key_format_check",
+  "merchant_auth_throttle_attempt_count_check",
+];
+
+function upgrade0008Scenario(): Scenario {
+  const scenario = emptyScenario();
+
+  scenario.ledgerExists = true;
+  scenario.applied = committed.slice(0, 9).map((entry, index) => ({
+    id: String(index + 1),
+    hash: entry.hash,
+    created_at: String(entry.when),
+  }));
+  scenario.appTables = [...UPGRADE_0008_TABLES];
+  scenario.indexes = [...UPGRADE_0008_INDEXES];
+  scenario.constraints = UPGRADE_0008_CONSTRAINTS.map((name) => ({
+    name,
+    type: "c",
+  }));
+  scenario.treeFks = Object.entries(wizard.EXPECTED_TREE_FKS).map(
+    ([table, name]) => ({ name, table_name: table }),
+  );
+  scenario.triggers = wizard.EXPECTED_NOTIFICATION_TRIGGERS.map((name) => ({
+    name,
+  }));
+
+  return scenario;
+}
+
+function apply0009To(scenario: Scenario) {
+  scenario.appTables = [...scenario.appTables, "merchant_auth_throttle"];
+  scenario.indexes = [...scenario.indexes, ...UPGRADE_0009_INDEXES];
+  scenario.constraints = [
+    ...scenario.constraints,
+    ...UPGRADE_0009_CONSTRAINTS.map((name) => ({ name, type: "c" })),
+  ];
+  scenario.applied = committed.map((entry, index) => ({
+    id: String(index + 1),
+    hash: entry.hash,
+    created_at: String(entry.when),
+  }));
+}
+
+describe("production runner 0008 to 0009 upgrade", () => {
+  const env = {
+    [actions.PROD_URL_ENV]: GOOD_URL,
+    [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+    [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+  };
+
+  it("inspect validates the healthy 0008 baseline before reporting success", async () => {
+    const { io, output } = testIo();
+    const scenario = upgrade0008Scenario();
+    let commandCalled = false;
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandCalled = true;
+        return { code: 0 };
+      },
+      mode: "inspect",
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("inspected");
+    expect(commandCalled).toBe(false);
+    expect(result.writes.migrationsApplied).toEqual([]);
+    expect(output()).toContain("Validating prior release schema on target");
+    expect(output()).toContain("0009_merchant_auth_throttle");
+  });
+
+  it("migrate validates 0008 first, applies only 0009, and validates the result", async () => {
+    const { io, output } = testIo();
+    const scenario = upgrade0008Scenario();
+    const executedCommands: string[] = [];
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async (opts) => {
+        executedCommands.push(`${opts.command} ${opts.args.join(" ")}`);
+
+        if (opts.args.includes("db:migrate")) {
+          apply0009To(scenario);
+        }
+
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("migrated");
+    expect(result.writes.migrationsApplied).toEqual([
+      "0009_merchant_auth_throttle",
+    ]);
+    expect(
+      executedCommands.filter((command) => command.includes("db:migrate")),
+    ).toHaveLength(1);
+    expect(output()).toContain(
+      "Verified healthy prior release (0008_merchant_invitations_and_credentials)",
+    );
+    expect(output()).toContain(
+      "Proceeding with migration to 0009_merchant_auth_throttle",
+    );
+    expect(output()).toContain("Validating the result on live database");
+  });
+
+  it("rejects a damaged 0008 baseline before running the migration command", async () => {
+    const { io, output } = testIo();
+    const scenario = upgrade0008Scenario();
+    scenario.appTables = scenario.appTables.filter(
+      (table) => table !== "merchant_credential",
+    );
+    let commandCalled = false;
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandCalled = true;
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(commandCalled).toBe(false);
+    expect(output()).toContain(
+      "does not match the verified prior release schema",
+    );
+  });
+});

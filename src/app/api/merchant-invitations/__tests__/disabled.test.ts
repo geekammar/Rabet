@@ -1,10 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST as preview } from "@/app/api/merchant-invitations/preview/route";
 import { POST as accept } from "@/app/api/merchant-invitations/accept/route";
 
 afterEach(() => {
   vi.unstubAllEnvs();
+});
+
+beforeEach(() => {
+  vi.stubEnv("APP_URL", "https://app.example.test");
 });
 
 function post(path: string, body = "{}") {

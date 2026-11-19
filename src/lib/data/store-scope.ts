@@ -31,19 +31,26 @@ export type StoreScope = {
 const trustedScopes = new WeakSet<object>();
 
 /**
+ * The narrow lookup surface required to mint a scope. Both the Neon HTTP
+ * application client and the server-only postgres-js transaction client satisfy
+ * it, so production code never needs a driver-to-driver cast.
+ */
+export type StoreScopeLookupDatabase = Pick<Database, "select">;
+
+/**
  * Mints a scope for a store that exists in PostgreSQL.
  *
  * This deliberately reads the `store` table instead of trusting the caller's
  * string: a nonexistent store can never receive a usable scope. The id is not
- * a browser credential — Phase 1 only calls this from test fixtures, and the
- * later production issuer will resolve the store from an authenticated
- * membership rather than from form or URL input.
+ * a browser credential — the authenticated merchant resolver is the production
+ * issuer, and it derives the id from one active membership rather than from
+ * form or URL input.
  *
  * Not exported from the `@/lib/data` barrel, so importing the data layer does
  * not expose scope issuance to application code.
  */
 export async function createStoreScopeForExistingStore(
-  db: Database,
+  db: StoreScopeLookupDatabase,
   storeId: unknown,
 ): Promise<StoreScope> {
   if (typeof storeId !== "string" || storeId.trim().length === 0) {

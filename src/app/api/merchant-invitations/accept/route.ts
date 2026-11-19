@@ -1,15 +1,12 @@
 import { getTransactionDb } from "@/db/transaction-client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import {
-  consumeMerchantThrottle,
-  merchantThrottleKey,
-} from "@/lib/auth/merchant-throttle";
-import {
   isSameOriginRequest,
   merchantJson,
   merchantNotFoundResponse,
   readMerchantJson,
 } from "@/lib/merchant-invitation/http";
+import { guardInvitationRequest } from "@/lib/merchant-invitation/guard";
 import {
   acceptMerchantInvitation,
   MerchantInvitationError,
@@ -20,11 +17,10 @@ import {
  * Explicit invitation acceptance.
  *
  * Only a form submission reaches this handler. The token is in the JSON body
- * and is inspected (without hashing) before the Argon2 work starts. The
- * merged transactional service remains the final authority: it locks the
- * invitation, creates the account, credential and membership, and consumes
- * the invitation in one transaction. A second submission cannot create a
- * second membership.
+ * and is inspected before any per-token budget or Argon2 work. The merged
+ * transactional service remains the final authority: it locks the invitation,
+ * creates the account, credential and membership, and consumes the invitation
+ * in one transaction. A second submission cannot create a second membership.
  *
  * Every invitation-level rejection — invalid, expired, revoked, consumed or
  * already-registered email — returns the same generic response.
@@ -79,46 +75,35 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  const throttleKey = merchantThrottleKey(
-    rawToken.length <= 512 ? rawToken : rawToken.slice(0, 512),
-  );
+  const result = await guardInvitationRequest({
+    execute: (statement) => getTransactionDb().execute(statement),
+    scope: "invitation_accept",
+    token: rawToken,
+    inspect: () => previewMerchantInvitation(getTransactionDb(), rawToken),
+  });
 
-  try {
-    const attempt = await consumeMerchantThrottle(
-      (statement) => getTransactionDb().execute(statement),
-      { scope: "invitation_accept", key: throttleKey },
+  if (result.status === "rejected") return merchantJson(REJECTED, 400);
+
+  if (result.status === "rate_limited") {
+    return merchantJson(
+      { ok: false, code: "RATE_LIMITED" },
+      429,
+      { "Retry-After": String(result.retryAfterSeconds) },
     );
+  }
 
-    if (!attempt.allowed) {
-      return merchantJson(
-        { ok: false, code: "RATE_LIMITED" },
-        429,
-        { "Retry-After": String(attempt.retryAfterSeconds) },
-      );
-    }
-  } catch {
+  if (result.status === "unavailable") {
     console.error(
-      "Invitation acceptance throttling is unavailable; denying the attempt.",
+      "Invitation acceptance is temporarily unavailable; returning a generic failure.",
     );
     return merchantJson({ ok: false, code: "UNAVAILABLE" }, 503);
   }
 
   try {
-    // Cheap pre-check: an unrecognized token never reaches Argon2. The
-    // transactional service re-reads and locks the row and remains final.
-    const preview = await previewMerchantInvitation(
-      getTransactionDb(),
-      rawToken,
-    );
-
-    if (!preview) return merchantJson(REJECTED, 400);
-
     await acceptMerchantInvitation(getTransactionDb(), {
       token: rawToken,
       password,
     });
-
-    return merchantJson({ ok: true, redirectTo: "/app/login" });
   } catch (error) {
     if (error instanceof MerchantInvitationError) {
       return merchantJson(REJECTED, 400);
@@ -129,4 +114,6 @@ export async function POST(request: Request): Promise<Response> {
     );
     return merchantJson({ ok: false, code: "UNAVAILABLE" }, 503);
   }
+
+  return merchantJson({ ok: true, redirectTo: "/app/login" });
 }

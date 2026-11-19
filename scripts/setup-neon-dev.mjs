@@ -143,6 +143,14 @@ export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
   (t) => !MERCHANT_INVITATION_TABLES.has(t) && !MERCHANT_SESSION_TABLES.has(t),
 );
 
+/**
+ * The exact twenty-four-table inventory through 0008:
+ * credential and invitation tables included, merchant_auth_throttle excluded.
+ */
+export const EXPECTED_TABLES_V7 = EXPECTED_TABLES.filter(
+  (t) => !MERCHANT_SESSION_TABLES.has(t),
+);
+
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
 export const EXPECTED_TABLES_V3 = EXPECTED_TABLES_V4.filter(
   (t) => !TENANT_TABLES.has(t),
@@ -225,6 +233,7 @@ export const EXPECTED_INDEXES_V5 = [
 /** Indexes present in the 0000..0007 baseline. */
 export const EXPECTED_INDEXES_V6 = [...EXPECTED_INDEXES_V5];
 
+
 /** Indexes the current chain requires (0008 adds credentials/invitations; 0009 adds throttle). */
 export const EXPECTED_INDEXES = [
   ...EXPECTED_INDEXES_V6,
@@ -234,6 +243,11 @@ export const EXPECTED_INDEXES = [
   "merchant_invitation_invited_email_idx",
   "merchant_auth_throttle_window_idx",
 ];
+
+/** Indexes present through 0008 (credentials and invitations, no 0009 throttle index). */
+export const EXPECTED_INDEXES_V7 = EXPECTED_INDEXES.filter(
+  (name) => name !== "merchant_auth_throttle_window_idx",
+);
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
 export const CRITICAL_CONSTRAINTS_V2 = [
@@ -300,8 +314,8 @@ export const CRITICAL_CONSTRAINTS_V6 = [
   "admin_login_throttle_attempt_count_check",
 ];
 
-/** CHECK, domain and ownership constraints the current chain requires. */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, domain and ownership constraints present through 0008. */
+export const CRITICAL_CONSTRAINTS_V7 = [
   ...CRITICAL_CONSTRAINTS_V6,
   "merchant_credential_password_hash_not_empty_check",
   "merchant_credential_password_hash_argon2id_check",
@@ -313,6 +327,11 @@ export const CRITICAL_CONSTRAINTS = [
   "merchant_invitation_terminal_state_check",
   "merchant_invitation_store_id_store_id_fk",
   "merchant_invitation_invited_by_user_id_app_user_id_fk",
+];
+
+/** CHECK, domain and ownership constraints the current chain requires (0009 adds throttle). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V7,
   "merchant_auth_throttle_scope_key_pk",
   "merchant_auth_throttle_scope_check",
   "merchant_auth_throttle_key_format_check",

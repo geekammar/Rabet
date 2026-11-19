@@ -10,12 +10,14 @@ import {
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
 import { Button } from "@/components/ui/button";
+import { classifyInvitationFailure } from "@/lib/merchant-invitation/responses";
 
 type Phase =
   | "reading"
   | "previewing"
   | "ready"
   | "invalid"
+  | "rateLimited"
   | "unavailable"
   | "submitting"
   | "success";
@@ -164,7 +166,14 @@ export function InvitationAcceptance() {
           return;
         }
 
-        setPhase("invalid");
+        const failure = classifyInvitationFailure(response.status);
+        setPhase(
+          failure === "rate_limited"
+            ? "rateLimited"
+            : failure === "unavailable"
+              ? "unavailable"
+              : "invalid",
+        );
       } catch (error) {
         if ((error as { name?: string }).name === "AbortError") return;
         setPhase("unavailable");
@@ -315,6 +324,16 @@ export function InvitationAcceptance() {
               data-testid="invite-error"
             >
               {copy.invalid}
+            </p>
+          ) : null}
+
+          {phase === "rateLimited" ? (
+            <p
+              role="alert"
+              className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-3 text-sm font-medium text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200"
+              data-testid="invite-rate-limited"
+            >
+              {copy.rateLimited}
             </p>
           ) : null}
 

@@ -1,24 +1,21 @@
 import { getTransactionDb } from "@/db/transaction-client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import {
-  consumeMerchantThrottle,
-  merchantThrottleKey,
-} from "@/lib/auth/merchant-throttle";
-import {
   isSameOriginRequest,
   merchantJson,
   merchantNotFoundResponse,
   readMerchantJson,
 } from "@/lib/merchant-invitation/http";
+import { guardInvitationRequest } from "@/lib/merchant-invitation/guard";
 import { previewMerchantInvitation } from "@/lib/merchant-invitation/service";
 
 /**
  * Read-only invitation preview.
  *
  * The token arrives in the POST body, never in the URL. This handler performs
- * no writes, so opening, refreshing or prefetching the invitation page cannot
- * consume the invitation. Invalid, expired, revoked and consumed invitations
- * all receive the same generic rejection.
+ * no writes to the invitation, so opening, refreshing or prefetching the
+ * invitation page cannot consume it. Invalid, expired, revoked and consumed
+ * invitations all receive the same generic rejection.
  */
 
 const REJECTED = { ok: false, code: "INVITATION_REJECTED" } as const;
@@ -37,47 +34,33 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const rawToken = typeof body.token === "string" ? body.token : "";
-  const throttleKey = merchantThrottleKey(
-    rawToken.length <= 512 ? rawToken : rawToken.slice(0, 512),
-  );
+  const result = await guardInvitationRequest({
+    execute: (statement) => getTransactionDb().execute(statement),
+    scope: "invitation_preview",
+    token: rawToken,
+    inspect: () => previewMerchantInvitation(getTransactionDb(), rawToken),
+  });
 
-  try {
-    const attempt = await consumeMerchantThrottle(
-      (statement) => getTransactionDb().execute(statement),
-      { scope: "invitation_preview", key: throttleKey },
+  if (result.status === "rejected") return merchantJson(REJECTED, 400);
+
+  if (result.status === "rate_limited") {
+    return merchantJson(
+      { ok: false, code: "RATE_LIMITED" },
+      429,
+      { "Retry-After": String(result.retryAfterSeconds) },
     );
+  }
 
-    if (!attempt.allowed) {
-      return merchantJson(
-        { ok: false, code: "RATE_LIMITED" },
-        429,
-        { "Retry-After": String(attempt.retryAfterSeconds) },
-      );
-    }
-  } catch {
+  if (result.status === "unavailable") {
     console.error(
-      "Invitation preview throttling is unavailable; denying the preview.",
+      "Invitation preview is temporarily unavailable; returning a generic failure.",
     );
     return merchantJson({ ok: false, code: "UNAVAILABLE" }, 503);
   }
 
-  try {
-    const preview = await previewMerchantInvitation(
-      getTransactionDb(),
-      rawToken,
-    );
-
-    if (!preview) return merchantJson(REJECTED, 400);
-
-    return merchantJson({
-      ok: true,
-      email: preview.invitedEmail,
-      storeName: preview.storeName,
-    });
-  } catch {
-    console.error(
-      "Invitation preview could not be read; returning a generic failure.",
-    );
-    return merchantJson({ ok: false, code: "UNAVAILABLE" }, 503);
-  }
+  return merchantJson({
+    ok: true,
+    email: result.preview.invitedEmail,
+    storeName: result.preview.storeName,
+  });
 }

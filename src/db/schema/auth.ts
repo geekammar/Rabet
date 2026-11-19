@@ -57,8 +57,9 @@ export const adminLoginThrottle = pgTable(
  * never stores a raw email address, invitation token or client address.
  *
  * Scopes:
- * - `invitation_preview` — one pending invitation lookup
- * - `invitation_accept`  — one invitation acceptance attempt (before Argon2)
+ * - `invitation_global`  — a coarse cap on all public invitation requests
+ * - `invitation_preview` — one pending invitation lookup per token
+ * - `invitation_accept`  — one invitation acceptance attempt per token (before Argon2)
  * - `sign_in`            — one merchant identity's password attempts
  * - `sign_in_global`     — a coarse cap on all merchant password attempts
  *
@@ -84,7 +85,7 @@ export const merchantAuthThrottle = pgTable(
     index("merchant_auth_throttle_window_idx").on(table.windowStartedAt),
     check(
       "merchant_auth_throttle_scope_check",
-      sql`${table.scope} IN ('invitation_preview', 'invitation_accept', 'sign_in', 'sign_in_global')`,
+      sql`${table.scope} IN ('invitation_global', 'invitation_preview', 'invitation_accept', 'sign_in', 'sign_in_global')`,
     ),
     check(
       "merchant_auth_throttle_key_format_check",

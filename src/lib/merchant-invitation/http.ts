@@ -18,6 +18,13 @@ const NO_STORE_HEADERS = {
 
 export const INVITATION_BODY_MAX_BYTES = 8 * 1024;
 
+/** Server-side application origin variables, in priority order. */
+export const TRUSTED_APP_ORIGIN_ENV_KEYS = [
+  "APP_URL",
+  "NEXT_PUBLIC_APP_URL",
+  "AUTH_URL",
+] as const;
+
 export function merchantJson(
   body: unknown,
   status = 200,
@@ -38,65 +45,155 @@ export function merchantNotFoundResponse(): Response {
 }
 
 /**
- * Rejects cross-origin and missing-origin POSTs. Browsers send `Origin` on a
- * same-origin `fetch` POST; comparing its host to the request host stops a
- * foreign page from using a victim's browser as a blind caller.
+ * Returns the trusted application origin from server configuration, including
+ * scheme and port. A missing or malformed value fails closed.
  */
-export function isSameOriginRequest(request: Request): boolean {
+export function trustedApplicationOrigin(): string | null {
+  for (const key of TRUSTED_APP_ORIGIN_ENV_KEYS) {
+    const raw = process.env[key];
+    if (typeof raw !== "string" || raw.trim() === "") continue;
+
+    try {
+      const parsed = new URL(raw.trim());
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return null;
+      }
+      return parsed.origin;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Rejects cross-origin and missing-origin POSTs by comparing the complete
+ * browser `Origin` to the trusted server-side application origin.
+ *
+ * Request `Host` and forwarded host headers are deliberately ignored: an
+ * attacker-controlled forwarded header must never turn a mismatched Origin
+ * into an accepted one.
+ */
+export function isSameOriginRequest(
+  request: Request,
+  trustedOrigin: string | null = trustedApplicationOrigin(),
+): boolean {
+  if (!trustedOrigin) return false;
+
   const origin = request.headers.get("origin");
 
   if (!origin) return false;
 
-  let originHost: string;
-
   try {
     const parsed = new URL(origin);
+
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return false;
     }
-    originHost = parsed.host;
+
+    return parsed.origin === trustedOrigin;
   } catch {
     return false;
   }
+}
 
-  const hosts = [
-    request.headers.get("host"),
-    request.headers.get("x-forwarded-host"),
-  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+function hasValidJsonContentType(value: string): boolean {
+  const [mediaType, ...parameters] = value.split(";").map((part) => part.trim());
 
-  return hosts.some((host) => host.toLowerCase() === originHost.toLowerCase());
+  if (mediaType.toLowerCase() !== "application/json") return false;
+
+  for (const parameter of parameters) {
+    if (parameter === "") continue;
+
+    const separator = parameter.indexOf("=");
+
+    if (separator === -1) return false;
+
+    const name = parameter.slice(0, separator).trim().toLowerCase();
+    const parameterValue = parameter
+      .slice(separator + 1)
+      .trim()
+      .replace(/^"|"$/g, "")
+      .toLowerCase();
+
+    if (name === "charset" && parameterValue !== "utf-8") return false;
+  }
+
+  return true;
 }
 
 /**
- * Reads an object-shaped JSON body with a hard byte cap. A missing, malformed
- * or oversized body returns `null`; the caller answers with its generic
- * rejection so the response shape does not reveal which check failed.
+ * Reads an object-shaped JSON body with a hard byte cap.
+ *
+ * A declared `Content-Length` is checked first when present. The body is then
+ * streamed into bounded chunks, and the reader is cancelled as soon as the cap
+ * is crossed — the remainder is never buffered or parsed. This also enforces
+ * the same cap for chunked requests without a `Content-Length`.
+ *
+ * A missing, malformed, oversized or non-object body returns `null`; the
+ * caller answers with its generic rejection.
  */
 export async function readMerchantJson(
   request: Request,
   maxBytes = INVITATION_BODY_MAX_BYTES,
 ): Promise<Record<string, unknown> | null> {
-  const contentType = request.headers.get("content-type") ?? "";
-
-  if (!contentType.toLowerCase().startsWith("application/json")) {
+  if (!hasValidJsonContentType(request.headers.get("content-type") ?? "")) {
     return null;
   }
 
-  const declaredLength = Number(request.headers.get("content-length"));
+  const contentLength = request.headers.get("content-length");
 
-  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+  if (contentLength !== null) {
+    if (!/^\d+$/.test(contentLength.trim())) return null;
+
+    const declared = Number(contentLength);
+
+    if (!Number.isSafeInteger(declared) || declared > maxBytes) return null;
+  }
+
+  if (!request.body) return null;
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+
+      total += value.byteLength;
+
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+
+      chunks.push(value);
+    }
+  } catch {
+    await reader.cancel().catch(() => undefined);
     return null;
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
 
   let text: string;
 
   try {
-    text = await request.text();
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
     return null;
   }
-
-  if (Buffer.byteLength(text, "utf8") > maxBytes) return null;
 
   try {
     const parsed: unknown = JSON.parse(text);

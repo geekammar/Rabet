@@ -3,8 +3,12 @@ import crypto from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 
-import { appUser } from "@/db/schema";
+import { appUser, store, storeMembership } from "@/db/schema";
 import { verifyMerchantCredentials } from "@/lib/auth/merchant-credentials";
+import {
+  MERCHANT_SIGN_IN_GLOBAL_MAX_ATTEMPTS,
+  merchantGlobalSignInKey,
+} from "@/lib/auth/merchant-throttle";
 import {
   acceptMerchantInvitation,
   issueMerchantInvitation,
@@ -99,6 +103,100 @@ describe.skipIf(!shouldRun)("merchant credentials", () => {
       .where(eq(appUser.id, a.userId));
 
     expect(await verify("credentials.disabled@example.test", PASSWORD)).toBeNull();
+  });
+
+  it("rejects revoked and zero active memberships, then recovers when restored", async () => {
+    const a = await seedMerchant("credentials.membership@example.test");
+
+    await testDb!.db
+      .update(storeMembership)
+      .set({ status: "revoked" })
+      .where(eq(storeMembership.userId, a.userId));
+
+    expect(await verify("credentials.membership@example.test", PASSWORD)).toBeNull();
+
+    await testDb!.db.execute(sql`delete from store_membership`);
+    expect(await verify("credentials.membership@example.test", PASSWORD)).toBeNull();
+
+    await testDb!.db.insert(storeMembership).values({
+      storeId: a.storeId,
+      userId: a.userId,
+      role: "owner",
+      status: "active",
+    });
+
+    expect(await verify("credentials.membership@example.test", PASSWORD)).not.toBeNull();
+  });
+
+  it("rejects multiple active memberships", async () => {
+    const a = await seedMerchant("credentials.multiple@example.test");
+    const [secondStore] = await testDb!.db
+      .insert(store)
+      .values({
+        name: "Second Credentials Store",
+        slug: `second-credentials-${crypto.randomUUID()}`,
+        status: "onboarding",
+      })
+      .returning();
+
+    await testDb!.db.insert(storeMembership).values({
+      storeId: secondStore.id,
+      userId: a.userId,
+      role: "owner",
+      status: "active",
+    });
+
+    expect(await verify("credentials.multiple@example.test", PASSWORD)).toBeNull();
+  });
+
+  it("rejects an ineligible platform identity", async () => {
+    const a = await seedMerchant("credentials.platform@example.test");
+
+    await testDb!.db
+      .update(appUser)
+      .set({ platformRole: "super_admin" })
+      .where(eq(appUser.id, a.userId));
+
+    expect(await verify("credentials.platform@example.test", PASSWORD)).toBeNull();
+
+    await testDb!.db
+      .update(appUser)
+      .set({ platformRole: "user" })
+      .where(eq(appUser.id, a.userId));
+
+    expect(await verify("credentials.platform@example.test", PASSWORD)).not.toBeNull();
+  });
+
+  it("issues a merchant session for a suspended store and leaves read-only handling to the resolver", async () => {
+    const a = await seedMerchant("credentials.suspended@example.test");
+
+    await testDb!.db
+      .update(store)
+      .set({ status: "suspended" })
+      .where(eq(store.id, a.storeId));
+
+    const identity = await verify("credentials.suspended@example.test", PASSWORD);
+    expect(identity).toMatchObject({ id: a.userId, role: "merchant" });
+  });
+
+  it("does not create a fresh identity bucket when the coarse budget is denied", async () => {
+    await testDb!.db.execute(sql`
+      insert into merchant_auth_throttle (scope, key, attempt_count, window_started_at)
+      values (
+        'sign_in_global',
+        ${merchantGlobalSignInKey()},
+        ${MERCHANT_SIGN_IN_GLOBAL_MAX_ATTEMPTS + 1},
+        now()
+      )
+    `);
+
+    expect(await verify("credentials.coarse@example.test", PASSWORD)).toBeNull();
+
+    const rows = await testDb!.db.execute<{ scope: string }>(sql`
+      select scope from merchant_auth_throttle
+    `);
+
+    expect(rows.filter((row) => row.scope === "sign_in")).toEqual([]);
   });
 
   it("throttles one identity's attempts before Argon2 without affecting another", async () => {

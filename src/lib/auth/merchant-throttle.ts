@@ -20,18 +20,26 @@ import { merchantAuthThrottle } from "@/db/schema";
  * `INSERT … ON CONFLICT … RETURNING` statement and concurrent requests cannot
  * overshoot the budget. The table is bounded in two ways:
  *
- * - The number of live keys is capped by the fixed window and by pruning rows
- *   older than {@link THROTTLE_RETENTION_SECONDS} on every attempt.
+ * - The number of live keys is capped by the fixed window and by a bounded
+ *   prune of rows older than {@link THROTTLE_RETENTION_SECONDS} on each
+ *   attempt. The prune never scans or deletes an unbounded batch.
  * - `attempt_count` stops at `max + 1`, so an individual row stays tiny.
  *
  * Policies are intentionally separate per operation:
  *
  * | Scope | Key | Budget |
  * | --- | --- | --- |
- * | `invitation_preview` | invitation token digest | 10 / 15 min |
- * | `invitation_accept` | invitation token digest | 5 / 15 min |
+ * | `invitation_global` | fixed digest | 60 / 15 min |
+ * | `invitation_preview` | recognized invitation token digest | 10 / 15 min |
+ * | `invitation_accept` | recognized invitation token digest | 5 / 15 min |
  * | `sign_in` | merchant email digest | 5 / 15 min |
  * | `sign_in_global` | fixed digest | 30 / 15 min |
+ *
+ * Public invitation requests spend the coarse budget before any database
+ * lookup. Only a recognized, eligible invitation may create its per-token
+ * bucket, so unknown, expired, revoked and consumed tokens never grow the
+ * per-key table. Sign-in spends the coarse budget before creating a fresh
+ * identity bucket.
  *
  * The invitation limits run before the Argon2 password hash and before the
  * transactional acceptance service. The sign-in limits run before any Argon2
@@ -41,13 +49,16 @@ import { merchantAuthThrottle } from "@/db/schema";
 
 export const THROTTLE_WINDOW_SECONDS = 15 * 60;
 export const THROTTLE_RETENTION_SECONDS = 24 * 60 * 60;
+export const THROTTLE_PRUNE_BATCH_SIZE = 25;
 
+export const INVITATION_GLOBAL_MAX_ATTEMPTS = 60;
 export const INVITATION_PREVIEW_MAX_ATTEMPTS = 10;
 export const INVITATION_ACCEPT_MAX_ATTEMPTS = 5;
 export const MERCHANT_SIGN_IN_MAX_ATTEMPTS = 5;
 export const MERCHANT_SIGN_IN_GLOBAL_MAX_ATTEMPTS = 30;
 
 export type MerchantThrottleScope =
+  | "invitation_global"
   | "invitation_preview"
   | "invitation_accept"
   | "sign_in"
@@ -59,6 +70,10 @@ type MerchantThrottlePolicy = {
 };
 
 const POLICIES: Record<MerchantThrottleScope, MerchantThrottlePolicy> = {
+  invitation_global: {
+    maxAttempts: INVITATION_GLOBAL_MAX_ATTEMPTS,
+    windowSeconds: THROTTLE_WINDOW_SECONDS,
+  },
   invitation_preview: {
     maxAttempts: INVITATION_PREVIEW_MAX_ATTEMPTS,
     windowSeconds: THROTTLE_WINDOW_SECONDS,
@@ -100,6 +115,11 @@ export function merchantThrottleKey(material: string): string {
   return crypto.createHash("sha256").update(material, "utf8").digest("hex");
 }
 
+/** The fixed digest used by the coarse global invitation budget. */
+export function merchantInvitationGlobalKey(): string {
+  return merchantThrottleKey("merchant-invitation-global");
+}
+
 /** The fixed digest used by the coarse global sign-in budget. */
 export function merchantGlobalSignInKey(): string {
   return merchantThrottleKey("merchant-sign-in-global");
@@ -118,8 +138,14 @@ async function pruneExpiredRows(execute: MerchantThrottleExecutor) {
   try {
     await execute(sql`
       DELETE FROM ${merchantAuthThrottle}
-      WHERE window_started_at
-        <= now() - make_interval(secs => ${THROTTLE_RETENTION_SECONDS})
+      WHERE ctid IN (
+        SELECT ctid
+        FROM ${merchantAuthThrottle}
+        WHERE window_started_at
+          <= now() - make_interval(secs => ${THROTTLE_RETENTION_SECONDS})
+        ORDER BY window_started_at
+        LIMIT ${THROTTLE_PRUNE_BATCH_SIZE}
+      )
     `);
   } catch {
     // Pruning is maintenance, not part of the authorization decision. A

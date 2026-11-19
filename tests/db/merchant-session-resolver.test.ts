@@ -163,14 +163,12 @@ describe.skipIf(!shouldRun)("merchant store resolver", () => {
   it("fails closed for zero and multiple active memberships", async () => {
     const a = await seedMerchant("resolver.multi.a@example.test", "Multi Store A");
     const b = await seedMerchant("resolver.multi.b@example.test", "Multi Store B");
+    const [zero] = await testDb!.db
+      .insert(appUser)
+      .values({ email: "resolver.zero@example.test" })
+      .returning();
 
-    const [superAdmin] = await testDb!.db
-      .select({ id: appUser.id })
-      .from(appUser)
-      .where(eq(appUser.platformRole, "super_admin"))
-      .limit(1);
-
-    expect(await resolveMerchantAccess(db(), claims(superAdmin.id))).toBeNull();
+    expect(await resolveMerchantAccess(db(), claims(zero.id))).toBeNull();
 
     await testDb!.db.insert(storeMembership).values({
       storeId: b.storeId,
@@ -178,6 +176,19 @@ describe.skipIf(!shouldRun)("merchant store resolver", () => {
       role: "owner",
       status: "active",
     });
+
+    expect(await resolveMerchantAccess(db(), claims(a.userId))).toBeNull();
+  });
+
+  it("rejects an ineligible platform identity on an existing session", async () => {
+    const a = await seedMerchant("resolver.platform@example.test", "Platform Store");
+
+    expect(await resolveMerchantAccess(db(), claims(a.userId))).not.toBeNull();
+
+    await testDb!.db
+      .update(appUser)
+      .set({ platformRole: "super_admin" })
+      .where(eq(appUser.id, a.userId));
 
     expect(await resolveMerchantAccess(db(), claims(a.userId))).toBeNull();
   });

@@ -14,6 +14,7 @@ vi.mock("@/lib/auth/merchant-throttle", () => ({
   consumeMerchantThrottle: flow.consume,
   merchantThrottleKey: (value: string) =>
     value.padEnd(64, "0").slice(0, 64),
+  merchantInvitationGlobalKey: () => "f".repeat(64),
 }));
 
 vi.mock("@/lib/merchant-invitation/service", () => ({
@@ -51,6 +52,7 @@ function request(overrides: Record<string, string> = {}) {
 
 beforeEach(() => {
   vi.stubEnv("RABET_MERCHANT_APP_ENABLED", "true");
+  vi.stubEnv("APP_URL", "https://app.example.test");
   flow.preview.mockReset();
   flow.accept.mockReset();
   flow.consume.mockReset().mockResolvedValue({
@@ -64,7 +66,7 @@ afterEach(() => {
 });
 
 describe("invitation acceptance route", () => {
-  it("rejects an unrecognized token before the hashing service is called", async () => {
+  it("rejects an unrecognized token after only the coarse budget", async () => {
     flow.preview.mockResolvedValueOnce(null);
 
     const response = await POST(request());
@@ -74,11 +76,15 @@ describe("invitation acceptance route", () => {
       ok: false,
       code: "INVITATION_REJECTED",
     });
-    expect(flow.preview).toHaveBeenCalledWith(expect.anything(), TOKEN);
+    expect(flow.consume).toHaveBeenCalledTimes(1);
+    expect(flow.consume.mock.calls[0][1]).toMatchObject({
+      scope: "invitation_global",
+    });
+    expect(flow.preview).toHaveBeenCalled();
     expect(flow.accept).not.toHaveBeenCalled();
   });
 
-  it("accepts a recognized token exactly once through the transactional service", async () => {
+  it("accepts a recognized token exactly once after coarse and per-token budgets", async () => {
     flow.preview.mockResolvedValueOnce({
       invitedEmail: "merchant@example.test",
       storeName: "Store",
@@ -91,6 +97,13 @@ describe("invitation acceptance route", () => {
     await expect(response.json()).resolves.toEqual({
       ok: true,
       redirectTo: "/app/login",
+    });
+    expect(flow.consume).toHaveBeenCalledTimes(2);
+    expect(flow.consume.mock.calls[0][1]).toMatchObject({
+      scope: "invitation_global",
+    });
+    expect(flow.consume.mock.calls[1][1]).toMatchObject({
+      scope: "invitation_accept",
     });
     expect(flow.accept).toHaveBeenCalledTimes(1);
     expect(flow.accept).toHaveBeenCalledWith(expect.anything(), {
@@ -117,7 +130,7 @@ describe("invitation acceptance route", () => {
     });
   });
 
-  it("validates password fields without consuming an invitation attempt", async () => {
+  it("validates password fields without consuming any invitation budget", async () => {
     const response = await POST(
       request({ passwordConfirmation: `${PASSWORD}-different` }),
     );
@@ -133,7 +146,7 @@ describe("invitation acceptance route", () => {
     expect(flow.accept).not.toHaveBeenCalled();
   });
 
-  it("denies with a 429 before preview or hashing when the budget is spent", async () => {
+  it("denies with a 429 before preview or hashing when the coarse budget is spent", async () => {
     flow.consume.mockResolvedValueOnce({
       allowed: false,
       retryAfterSeconds: 120,
@@ -143,7 +156,24 @@ describe("invitation acceptance route", () => {
 
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("120");
+    expect(flow.consume).toHaveBeenCalledTimes(1);
     expect(flow.preview).not.toHaveBeenCalled();
+    expect(flow.accept).not.toHaveBeenCalled();
+  });
+
+  it("denies a recognized token when its per-token budget is spent", async () => {
+    flow.preview.mockResolvedValueOnce({
+      invitedEmail: "merchant@example.test",
+      storeName: "Store",
+    });
+    flow.consume
+      .mockResolvedValueOnce({ allowed: true, retryAfterSeconds: 0 })
+      .mockResolvedValueOnce({ allowed: false, retryAfterSeconds: 60 });
+
+    const response = await POST(request());
+
+    expect(response.status).toBe(429);
+    expect(flow.consume).toHaveBeenCalledTimes(2);
     expect(flow.accept).not.toHaveBeenCalled();
   });
 });

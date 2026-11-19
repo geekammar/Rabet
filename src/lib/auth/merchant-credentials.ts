@@ -9,6 +9,7 @@ import {
   type TransactionDatabase,
 } from "@/db/transaction-client";
 import { signInSchema } from "@/lib/auth/schema";
+import { resolveMerchantEligibility } from "@/lib/merchant/eligibility";
 import {
   consumeMerchantThrottle,
   merchantGlobalSignInKey,
@@ -23,19 +24,22 @@ import {
  * with a one-to-one `merchant_credential` containing an Argon2id PHC hash. The
  * plaintext password is never stored, logged or compared in the clear.
  *
- * Order of operations, all before Argon2:
+ * Order of operations:
  * 1. Shape validation (email, bounded password).
- * 2. The per-identity sign-in budget.
- * 3. The coarse global merchant sign-in budget.
+ * 2. The coarse global merchant sign-in budget.
+ * 3. The per-identity sign-in budget, only after the coarse budget allows.
+ * 4. Password verification and the shared merchant eligibility rule.
  *
  * An unknown email still performs one Argon2 verification against a fixed
- * dummy hash, so a caller cannot enumerate merchants by timing. A disabled
- * user is also verified and then rejected, so disablement does not become a
- * fast-path oracle.
+ * dummy hash, so a caller cannot enumerate merchants by timing. After the
+ * password verifies, the same eligibility rule used by every protected request
+ * decides whether a session may be issued: active `app_user`, plain `user`
+ * platform role, matching session version, exactly one active owner membership
+ * and a supported store. Suspended stores remain eligible for read-only setup.
  *
  * The returned identity carries `sessionVersion`, which the Auth.js JWT
  * stores. It is only a starting value: `requireMerchantAccess()` reloads the
- * user, version, membership and store on every protected request.
+ * same eligibility facts on every protected request.
  */
 
 /** A syntactically valid Argon2id hash of a random string that is never used. */
@@ -78,18 +82,19 @@ export async function verifyMerchantCredentials(
   const identityKey = merchantThrottleKey(email);
 
   try {
-    const [identityAttempt, globalAttempt] = await Promise.all([
-      consumeMerchantThrottle(execute, {
-        scope: "sign_in",
-        key: identityKey,
-      }),
-      consumeMerchantThrottle(execute, {
-        scope: "sign_in_global",
-        key: merchantGlobalSignInKey(),
-      }),
-    ]);
+    const globalAttempt = await consumeMerchantThrottle(execute, {
+      scope: "sign_in_global",
+      key: merchantGlobalSignInKey(),
+    });
 
-    if (!identityAttempt.allowed || !globalAttempt.allowed) return null;
+    if (!globalAttempt.allowed) return null;
+
+    const identityAttempt = await consumeMerchantThrottle(execute, {
+      scope: "sign_in",
+      key: identityKey,
+    });
+
+    if (!identityAttempt.allowed) return null;
   } catch {
     console.error(
       "Merchant sign-in throttling is unavailable; denying credential verification.",
@@ -99,8 +104,6 @@ export async function verifyMerchantCredentials(
 
   let stored: {
     id: string;
-    email: string;
-    status: string;
     sessionVersion: number;
     passwordHash: string;
   } | null = null;
@@ -109,8 +112,6 @@ export async function verifyMerchantCredentials(
     const rows = await db
       .select({
         id: appUser.id,
-        email: appUser.email,
-        status: appUser.status,
         sessionVersion: appUser.sessionVersion,
         passwordHash: merchantCredential.passwordHash,
       })
@@ -135,9 +136,25 @@ export async function verifyMerchantCredentials(
     password,
   ).catch(() => false);
 
-  if (!stored || !passwordMatches || stored.status !== "active") {
+  if (!stored || !passwordMatches) {
     return null;
   }
+
+  let eligibility;
+
+  try {
+    eligibility = await resolveMerchantEligibility(db, {
+      userId: stored.id,
+      sessionVersion: stored.sessionVersion,
+    });
+  } catch {
+    console.error(
+      "Merchant eligibility lookup is unavailable; denying credential verification.",
+    );
+    return null;
+  }
+
+  if (!eligibility) return null;
 
   try {
     await resetMerchantThrottle(execute, {
@@ -149,9 +166,9 @@ export async function verifyMerchantCredentials(
   }
 
   return {
-    id: stored.id,
-    email: stored.email,
+    id: eligibility.userId,
+    email: eligibility.email,
     role: "merchant",
-    sessionVersion: stored.sessionVersion,
+    sessionVersion: eligibility.sessionVersion,
   };
 }

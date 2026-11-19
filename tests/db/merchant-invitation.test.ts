@@ -1322,6 +1322,8 @@ describe.skipIf(!shouldRun)("Phase 2A merchant invitations", () => {
       path.join(sourceRoot, "app/api/merchant-invitations/accept/route.ts"),
       path.join(sourceRoot, "app/api/merchant-invitations/preview/route.ts"),
       path.join(sourceRoot, "components/merchant/invitation-acceptance.tsx"),
+      path.join(sourceRoot, "lib/auth/merchant-throttle.ts"),
+      path.join(sourceRoot, "lib/merchant-invitation/guard.ts"),
     ]);
     const offenders = files.filter((file) => {
       if (allowed.has(file)) return false;

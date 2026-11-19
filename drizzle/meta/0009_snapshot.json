@@ -1,5 +1,5 @@
 {
-  "id": "ce925452-7436-423a-8e72-503eb6e19f48",
+  "id": "4acfc3de-89bb-4299-af37-baddde2befdb",
   "prevId": "880c4296-ef41-4c6e-80a9-36136caf1ea0",
   "version": "7",
   "dialect": "postgresql",
@@ -479,7 +479,7 @@
       "checkConstraints": {
         "merchant_auth_throttle_scope_check": {
           "name": "merchant_auth_throttle_scope_check",
-          "value": "\"merchant_auth_throttle\".\"scope\" IN ('invitation_preview', 'invitation_accept', 'sign_in', 'sign_in_global')"
+          "value": "\"merchant_auth_throttle\".\"scope\" IN ('invitation_global', 'invitation_preview', 'invitation_accept', 'sign_in', 'sign_in_global')"
         },
         "merchant_auth_throttle_key_format_check": {
           "name": "merchant_auth_throttle_key_format_check",

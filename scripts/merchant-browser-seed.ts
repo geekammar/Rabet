@@ -95,6 +95,12 @@ async function main() {
       invitationId: revoked.invitationId,
     });
 
+    const throttle = await issue(
+      "throttle.fixture@example.test",
+      "متجر حد المحاولات",
+      "browser-store-throttle",
+    );
+
     const used = await issue(
       "used.fixture@example.test",
       "متجر مستخدم",
@@ -128,6 +134,11 @@ async function main() {
         storeName: "متجر القمر",
         email: b.invitedEmail,
         token: b.token,
+      },
+      throttle: {
+        invitationId: throttle.invitationId,
+        email: throttle.invitedEmail,
+        token: throttle.token,
       },
       expired: {
         invitationId: expired.invitationId,
