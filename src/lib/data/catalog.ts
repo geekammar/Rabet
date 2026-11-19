@@ -4,7 +4,6 @@ import {
   and,
   eq,
   exists,
-  inArray,
   isNull,
   sql,
 } from "drizzle-orm";
@@ -329,7 +328,7 @@ export async function listCatalogProducts(
 }
 
 /**
- * Lists one store's non-deleted products with SQL-scoped translations.
+ * Lists one store's products and translations from one SQL snapshot.
  *
  * This is the Phase 1 tenant-scoped read. It is intentionally separate from the
  * legacy global `listCatalogProducts`: the operator dashboard keeps its current
@@ -341,11 +340,14 @@ export async function listCatalogProducts(
  *      store, checked before the product query, so a bad filter can never fall
  *      through to an unfiltered read;
  *   3. every returned product must have `store_id = scope.storeId` *and* a
- *      same-store category. The latter excludes an A-owned product whose
- *      category was cross-linked to B under the current single-column FK.
+ *      non-deleted category owned by the same store. The latter excludes an
+ *      A-owned product whose category was cross-linked to B under the current
+ *      single-column FK, and a product under a soft-deleted category.
  *
- * Translations are loaded only for the authorized product ids, in SQL. No
- * other store's translation rows are fetched and filtered in memory.
+ * Products and translations are fetched in one statement. The product-side
+ * predicates and the category ownership/deletion checks are part of that same
+ * statement, and the LEFT JOIN keeps an eligible product with no translation
+ * visible. No other store's translation rows are read at all.
  */
 export async function listCatalogProductsForStore(
   db: Database,
@@ -382,7 +384,7 @@ export async function listCatalogProductsForStore(
       conditions.push(eq(product.categoryId, categoryId));
     }
 
-    const products = await db
+    const rows = await db
       .select({
         id: product.id,
         categoryId: product.categoryId,
@@ -392,6 +394,12 @@ export async function listCatalogProductsForStore(
         sortOrder: product.sortOrder,
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
+        translationId: productTranslation.id,
+        translationLanguageId: productTranslation.languageId,
+        translationLanguageCode: language.code,
+        translationName: productTranslation.name,
+        translationDescription: productTranslation.description,
+        translationDetails: productTranslation.details,
       })
       .from(product)
       .innerJoin(
@@ -399,68 +407,59 @@ export async function listCatalogProductsForStore(
         and(
           eq(product.categoryId, category.id),
           eq(category.storeId, scope.storeId),
+          isNull(category.deletedAt),
         ),
       )
+      .leftJoin(
+        productTranslation,
+        eq(productTranslation.productId, product.id),
+      )
+      .leftJoin(language, eq(productTranslation.languageId, language.id))
       .where(and(...conditions))
-      .orderBy(product.sortOrder, product.createdAt, product.id);
+      .orderBy(
+        product.sortOrder,
+        product.createdAt,
+        product.id,
+        productTranslation.languageId,
+      );
 
-    if (products.length === 0) {
-      return [];
+    const products = new Map<string, CatalogProductRecord>();
+
+    for (const row of rows) {
+      let record = products.get(row.id);
+
+      if (record === undefined) {
+        record = {
+          id: row.id,
+          categoryId: row.categoryId,
+          slug: row.slug,
+          price: row.price,
+          isActive: row.isActive,
+          sortOrder: row.sortOrder,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          translations: {},
+        };
+        products.set(row.id, record);
+      }
+
+      if (
+        row.translationId !== null &&
+        row.translationLanguageId !== null &&
+        row.translationLanguageCode !== null &&
+        row.translationName !== null
+      ) {
+        record.translations[row.translationLanguageCode] = {
+          id: row.translationId,
+          languageId: row.translationLanguageId,
+          name: row.translationName,
+          description: row.translationDescription,
+          details: row.translationDetails,
+        };
+      }
     }
 
-    const productIds = products.map((p) => p.id);
-
-    const translations = await db
-      .select({
-        id: productTranslation.id,
-        productId: productTranslation.productId,
-        languageId: productTranslation.languageId,
-        languageCode: language.code,
-        name: productTranslation.name,
-        description: productTranslation.description,
-        details: productTranslation.details,
-      })
-      .from(productTranslation)
-      .innerJoin(language, eq(productTranslation.languageId, language.id))
-      .where(inArray(productTranslation.productId, productIds));
-
-    const transByProdId = new Map<
-      string,
-      Record<
-        string,
-        {
-          id: string;
-          languageId: string;
-          name: string;
-          description: string | null;
-          details: string | null;
-        }
-      >
-    >();
-
-    for (const t of translations) {
-      const existing = transByProdId.get(t.productId) ?? {};
-      existing[t.languageCode] = {
-        id: t.id,
-        languageId: t.languageId,
-        name: t.name,
-        description: t.description,
-        details: t.details,
-      };
-      transByProdId.set(t.productId, existing);
-    }
-
-    return products.map((p) => ({
-      id: p.id,
-      categoryId: p.categoryId,
-      slug: p.slug,
-      price: p.price,
-      isActive: p.isActive,
-      sortOrder: p.sortOrder,
-      createdAt: p.createdAt,
-      updatedAt: p.updatedAt,
-      translations: transByProdId.get(p.id) ?? {},
-    }));
+    return [...products.values()];
   } catch (error) {
     throw mapDatabaseError(error);
   }
@@ -470,8 +469,8 @@ export async function listCatalogProductsForStore(
  * Updates one store-owned product's availability in a single guarded write.
  *
  * The `UPDATE` itself requires the target id, the scope's store id, a
- * non-deleted product, and a category owned by the same store. There is no
- * authorization `SELECT` before it, so a foreign or missing id is
+ * non-deleted product, and a non-deleted category owned by the same store.
+ * There is no authorization `SELECT` before it, so a foreign or missing id is
  * indistinguishable and writes nothing. Only `is_active` is set; price,
  * translations and product actions are left alone, and the database trigger
  * still maintains `updated_at`.
@@ -503,6 +502,7 @@ export async function updateCatalogProductAvailabilityForStore(
                 and(
                   eq(category.id, product.categoryId),
                   eq(category.storeId, scope.storeId),
+                  isNull(category.deletedAt),
                 ),
               ),
           ),

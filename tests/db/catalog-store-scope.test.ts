@@ -75,19 +75,23 @@ function createObservedDb(url: string) {
 
 type Fixture = {
   englishId: string;
+  arabicId: string;
   storeAId: string;
   storeBId: string;
   categoryAId: string;
   categoryBId: string;
   unownedCategoryId: string;
+  deletedCategoryAId: string;
   productAOneId: string;
   productATwoId: string;
   productAWriteId: string;
+  productANoTranslationId: string;
   productBId: string;
   crossLinkedProductId: string;
   deletedProductId: string;
   nullOwnedProductId: string;
   unownedCategoryProductId: string;
+  productUnderDeletedCategoryId: string;
 };
 
 let testDb: TestDatabase | null = null;
@@ -110,6 +114,16 @@ beforeAll(async () => {
       code: "en",
       label: "English",
       textDirection: "ltr",
+      isEnabled: true,
+    })
+    .returning({ id: language.id });
+
+  const [arabic] = await db
+    .insert(language)
+    .values({
+      code: "ar",
+      label: "العربية",
+      textDirection: "rtl",
       isEnabled: true,
     })
     .returning({ id: language.id });
@@ -154,6 +168,17 @@ beforeAll(async () => {
     })
     .returning({ id: category.id });
 
+  const [deletedCategoryA] = await db
+    .insert(category)
+    .values({
+      storeId: storeA.id,
+      slug: "store-a-deleted-category",
+      sortOrder: nextOrder(),
+      isActive: true,
+      deletedAt: new Date(),
+    })
+    .returning({ id: category.id });
+
   const [productAOne] = await db
     .insert(product)
     .values({
@@ -187,6 +212,18 @@ beforeAll(async () => {
       price: "55.00",
       isActive: false,
       sortOrder: 30,
+    })
+    .returning({ id: product.id });
+
+  const [productANoTranslation] = await db
+    .insert(product)
+    .values({
+      storeId: storeA.id,
+      categoryId: categoryA.id,
+      slug: "store-a-no-translation",
+      price: "57.00",
+      isActive: true,
+      sortOrder: 35,
     })
     .returning({ id: product.id });
 
@@ -254,6 +291,21 @@ beforeAll(async () => {
     })
     .returning({ id: product.id });
 
+  // An otherwise eligible A product under an A-owned category that is only
+  // soft-deleted. The category row and product FK are fully valid; the scoped
+  // operations must treat it exactly like an ineligible category.
+  const [productUnderDeletedCategory] = await db
+    .insert(product)
+    .values({
+      storeId: storeA.id,
+      categoryId: deletedCategoryA.id,
+      slug: "store-a-under-deleted-category",
+      price: "88.00",
+      isActive: true,
+      sortOrder: 80,
+    })
+    .returning({ id: product.id });
+
   await db.insert(productTranslation).values([
     {
       productId: productAOne.id,
@@ -261,6 +313,13 @@ beforeAll(async () => {
       name: "Store A Product One",
       description: "A one",
       details: "A one details",
+    },
+    {
+      productId: productAOne.id,
+      languageId: arabic.id,
+      name: "منتج المتجر أ الأول",
+      description: "وصف أ واحد",
+      details: "تفاصيل أ واحد",
     },
     {
       productId: productATwo.id,
@@ -310,6 +369,13 @@ beforeAll(async () => {
       name: "A Under Unowned Category",
       description: "Unowned category",
       details: "Unowned category details",
+    },
+    {
+      productId: productUnderDeletedCategory.id,
+      languageId: english.id,
+      name: "A Under Deleted Category",
+      description: "Deleted category",
+      details: "Deleted category details",
     },
   ]);
 
@@ -366,19 +432,23 @@ beforeAll(async () => {
 
   fixture = {
     englishId: english.id,
+    arabicId: arabic.id,
     storeAId: storeA.id,
     storeBId: storeB.id,
     categoryAId: categoryA.id,
     categoryBId: categoryB.id,
     unownedCategoryId: unownedCategory.id,
+    deletedCategoryAId: deletedCategoryA.id,
     productAOneId: productAOne.id,
     productATwoId: productATwo.id,
     productAWriteId: productAWrite.id,
+    productANoTranslationId: productANoTranslation.id,
     productBId: productB.id,
     crossLinkedProductId: crossLinkedProduct.id,
     deletedProductId: deletedProduct.id,
     nullOwnedProductId: nullOwnedProduct.id,
     unownedCategoryProductId: unownedCategoryProduct.id,
+    productUnderDeletedCategoryId: productUnderDeletedCategory.id,
   };
 });
 
@@ -410,30 +480,42 @@ async function readProductState(productId: string) {
   return { row, actions, translations };
 }
 
-function productQueries(queries: readonly ObservedQuery[]) {
-  return queries.filter((entry) => /from "product"/.test(entry.query));
-}
-
-function translationQueries(queries: readonly ObservedQuery[]) {
-  return queries.filter((entry) =>
-    /from "product_translation"/.test(entry.query),
+function catalogDataQueries(queries: readonly ObservedQuery[]) {
+  return queries.filter(
+    (entry) =>
+      /from "product"/.test(entry.query) &&
+      /left join "product_translation"/.test(entry.query),
   );
 }
 
+function categoryGateQueries(queries: readonly ObservedQuery[]) {
+  return queries.filter((entry) => /from "category"/.test(entry.query));
+}
+
+function updateQueries(queries: readonly ObservedQuery[]) {
+  return queries.filter((entry) => /^update "product"/.test(entry.query));
+}
+
 describe.skipIf(!shouldRun)("store-scoped catalog", () => {
-  it("lists only A's products and translations, and only B's for B", async () => {
+  it("returns each eligible product once with all translations from one catalog statement", async () => {
     observer!.queries.length = 0;
 
     const aProducts = await listCatalogProductsForStore(observer!.db, scopeA);
+    const aQueries = [...observer!.queries];
 
-    expect(aProducts.map((p) => p.id)).toEqual([
+    const aProductIds = aProducts.map((p) => p.id);
+    expect(aProductIds).toEqual([
       fixture.productAOneId,
       fixture.productATwoId,
       fixture.productAWriteId,
+      fixture.productANoTranslationId,
     ]);
+    expect(new Set(aProductIds).size).toBe(aProductIds.length);
     expect(aProducts[0].translations.en?.name).toBe("Store A Product One");
+    expect(aProducts[0].translations.ar?.name).toBe("منتج المتجر أ الأول");
     expect(aProducts[1].translations.en?.name).toBe("Store A Product Two");
     expect(aProducts[2].translations.en?.name).toBe("Store A Write Product");
+    expect(aProducts[3].translations).toEqual({});
 
     const aJson = JSON.stringify(aProducts);
     expect(aJson).not.toContain("Store B Product");
@@ -441,93 +523,106 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
     expect(aJson).not.toContain("Store A Deleted Product");
     expect(aJson).not.toContain("Unowned Product");
     expect(aJson).not.toContain("A Under Unowned Category");
+    expect(aJson).not.toContain("A Under Deleted Category");
+
+    const catalogQueries = catalogDataQueries(aQueries);
+    expect(catalogQueries).toHaveLength(1);
+    expect(
+      aQueries.filter((entry) => /from "product"/.test(entry.query)),
+    ).toHaveLength(1);
+    const catalogQuery = catalogQueries[0];
+    expect(catalogQuery.query).toContain('from "product"');
+    expect(catalogQuery.query).toContain('inner join "category"');
+    expect(catalogQuery.query).toContain('left join "product_translation"');
+    expect(catalogQuery.query).toContain('left join "language"');
+    expect(catalogQuery.query).toMatch(/"product"\."store_id"\s*=\s*\$\d+/);
+    expect(catalogQuery.query).toMatch(/"category"\."store_id"\s*=\s*\$\d+/);
+    expect(catalogQuery.query).toContain('"product"."deleted_at" is null');
+    expect(catalogQuery.query).toContain('"category"."deleted_at" is null');
+    expect(catalogQuery.query).not.toContain(
+      '"product_translation"."product_id" in (',
+    );
 
     const bProducts = await listCatalogProductsForStore(observer!.db, scopeB);
 
     expect(bProducts.map((p) => p.id)).toEqual([fixture.productBId]);
     expect(bProducts[0].translations.en?.name).toBe("Store B Product");
     expect(JSON.stringify(bProducts)).not.toContain("Store A Product");
-
-    const productQuery = productQueries(observer!.queries)[0];
-    expect(productQuery).toBeDefined();
-    expect(productQuery.query).toContain('inner join "category"');
-    expect(productQuery.query).toMatch(/"product"\."store_id"\s*=\s*\$\d+/);
-    expect(productQuery.query).toMatch(/"category"\."store_id"\s*=\s*\$\d+/);
-    expect(productQuery.query).toContain('"product"."deleted_at" is null');
-
-    const translationQuery = translationQueries(observer!.queries)[0];
-    expect(translationQuery).toBeDefined();
-    expect(translationQuery.query).toContain(
-      '"product_translation"."product_id" in (',
-    );
-
-    const translationParameters = translationQuery.parameters.map(String);
-    for (const authorizedId of [
-      fixture.productAOneId,
-      fixture.productATwoId,
-      fixture.productAWriteId,
-    ]) {
-      expect(translationParameters).toContain(authorizedId);
-    }
-    for (const excludedId of [
-      fixture.productBId,
-      fixture.crossLinkedProductId,
-      fixture.deletedProductId,
-      fixture.nullOwnedProductId,
-      fixture.unownedCategoryProductId,
-    ]) {
-      expect(translationParameters).not.toContain(excludedId);
-    }
   });
 
-  it("accepts a live same-store category filter and rejects a foreign or missing category before the product query", async () => {
+  it("accepts a live same-store category filter and rejects foreign, missing or soft-deleted categories before catalog data", async () => {
+    observer!.queries.length = 0;
     const filtered = await listCatalogProductsForStore(
       observer!.db,
       scopeA,
       fixture.categoryAId,
     );
+    const filteredQueries = [...observer!.queries];
 
     expect(filtered.map((p) => p.id)).toEqual([
       fixture.productAOneId,
       fixture.productATwoId,
       fixture.productAWriteId,
+      fixture.productANoTranslationId,
     ]);
+    const filteredCategoryQueries = categoryGateQueries(filteredQueries);
+    expect(filteredCategoryQueries).toHaveLength(1);
+    expect(filteredCategoryQueries[0].query).toContain('from "category"');
+    expect(filteredCategoryQueries[0].query).toContain(
+      '"category"."deleted_at" is null',
+    );
+    const filteredCatalogQueries = catalogDataQueries(filteredQueries);
+    expect(filteredCatalogQueries).toHaveLength(1);
+    expect(filteredCatalogQueries[0].query).toContain(
+      '"product"."category_id"',
+    );
+    expect(filteredCatalogQueries[0].query).toContain(
+      'left join "product_translation"',
+    );
 
-    observer!.queries.length = 0;
-    const byForeignCategory = await listCatalogProductsForStore(
-      observer!.db,
-      scopeA,
+    const deniedCategoryIds = [
       fixture.categoryBId,
-    );
-    const foreignQueries = [...observer!.queries];
-
-    observer!.queries.length = 0;
-    const byMissingCategory = await listCatalogProductsForStore(
-      observer!.db,
-      scopeA,
       globalThis.crypto.randomUUID(),
-    );
-    const missingQueries = [...observer!.queries];
+      fixture.deletedCategoryAId,
+    ];
 
     // The same generic outcome: an empty record list, never an unfiltered read.
-    expect(byForeignCategory).toEqual([]);
-    expect(byMissingCategory).toEqual([]);
+    const deniedQueries: ObservedQuery[][] = [];
 
-    for (const queries of [foreignQueries, missingQueries]) {
-      expect(productQueries(queries)).toHaveLength(0);
-      expect(translationQueries(queries)).toHaveLength(0);
-      expect(queries).toHaveLength(1);
-      expect(queries[0].query).toContain('from "category"');
-      expect(queries[0].query).toMatch(/"category"\."store_id"\s*=\s*\$\d+/);
-      expect(queries[0].query).toContain('"category"."deleted_at" is null');
+    for (const deniedCategoryId of deniedCategoryIds) {
+      observer!.queries.length = 0;
+      const result = await listCatalogProductsForStore(
+        observer!.db,
+        scopeA,
+        deniedCategoryId,
+      );
+      const queries = [...observer!.queries];
+
+      expect(result).toEqual([]);
+      expect(catalogDataQueries(queries)).toHaveLength(0);
+      expect(
+        queries.filter((entry) => /from "product"/.test(entry.query)),
+      ).toHaveLength(0);
+      const categoryQueries = categoryGateQueries(queries);
+      expect(categoryQueries).toHaveLength(1);
+      expect(categoryQueries[0].query).toMatch(
+        /"category"\."store_id"\s*=\s*\$\d+/,
+      );
+      expect(categoryQueries[0].query).toContain(
+        '"category"."deleted_at" is null',
+      );
+      expect(categoryQueries[0].parameters).toContain(deniedCategoryId);
+      expect(categoryQueries[0].parameters).toContain(scopeA.storeId);
+
+      deniedQueries.push(categoryQueries);
     }
 
-    expect(foreignQueries[0].parameters).toContain(fixture.categoryBId);
-    expect(foreignQueries[0].parameters).toContain(scopeA.storeId);
-    expect(foreignQueries[0].query).toBe(missingQueries[0].query);
+    for (const queries of deniedQueries.slice(1)) {
+      expect(queries[0].query).toBe(deniedQueries[0][0].query);
+    }
   });
 
-  it("excludes the legacy cross-link, deleted, NULL-owned and unowned-category rows while the legacy read is unchanged", async () => {
+  it("excludes the legacy cross-link, deleted, NULL-owned, unowned-category and deleted-category rows while the legacy read is unchanged", async () => {
     const scoped = await listCatalogProductsForStore(observer!.db, scopeA);
     const scopedIds = scoped.map((p) => p.id);
 
@@ -535,15 +630,20 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
       fixture.productAOneId,
       fixture.productATwoId,
       fixture.productAWriteId,
+      fixture.productANoTranslationId,
     ]);
     expect(scopedIds).not.toContain(fixture.crossLinkedProductId);
     expect(scopedIds).not.toContain(fixture.deletedProductId);
     expect(scopedIds).not.toContain(fixture.nullOwnedProductId);
     expect(scopedIds).not.toContain(fixture.unownedCategoryProductId);
+    expect(scopedIds).not.toContain(fixture.productUnderDeletedCategoryId);
     expect(JSON.stringify(scoped)).not.toContain(
       "Store A Cross-Link Product",
     );
     expect(JSON.stringify(scoped)).not.toContain("Unowned Product");
+    expect(JSON.stringify(scoped)).not.toContain(
+      "A Under Deleted Category",
+    );
 
     const legacy = await listCatalogProducts(asAppDb(testDb!.db));
     const legacyIds = legacy.map((p) => p.id);
@@ -552,10 +652,12 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
       fixture.productAOneId,
       fixture.productATwoId,
       fixture.productAWriteId,
+      fixture.productANoTranslationId,
       fixture.productBId,
       fixture.crossLinkedProductId,
       fixture.nullOwnedProductId,
       fixture.unownedCategoryProductId,
+      fixture.productUnderDeletedCategoryId,
     ]) {
       expect(legacyIds).toContain(visible);
     }
@@ -607,13 +709,15 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
     expect(after.translations).toEqual(before.translations);
     expect(after.actions).toEqual(before.actions);
 
-    expect(observer!.queries).toHaveLength(1);
-    const statement = observer!.queries[0];
+    const writeQueries = updateQueries(observer!.queries);
+    expect(writeQueries).toHaveLength(1);
+    const statement = writeQueries[0];
     expect(statement.query).toMatch(/^update "product"/);
     expect(statement.query).toMatch(/"product"\."store_id"\s*=\s*\$\d+/);
     expect(statement.query).toContain('"product"."deleted_at" is null');
     expect(statement.query).toContain("exists");
     expect(statement.query).toMatch(/"category"\."store_id"\s*=\s*\$\d+/);
+    expect(statement.query).toContain('"category"."deleted_at" is null');
     expect(statement.query).toContain("returning");
   });
 
@@ -627,7 +731,7 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
       fixture.productBId,
       false,
     );
-    const foreignQueries = [...observer!.queries];
+    const foreignQueries = updateQueries(observer!.queries);
 
     observer!.queries.length = 0;
     const missingResult = await updateCatalogProductAvailabilityForStore(
@@ -636,7 +740,7 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
       globalThis.crypto.randomUUID(),
       false,
     );
-    const missingQueries = [...observer!.queries];
+    const missingQueries = updateQueries(observer!.queries);
 
     expect(foreignResult).toBe(false);
     expect(missingResult).toBe(false);
@@ -664,8 +768,9 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
     );
 
     expect(crossResult).toBe(false);
-    expect(observer!.queries).toHaveLength(1);
-    expect(observer!.queries[0].query).toContain("exists");
+    const crossQueries = updateQueries(observer!.queries);
+    expect(crossQueries).toHaveLength(1);
+    expect(crossQueries[0].query).toContain("exists");
 
     const crossAfter = await readProductState(fixture.crossLinkedProductId);
     expect(crossAfter).toEqual(crossBefore);
@@ -686,6 +791,69 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
       unownedBefore,
     );
     expect(unownedBefore.row.categoryId).toBe(fixture.unownedCategoryId);
+  });
+
+  it("excludes and refuses to update an eligible product under a soft-deleted same-store category", async () => {
+    const before = await readProductState(
+      fixture.productUnderDeletedCategoryId,
+    );
+
+    expect(before.row.deletedAt).toBeNull();
+    expect(before.row.storeId).toBe(fixture.storeAId);
+    expect(before.row.categoryId).toBe(fixture.deletedCategoryAId);
+    expect(before.translations[0]?.name).toBe("A Under Deleted Category");
+
+    const scoped = await listCatalogProductsForStore(observer!.db, scopeA);
+    expect(scoped.map((p) => p.id)).not.toContain(
+      fixture.productUnderDeletedCategoryId,
+    );
+    expect(JSON.stringify(scoped)).not.toContain(
+      "A Under Deleted Category",
+    );
+
+    observer!.queries.length = 0;
+    const filtered = await listCatalogProductsForStore(
+      observer!.db,
+      scopeA,
+      fixture.deletedCategoryAId,
+    );
+    const filteredQueries = [...observer!.queries];
+
+    expect(filtered).toEqual([]);
+    expect(catalogDataQueries(filteredQueries)).toHaveLength(0);
+    const filteredCategoryQueries = categoryGateQueries(filteredQueries);
+    expect(filteredCategoryQueries).toHaveLength(1);
+    expect(filteredCategoryQueries[0].query).toContain('from "category"');
+    expect(filteredCategoryQueries[0].query).toContain(
+      '"category"."deleted_at" is null',
+    );
+
+    observer!.queries.length = 0;
+    const updated = await updateCatalogProductAvailabilityForStore(
+      observer!.db,
+      scopeA,
+      fixture.productUnderDeletedCategoryId,
+      false,
+    );
+
+    expect(updated).toBe(false);
+    const updateStatements = updateQueries(observer!.queries);
+    expect(updateStatements).toHaveLength(1);
+    expect(updateStatements[0].query).toContain(
+      '"category"."deleted_at" is null',
+    );
+    expect(
+      await readProductState(fixture.productUnderDeletedCategoryId),
+    ).toEqual(before);
+    expect(before.row.isActive).toBe(true);
+
+    const legacy = await listCatalogProducts(asAppDb(testDb!.db));
+    const legacyProduct = legacy.find(
+      (p) => p.id === fixture.productUnderDeletedCategoryId,
+    );
+    expect(legacyProduct?.translations.en?.name).toBe(
+      "A Under Deleted Category",
+    );
   });
 
   it("does not update a soft-deleted product", async () => {
