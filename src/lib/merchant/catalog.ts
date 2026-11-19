@@ -3,15 +3,16 @@ import "server-only";
 import type { Database } from "@/db/client";
 import type { MerchantAccess } from "@/lib/auth/merchant-session";
 import { validatePrice, validateUuid } from "@/lib/catalog/validation";
-import { updateCatalogProductPriceForStore } from "@/lib/data/catalog";
+import { updateCatalogProductPriceForMerchant } from "@/lib/data/catalog";
 import { RabetDataError } from "@/lib/data/errors";
 
 /**
  * Merchant-scoped catalog price mutation.
  *
- * Authorization is already resolved by the caller with the same eligibility
- * rule used for every protected merchant request. This module adds the
- * business rules on top of that access result:
+ * Authorization is resolved by the caller, then re-bound to the guarded price
+ * `UPDATE` itself. The caller's access result supplies only server-derived
+ * identity, session version and store scope; the database statement rechecks
+ * the same eligibility facts and the writable store state when it writes.
  *
  * - a suspended (read-only) store may not write;
  * - the product identifier must be a server-validated UUID;
@@ -61,9 +62,13 @@ export async function updateMerchantCatalogProductPrice(
   }
 
   try {
-    const updated = await updateCatalogProductPriceForStore(
+    const updated = await updateCatalogProductPriceForMerchant(
       db,
       access.scope,
+      {
+        userId: access.userId,
+        sessionVersion: access.sessionVersion,
+      },
       productId.data,
       price.data,
     );

@@ -36,6 +36,7 @@ export default async function MerchantProductsPage() {
         id: product.id,
         name: productName(product.translations, product.slug),
         price: product.price,
+        updatedAt: product.updatedAt.toISOString(),
       }))}
     />
   );

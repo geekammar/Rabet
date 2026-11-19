@@ -1179,6 +1179,7 @@ describe("scoped-operation production surface", () => {
 
     const listOffenders: string[] = [];
     const priceOffenders: string[] = [];
+    const merchantPriceOffenders: string[] = [];
     const availabilityOffenders: string[] = [];
     const scopeIssuerOffenders: string[] = [];
 
@@ -1194,6 +1195,9 @@ describe("scoped-operation production surface", () => {
       if (source.includes("updateCatalogProductPriceForStore")) {
         priceOffenders.push(relative);
       }
+      if (source.includes("updateCatalogProductPriceForMerchant")) {
+        merchantPriceOffenders.push(relative);
+      }
       if (source.includes("updateCatalogProductAvailabilityForStore")) {
         availabilityOffenders.push(relative);
       }
@@ -1208,6 +1212,7 @@ describe("scoped-operation production surface", () => {
     // authenticated merchant resolver.
     expect(listOffenders).toEqual([]);
     expect(priceOffenders).toEqual([]);
+    expect(merchantPriceOffenders).toEqual([]);
     expect(availabilityOffenders).toEqual([]);
     expect(scopeIssuerOffenders).toEqual([]);
 
@@ -1215,8 +1220,16 @@ describe("scoped-operation production surface", () => {
     expect(page).toContain("requireMerchantAccess");
     expect(page).toContain("listCatalogProductsForStore");
     expect(page).not.toContain("updateCatalogProductPriceForStore");
+    expect(page).not.toContain("updateCatalogProductPriceForMerchant");
     expect(page).not.toContain("searchParams");
     expect(page).not.toContain("storeId");
+
+    const merchantModule = readFileSync(
+      path.join(srcRoot, merchantCatalog),
+      "utf8",
+    );
+    expect(merchantModule).toContain("updateCatalogProductPriceForMerchant");
+    expect(merchantModule).not.toContain("updateCatalogProductPriceForStore");
 
     const barrel = readFileSync(
       path.join(srcRoot, "lib", "data", "index.ts"),

@@ -17,6 +17,10 @@ import {
   storeMembership,
 } from "@/db/schema";
 import { resolveMerchantAccess } from "@/lib/auth/merchant-session";
+import {
+  createTransactionClient,
+  type TransactionDatabase,
+} from "@/db/transaction-client";
 import { listCatalogProductsForStore } from "@/lib/data";
 import {
   acceptMerchantInvitation,
@@ -203,6 +207,22 @@ async function readPrice(productId: string) {
   return row.price;
 }
 
+/**
+ * Commits fixture changes through an independent postgres-js client, so the
+ * write under test sees the change on its next statement snapshot exactly as
+ * it would see a concurrent revocation, suspension or session-version bump.
+ */
+async function withSeparateConnection<T>(
+  run: (separate: TransactionDatabase) => Promise<T>,
+): Promise<T> {
+  const client = createTransactionClient(testDb!.url);
+  try {
+    return await run(client.db);
+  } finally {
+    await client.close();
+  }
+}
+
 describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
   it("lists only the authenticated merchant's own store products", async () => {
     const a = await seedMerchant(
@@ -345,6 +365,90 @@ describe.skipIf(!shouldRun)("merchant catalog price mutation", () => {
     expect(
       persisted.find((entry) => entry.id === a.secondProductId)?.price,
     ).toBe("19.90");
+  });
+
+  it("does not write when membership is revoked on a separate connection after access was resolved", async () => {
+    const a = await seedMerchant(
+      "catalog.bound.revoked@example.test",
+      "Bound Revoked Store",
+      "catalog-bound-revoked",
+    );
+    const access = await resolveMerchantAccess(db(), claims(a.userId));
+    const before = await readPrice(a.productId);
+
+    expect(access).toMatchObject({ readOnly: false });
+
+    await withSeparateConnection(async (separate) => {
+      await separate
+        .update(storeMembership)
+        .set({ status: "revoked" })
+        .where(eq(storeMembership.userId, a.userId));
+    });
+
+    const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
+      productId: a.productId,
+      price: "41.00",
+    });
+
+    expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
+    expect(await readPrice(a.productId)).toBe(before);
+  });
+
+  it("does not write when the store is suspended on a separate connection after access was resolved", async () => {
+    const a = await seedMerchant(
+      "catalog.bound.suspended@example.test",
+      "Bound Suspended Store",
+      "catalog-bound-suspended",
+    );
+    const access = await resolveMerchantAccess(db(), claims(a.userId));
+    const before = await readPrice(a.productId);
+
+    expect(access).toMatchObject({
+      readOnly: false,
+      store: { status: "onboarding" },
+    });
+
+    await withSeparateConnection(async (separate) => {
+      await separate
+        .update(store)
+        .set({ status: "suspended" })
+        .where(eq(store.id, a.storeId));
+    });
+
+    const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
+      productId: a.productId,
+      price: "42.00",
+    });
+
+    expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
+    expect(await readPrice(a.productId)).toBe(before);
+  });
+
+  it("does not write when session_version is stale at the guarded statement", async () => {
+    const a = await seedMerchant(
+      "catalog.bound.version@example.test",
+      "Bound Version Store",
+      "catalog-bound-version",
+    );
+    const access = await resolveMerchantAccess(db(), claims(a.userId, 0));
+    const before = await readPrice(a.productId);
+
+    expect(access).toMatchObject({ sessionVersion: 0, readOnly: false });
+
+    await withSeparateConnection(async (separate) => {
+      await separate
+        .update(appUser)
+        .set({ sessionVersion: 1 })
+        .where(eq(appUser.id, a.userId));
+    });
+
+    const result = await updateMerchantCatalogProductPrice(appDb(), access!, {
+      productId: a.productId,
+      price: "43.00",
+    });
+
+    expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
+    expect(await readPrice(a.productId)).toBe(before);
   });
 
   it("denies writes for a suspended store resolved at mutation time", async () => {

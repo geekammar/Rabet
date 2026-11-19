@@ -4,12 +4,14 @@ import {
   and,
   eq,
   exists,
+  inArray,
   isNull,
   sql,
 } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
+  appUser,
   category,
   categoryTranslation,
   language,
@@ -17,6 +19,8 @@ import {
   productAction,
   productActionTranslation,
   productTranslation,
+  store,
+  storeMembership,
 } from "@/db/schema";
 import { validatePrice } from "@/lib/catalog/validation";
 import {
@@ -548,6 +552,11 @@ export async function updateCatalogProductAvailabilityForStore(
  * maintains `updated_at`.
  *
  * Returns `true` when the row was updated and `false` for every no-match case.
+ *
+ * This is the Phase 1 scoped primitive used by the catalog-scope acceptance
+ * tests. The production merchant path uses
+ * `updateCatalogProductPriceForMerchant`, which adds the write-time
+ * eligibility predicates to the same guarded statement.
  */
 export async function updateCatalogProductPriceForStore(
   db: Database,
@@ -567,6 +576,119 @@ export async function updateCatalogProductPriceForStore(
       .update(product)
       .set({ price: priceResult.data })
       .where(storeOwnedProductWhere(db, scope, productId))
+      .returning({ id: product.id });
+
+    return updated.length > 0;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/** The server-derived identity required to bind a merchant price write. */
+export type MerchantPriceWriteIdentity = {
+  userId: string;
+  sessionVersion: number;
+};
+
+/**
+ * The write-time merchant eligibility predicate.
+ *
+ * This mirrors `resolveMerchantEligibility` inside the same SQL statement as
+ * the price update, so a membership revocation, session-version change or
+ * store suspension committed before this statement starts can never be
+ * bypassed by an access result resolved earlier in the request:
+ *
+ * - the user is active and has the plain `user` platform role;
+ * - `app_user.session_version` still matches the session claim;
+ * - the user has exactly one active owner membership;
+ * - that membership belongs to the scoped store;
+ * - the store is in a writable lifecycle state (`onboarding` or `active`).
+ *
+ * The `UPDATE` evaluates these predicates itself; there is no separate
+ * authorization read that the write could race against.
+ */
+function merchantPriceWriteEligibilityWhere(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+) {
+  return and(
+    exists(
+      db
+        .select({ id: appUser.id })
+        .from(appUser)
+        .where(
+          and(
+            eq(appUser.id, identity.userId),
+            eq(appUser.status, "active"),
+            eq(appUser.platformRole, "user"),
+            eq(appUser.sessionVersion, identity.sessionVersion),
+          ),
+        ),
+    ),
+    exists(
+      db
+        .select({ id: storeMembership.id })
+        .from(storeMembership)
+        .innerJoin(store, eq(store.id, storeMembership.storeId))
+        .where(
+          and(
+            eq(storeMembership.userId, identity.userId),
+            eq(storeMembership.storeId, scope.storeId),
+            eq(storeMembership.role, "owner"),
+            eq(storeMembership.status, "active"),
+            inArray(store.status, ["onboarding", "active"]),
+          ),
+        ),
+    ),
+    sql`(
+      select count(*)::int
+      from ${storeMembership}
+      where ${storeMembership.userId} = ${identity.userId}
+        and ${storeMembership.role} = 'owner'
+        and ${storeMembership.status} = 'active'
+    ) = 1`,
+  );
+}
+
+/**
+ * Updates one product's price only while the merchant write eligibility still
+ * holds in the database.
+ *
+ * The eligible user id, session version and store scope are all server-derived
+ * and are supplied as query parameters. The product/category ownership and
+ * deletion predicates are the same used by the scoped catalog mutations, so a
+ * missing, foreign, deleted or otherwise ineligible product and a merchant
+ * whose eligibility changed all produce the same no-match result.
+ *
+ * Only `price` is set; availability, translations, actions, category, slug and
+ * ownership are left alone, and the database trigger still maintains
+ * `updated_at`.
+ */
+export async function updateCatalogProductPriceForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  productId: string,
+  price: unknown,
+): Promise<boolean> {
+  assertStoreScope(scope);
+
+  const priceResult = validatePrice(price);
+  if (!priceResult.success) {
+    throw new RabetDataError("INVALID_INPUT", priceResult.error);
+  }
+
+  try {
+    const updated = await db
+      .update(product)
+      .set({ price: priceResult.data })
+      .where(
+        and(
+          storeOwnedProductWhere(db, scope, productId),
+          merchantPriceWriteEligibilityWhere(db, scope, identity),
+        ),
+      )
       .returning({ id: product.id });
 
     return updated.length > 0;

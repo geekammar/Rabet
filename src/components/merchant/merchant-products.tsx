@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { Loader2, Save } from "lucide-react";
 
 import { saveMerchantProductPrice } from "@/app/actions/merchant-catalog";
@@ -17,7 +17,26 @@ export type MerchantProductItem = {
   id: string;
   name: string;
   price: string;
+  updatedAt: string;
 };
+
+type PriceDraft = {
+  value: string;
+  baseUpdatedAt: string;
+  dirty: boolean;
+};
+
+function draftFor(product: MerchantProductItem, drafts: Record<string, PriceDraft>) {
+  const entry = drafts[product.id];
+
+  if (entry) {
+    if (entry.dirty || entry.baseUpdatedAt === product.updatedAt) {
+      return entry.value;
+    }
+  }
+
+  return product.price;
+}
 
 type PriceError = "UNAVAILABLE" | "DENIED" | "NOT_FOUND" | "INVALID_PRICE";
 
@@ -116,25 +135,30 @@ export function MerchantProducts({
   products: MerchantProductItem[];
 }) {
   const [locale, setLocale] = useState<MerchantLocale>("ar");
-  const [savedPrices, setSavedPrices] = useState<Record<string, string>>({});
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [drafts, setDrafts] = useState<Record<string, PriceDraft>>({});
   const [errors, setErrors] = useState<Record<string, PriceError | undefined>>(
     {},
   );
   const [savedId, setSavedId] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const pendingRef = useRef<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const copy = COPY[locale];
   const saving = isPending || pendingId !== null;
 
   function submitPrice(
     event: React.FormEvent<HTMLFormElement>,
-    productId: string,
+    product: MerchantProductItem,
     draft: string,
   ) {
     event.preventDefault();
 
-    if (readOnly || saving) return;
+    // The ref is set synchronously, before React can render the pending state,
+    // so two rapid submissions in the same task can never start two writes.
+    if (readOnly || pendingRef.current !== null) return;
+
+    const productId = product.id;
+    pendingRef.current = productId;
 
     setErrors((current) => ({ ...current, [productId]: undefined }));
     setSavedId(null);
@@ -148,13 +172,16 @@ export function MerchantProducts({
         });
 
         if (result.ok) {
-          setSavedPrices((current) => ({
-            ...current,
-            [result.productId]: result.price,
-          }));
+          // Keep the server canonical price visible during the immediate
+          // result handoff. It is only an override while the row's server
+          // revision is unchanged, so a later scoped refresh always wins.
           setDrafts((current) => ({
             ...current,
-            [result.productId]: result.price,
+            [result.productId]: {
+              value: result.price,
+              baseUpdatedAt: product.updatedAt,
+              dirty: false,
+            },
           }));
           setSavedId(result.productId);
         } else {
@@ -169,6 +196,7 @@ export function MerchantProducts({
           [productId]: "UNAVAILABLE",
         }));
       } finally {
+        pendingRef.current = null;
         setPendingId(null);
       }
     });
@@ -251,9 +279,7 @@ export function MerchantProducts({
                 const errorId = `merchant-price-error-${product.id}`;
                 const error = errors[product.id];
                 const rowSaving = pendingId === product.id;
-                const displayedPrice =
-                  savedPrices[product.id] ?? product.price;
-                const draft = drafts[product.id] ?? displayedPrice;
+                const draft = draftFor(product, drafts);
 
                 return (
                   <li
@@ -279,7 +305,7 @@ export function MerchantProducts({
                           className="font-medium tabular-nums"
                           data-testid={`merchant-product-price-${product.id}`}
                         >
-                          {displayedPrice}
+                          {product.price}
                         </span>
                       </div>
                     ) : (
@@ -288,7 +314,7 @@ export function MerchantProducts({
                         noValidate
                         aria-busy={rowSaving}
                         onSubmit={(event) =>
-                          submitPrice(event, product.id, draft)
+                          submitPrice(event, product, draft)
                         }
                       >
                         <label
@@ -307,12 +333,19 @@ export function MerchantProducts({
                             autoComplete="off"
                             spellCheck={false}
                             value={draft}
+                            readOnly={rowSaving}
                             onChange={(event) => {
+                              if (pendingRef.current === product.id) return;
+
                               const value = event.target.value;
 
                               setDrafts((current) => ({
                                 ...current,
-                                [product.id]: value,
+                                [product.id]: {
+                                  value,
+                                  baseUpdatedAt: product.updatedAt,
+                                  dirty: true,
+                                },
                               }));
                               setSavedId(null);
                               setErrors((current) => ({
@@ -323,7 +356,7 @@ export function MerchantProducts({
                             aria-invalid={error ? "true" : undefined}
                             aria-describedby={error ? errorId : undefined}
                             data-testid={`merchant-price-input-${product.id}`}
-                            className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:max-w-48"
+                            className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground read-only:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:max-w-48"
                           />
                           <Button
                             type="submit"

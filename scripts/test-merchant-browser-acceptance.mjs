@@ -783,6 +783,93 @@ async function runJourney(cdp, fixture, authSecret) {
     "merchant A saved price after reload",
   );
 
+  // Repopulate the previous-success path, then change product one outside the
+  // browser. Saving product two triggers the scoped refresh that must replace
+  // the clean row with the newer server price.
+  await setValue(aPriceInput, "123.46");
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceSaved)})) && document.querySelector(${JSON.stringify(aPriceInput)})?.value === "123.46"`,
+    "merchant A second successful save",
+  );
+
+  await pgClient`
+    update product set price = '77.70' where id = ${a.products.one.id}
+  `;
+
+  const aSecondInput = `[data-testid="merchant-price-input-${a.products.two.id}"]`;
+  const aSecondSave = `[data-testid="merchant-price-save-${a.products.two.id}"]`;
+  const aSecondSaved = `[data-testid="merchant-price-saved-${a.products.two.id}"]`;
+  const aConfirmedPrice = "77.70";
+
+  await setValue(aSecondInput, "15.00");
+  assert(
+    await evaluate(`(() => {
+      window.__merchantPricePosts = 0;
+      const originalFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url =
+          typeof input === "string" ? input : (input && input.url) || String(input);
+        if (url.includes("/app/products") && init && init.method === "POST") {
+          window.__merchantPricePosts += 1;
+        }
+        return originalFetch.apply(this, arguments);
+      };
+      return true;
+    })()`),
+    "Could not instrument the merchant price action fetch calls",
+  );
+
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 700,
+    downloadThroughput: 1024 * 1024,
+    uploadThroughput: 1024 * 1024,
+  });
+
+  assert(
+    await evaluate(`(() => {
+      const input = document.querySelector(${JSON.stringify(aSecondInput)});
+      const form = input && input.closest("form");
+      if (!form) return false;
+      form.requestSubmit();
+      form.requestSubmit();
+      return true;
+    })()`),
+    "Could not submit the controlled pending price save",
+  );
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aSecondInput)})?.readOnly === true && document.querySelector(${JSON.stringify(aSecondSave)})?.disabled === true`,
+    "pending price field protection",
+  );
+
+  await evaluate(
+    `document.querySelector(${JSON.stringify(aSecondInput)})?.closest("form")?.requestSubmit()`,
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSecondSaved)})) && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "15.00" && document.querySelector(${JSON.stringify(aPriceInput)})?.value === ${JSON.stringify(aConfirmedPrice)}`,
+    "single pending save and reconciled server price",
+  );
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 0,
+    downloadThroughput: -1,
+    uploadThroughput: -1,
+  });
+
+  assert(
+    (await evaluate("window.__merchantPricePosts")) === 1,
+    "Rapid repeat submission must start exactly one price write",
+  );
+  assert(
+    (await evaluate(`document.querySelector(${JSON.stringify(aSecondInput)})?.readOnly`)) ===
+      false,
+    "The price field should be editable again after the save completes",
+  );
+
   await setValue(aPriceInput, "10.123");
   await click(aSaveButton);
   await waitFor(
@@ -798,7 +885,7 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(
     (await pgClient`
       select price::text as price from product where id = ${a.products.one.id}
-    `)[0].price === "123.45",
+    `)[0].price === aConfirmedPrice,
     "An invalid price must not write",
   );
 
@@ -824,7 +911,7 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(
     (await pgClient`
       select price::text as price from product where id = ${a.products.one.id}
-    `)[0].price === "123.45",
+    `)[0].price === aConfirmedPrice,
     "A revoked membership save must not write",
   );
   await pgClient`
@@ -850,7 +937,7 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(
     (await pgClient`
       select price::text as price from product where id = ${a.products.one.id}
-    `)[0].price === "123.45",
+    `)[0].price === aConfirmedPrice,
     "A stale session_version save must not write",
   );
   await pgClient`
@@ -876,7 +963,7 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(
     (await pgClient`
       select price::text as price from product where id = ${a.products.one.id}
-    `)[0].price === "123.45",
+    `)[0].price === aConfirmedPrice,
     "A suspended store save must not write",
   );
 
@@ -894,7 +981,7 @@ async function runJourney(cdp, fixture, authSecret) {
   );
   assert(
     (await text(`[data-testid="merchant-product-price-${a.products.one.id}"]`)) ===
-      "123.45",
+      aConfirmedPrice,
     "A suspended store should still see its own product list",
   );
   await expectNoHorizontalScroll("suspended merchant products");
@@ -1026,7 +1113,7 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(
     (await pgClient`
       select price::text as price from product where id = ${a.products.one.id}
-    `)[0].price === "123.45",
+    `)[0].price === aConfirmedPrice,
     "A's persisted price should remain independent of B",
   );
 
