@@ -27,9 +27,10 @@ verified here; those gaps are recorded in §3.7 and in the delivery document.
 ## 1. Decision summary
 
 1. **One deployable application and one PostgreSQL database.** Keep the Next.js
-   modular monolith and the current Render/GHCR deployment model. No
-   microservices, plugin framework, generic event bus or speculative channel
-   abstraction.
+   modular monolith and the current Render service (Git-backed Docker runtime).
+   GHCR image promotion is an earlier deployment path, not the current service
+   source. No microservices, plugin framework, generic event bus or speculative
+   channel abstraction.
 2. **Invitation-only MVP.** A platform Super Admin creates a store and invites
    one merchant. A merchant account manages exactly one store. There is no
    public signup, store switcher, agency dashboard, staff role or billing.
@@ -132,10 +133,18 @@ flowchart LR
   N -->|"env TELEGRAM_BOT_TOKEN"| TG["Telegram Bot API\none bot"]
 ```
 
-The deployment target is now an immutable container on Render backed by the
-existing Neon `Rabet_prod` database, not the Vercel hosting described in older
-architecture text. See `docs/RENDER_DEPLOYMENT.md` §1–§2. The application is
-still one store, one bot and one environment-configured administrator.
+The current Render service is **Git-backed** from `geekammar/Rabet`, branch
+`main`, with a Docker runtime, `autoDeployTrigger=checksPass` and
+`healthCheckPath=/api/healthz`. Reviewer-observed live revision:
+`bab0649213461d9df7747a75b54c689e7f9377ef`, triggered by `service_updated`. That
+observation describes the current configuration and live revision; it is not
+evidence that an automatic deploy will occur on a later merge. The earlier
+immutable-GHCR-image promotion path is **not** the current service source. The
+service uses the existing Neon `Rabet_prod` database. See
+`docs/RENDER_DEPLOYMENT.md` §1–§2, but do not treat that runbook's image-promotion
+path as the current wiring. The legacy application is still one store, one bot
+and one environment-configured administrator; the target SaaS architecture below
+is separate.
 
 ### 3.2 Actual merchant-side catalog read
 
@@ -281,7 +290,10 @@ database constraints.
   Telegram connection model exists in application code.
 - The existing backfill and verification SQL are present, atomic and exercised
   on disposable PostgreSQL by the `tests/db/tenant-*` suites.
-- The current deployment runbook is Render + Neon + one Telegram bot.
+- The current production service is a Git-backed Render Docker service
+  (`geekammar/Rabet`, branch `main`, `autoDeployTrigger=checksPass`,
+  `healthCheckPath=/api/healthz`) on Neon `Rabet_prod` with one Telegram bot.
+  The earlier GHCR image-promotion path is separate.
 
 **Assumptions not verified here**
 
@@ -564,6 +576,27 @@ Rules:
 | `seller_notification_setting` | One row per store | Per-store destination and verification state; feature deferred |
 | `store_membership` | Many-to-many schema, one active membership enforced by MVP service | Preserves future flexibility without enabling switching |
 
+**Replacement, not coexistence.** Adding `UNIQUE(store_id, slug)` while the old
+global `UNIQUE(slug)` remains does not allow same-slug rows across stores:
+PostgreSQL enforces both. The Phase 5 reviewed migration must add the
+store-scoped replacements, verify ownership and key integrity, scope the affected
+reads/writes, and then remove the old global enforcement before the matching
+staging collision tests and before store #2 is enabled. The migration and
+operator runbook are separate reviewed artifacts.
+
+`telegram_update.update_id` is **connection-scoped**, not store-scoped: the
+replacement is `UNIQUE(connection_id, update_id)` because each bot has its own
+update sequence. A store-scoped key would be the wrong model.
+
+**Pre-pilot catalog ordering.** The current
+`category_root_sort_order_idx` is global on `(sort_order) WHERE parent_id IS
+NULL` (`src/db/schema/catalog.ts:99-101`). It prevents two stores from
+independently using root order `0`. The later design intends
+`UNIQUE(store_id, sort_order)` for roots (and keeps sibling ordering scoped by
+the globally unique parent id). This is a pre-pilot catalog concern; its schema
+change belongs to a separate reviewed migration and must be in force before
+store #2.
+
 ### 4.7 Transaction and idempotency model
 
 Keep the existing rules from ADR-015 and S1.3-A:
@@ -658,7 +691,13 @@ No SQL is authored or run by this PR.
    - Replace global template-key uniqueness with `(store_id, key)`.
    - Replace `customer.telegram_id` uniqueness with `(store_id, telegram_id)`.
    - Replace `telegram_update.update_id` uniqueness with
-     `(connection_id, update_id)`.
+     `(connection_id, update_id)`; this key is connection-scoped, not
+     store-scoped.
+   - Replace the global root-category sort-order index with a store-scoped root
+     order. These are **replacements**, not additive coexistence: the old global
+     constraint must be removed in the reviewed Phase 5 migration after
+     ownership/key integrity and scoped reads/writes are verified, and before
+     store #2.
 5. **Inquiry ownership**
    - Materialize `inquiry.store_id` for indexed scoping.
    - Enforce `(store_id, customer_id)` and `(store_id, product_id)` ownership
@@ -670,7 +709,9 @@ No SQL is authored or run by this PR.
      backfilled and no `NULL` remains.
    - Composite ownership foreign keys where a dependent row can otherwise point
      across stores.
-   - Contract names and migration order are approved in the delivery document
+   - Replacements for the old global business-key constraints are in force and
+     the old enforcement is removed before store #2, as gated in the delivery
+     document Phase 5. Contract names and migration order are approved there
      before implementation.
 
 ---
@@ -688,8 +729,9 @@ No SQL is authored or run by this PR.
 | `bot_setting` singleton | **Replace** | `src/db/schema/settings.ts:41`, `:76-78`; `settings.ts:139` | Merchant edits their own store identity, currency and language | Per-store settings migration and UI scoping | Old singleton table shape removed after all stores migrated |
 | `seller_notification_setting` singleton | **Replace** | `src/db/schema/seller-notifications.ts:51`, `:78-81` | Later milestone; current code stays dormant | Per-store row; deferred merchant enablement | Later notification milestone |
 | Global `language.is_enabled` | **Refactor** | `src/db/schema/settings.ts:102`; `languages.ts:105` | One merchant can enable Arabic without changing another | `store_language` additive mapping | Remove global flag after all stores mapped |
-| `customer.telegram_id` global unique | **Replace** | `src/db/schema/customer.ts:39`; `customer.ts:60` | Same Telegram user can be a customer of two stores | Per-store identity and customer lookup | Drop old unique index after data migration |
-| `telegram_update.update_id` global unique | **Replace** | `src/db/schema/telegram.ts:43`; `telegram.ts:96` | Two bots can operate without dedup collisions | Connection model and per-connection claim | Drop old unique index after cutover |
+| Global category/product slug and root-order constraints | **Replace** | `src/db/schema/catalog.ts:68`, `:99-101`, `:161` | Two stores can use their own slugs and root ordering | Phase 5 reviewed migration; scoped reads/writes | Drop old global enforcement only after replacements are in force, scoped code is verified and before store #2 |
+| `customer.telegram_id` global unique | **Replace** | `src/db/schema/customer.ts:39`; `customer.ts:60` | Same Telegram user can be a customer of two stores | Per-store identity and customer lookup | Drop old unique index in the Phase 5 reviewed migration after replacement/scoped code are verified, before store #2 |
+| `telegram_update.update_id` global unique | **Replace** | `src/db/schema/telegram.ts:43`; `telegram.ts:96` | Two bots can operate without dedup collisions | Connection model and per-connection claim | Drop old unique index in the Phase 5 reviewed migration; replacement is `(connection_id, update_id)`, before store #2 |
 | Telegram webhook handler | **Refactor** | `src/lib/telegram/webhook.ts:331-550` | Each store's bot reaches its own store | Connection resolver, per-connection secret, scoped claim | Old single-route handler removed after one bot per store |
 | Telegram catalog/inquiry journeys | **Keep** | `src/lib/telegram/catalog-journey.ts`, `inquiry-journey.ts`; proven by `tests/db/telegram-journey.test.ts` | Preserves customer experience and tests | Scope every read/write with connection store | None |
 | Seller inbox reads/writes | **Refactor** | `src/lib/data/seller-inbox.ts:133`, `:368`, `:526`, `:779`, `:1188`, `:1422` | Merchant can only open and answer their inquiries | `StoreScope`; inquiry `store_id` | Old unscoped functions removed |

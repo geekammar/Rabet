@@ -38,7 +38,7 @@ backfill.
 | C1 | The legacy store's post-cutover owner: an invited merchant, or the platform operator, and the store lifecycle/activation authority | Membership, invitation, support ownership and customer readiness are undefined today; `app_user` has no credentials and no membership is created by the backfill | `src/db/schema/tenant.ts:26-42`; `legacy-store-backfill.sql:300-316` creates only `store`; lifecycle table in the architecture document §4.3.1 |
 | C2 | The final ownership contract: all eight roots `NOT NULL`, explicit `inquiry.store_id`, derived records constrained, no NULL compatibility after cutover | The existing backfill leaves nullable columns and no composite ownership FKs; NULL tolerance remains in runtime | `store-context.ts:125-131`; `drizzle/0006_tenant_ownership_expansion.sql`; `S1.3A_SAAS_DATA_ARCHITECTURE.md` §11 |
 | C3 | One merchant = one store, and one active store membership | The schema is many-to-many by design; the MVP must fail closed on zero or multiple memberships | `src/db/schema/tenant.ts:19-33`, `:143-173`; `S1.3A_SAAS_DATA_ARCHITECTURE.md` §1 |
-| C4 | Per-store uniqueness contract for category/product slugs, template keys, customer Telegram ids and update ids | The existing global unique keys make two stores collide and can expose another store's template | `src/db/schema/customer.ts:39`; `src/db/schema/telegram.ts:43`; `src/db/schema/catalog.ts:68`, `:161`; `src/db/schema/content.ts:35`; `templates.ts:242-251` |
+| C4 | Per-store uniqueness contract for category/product slugs, template keys and customer Telegram ids, plus connection-scoped Telegram update ids and store-scoped root category ordering | The existing global unique keys make two stores collide; update ids are connection-scoped, not store-scoped | `src/db/schema/customer.ts:39`; `src/db/schema/telegram.ts:43`; `src/db/schema/catalog.ts:68`, `:99-101`, `:161`; `src/db/schema/content.ts:35`; `templates.ts:242-251` |
 | C5 | Per-store configuration contract: one `bot_setting` row per store, one notification setting per store, enabled languages per store | Both settings tables are constrained to `id = 1` | `src/db/schema/settings.ts:41`, `:76-78`; `src/db/schema/seller-notifications.ts:51`, `:78-81` |
 | C6 | Telegram connection contract: one ready connection per store, per-connection webhook secret, `(connection_id, update_id)` dedup, and a fail-closed rule for ambiguous `managed_bot` events | The current webhook has one process-wide secret and one global update id; official events carry creator identity but no attempt id | `src/lib/telegram/webhook.ts:335-359`; `src/db/schema/telegram.ts:43`; architecture §8.3 |
 | C7 | Cutover policy: maintenance window, quiescence method, abort criteria, restore point and rollback boundary | `ACCESS EXCLUSIVE` locks block reads as well as writes; no production lock duration is known | `legacy-store-backfill.sql:99`, `:137-159` |
@@ -379,9 +379,9 @@ the Phase 5 gate accrues and repeats them as one integrated acceptance run.
 | 2 | Merchant credential, invitation, merchant session, operator/merchant split, lifecycle/activation UI; scope the catalog call sites to the resolved membership; add this slice's two-store negative tests | A merchant can manage their own store while onboarding; membership is not customer readiness | Telegram connection; production isolation | UI strings; invitation content | Phase 1 gate; C1, C3, C9 |
 | 3 | Telegram connection model, per-connection webhook, Managed Bot spike first, then implementation; keep the legacy bot unchanged; add this slice's two-store/two-connection negative tests | Inbound updates resolve one connection to one store; ambiguous provisioning fails closed | Live correlation until spike passes; second-store safety | Test-bot spike (test accounts only) | C6; spike result; Phase 2 gate |
 | 4 | Production maintenance: confirm compatible writes live and scoped reads disabled; quiesce; backfill; verify content/ownership; switch scoped reads on; reconcile and monitor | The legacy rows are owned at cutover; scoped reads only start after zero NULL | Tenant isolation; second-store safety | Staging fixture preparation | Phase 1–3 gates; C1–C3, C7–C10 |
-| 5 | Per-store uniqueness migration and the §6.6 same-slug tests, then the integrated two-store/two-bot acceptance gate on staging | Cross-store access is denied at the data layer, membership boundary, webhook and worker; same-slug stores coexist only under the approved schema | Live Telegram production behavior; scale | Pilot preparation | Phases 2–4; C4; full matrix |
-| 6 | Invite-only pilot: legacy store per C1, then a second production store only after Phase 5 | The real merchant journey works under isolation | Scale, billing, staff, WhatsApp | Monitoring and support | Phase 4 and Phase 5 gates |
-| 7 | Final hardening: `NOT NULL`, composite constraints, drop superseded global unique indexes, drop legacy resolver; later notifications | The transitional code and global uniqueness assumptions can be retired | Future product scope | Notification milestone | Zero NULL, zero cross-store mismatches, all stores migrated; C4 migration verified |
+| 5 | Reviewed constraint-replacement migration and scoped reads/writes for every colliding-key test: verify ownership/key integrity, add store/connection-scoped replacements, scope affected paths, then remove the blocking global enforcement before running §6.6/§6.7 and the integrated two-store/two-bot gate on staging | Cross-store access is denied; same-slug/key/identity/update-id rows coexist only under the approved replacement constraints | Live Telegram production behavior; scale | Pilot preparation | Phases 2–4; C4; full matrix |
+| 6 | Invite-only pilot: legacy store per C1, then a second production store only after Phase 5 and after the same reviewed replacement constraints are applied and verified in Production | The real merchant journey works under isolation; Production has the applicable replacement keys before store #2 | Scale, billing, staff, WhatsApp | Monitoring and support | Phase 4 and Phase 5 gates; Production replacement constraints verified |
+| 7 | Residual cleanup that can wait: `NOT NULL` and composite ownership constraints not required for Phase 5, eligible legacy code/resolver removal, remaining structural hardening; later notifications | The transitional code can be retired | Future product scope | Notification milestone | Zero NULL, zero cross-store mismatches, all stores migrated; Phase 5 replacement constraints verified |
 
 ### 5.1 What must not run in parallel or out of order
 
@@ -395,9 +395,17 @@ the Phase 5 gate accrues and repeats them as one integrated acceptance run.
   switch and the Phase 5 integrated gate. Today the legacy resolver fails closed
   on two stores and global reads still leak.
 - Do not drop the legacy unique indexes or singletons before their replacement
-  data is backfilled and verified.
+  data is backfilled and verified, and do not treat adding a store-scoped unique
+  as sufficient while the old global unique remains: PostgreSQL enforces both.
+  Remove the old global enforcement only after the replacement, scoped
+  reads/writes and integrity checks are verified.
+- Do not run the colliding-key tests (same slug, template key, customer Telegram
+  id or update id across scopes) against a schema that still has the old global
+  enforcement. Those tests are a Phase 5 gate, not Phase 1.
 - Do not enable a second production bot before the two-connection isolated tests
   and the managed-bot correlation spike pass.
+- Do not enable store #2 until Production has the applicable replacement
+  constraints verified, including the root category ordering replacement.
 - Do not convert the operator-managed legacy store into a merchant store before
   C1 and a separate approved cutover.
 - Do not treat the backfill as the isolation gate.
@@ -435,8 +443,10 @@ not the backfill.
 
 ### 5.4 Render deployment verification is not SaaS acceptance
 
-Direct Render verification (`/api/healthz`, GHCR digest, Render Live, exact SHA)
-proves the image and process are running. It does not prove:
+Direct Render verification (`/api/healthz`, Render Live, exact SHA; a GHCR digest
+only when the earlier image-promotion path is used) proves the deployed process
+and revision are running. The current service is Git-backed from branch `main`,
+not an immutable GHCR image deploy. A green health check does not prove:
 
 - the backfill content/ownership result;
 - zero `NULL` ownership or scoped-read correctness;
@@ -494,7 +504,7 @@ Create in an isolated PostgreSQL database (the existing
   this slice.
 
 Do not relax the existing unique constraints or add a migration for Phase 1.
-The same-slug case belongs to the later per-store uniqueness milestone in §6.6.
+The same-slug case belongs to the Phase 5 constraint-replacement milestone in §6.6.
 
 **Later-phase additions** for the integrated matrix:
 
@@ -575,8 +585,13 @@ never use production credentials.
 ### 6.5 Exit criteria before a second production store
 
 - Every matrix row in §6.3 passes in CI on the exact SHA to be deployed.
-- Before the Phase 5 gate, the §6.6 same-slug cases pass on the C4 per-store
-  uniqueness schema; they are not required for Phase 1.
+- Before the Phase 5 gate, the §6.6 same-slug/key/identity/update-id cases and
+  the §6.7 root-ordering concern pass on the replacement schema; they are not
+  required for Phase 1.
+- The old global constraints that block those cases are removed only after the
+  replacements, scoped reads/writes and ownership/key integrity are verified.
+- The same reviewed replacement constraints are applied and verified in
+  Production before store #2 is created.
 - The full existing suite still passes (no regressions in catalog, inquiry,
   notifications or Telegram journeys).
 - The operator records the store/connection ids and the CI run URL.
@@ -585,28 +600,61 @@ never use production credentials.
 - Cross-store access is denied in staging with real sessions and two real
   connections before production gets the second store.
 
-### 6.6 Later per-store uniqueness milestone (not Phase 1)
+### 6.6 Phase 5 constraint replacement (not Phase 1)
 
-**Schema dependency:** C4 and a reviewed migration replacing the global unique
-constraints on `category.slug` and `product.slug` with store-scoped uniqueness
-(`(store_id, slug)` or equivalent), plus the required data backfill. The current
-schema is global unique (`src/db/schema/catalog.ts:68`, `:161`), so the same-slug
-case cannot run in Phase 1 and must not be made to pass by relaxing the
-constraint. This milestone must be complete before the Phase 5 integrated gate
-and before any second production store; Phase 7 only removes the superseded
-global indexes after all stores are migrated.
+**Schema dependency:** C4 and a separately reviewed migration. Phase 1 remains on
+the current schema with distinct slugs. The current schema has global unique
+constraints on `category.slug` (`src/db/schema/catalog.ts:68`), `product.slug`
+(`:161`), `message_template.key` (`src/db/schema/content.ts:35`),
+`customer.telegram_id` (`src/db/schema/customer.ts:39`) and
+`telegram_update.update_id` (`src/db/schema/telegram.ts:43`).
 
-After that migration, add the deferred case:
+**Adding a replacement does not remove the old block.** Retaining the global
+unique alongside the new key still prohibits colliding values across stores. The
+Phase 5 transition must remove the old enforcement after the replacement and
+scoped code are verified.
 
-| Case | Setup | Expected |
+| Integrated collision case | Old global enforcement | Intended replacement |
 | --- | --- | --- |
-| Same product slug in two stores | Product A and product B both use `shared-slug` after the store-scoped unique migration | Both rows are valid; A's scoped read returns A's row only |
-| Same category slug in two stores | Category A and category B both use `shared-category` after the migration | Both rows are valid; each category filter resolves in its own store |
-| Same slug before the migration | Attempt to seed the same product/category slug on current schema | Existing global unique constraint rejects it; this is expected and is not a Phase 1 failure |
+| Same product slug in A and B | `UNIQUE(product.slug)` (`catalog.ts:161`) | `UNIQUE(store_id, slug)` |
+| Same category slug in A and B | `UNIQUE(category.slug)` (`catalog.ts:68`) | `UNIQUE(store_id, slug)` |
+| Same template key in A and B | `UNIQUE(message_template.key)` (`content.ts:35`) | `UNIQUE(store_id, key)` |
+| Same Telegram user as customer in A and B | `UNIQUE(customer.telegram_id)` (`customer.ts:39`) | `UNIQUE(store_id, telegram_id)` |
+| Same update id on connections A and B | `UNIQUE(telegram_update.update_id)` (`telegram.ts:43`) | `UNIQUE(connection_id, update_id)` — connection-scoped, not store-scoped |
 
-Do not copy a same-slug fixture into Phase 1. The later test is gated on the
-schema change and belongs with the per-store uniqueness milestone, not with the
-first catalog slice.
+Required order for the Phase 5 migration and staging gate:
+
+1. Read-only integrity audit: required ownership is non-null and no data would
+   violate the replacements.
+2. Add the replacement store/connection-scoped keys in the reviewed migration.
+3. Deploy the scoped reads/writes for the affected paths (customer upsert,
+   update claim, template lookup/create, catalog slug lookup/create, category
+   filter).
+4. Verify the replacements are in force and ownership/key integrity still holds.
+5. Remove the old global enforcement only after steps 1–4 pass.
+6. Run the colliding-key tests and the §6.7 root-ordering verification.
+7. Run the integrated two-store/two-bot gate.
+
+The migration and operator runbook are reviewed separately. The same reviewed
+replacement constraints must be applied and verified in Production before store
+#2 is enabled. Phase 7 keeps only residual cleanup that can wait; it does not
+defer a constraint removal required by Phase 5.
+
+### 6.7 Pre-pilot root category ordering (not Phase 1)
+
+Current evidence: `category_root_sort_order_idx` is a **global** partial unique
+index on `(sort_order) WHERE parent_id IS NULL`
+(`src/db/schema/catalog.ts:99-101`). Two stores cannot both use root order `0`,
+so independent per-store ordering is impossible under the current schema.
+
+Intended design: a store-scoped root-order unique index, for example
+`UNIQUE(store_id, sort_order) WHERE parent_id IS NULL`. Child ordering is already
+scoped by the globally unique parent id, so the root index is the blocker. This
+is a pre-pilot catalog concern; it belongs to a separately reviewed schema
+migration. That migration adds the store-scoped replacement and removes the old
+global root index after the replacement is verified; it must be in force before
+store #2. Phase 1 avoids the conflict by using distinct root sort orders and does
+not change the index.
 
 ---
 
@@ -739,8 +787,8 @@ Stop before implementation if any of the following is true:
 - It does not add a production route, page, Server Action or dashboard UI.
 - It does not wire the scoped functions to any browser path.
 - It does not update price (the immediate next field on the same seam).
-- It does not test duplicate cross-store slugs; that case waits for the C4
-  per-store uniqueness schema change in §6.6.
+- It does not test duplicate cross-store slugs; that case waits for the Phase 5
+  constraint replacement in §6.6.
 - It does not change the legacy resolver or the eight ownership roots.
 - It does not add settings, per-store uniqueness, composite FKs or Telegram.
 - It does not run the backfill or create a second production store.
