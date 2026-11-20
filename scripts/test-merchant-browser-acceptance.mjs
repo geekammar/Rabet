@@ -452,12 +452,19 @@ async function runGateDisabledProbe(envFile, merchantCookie) {
         headers: { Cookie: cookie, "Cache-Control": "no-store" },
       },
     );
+    const categories = await fetch(
+      `${baseUrl}/app/categories?gateProbe=${Date.now()}`,
+      {
+        headers: { Cookie: cookie, "Cache-Control": "no-store" },
+      },
+    );
     const productsBody = await products.text();
     const loginBody = await login.text();
     const createProductBody = await createProduct.text();
+    const categoriesBody = await categories.text();
 
     log(
-      `Feature-gate-off responses: products=${products.status}, login=${login.status}, create=${createProduct.status}`,
+      `Feature-gate-off responses: products=${products.status}, login=${login.status}, create=${createProduct.status}, categories=${categories.status}`,
     );
 
     assert(
@@ -476,6 +483,11 @@ async function runGateDisabledProbe(envFile, merchantCookie) {
           'data-testid="merchant-product-create-page"',
         ),
       `Merchant product creation must be hidden when the feature gate is off (saw ${createProduct.status})`,
+    );
+    assert(
+      categories.status === 404 ||
+        !categoriesBody.includes('data-testid="merchant-categories-page"'),
+      `Merchant categories must be hidden when the feature gate is off (saw ${categories.status})`,
     );
   } finally {
     if (probeServer.pid) {
@@ -1437,6 +1449,44 @@ async function runJourney(cdp, fixture, authSecret) {
     "A's availability writes must not change B's product state",
   );
 
+  await click('[data-testid="merchant-categories-link"]');
+  await waitForUrl("/app/categories", "merchant B categories page");
+  await waitFor(
+    cdp,
+    `document.querySelectorAll('[data-testid="merchant-category-row"]').length === 1`,
+    "merchant B category rows",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-category-row"]')?.getAttribute('data-category-id')`,
+    )) === b.products.categoryId,
+    "Merchant B should see exactly B's category",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-name-${b.products.categoryId}"]`)) ===
+      "browser-store-b-category",
+    "A category without translations should fall back to its saved slug",
+  );
+  assert(
+    (await evaluate(
+      `Boolean(document.querySelector('[data-testid="merchant-category-row"][data-category-id="${a.products.categoryId}"]'))`,
+    )) === false,
+    "Merchant B must not see A's category",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-category-path-${b.products.categoryId}"]')?.getAttribute('data-path-visible')`,
+    )) === "true",
+    "Merchant B's active category path should be visible",
+  );
+  await expectNoHorizontalScroll("merchant B categories (Arabic)");
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    `document.querySelectorAll('[data-testid="merchant-product-row"]').length === 3`,
+    "merchant B products restored after category check",
+  );
+
   const invalidPreview = await postJson("/api/merchant-invitations/preview", {
     token: crypto.randomBytes(32).toString("base64url"),
   });
@@ -1944,6 +1994,261 @@ async function runJourney(cdp, fixture, authSecret) {
     "available state and category warning after reload",
   );
 
+  const createdCategoryId = emptyCatalog[0].category_id;
+  assert(
+    await evaluate(
+      `Boolean(document.querySelector('[data-testid="merchant-product-category-manage-${createdProductId}"]')) && Boolean(document.querySelector('[data-testid="merchant-categories-link"]'))`,
+    ),
+    "The category warning and the products header should link to category management",
+  );
+
+  await click(`[data-testid="merchant-product-category-manage-${createdProductId}"]`);
+  await waitForUrl("/app/categories", "merchant categories page from warning");
+  await waitFor(
+    cdp,
+    `document.querySelectorAll('[data-testid="merchant-category-row"]').length === 1 && Boolean(document.querySelector('[data-testid="merchant-categories-page"]'))`,
+    "single merchant category row",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-categories-page"]').getAttribute('dir')`,
+    )) === "rtl",
+    "The categories page should default to RTL Arabic",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-category-row"]')?.getAttribute('data-category-id')`,
+    )) === createdCategoryId,
+    "The categories page should list the merchant's own category",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-name-${createdCategoryId}"]`)) ===
+      "قسم البداية",
+    "The category name should use the saved Arabic translation",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-saved-${createdCategoryId}"]`)).includes(
+      "متوقفة",
+    ),
+    "The newly created category should start with saved availability off",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-category-path-${createdCategoryId}"]')?.getAttribute('data-path-visible')`,
+    )) === "false",
+    "An unavailable category should have an unavailable effective path",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-enable-${createdCategoryId}"]`)) ===
+      "إتاحة القسم",
+    "The Arabic category enable action should be present",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-disable-${createdCategoryId}"]`)) ===
+      "إيقاف إتاحة القسم",
+    "The Arabic category disable action should be present",
+  );
+  await expectNoHorizontalScroll("merchant categories (Arabic)");
+
+  await click('[data-testid="merchant-locale-en"]');
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="merchant-categories-page"]').getAttribute('dir') === 'ltr'`,
+    "English merchant categories direction",
+  );
+  assert(
+    (await evaluate("document.body.innerText")).includes("Store categories") &&
+      (await evaluate("document.body.innerText")).includes(
+        "Make category available",
+      ) &&
+      (await evaluate("document.body.innerText")).includes(
+        "Stop category availability",
+      ),
+    "Category availability actions should have English labels",
+  );
+  await click('[data-testid="merchant-locale-ar"]');
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="merchant-categories-page"]').getAttribute('dir') === 'rtl'`,
+    "Arabic merchant categories direction",
+  );
+
+  const categoryEnable = `[data-testid="merchant-category-enable-${createdCategoryId}"]`;
+  const categoryDisable = `[data-testid="merchant-category-disable-${createdCategoryId}"]`;
+  const categorySaved = `[data-testid="merchant-category-saved-notice-${createdCategoryId}"]`;
+  const categoryPath = `[data-testid="merchant-category-path-${createdCategoryId}"]`;
+  const categoryConflict = `[data-testid="merchant-category-conflict-${createdCategoryId}"]`;
+  const categoryConflictLatest = `[data-testid="merchant-category-conflict-latest-${createdCategoryId}"]`;
+
+  assert(
+    await evaluate(`(() => {
+      window.__merchantCategoryPosts = 0;
+      const originalFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url =
+          typeof input === "string" ? input : (input && input.url) || String(input);
+        if (url.includes("/app/categories") && init && init.method === "POST") {
+          window.__merchantCategoryPosts += 1;
+        }
+        return originalFetch.apply(this, arguments);
+      };
+      return true;
+    })()`),
+    "Could not instrument the merchant category action fetch calls",
+  );
+
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 700,
+    downloadThroughput: 1024 * 1024,
+    uploadThroughput: 1024 * 1024,
+  });
+  assert(
+    await evaluate(`(() => {
+      const button = document.querySelector(${JSON.stringify(categoryEnable)});
+      if (!button) return false;
+      button.click();
+      button.click();
+      return true;
+    })()`),
+    "Could not submit the controlled category availability save",
+  );
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(categoryEnable)})?.disabled === true`,
+    "pending category availability protection",
+  );
+  await evaluate(
+    `document.querySelector(${JSON.stringify(categoryEnable)})?.click()`,
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(categorySaved)})) && document.querySelector(${JSON.stringify(categoryPath)})?.getAttribute('data-path-visible') === 'true' && document.querySelector(${JSON.stringify(categoryDisable)})?.disabled === false`,
+    "first category made available and path visible",
+  );
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 0,
+    downloadThroughput: -1,
+    uploadThroughput: -1,
+  });
+  assert(
+    (await evaluate("window.__merchantCategoryPosts")) === 1,
+    "Rapid repeat submission must start exactly one category write",
+  );
+  assert(
+    (await pgClient`
+      select is_active from category where id = ${createdCategoryId}
+    `)[0].is_active === true,
+    "Enabling the category should persist its own availability",
+  );
+
+  await pgClient`
+    update category set is_active = false where id = ${createdCategoryId}
+  `;
+  await click(categoryDisable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(categoryConflict)})) && document.querySelector(${JSON.stringify(categoryConflictLatest)})?.textContent === "متوقفة" && document.querySelector(${JSON.stringify(categoryEnable)})?.disabled === false`,
+    "stale category revision conflict from freshly authorized data",
+  );
+  assert(
+    (await pgClient`
+      select is_active from category where id = ${createdCategoryId}
+    `)[0].is_active === false,
+    "A stale category write must not replace the newer state",
+  );
+
+  await click(categoryEnable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(categorySaved)})) && !document.querySelector(${JSON.stringify(categoryConflict)}) && document.querySelector(${JSON.stringify(categoryPath)})?.getAttribute('data-path-visible') === 'true'`,
+    "fresh explicit category decision after conflict",
+  );
+  assert(
+    (await pgClient`
+      select is_active from category where id = ${createdCategoryId}
+    `)[0].is_active === true,
+    "A fresh explicit category decision should persist after a conflict",
+  );
+
+  await click('[data-testid="merchant-categories-back"]');
+  await waitForUrl("/app/products", "products page after enabling category");
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')) && !document.querySelector(${JSON.stringify(emptyCategoryWarning)}) && document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')?.textContent === "متاح في الكتالوج" && document.querySelector('[data-testid="merchant-products-page"]')?.getAttribute('data-hydrated') === 'true'`,
+    "category warning disappears after the path becomes available",
+  );
+
+  const categoryEnabledReloadToken = `categoryEnabledReload=${Date.now()}`;
+  await navigate(`${BASE_URL}/app/products?${categoryEnabledReloadToken}`);
+  await waitFor(
+    cdp,
+    `window.location.search.includes(${JSON.stringify(categoryEnabledReloadToken)}) && Boolean(document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')) && !document.querySelector(${JSON.stringify(emptyCategoryWarning)}) && document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')?.textContent === "متاح في الكتالوج"`,
+    "enabled category path after product reload",
+  );
+
+  await click('[data-testid="merchant-categories-link"]');
+  await waitForUrl("/app/categories", "merchant categories page from products header");
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-category-row"]')) && document.querySelector(${JSON.stringify(categoryDisable)})?.disabled === false`,
+    "category page ready for explicit disable",
+  );
+  await click(categoryDisable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(categorySaved)})) && document.querySelector(${JSON.stringify(categoryPath)})?.getAttribute('data-path-visible') === 'false' && document.querySelector(${JSON.stringify(categoryEnable)})?.disabled === false`,
+    "category disabled again while product stays enabled",
+  );
+  assert(
+    (await pgClient`
+      select p.is_active as product_active, c.is_active as category_active
+      from product p
+      join category c on c.id = p.category_id
+      where p.id = ${createdProductId}
+    `)[0].product_active === true,
+    "Disabling a category must not disable its products",
+  );
+  assert(
+    (await pgClient`
+      select c.is_active as category_active
+      from category c
+      where c.id = ${createdCategoryId}
+    `)[0].category_active === false,
+    "Disabling a category should persist only its own availability",
+  );
+
+  await click('[data-testid="merchant-categories-back"]');
+  await waitForUrl("/app/products", "products page after disabling category");
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')) && Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)})) && document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')?.textContent === "الإتاحة مفعّلة"`,
+    "category warning returns after its path is disabled",
+  );
+
+  const categoryDisabledReloadToken = `categoryDisabledReload=${Date.now()}`;
+  await navigate(`${BASE_URL}/app/products?${categoryDisabledReloadToken}`);
+  await waitFor(
+    cdp,
+    `window.location.search.includes(${JSON.stringify(categoryDisabledReloadToken)}) && Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)})) && document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')?.textContent === "الإتاحة مفعّلة"`,
+    "disabled category path and enabled product after reload",
+  );
+
+  await navigate(`${BASE_URL}/app/categories?categoryReload=${Date.now()}`);
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(categoryPath)})?.getAttribute('data-path-visible') === 'false' && document.querySelector('[data-testid="merchant-category-saved-${createdCategoryId}"]')?.textContent.includes("متوقفة")`,
+    "category saved state after reload",
+  );
+  await expectNoHorizontalScroll("category state after reload");
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)}))`,
+    "products warning before the next product step",
+  );
+
   await click(emptyAvailabilityDisable);
   await waitFor(
     cdp,
@@ -2081,6 +2386,25 @@ async function runJourney(cdp, fixture, authSecret) {
     )) === 0,
     "A suspended store must not render add-product actions",
   );
+  await navigate(`${BASE_URL}/app/categories`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-categories-suspended-notice\"]')) && Boolean(document.querySelector('[data-testid=\"merchant-category-row\"]'))",
+    "suspended categories read-only state",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelectorAll('[data-testid^=\"merchant-category-enable-\"], [data-testid^=\"merchant-category-disable-\"]').length",
+    )) === 0,
+    "A suspended store must not render usable category availability controls",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-saved-${createdCategoryId}"]`)).includes(
+      "متوقفة",
+    ),
+    "A suspended store should still read its own category availability",
+  );
+  await expectNoHorizontalScroll("suspended merchant categories");
   await navigate(`${BASE_URL}/app/products/new`);
   await waitFor(
     cdp,
