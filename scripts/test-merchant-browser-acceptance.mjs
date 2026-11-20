@@ -255,8 +255,18 @@ async function main() {
       `  if (process.env.TEST_REAL_PG_URL && typeof url === "string" && url.endsWith("/sql")) {\n` +
       `    if (!pg) pg = postgres(process.env.TEST_REAL_PG_URL);\n` +
       `    const { query, params } = JSON.parse(init.body);\n` +
+      `    const booleanColumns = new Set(["is_active", "enabled", "ask_for_language", "is_enabled", "is_blocked"]);\n` +
+      `    const booleanIndexes = new Set();\n` +
+      `    for (const match of query.matchAll(/"([a-z_]+)"\\s*=\\s*\\$(\\d+)/g)) {\n` +
+      `      if (booleanColumns.has(match[1])) booleanIndexes.add(Number(match[2]));\n` +
+      `    }\n` +
+      `    const normalizedParams = (params || []).map((value, index) =>\n` +
+      `      typeof value === "string" && booleanIndexes.has(index + 1)\n` +
+      `        ? value === "true"\n` +
+      `        : value,\n` +
+      `    );\n` +
       `    try {\n` +
-      `      const rows = await pg.unsafe(query, params || []).values();\n` +
+      `      const rows = await pg.unsafe(query, normalizedParams).values();\n` +
       `      const cols = rows.columns || [];\n` +
       `      const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
       `      const rowArrays = rows.map((r) => r.map((value) => formatVal(value)));\n` +
@@ -754,6 +764,27 @@ async function runJourney(cdp, fixture, authSecret) {
       !aProductsText.includes("Al Qamar Product One"),
     "Merchant A must not see B's products",
   );
+  assert(
+    (await evaluate(
+      "document.querySelectorAll('[data-testid^=\"merchant-product-category-inactive-\"]').length",
+    )) === 0,
+    "An active-category fixture must not show the inactive-category warning",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-available-${a.products.one.id}"]`)) ===
+      "متاح في الكتالوج",
+    "An available product should say it is available in the catalog",
+  );
+  assert(
+    (await text(`[data-testid="merchant-availability-enable-${a.products.one.id}"]`)) ===
+      "إتاحة المنتج",
+    "The Arabic make-available action should be present",
+  );
+  assert(
+    (await text(`[data-testid="merchant-availability-disable-${a.products.one.id}"]`)) ===
+      "إيقاف الإتاحة",
+    "The Arabic stop-availability action should be present",
+  );
 
   await click('[data-testid="merchant-locale-en"]');
   await waitFor(
@@ -764,6 +795,12 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(
     (await evaluate("document.body.innerText")).includes("Store products"),
     "Merchant products English copy should be available",
+  );
+  assert(
+    (await evaluate("document.body.innerText")).includes("Available in the catalog") &&
+      (await evaluate("document.body.innerText")).includes("Make product available") &&
+      (await evaluate("document.body.innerText")).includes("Stop availability"),
+    "Merchant availability actions and state should have English labels",
   );
   await click('[data-testid="merchant-locale-ar"]');
   await waitFor(
@@ -1031,6 +1068,123 @@ async function runJourney(cdp, fixture, authSecret) {
     "An invalid price must not write",
   );
 
+  const aAvailabilityDisable = `[data-testid="merchant-availability-disable-${a.products.one.id}"]`;
+  const aAvailabilitySaved = `[data-testid="merchant-availability-saved-${a.products.one.id}"]`;
+  const aPriceUseLatest = `[data-testid="merchant-price-use-latest-${a.products.one.id}"]`;
+
+  await setValue(aPriceInput, "12.34");
+  await click(aAvailabilityDisable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aAvailabilitySaved)})) && document.querySelector(${JSON.stringify(aPriceInput)})?.value === "12.34" && document.querySelector(${JSON.stringify(aAvailabilityDisable)})?.disabled === true && Boolean(document.querySelector('[data-testid="merchant-product-status-${a.products.one.id}"]'))`,
+    "availability save preserves a genuine price draft",
+  );
+  assert(
+    (await pgClient`
+      select is_active from product where id = ${a.products.one.id}
+    `)[0].is_active === false,
+    "Stopping availability should persist unavailable state",
+  );
+
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-price-conflict-${a.products.one.id}"]')) && document.querySelector(${JSON.stringify(aPriceInput)})?.value === "12.34"`,
+    "availability refresh does not rebase the price draft",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.one.id}
+    `)[0].price === aConfirmedPrice,
+    "The price draft must not silently overwrite after an availability refresh",
+  );
+  await click(aPriceUseLatest);
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aPriceInput)})?.value === ${JSON.stringify(aConfirmedPrice)} && !document.querySelector('[data-testid="merchant-price-conflict-${a.products.one.id}"]')`,
+    "adopt latest price after availability refresh",
+  );
+
+  const aTwoConflict = `[data-testid="merchant-availability-conflict-${a.products.two.id}"]`;
+  const aTwoConflictLatest = `[data-testid="merchant-availability-conflict-latest-${a.products.two.id}"]`;
+  const aTwoDisable = `[data-testid="merchant-availability-disable-${a.products.two.id}"]`;
+  const aTwoAvailable = `[data-testid="merchant-product-available-${a.products.two.id}"]`;
+  const aFallbackSaved = `[data-testid="merchant-price-saved-${a.products.fallback.id}"]`;
+
+  await setValue(aPriceInput, "12.34");
+  await pgClient`
+    update product set is_active = false where id = ${a.products.two.id}
+  `;
+  await click(aTwoDisable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aTwoConflict)})) && document.querySelector(${JSON.stringify(aTwoConflictLatest)})?.textContent === "غير متاح"`,
+    "stale availability conflict from freshly authorized data",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price, is_active from product where id = ${a.products.two.id}
+    `)[0].is_active === false,
+    "A stale availability write must not replace the newer state",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.two.id}
+    `)[0].price === "55.50",
+    "An availability conflict must leave the price unchanged",
+  );
+
+  await pgClient`
+    update product set is_active = true where id = ${a.products.two.id}
+  `;
+  await setValue(aFallbackInput, "36.70");
+  await click(aFallbackSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aFallbackSaved)})) && Boolean(document.querySelector(${JSON.stringify(aTwoAvailable)})) && document.querySelector(${JSON.stringify(aTwoConflictLatest)})?.textContent === "متاح" && document.querySelector(${JSON.stringify(aPriceInput)})?.value === "12.34"`,
+    "newer scoped refresh wins over the conflict snapshot and preserves the price draft",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.fallback.id}
+    `)[0].price === "36.70",
+    "Saving row B should persist its price and trigger the normal scoped refresh",
+  );
+
+  await pgClient`
+    update product set is_active = true where id = ${a.products.two.id}
+  `;
+  await click(aTwoDisable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aTwoConflict)})) && document.querySelector(${JSON.stringify(aTwoConflictLatest)})?.textContent === "متاح" && Boolean(document.querySelector(${JSON.stringify(aTwoAvailable)}))`,
+    "failed availability follow-up keeps the newest confirmed state",
+  );
+  assert(
+    (await pgClient`
+      select is_active from product where id = ${a.products.two.id}
+    `)[0].is_active === true,
+    "A failed availability follow-up must not overwrite the newer state",
+  );
+
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aTwoDisable)})?.disabled === false`,
+    "availability conflict decision control ready",
+  );
+  await click(aTwoDisable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-availability-saved-${a.products.two.id}"]')) && !document.querySelector(${JSON.stringify(aTwoConflict)}) && Boolean(document.querySelector('[data-testid="merchant-product-status-${a.products.two.id}"]'))`,
+    "fresh explicit availability decision after conflict",
+  );
+  assert(
+    (await pgClient`
+      select is_active from product where id = ${a.products.two.id}
+    `)[0].is_active === false,
+    "A fresh availability decision should persist after a conflict",
+  );
+
   const aRows = await pgClient`
     select u.id as user_id, u.session_version, m.id as membership_id
     from app_user u
@@ -1120,6 +1274,12 @@ async function runJourney(cdp, fixture, authSecret) {
       "document.querySelectorAll('[data-testid^=\"merchant-price-save-\"]').length",
     )) === 0,
     "A suspended store must not render enabled price controls",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelectorAll('[data-testid^=\"merchant-availability-enable-\"], [data-testid^=\"merchant-availability-disable-\"]').length",
+    )) === 0,
+    "A suspended store must not render usable availability controls",
   );
   assert(
     (await text(`[data-testid="merchant-product-price-${a.products.one.id}"]`)) ===
@@ -1257,6 +1417,24 @@ async function runJourney(cdp, fixture, authSecret) {
       select price::text as price from product where id = ${a.products.one.id}
     `)[0].price === aConfirmedPrice,
     "A's persisted price should remain independent of B",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-available-${b.products.one.id}"]`)) ===
+      "متاح في الكتالوج",
+    "Merchant B should see B's own available state",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelectorAll('[data-testid^=\"merchant-product-category-inactive-\"]').length",
+    )) === 0,
+    "Merchant B's active category must not show A's category warning",
+  );
+  const bAvailabilityRow = await pgClient`
+    select is_active from product where id = ${b.products.one.id}
+  `;
+  assert(
+    bAvailabilityRow[0].is_active === true,
+    "A's availability writes must not change B's product state",
   );
 
   const invalidPreview = await postJson("/api/merchant-invitations/preview", {
@@ -1664,12 +1842,129 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(emptyCatalog[0].product_name === "منتج البداية الأول", "The product translation should persist");
   assert(emptyCatalog[0].category_name === "قسم البداية", "The category translation should persist");
 
-  await navigate(`${BASE_URL}/app/products`);
+  const firstDraftReloadToken = `firstDraftReload=${Date.now()}`;
+  await navigate(`${BASE_URL}/app/products?${firstDraftReloadToken}`);
   await waitFor(
     cdp,
-    "document.querySelectorAll('[data-testid=\"merchant-product-row\"]').length === 1 && document.querySelector('[data-testid=\"merchant-product-name-" + emptyCatalog[0].product_id + "\"]')?.textContent === 'منتج البداية الأول' && document.querySelector('[data-testid=\"merchant-product-status-" + emptyCatalog[0].product_id + "\"]')?.textContent === 'مسودة'",
+    `window.location.search.includes(${JSON.stringify(firstDraftReloadToken)}) && document.querySelectorAll('[data-testid="merchant-product-row"]').length === 1 && document.querySelector('[data-testid="merchant-product-name-${emptyCatalog[0].product_id}"]')?.textContent === 'منتج البداية الأول' && document.querySelector('[data-testid="merchant-product-status-${emptyCatalog[0].product_id}"]')?.textContent === 'مسودة' && document.querySelector('[data-testid="merchant-products-page"]')?.getAttribute('data-hydrated') === 'true'`,
     "first draft product and status after reload",
   );
+
+  const emptyAvailabilityEnable = `[data-testid="merchant-availability-enable-${createdProductId}"]`;
+  const emptyAvailabilityDisable = `[data-testid="merchant-availability-disable-${createdProductId}"]`;
+  const emptyAvailabilitySaved = `[data-testid="merchant-availability-saved-${createdProductId}"]`;
+  const emptyCategoryWarning = `[data-testid="merchant-product-category-inactive-${createdProductId}"]`;
+
+  assert(
+    (await evaluate(
+      `Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)}))`,
+    )) === true,
+    "A product under the newly created inactive category should show the category warning",
+  );
+  assert(
+    (await text(emptyCategoryWarning)).includes("أحد أقسامه الأعلى"),
+    "The Arabic category warning should explain that a parent category can hide the product",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-status-${createdProductId}"]`)) ===
+      "مسودة",
+    "The first product should start as a draft",
+  );
+  assert(
+    (await text(emptyAvailabilityEnable)) === "إتاحة المنتج",
+    "The first product should offer the Arabic make-available action",
+  );
+
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 700,
+    downloadThroughput: 1024 * 1024,
+    uploadThroughput: 1024 * 1024,
+  });
+
+  assert(
+    await evaluate(`(() => {
+      window.__merchantAvailabilityPosts = 0;
+      const originalFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url =
+          typeof input === "string" ? input : (input && input.url) || String(input);
+        if (url.includes("/app/products") && init && init.method === "POST") {
+          window.__merchantAvailabilityPosts += 1;
+        }
+        return originalFetch.apply(this, arguments);
+      };
+      const button = document.querySelector(${JSON.stringify(emptyAvailabilityEnable)});
+      if (!button) return false;
+      button.click();
+      button.click();
+      return true;
+    })()`),
+    "Could not submit the controlled availability save",
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(emptyAvailabilitySaved)})) && Boolean(document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')) && Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)}))`,
+    "first product made available with inactive-category warning",
+  );
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 0,
+    downloadThroughput: -1,
+    uploadThroughput: -1,
+  });
+  assert(
+    (await evaluate("window.__merchantAvailabilityPosts")) === 1,
+    "Rapid repeat submission must start exactly one availability write",
+  );
+  assert(
+    (await pgClient`
+      select p.is_active as product_active, c.is_active as category_active
+      from product p
+      join category c on c.id = p.category_id
+      where p.id = ${createdProductId}
+    `)[0].product_active === true,
+    "Making the first product available should persist",
+  );
+  assert(
+    (await pgClient`
+      select c.is_active as category_active
+      from product p
+      join category c on c.id = p.category_id
+      where p.id = ${createdProductId}
+    `)[0].category_active === false,
+    "Making a product available must not activate its category",
+  );
+
+  const availableReloadToken = `availableReload=${Date.now()}`;
+  await navigate(`${BASE_URL}/app/products?${availableReloadToken}`);
+  await waitFor(
+    cdp,
+    `window.location.search.includes(${JSON.stringify(availableReloadToken)}) && Boolean(document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]')) && Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)})) && document.querySelector('[data-testid="merchant-product-status-${createdProductId}"]') === null && document.querySelector(${JSON.stringify(emptyAvailabilityDisable)})?.disabled === false && document.querySelector('[data-testid="merchant-products-page"]')?.getAttribute('data-hydrated') === 'true'`,
+    "available state and category warning after reload",
+  );
+
+  await click(emptyAvailabilityDisable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(emptyAvailabilitySaved)})) && Boolean(document.querySelector('[data-testid="merchant-product-status-${createdProductId}"]')) && Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)}))`,
+    "first product stopped and draft label restored",
+  );
+  assert(
+    (await pgClient`
+      select is_active from product where id = ${createdProductId}
+    `)[0].is_active === false,
+    "Stopping the first product availability should persist",
+  );
+
+  const unavailableReloadToken = `unavailableReload=${Date.now()}`;
+  await navigate(`${BASE_URL}/app/products?${unavailableReloadToken}`);
+  await waitFor(
+    cdp,
+    `window.location.search.includes(${JSON.stringify(unavailableReloadToken)}) && Boolean(document.querySelector('[data-testid="merchant-product-status-${createdProductId}"]')) && Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)})) && document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]') === null && document.querySelector(${JSON.stringify(emptyAvailabilityEnable)})?.disabled === false && document.querySelector('[data-testid="merchant-products-page"]')?.getAttribute('data-hydrated') === 'true'`,
+    "unavailable state and category warning after reload",
+  );
+  await expectNoHorizontalScroll("first product availability states");
 
   await click('[data-testid="merchant-add-product-link"]');
   await waitForUrl("/app/products/new", "add another product form");

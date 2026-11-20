@@ -35,6 +35,7 @@ export default async function MerchantProductsPage() {
         price: product.price,
         revision: product.revision,
         isActive: product.isActive,
+        categoryPathVisible: product.categoryPathVisible,
       }))}
     />
   );

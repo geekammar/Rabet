@@ -22,6 +22,7 @@ import {
   store,
   storeMembership,
 } from "@/db/schema";
+import { isCategoryAncestryActive } from "@/lib/catalog/eligibility";
 import { validatePrice } from "@/lib/catalog/validation";
 import {
   mapDatabaseError,
@@ -82,6 +83,10 @@ export interface CatalogProductRecord {
 export interface CatalogProductRecordWithRevision extends CatalogProductRecord {
   /** Exact microsecond UTC `updated_at` revision, never a JavaScript Date. */
   revision: string;
+  /** Whether the product's non-deleted same-store category is active. */
+  categoryIsActive: boolean;
+  /** Whether the full same-store category path is active and traversable. */
+  categoryPathVisible: boolean;
 }
 
 type BatchCapableDb = {
@@ -483,6 +488,7 @@ export async function listCatalogProductsForStore(
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
         revision: productRevisionSql(),
+        categoryIsActive: category.isActive,
         translationId: productTranslation.id,
         translationLanguageId: productTranslation.languageId,
         translationLanguageCode: language.code,
@@ -528,6 +534,8 @@ export async function listCatalogProductsForStore(
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
           revision: row.revision,
+          categoryIsActive: row.categoryIsActive,
+          categoryPathVisible: false,
           translations: {},
         };
         products.set(row.id, record);
@@ -546,6 +554,39 @@ export async function listCatalogProductsForStore(
           description: row.translationDescription,
           details: row.translationDetails,
         };
+      }
+    }
+
+    if (products.size > 0) {
+      const categories = await db
+        .select({
+          id: category.id,
+          parentId: category.parentId,
+          isActive: category.isActive,
+        })
+        .from(category)
+        .where(
+          and(
+            eq(category.storeId, scope.storeId),
+            isNull(category.deletedAt),
+          ),
+        );
+      const categoryById = new Map(
+        categories.map((row) => [row.id, row]),
+      );
+      const pathVisibility = new Map<string, boolean>();
+
+      for (const record of products.values()) {
+        let visible = pathVisibility.get(record.categoryId);
+
+        if (visible === undefined) {
+          visible = isCategoryAncestryActive(record.categoryId, (id) =>
+            categoryById.get(id),
+          );
+          pathVisibility.set(record.categoryId, visible);
+        }
+
+        record.categoryPathVisible = visible;
       }
     }
 
@@ -817,6 +858,94 @@ export async function readCatalogProductPriceForMerchant(
     const rows = await db
       .select({
         price: product.price,
+        revision: productRevisionSql(),
+      })
+      .from(product)
+      .where(
+        and(
+          storeOwnedProductWhere(db, scope, productId),
+          merchantWriteEligibilityWhere(db, scope, identity),
+        ),
+      )
+      .limit(1);
+
+    return rows[0] ?? null;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+export type MerchantAvailabilityWriteResult = {
+  isActive: boolean;
+  revision: string;
+};
+
+/**
+ * Updates one product's availability only while the merchant write eligibility
+ * still holds in the database.
+ *
+ * The statement carries the same product/category ownership and deletion
+ * predicates as the scoped catalog mutations, the full write-time merchant
+ * eligibility predicate, and the exact expected product revision. A stale
+ * revision, a revoked membership, a session-version change, a suspended store,
+ * a foreign product or a deleted category all produce the same no-match result.
+ *
+ * Only `is_active` is set; price, translations, actions, category, slug and
+ * ownership are left alone, and the database trigger still maintains
+ * `updated_at`.
+ */
+export async function updateCatalogProductAvailabilityForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  productId: string,
+  isActive: boolean,
+  expectedRevision: string,
+): Promise<MerchantAvailabilityWriteResult | null> {
+  assertStoreScope(scope);
+
+  try {
+    const updated = await db
+      .update(product)
+      .set({ isActive })
+      .where(
+        and(
+          storeOwnedProductWhere(db, scope, productId),
+          merchantWriteEligibilityWhere(db, scope, identity),
+          eq(productRevisionSql(), expectedRevision),
+        ),
+      )
+      .returning({
+        isActive: product.isActive,
+        revision: productRevisionSql(),
+      });
+
+    return updated[0] ?? null;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Reads the latest authorized availability and revision after a guarded write
+ * lost its revision precondition.
+ *
+ * The same product/category and merchant eligibility predicates gate this read,
+ * so a revoked membership, suspended store, foreign product or ineligible row
+ * yields `null` and never discloses another row's availability or revision.
+ */
+export async function readCatalogProductAvailabilityForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  productId: string,
+): Promise<MerchantAvailabilityWriteResult | null> {
+  assertStoreScope(scope);
+
+  try {
+    const rows = await db
+      .select({
+        isActive: product.isActive,
         revision: productRevisionSql(),
       })
       .from(product)
