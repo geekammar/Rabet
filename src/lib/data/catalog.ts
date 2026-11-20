@@ -59,6 +59,20 @@ export interface CatalogCategoryRecord {
   >;
 }
 
+export interface CatalogCategoryRecordWithRevision
+  extends CatalogCategoryRecord {
+  /** Exact microsecond UTC `updated_at` revision, never a JavaScript Date. */
+  revision: string;
+  /** Whether the category and every scoped ancestor are available. */
+  pathVisible: boolean;
+  /**
+   * False when the stored parent is not part of the scoped rows (missing,
+   * soft-deleted or foreign). The parent id itself is not returned then, so a
+   * genuine root stays distinguishable from an unresolved parent.
+   */
+  parentResolved: boolean;
+}
+
 export interface CatalogProductRecord {
   id: string;
   categoryId: string;
@@ -255,10 +269,18 @@ export async function listCatalogCategories(
   }
 }
 
+/**
+ * Lists one store's non-deleted categories with translations, exact revisions
+ * and effective category-path visibility.
+ *
+ * Ancestry is resolved exclusively from the same scoped rows. A missing,
+ * soft-deleted, foreign or cyclic ancestor is not loaded, so the path is
+ * reported unavailable without exposing any foreign category id, name or slug.
+ */
 export async function listCatalogCategoriesForStore(
   db: Database,
   scope: StoreScope,
-): Promise<CatalogCategoryRecord[]> {
+): Promise<CatalogCategoryRecordWithRevision[]> {
   assertStoreScope(scope);
 
   try {
@@ -271,6 +293,7 @@ export async function listCatalogCategoriesForStore(
         isActive: category.isActive,
         createdAt: category.createdAt,
         updatedAt: category.updatedAt,
+        revision: categoryRevisionSql(),
         translationId: categoryTranslation.id,
         translationLanguageId: categoryTranslation.languageId,
         translationLanguageCode: language.code,
@@ -293,7 +316,7 @@ export async function listCatalogCategoriesForStore(
         categoryTranslation.languageId,
       );
 
-    const categories = new Map<string, CatalogCategoryRecord>();
+    const categories = new Map<string, CatalogCategoryRecordWithRevision>();
 
     for (const row of rows) {
       let record = categories.get(row.id);
@@ -307,6 +330,9 @@ export async function listCatalogCategoriesForStore(
           isActive: row.isActive,
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
+          revision: row.revision,
+          pathVisible: false,
+          parentResolved: true,
           translations: {},
         };
         categories.set(row.id, record);
@@ -324,6 +350,31 @@ export async function listCatalogCategoriesForStore(
           name: row.translationName,
           description: row.translationDescription,
         };
+      }
+    }
+
+    const pathVisibility = new Map<string, boolean>();
+
+    for (const record of categories.values()) {
+      let visible = pathVisibility.get(record.id);
+
+      if (visible === undefined) {
+        visible = isCategoryAncestryActive(record.id, (id) =>
+          categories.get(id),
+        );
+        pathVisibility.set(record.id, visible);
+      }
+
+      record.pathVisible = visible;
+    }
+
+    // A parent that is missing, soft-deleted or owned by another store is not
+    // part of the scoped result. Do not echo its id, but keep the distinction
+    // between a genuine root and an unresolved parent for path derivation.
+    for (const record of categories.values()) {
+      if (record.parentId !== null && !categories.has(record.parentId)) {
+        record.parentId = null;
+        record.parentResolved = false;
       }
     }
 
@@ -628,6 +679,18 @@ function storeOwnedProductWhere(
   );
 }
 
+/** The target-category predicate shared by the scoped category mutations. */
+function storeOwnedCategoryWhere(
+  scope: StoreScope,
+  categoryId: string,
+) {
+  return and(
+    eq(category.id, categoryId),
+    eq(category.storeId, scope.storeId),
+    isNull(category.deletedAt),
+  );
+}
+
 /**
  * Updates one store-owned product's availability in a single guarded write.
  *
@@ -713,6 +776,11 @@ export async function updateCatalogProductPriceForStore(
 /** The exact UTC revision expression shared by reads and guarded writes. */
 function productRevisionSql() {
   return sql<string>`to_char(${product.updatedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+}
+
+/** The category revision uses exactly the same lossless timestamp format. */
+function categoryRevisionSql() {
+  return sql<string>`to_char(${category.updatedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 }
 
 /** The server-derived identity required to bind a merchant price write. */
@@ -952,6 +1020,95 @@ export async function readCatalogProductAvailabilityForMerchant(
       .where(
         and(
           storeOwnedProductWhere(db, scope, productId),
+          merchantWriteEligibilityWhere(db, scope, identity),
+        ),
+      )
+      .limit(1);
+
+    return rows[0] ?? null;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+export type MerchantCategoryAvailabilityWriteResult = {
+  isActive: boolean;
+  revision: string;
+};
+
+/**
+ * Updates one category's own availability only while the merchant write
+ * eligibility still holds in the database.
+ *
+ * The statement requires the target category to belong to the scoped store and
+ * not be soft-deleted, carries the full write-time merchant eligibility
+ * predicate, and compares the exact expected category revision. A foreign,
+ * missing, deleted or otherwise ineligible category, a stale revision, a
+ * revoked membership, a session-version change and a suspended store all
+ * produce the same no-match result.
+ *
+ * Only `is_active` is set. Descendants, products, prices, store status and
+ * connection state are untouched, and the database trigger maintains the
+ * category's own `updated_at` revision.
+ */
+export async function updateCatalogCategoryAvailabilityForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  categoryId: string,
+  isActive: boolean,
+  expectedRevision: string,
+): Promise<MerchantCategoryAvailabilityWriteResult | null> {
+  assertStoreScope(scope);
+
+  try {
+    const updated = await db
+      .update(category)
+      .set({ isActive })
+      .where(
+        and(
+          storeOwnedCategoryWhere(scope, categoryId),
+          merchantWriteEligibilityWhere(db, scope, identity),
+          eq(categoryRevisionSql(), expectedRevision),
+        ),
+      )
+      .returning({
+        isActive: category.isActive,
+        revision: categoryRevisionSql(),
+      });
+
+    return updated[0] ?? null;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Reads the latest authorized category availability and revision after a
+ * guarded write lost its revision precondition.
+ *
+ * The scoped ownership and merchant eligibility predicates gate this read, so
+ * a foreign or missing category yields `null` and never discloses its saved
+ * status or revision.
+ */
+export async function readCatalogCategoryAvailabilityForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  categoryId: string,
+): Promise<MerchantCategoryAvailabilityWriteResult | null> {
+  assertStoreScope(scope);
+
+  try {
+    const rows = await db
+      .select({
+        isActive: category.isActive,
+        revision: categoryRevisionSql(),
+      })
+      .from(category)
+      .where(
+        and(
+          storeOwnedCategoryWhere(scope, categoryId),
           merchantWriteEligibilityWhere(db, scope, identity),
         ),
       )

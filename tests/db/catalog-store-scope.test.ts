@@ -1174,14 +1174,23 @@ describe("scoped-operation production surface", () => {
     const storeScopeModule = path.join("lib", "data", "store-scope.ts");
     const merchantResolver = path.join("lib", "auth", "merchant-session.ts");
     const merchantCatalog = path.join("lib", "merchant", "catalog.ts");
+    const merchantCategory = path.join("lib", "merchant", "category.ts");
     const productsPage = path.join("app", "app", "products", "page.tsx");
+    const categoriesPage = path.join(
+      "app",
+      "app",
+      "categories",
+      "page.tsx",
+    );
 
     const allowed = new Set([
       catalogModule,
       storeScopeModule,
       merchantResolver,
       merchantCatalog,
+      merchantCategory,
       productsPage,
+      categoriesPage,
     ]);
 
     const walk = (dir: string): string[] =>
@@ -1196,6 +1205,8 @@ describe("scoped-operation production surface", () => {
     const merchantPriceOffenders: string[] = [];
     const merchantPriceReadOffenders: string[] = [];
     const availabilityOffenders: string[] = [];
+    const merchantCategoryWriteOffenders: string[] = [];
+    const merchantCategoryReadOffenders: string[] = [];
     const scopeIssuerOffenders: string[] = [];
 
     for (const file of walk(srcRoot)) {
@@ -1219,6 +1230,12 @@ describe("scoped-operation production surface", () => {
       if (source.includes("updateCatalogProductAvailabilityForStore")) {
         availabilityOffenders.push(relative);
       }
+      if (source.includes("updateCatalogCategoryAvailabilityForMerchant")) {
+        merchantCategoryWriteOffenders.push(relative);
+      }
+      if (source.includes("readCatalogCategoryAvailabilityForMerchant")) {
+        merchantCategoryReadOffenders.push(relative);
+      }
       if (source.includes("createStoreScopeForExistingStore")) {
         scopeIssuerOffenders.push(relative);
       }
@@ -1233,6 +1250,8 @@ describe("scoped-operation production surface", () => {
     expect(merchantPriceOffenders).toEqual([]);
     expect(merchantPriceReadOffenders).toEqual([]);
     expect(availabilityOffenders).toEqual([]);
+    expect(merchantCategoryWriteOffenders).toEqual([]);
+    expect(merchantCategoryReadOffenders).toEqual([]);
     expect(scopeIssuerOffenders).toEqual([]);
 
     const page = readFileSync(path.join(srcRoot, productsPage), "utf8");
@@ -1251,6 +1270,32 @@ describe("scoped-operation production surface", () => {
     expect(merchantModule).toContain("updateCatalogProductPriceForMerchant");
     expect(merchantModule).toContain("readCatalogProductPriceForMerchant");
     expect(merchantModule).not.toContain("updateCatalogProductPriceForStore");
+
+    const categoryPage = readFileSync(
+      path.join(srcRoot, categoriesPage),
+      "utf8",
+    );
+    expect(categoryPage).toContain("requireMerchantAccess");
+    expect(categoryPage).toContain("listCatalogCategoriesForStore");
+    expect(categoryPage).not.toContain(
+      "updateCatalogCategoryAvailabilityForMerchant",
+    );
+    expect(categoryPage).not.toContain(
+      "readCatalogCategoryAvailabilityForMerchant",
+    );
+    expect(categoryPage).not.toContain("searchParams");
+    expect(categoryPage).not.toContain("storeId");
+
+    const merchantCategoryModule = readFileSync(
+      path.join(srcRoot, merchantCategory),
+      "utf8",
+    );
+    expect(merchantCategoryModule).toContain(
+      "updateCatalogCategoryAvailabilityForMerchant",
+    );
+    expect(merchantCategoryModule).toContain(
+      "readCatalogCategoryAvailabilityForMerchant",
+    );
 
     const barrel = readFileSync(
       path.join(srcRoot, "lib", "data", "index.ts"),

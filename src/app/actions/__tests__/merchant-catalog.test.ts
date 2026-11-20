@@ -5,7 +5,9 @@ const state = vi.hoisted(() => ({
   getMerchantAccess: vi.fn(),
   updateMerchantCatalogProductPrice: vi.fn(),
   updateMerchantCatalogProductAvailability: vi.fn(),
+  updateMerchantCatalogCategoryAvailability: vi.fn(),
   refresh: vi.fn(),
+  revalidatePath: vi.fn(),
 }));
 
 vi.mock("@/db/client", () => ({
@@ -22,12 +24,21 @@ vi.mock("@/lib/merchant/catalog", () => ({
     state.updateMerchantCatalogProductAvailability,
 }));
 
-vi.mock("next/cache", () => ({
-  refresh: state.refresh,
+vi.mock("@/lib/merchant/category", () => ({
+  updateMerchantCatalogCategoryAvailability:
+    state.updateMerchantCatalogCategoryAvailability,
 }));
 
-const { saveMerchantProductPrice, saveMerchantProductAvailability } =
-  await import("@/app/actions/merchant-catalog");
+vi.mock("next/cache", () => ({
+  refresh: state.refresh,
+  revalidatePath: state.revalidatePath,
+}));
+
+const {
+  saveMerchantProductPrice,
+  saveMerchantProductAvailability,
+  saveMerchantCategoryAvailability,
+} = await import("@/app/actions/merchant-catalog");
 
 const REVISION = "2026-11-19T22:42:44.123456Z";
 
@@ -273,5 +284,146 @@ describe("merchant catalog availability action", () => {
 
     expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
     expect(state.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("merchant category availability action — enablement gate", () => {
+  it("does not resolve access or touch the database while the app is disabled", async () => {
+    vi.stubEnv("RABET_MERCHANT_APP_ENABLED", "false");
+
+    const result = await saveMerchantCategoryAvailability({
+      categoryId: "33333333-3333-4333-8333-333333333333",
+      isActive: true,
+      revision: REVISION,
+    });
+
+    expect(result).toEqual({ ok: false, error: "UNAVAILABLE" });
+    expect(state.getMerchantAccess).not.toHaveBeenCalled();
+    expect(state.getDb).not.toHaveBeenCalled();
+    expect(state.updateMerchantCatalogCategoryAvailability).not.toHaveBeenCalled();
+  });
+});
+
+describe("merchant category availability action", () => {
+  beforeEach(() => {
+    vi.stubEnv("RABET_MERCHANT_APP_ENABLED", "true");
+  });
+
+  it("denies a session whose access was revoked before the mutation", async () => {
+    state.getMerchantAccess.mockResolvedValueOnce(null);
+
+    const result = await saveMerchantCategoryAvailability({
+      categoryId: "33333333-3333-4333-8333-333333333333",
+      isActive: false,
+      revision: REVISION,
+    });
+
+    expect(result).toEqual({ ok: false, error: "DENIED" });
+    expect(state.getDb).not.toHaveBeenCalled();
+    expect(state.updateMerchantCatalogCategoryAvailability).not.toHaveBeenCalled();
+  });
+
+  it("reads only categoryId, isActive and revision, ignoring ownership fields, and refreshes both views", async () => {
+    state.getMerchantAccess.mockResolvedValueOnce(access);
+    state.updateMerchantCatalogCategoryAvailability.mockResolvedValueOnce({
+      ok: true,
+      categoryId: "33333333-3333-4333-8333-333333333333",
+      isActive: true,
+      revision: REVISION,
+    });
+
+    const result = await saveMerchantCategoryAvailability({
+      categoryId: "33333333-3333-4333-8333-333333333333",
+      isActive: true,
+      revision: REVISION,
+      storeId: "44444444-4444-4444-8444-444444444444",
+      role: "super_admin",
+      readOnly: false,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      categoryId: "33333333-3333-4333-8333-333333333333",
+      isActive: true,
+      revision: REVISION,
+    });
+    expect(state.updateMerchantCatalogCategoryAvailability).toHaveBeenCalledWith(
+      { kind: "application-db" },
+      access,
+      {
+        categoryId: "33333333-3333-4333-8333-333333333333",
+        isActive: true,
+        revision: REVISION,
+      },
+    );
+    expect(state.revalidatePath).toHaveBeenCalledWith("/app/categories");
+    expect(state.revalidatePath).toHaveBeenCalledWith("/app/products");
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes an explicit false decision and refreshes after success", async () => {
+    state.getMerchantAccess.mockResolvedValueOnce(access);
+    state.updateMerchantCatalogCategoryAvailability.mockResolvedValueOnce({
+      ok: true,
+      categoryId: "33333333-3333-4333-8333-333333333333",
+      isActive: false,
+      revision: REVISION,
+    });
+
+    const result = await saveMerchantCategoryAvailability({
+      categoryId: "33333333-3333-4333-8333-333333333333",
+      isActive: false,
+      revision: REVISION,
+    });
+
+    expect(result).toMatchObject({ ok: true, isActive: false });
+    expect(state.updateMerchantCatalogCategoryAvailability).toHaveBeenCalledWith(
+      { kind: "application-db" },
+      access,
+      expect.objectContaining({ isActive: false }),
+    );
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns an authorized conflict without refreshing or replaying the old decision", async () => {
+    state.getMerchantAccess.mockResolvedValueOnce(access);
+    state.updateMerchantCatalogCategoryAvailability.mockResolvedValueOnce({
+      ok: false,
+      error: "CONFLICT",
+      current: { isActive: true, revision: REVISION },
+    });
+
+    const result = await saveMerchantCategoryAvailability({
+      categoryId: "33333333-3333-4333-8333-333333333333",
+      isActive: false,
+      revision: "2026-11-19T22:42:44.000001Z",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "CONFLICT",
+      current: { isActive: true, revision: REVISION },
+    });
+    expect(state.refresh).not.toHaveBeenCalled();
+    expect(state.revalidatePath).not.toHaveBeenCalled();
+    expect(state.updateMerchantCatalogCategoryAvailability).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a safe not-found result for a foreign, missing or ineligible category", async () => {
+    state.getMerchantAccess.mockResolvedValueOnce(access);
+    state.updateMerchantCatalogCategoryAvailability.mockResolvedValueOnce({
+      ok: false,
+      error: "NOT_FOUND",
+    });
+
+    const result = await saveMerchantCategoryAvailability({
+      categoryId: "55555555-5555-4555-8555-555555555555",
+      isActive: true,
+      revision: REVISION,
+    });
+
+    expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
+    expect(state.refresh).not.toHaveBeenCalled();
+    expect(state.revalidatePath).not.toHaveBeenCalled();
   });
 });

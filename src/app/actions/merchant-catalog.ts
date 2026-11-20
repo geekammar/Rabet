@@ -13,6 +13,10 @@ import {
   type MerchantProductPriceResult,
 } from "@/lib/merchant/catalog";
 import {
+  updateMerchantCatalogCategoryAvailability,
+  type MerchantCategoryAvailabilityResult,
+} from "@/lib/merchant/category";
+import {
   createMerchantCatalogProduct,
   resolveMerchantCatalogLanguage,
   type MerchantProductCreateResult,
@@ -91,6 +95,53 @@ export async function saveMerchantProductAvailability(
   );
 
   if (result.ok) {
+    refresh();
+  }
+
+  return result;
+}
+
+/**
+ * Saves one explicit availability decision for a category in the signed-in
+ * merchant's own store.
+ *
+ * The enablement gate and the database-backed merchant eligibility rule run on
+ * every invocation. Only `categoryId`, a literal `isActive` boolean and the
+ * expected category `revision` are read from the submitted object; submitted
+ * store, ownership or role fields are ignored and the scope is minted from the
+ * current session.
+ */
+export async function saveMerchantCategoryAvailability(
+  input: unknown,
+): Promise<MerchantCategoryAvailabilityResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+
+  const result = await updateMerchantCatalogCategoryAvailability(
+    getDb(),
+    access,
+    {
+      categoryId: submitted.categoryId,
+      isActive: submitted.isActive,
+      revision: submitted.revision,
+    },
+  );
+
+  if (result.ok) {
+    revalidatePath("/app/categories");
+    revalidatePath("/app/products");
     refresh();
   }
 
