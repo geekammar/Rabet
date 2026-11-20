@@ -11,6 +11,7 @@ import {
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
 import { MerchantLogoutButton } from "@/components/merchant/merchant-logout-button";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 export type MerchantProductItem = {
@@ -18,6 +19,7 @@ export type MerchantProductItem = {
   name: string;
   price: string;
   revision: string;
+  isActive: boolean;
 };
 
 type PriceDraft = {
@@ -66,6 +68,7 @@ type Copy = {
   subtitle: string;
   storeLabel: string;
   productsLabel: string;
+  draftStatus: string;
   priceLabel: string;
   save: string;
   saving: string;
@@ -99,6 +102,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     subtitle: "راجع منتجات متجرك وحدّث سعر كل منتج.",
     storeLabel: "المتجر",
     productsLabel: "المنتجات",
+    draftStatus: "مسودة",
     priceLabel: "السعر",
     save: "حفظ السعر",
     saving: "جارٍ حفظ السعر…",
@@ -132,6 +136,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     subtitle: "Review your store products and update each product price.",
     storeLabel: "Store",
     productsLabel: "Products",
+    draftStatus: "Draft",
     priceLabel: "Price",
     save: "Save price",
     saving: "Saving price…",
@@ -206,9 +211,14 @@ export function MerchantProducts({
     let created = false;
 
     try {
-      created =
-        window.sessionStorage.getItem("rabet:merchant-product-created") === "1";
-      window.sessionStorage.removeItem("rabet:merchant-product-created");
+      if (window.location.hash === "#product-created") {
+        created = true;
+        window.history.replaceState(
+          null,
+          "",
+          `${window.location.pathname}${window.location.search}`,
+        );
+      }
     } catch {}
 
     queueMicrotask(() => {
@@ -428,12 +438,23 @@ export function MerchantProducts({
                     data-testid="merchant-product-row"
                     data-product-id={product.id}
                   >
-                    <h3
-                      className="break-words font-heading text-base font-semibold"
-                      data-testid={`merchant-product-name-${product.id}`}
-                    >
-                      {product.name}
-                    </h3>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3
+                        className="break-words font-heading text-base font-semibold"
+                        data-testid={`merchant-product-name-${product.id}`}
+                      >
+                        {product.name}
+                      </h3>
+                      {product.isActive ? null : (
+                        <Badge
+                          variant="outline"
+                          data-testid={`merchant-product-status-${product.id}`}
+                          data-status="draft"
+                        >
+                          {copy.draftStatus}
+                        </Badge>
+                      )}
+                    </div>
 
                     {readOnly ? (
                       <div className="mt-2 flex flex-wrap items-baseline gap-2 text-sm">

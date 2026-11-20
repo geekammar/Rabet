@@ -22,7 +22,6 @@ import {
   merchantWriteEligibilityWhere,
   type MerchantPriceWriteIdentity,
 } from "@/lib/data/catalog";
-import { resolveDefaultLanguage } from "@/lib/data/languages";
 
 export type MerchantCatalogLanguage = {
   id: string;
@@ -34,10 +33,6 @@ export type MerchantCatalogLanguage = {
 export async function resolveMerchantCatalogLanguage(
   db: Database,
 ): Promise<MerchantCatalogLanguage | null> {
-  const configured = await resolveDefaultLanguage(db);
-
-  if (configured) return configured;
-
   const rows = await db
     .select({
       id: language.id,
@@ -50,11 +45,10 @@ export async function resolveMerchantCatalogLanguage(
     .orderBy(language.code);
 
   const enabled = rows.filter((row) => row.isEnabled);
-  const candidates = enabled.length > 0 ? enabled : rows;
   const selected =
-    candidates.find((row) => row.code === "ar") ??
-    candidates.find((row) => row.code === "en") ??
-    candidates[0];
+    enabled.find((row) => row.code === "en") ??
+    enabled.find((row) => row.code === "ar") ??
+    enabled[0];
 
   if (!selected) return null;
 
@@ -87,6 +81,7 @@ export type MerchantProductCreateResult =
         | "DENIED"
         | "CATEGORY_NOT_FOUND"
         | "CONFLICT"
+        | "LANGUAGE_UNAVAILABLE"
         | "UNAVAILABLE";
       fields?: {
         name?: boolean;

@@ -48,6 +48,7 @@ export default async function MerchantProductCreatePage() {
       storeId={access.store.id}
       userId={access.userId}
       readOnly={access.readOnly}
+      languageUnavailable={language === null}
       categories={options}
     />
   );

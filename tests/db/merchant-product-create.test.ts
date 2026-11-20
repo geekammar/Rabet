@@ -9,6 +9,7 @@ vi.mock("@/auth-merchant", () => ({
 
 import {
   appUser,
+  botSetting,
   category,
   categoryTranslation,
   language,
@@ -22,7 +23,11 @@ import {
   createTransactionClient,
   type TransactionDatabase,
 } from "@/db/transaction-client";
-import { listCatalogCategoriesForStore } from "@/lib/data";
+import {
+  listCatalogCategoriesForStore,
+  listCatalogProductsForStore,
+  resolveDefaultLanguage,
+} from "@/lib/data";
 import {
   acceptMerchantInvitation,
   issueMerchantInvitation,
@@ -32,6 +37,7 @@ import {
   resolveMerchantCatalogLanguage,
   type MerchantCatalogLanguage,
 } from "@/lib/merchant/product-create";
+import { resolveMerchantProductName } from "@/lib/merchant/product-display";
 import {
   asAppDb,
   createTestDatabase,
@@ -197,7 +203,7 @@ describe.skipIf(!shouldRun)("merchant first product creation", () => {
     const access = await resolveMerchantAccess(db(), claims(a.userId));
 
     expect(access).not.toBeNull();
-    expect(merchantLanguage.code).toBe("ar");
+    expect(merchantLanguage.code).toBe("en");
 
     const before = await counts();
     const result = await createMerchantCatalogProduct(
@@ -679,6 +685,139 @@ describe.skipIf(!shouldRun)("merchant first product creation", () => {
     }
 
     expect(await counts()).toEqual(before);
+  });
+
+  it("ignores the legacy bot default and displays saved non-Arabic translations", async () => {
+    const a = await seedMerchant(
+      "language.regression.a@example.test",
+      "Language Regression Store A",
+      "language-regression-a",
+    );
+    const access = await resolveMerchantAccess(db(), claims(a.userId));
+    const [arabic] = await db()
+      .select({ id: language.id })
+      .from(language)
+      .where(eq(language.code, "ar"));
+    const [english] = await db()
+      .select({ id: language.id })
+      .from(language)
+      .where(eq(language.code, "en"));
+    const insertedFrench = await db()
+      .insert(language)
+      .values({
+        code: "fr",
+        label: "Français",
+        textDirection: "ltr",
+        isEnabled: true,
+      })
+      .onConflictDoNothing({ target: language.code })
+      .returning({ id: language.id });
+    const [french] =
+      insertedFrench.length > 0
+        ? insertedFrench
+        : await db()
+            .select({ id: language.id })
+            .from(language)
+            .where(eq(language.code, "fr"));
+
+    await db().insert(botSetting).values({
+      id: 1,
+      defaultLanguageId: arabic.id,
+      currency: "SAR",
+      displayName: "Legacy Bot",
+    });
+
+    expect((await resolveDefaultLanguage(appDb()))?.code).toBe("ar");
+
+    const languageBefore = await resolveMerchantCatalogLanguage(appDb());
+    expect(languageBefore?.code).toBe("en");
+
+    const created = await createMerchantCatalogProduct(
+      db(),
+      access!,
+      languageBefore!,
+      {
+        name: "منتج محفوظ بالعربية",
+        price: "21.00",
+        categoryId: "",
+        newCategoryName: "قسم محفوظ",
+      },
+    );
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error("expected creation to succeed");
+
+    const savedTranslation = await db()
+      .select({ code: language.code, name: productTranslation.name })
+      .from(productTranslation)
+      .innerJoin(language, eq(language.id, productTranslation.languageId))
+      .where(eq(productTranslation.productId, created.productId));
+
+    expect(savedTranslation).toEqual([
+      { code: "en", name: "منتج محفوظ بالعربية" },
+    ]);
+
+    const productsBefore = await listCatalogProductsForStore(
+      appDb(),
+      access!.scope,
+    );
+    const createdRecord = productsBefore.find(
+      (entry) => entry.id === created.productId,
+    );
+
+    expect(
+      resolveMerchantProductName(
+        createdRecord!.translations,
+        createdRecord!.slug,
+      ),
+    ).toBe("منتج محفوظ بالعربية");
+
+    await db()
+      .update(botSetting)
+      .set({ defaultLanguageId: french.id })
+      .where(eq(botSetting.id, 1));
+
+    expect((await resolveDefaultLanguage(appDb()))?.code).toBe("fr");
+    expect((await resolveMerchantCatalogLanguage(appDb()))?.code).toBe("en");
+
+    const frenchProductId = crypto.randomUUID();
+    await db().insert(product).values({
+      id: frenchProductId,
+      storeId: a.storeId,
+      categoryId: created.categoryId,
+      slug: `french-only-${crypto.randomUUID()}`,
+      price: "5.00",
+      isActive: false,
+      sortOrder: nextOrder(),
+    });
+    await db().insert(productTranslation).values({
+      productId: frenchProductId,
+      languageId: french.id,
+      name: "Produit français",
+    });
+
+    const productsAfter = await listCatalogProductsForStore(
+      appDb(),
+      access!.scope,
+    );
+    const frenchRecord = productsAfter.find(
+      (entry) => entry.id === frenchProductId,
+    );
+
+    expect(
+      resolveMerchantProductName(frenchRecord!.translations, frenchRecord!.slug),
+    ).toBe("Produit français");
+    expect(english.id).toBe(languageBefore!.id);
+  });
+
+  it("returns no language when every global language is disabled", async () => {
+    await db().update(language).set({ isEnabled: false });
+
+    try {
+      expect(await resolveMerchantCatalogLanguage(appDb())).toBeNull();
+    } finally {
+      await db().update(language).set({ isEnabled: true });
+    }
   });
 
   it("refuses a read-only resolved access even when called directly", async () => {

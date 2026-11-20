@@ -7,6 +7,7 @@ import { MerchantProducts } from "@/components/merchant/merchant-products";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
 import { listCatalogProductsForStore } from "@/lib/data/catalog";
+import { resolveMerchantProductName } from "@/lib/merchant/product-display";
 
 export const metadata: Metadata = {
   title: "منتجات المتجر",
@@ -15,10 +16,6 @@ export const metadata: Metadata = {
 };
 
 export const instant = false;
-
-function productName(translations: Record<string, { name: string }>, slug: string) {
-  return translations.ar?.name ?? translations.en?.name ?? slug;
-}
 
 export default async function MerchantProductsPage() {
   await connection();
@@ -34,9 +31,10 @@ export default async function MerchantProductsPage() {
       readOnly={access.readOnly}
       products={products.map((product) => ({
         id: product.id,
-        name: productName(product.translations, product.slug),
+        name: resolveMerchantProductName(product.translations, product.slug),
         price: product.price,
         revision: product.revision,
+        isActive: product.isActive,
       }))}
     />
   );

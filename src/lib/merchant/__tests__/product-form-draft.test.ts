@@ -7,6 +7,7 @@ import {
   productFormDraftKey,
   readLastCategory,
   readProductFormDraft,
+  restoreProductFormDraft,
   writeLastCategory,
   writeProductFormDraft,
   type DraftStorage,
@@ -112,5 +113,84 @@ describe("merchant product form draft", () => {
 
     clearProductFormDraft(storage, key);
     expect(readProductFormDraft(storage, key)).toBeNull();
+  });
+});
+
+describe("merchant product draft restoration", () => {
+  const CATEGORY_IDS = [{ id: CATEGORY_ID }];
+
+  it("applies once and does not overwrite after a replay", () => {
+    const input = {
+      draft: draft({ useNewCategory: false, categoryId: CATEGORY_ID }),
+      lastCategoryId: null,
+      categories: CATEGORY_IDS,
+      alreadyRestored: false,
+      edited: false,
+    };
+
+    expect(restoreProductFormDraft(input)).toMatchObject({
+      name: "منتج النور",
+      categoryId: CATEGORY_ID,
+      useNewCategory: false,
+    });
+    expect(
+      restoreProductFormDraft({ ...input, alreadyRestored: true }),
+    ).toBeNull();
+    expect(restoreProductFormDraft({ ...input, edited: true })).toBeNull();
+  });
+
+  it("allows a cancelled deferred restore to run on replay", () => {
+    const input = {
+      draft: draft(),
+      lastCategoryId: null,
+      categories: CATEGORY_IDS,
+      alreadyRestored: false,
+      edited: false,
+    };
+
+    expect(
+      restoreProductFormDraft({ ...input, cancelled: true }),
+    ).toBeNull();
+    expect(restoreProductFormDraft(input)).toMatchObject({
+      name: "منتج النور",
+      useNewCategory: true,
+    });
+  });
+
+  it("falls back to a valid last or first category without an empty draft", () => {
+    expect(
+      restoreProductFormDraft({
+        draft: null,
+        lastCategoryId: CATEGORY_ID,
+        categories: CATEGORY_IDS,
+        alreadyRestored: false,
+        edited: false,
+      }),
+    ).toMatchObject({ categoryId: CATEGORY_ID, useNewCategory: false });
+
+    expect(
+      restoreProductFormDraft({
+        draft: null,
+        lastCategoryId: "44444444-4444-4444-8444-444444444444",
+        categories: CATEGORY_IDS,
+        alreadyRestored: false,
+        edited: false,
+      }),
+    ).toMatchObject({ categoryId: CATEGORY_ID, useNewCategory: false });
+  });
+
+  it("does not keep a stale draft category that left the current list", () => {
+    expect(
+      restoreProductFormDraft({
+        draft: draft({
+          useNewCategory: false,
+          categoryId: "44444444-4444-4444-8444-444444444444",
+        }),
+        lastCategoryId: null,
+        categories: [],
+        alreadyRestored: false,
+        edited: false,
+      }),
+    ).toMatchObject({ categoryId: "", useNewCategory: true });
   });
 });

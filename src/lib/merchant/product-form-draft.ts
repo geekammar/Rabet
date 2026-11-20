@@ -137,3 +137,53 @@ export function writeLastCategory(
     storage.setItem(key, categoryId);
   } catch {}
 }
+
+export type ProductFormDraftRestoreInput = {
+  draft: ProductFormDraft | null;
+  lastCategoryId: string | null;
+  categories: ReadonlyArray<{ id: string }>;
+  alreadyRestored: boolean;
+  edited: boolean;
+  cancelled?: boolean;
+};
+
+export function restoreProductFormDraft(
+  input: ProductFormDraftRestoreInput,
+): ProductFormDraft | null {
+  if (input.cancelled || input.alreadyRestored || input.edited) return null;
+
+  const categoryIds = new Set(input.categories.map((entry) => entry.id));
+  const firstCategoryId = input.categories[0]?.id ?? "";
+  const lastCategoryId =
+    input.lastCategoryId && categoryIds.has(input.lastCategoryId)
+      ? input.lastCategoryId
+      : null;
+
+  if (!input.draft) {
+    const categoryId = lastCategoryId ?? firstCategoryId;
+
+    return {
+      name: "",
+      price: "",
+      categoryId,
+      newCategoryName: "",
+      useNewCategory: categoryId.length === 0,
+    };
+  }
+
+  if (input.draft.useNewCategory) {
+    return { ...input.draft, categoryId: "", useNewCategory: true };
+  }
+
+  const draftCategoryId =
+    input.draft.categoryId && categoryIds.has(input.draft.categoryId)
+      ? input.draft.categoryId
+      : null;
+  const categoryId = draftCategoryId ?? lastCategoryId ?? firstCategoryId;
+
+  return {
+    ...input.draft,
+    categoryId,
+    useNewCategory: categoryId.length === 0,
+  };
+}

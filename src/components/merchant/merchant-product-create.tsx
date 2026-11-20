@@ -19,8 +19,10 @@ import {
   productFormDraftKey,
   readLastCategory,
   readProductFormDraft,
+  restoreProductFormDraft,
   writeLastCategory,
   writeProductFormDraft,
+  type DraftStorage,
   type ProductFormDraft,
 } from "@/lib/merchant/product-form-draft";
 
@@ -57,6 +59,7 @@ type Copy = {
   denied: string;
   conflict: string;
   unavailable: string;
+  languageUnavailable: string;
   suspendedTitle: string;
   suspendedBody: string;
 };
@@ -90,6 +93,8 @@ const COPY: Record<MerchantLocale, Copy> = {
     denied: "لم تعد تملك صلاحية إضافة منتج لهذا المتجر.",
     conflict: "تعذر إنشاء المنتج بسبب تعارض في البيانات. حاول مرة أخرى.",
     unavailable: "تعذر حفظ المنتج الآن. حاول مرة أخرى بعد قليل.",
+    languageUnavailable:
+      "لا توجد لغة مفعّلة جاهزة لحفظ اسم المنتج. اطلب من مسؤول المنصة تفعيل لغة الكتالوج.",
     suspendedTitle: "المتجر موقوف مؤقتًا.",
     suspendedBody:
       "يمكنك الاطلاع على المنتجات فقط. الإضافة غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
@@ -122,6 +127,8 @@ const COPY: Record<MerchantLocale, Copy> = {
     denied: "You can no longer add products to this store.",
     conflict: "The product could not be created because of a data conflict. Try again.",
     unavailable: "The product could not be saved right now. Try again shortly.",
+    languageUnavailable:
+      "No enabled catalog language is ready for the product name. Ask a platform administrator to enable one.",
     suspendedTitle: "This store is suspended.",
     suspendedBody:
       "You can review products only. Adding is unavailable until a platform administrator reactivates the store.",
@@ -140,6 +147,7 @@ type SaveError =
   | "CATEGORY_NOT_FOUND"
   | "DENIED"
   | "CONFLICT"
+  | "LANGUAGE_UNAVAILABLE"
   | "UNAVAILABLE";
 
 function validCategoryId(
@@ -147,6 +155,14 @@ function validCategoryId(
   categories: MerchantProductCategoryOption[],
 ): string | null {
   return categories.some((entry) => entry.id === candidate) ? candidate : null;
+}
+
+function draftStorage(): DraftStorage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function errorMessage(error: SaveError, copy: Copy): string {
@@ -157,6 +173,8 @@ function errorMessage(error: SaveError, copy: Copy): string {
       return copy.denied;
     case "CONFLICT":
       return copy.conflict;
+    case "LANGUAGE_UNAVAILABLE":
+      return copy.languageUnavailable;
     case "UNAVAILABLE":
       return copy.unavailable;
     case "INVALID_INPUT":
@@ -169,12 +187,14 @@ export function MerchantProductCreate({
   storeId,
   userId,
   readOnly,
+  languageUnavailable,
   categories,
 }: {
   storeName: string;
   storeId: string;
   userId: string;
   readOnly: boolean;
+  languageUnavailable: boolean;
   categories: MerchantProductCategoryOption[];
 }) {
   const router = useRouter();
@@ -184,10 +204,12 @@ export function MerchantProductCreate({
   const [categoryId, setCategoryId] = useState("");
   const [newCategoryName, setNewCategoryName] = useState("");
   const [hydrated, setHydrated] = useState(false);
+  const [editVersion, setEditVersion] = useState(0);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [saveError, setSaveError] = useState<SaveError | null>(null);
   const [, startTransition] = useTransition();
-  const loadedRef = useRef(false);
+  const restoredRef = useRef(false);
+  const editedRef = useRef(false);
   const submittingRef = useRef(false);
   const completedRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -198,35 +220,31 @@ export function MerchantProductCreate({
   const useNewCategory = categoryId.length === 0;
 
   useEffect(() => {
-    if (loadedRef.current || readOnly) return;
+    if (readOnly) return;
 
-    loadedRef.current = true;
     let cancelled = false;
-
-    const draft = readProductFormDraft(window.localStorage, draftKey);
-    const lastCategory = validCategoryId(
-      readLastCategory(window.localStorage, lastCategoryStorageKey) ?? "",
-      categories,
-    );
+    const storage = draftStorage();
+    const draft = storage ? readProductFormDraft(storage, draftKey) : null;
+    const lastCategoryId = storage
+      ? readLastCategory(storage, lastCategoryStorageKey)
+      : null;
 
     queueMicrotask(() => {
-      if (cancelled) return;
+      const restored = restoreProductFormDraft({
+        draft,
+        lastCategoryId,
+        categories,
+        alreadyRestored: restoredRef.current,
+        edited: editedRef.current,
+        cancelled,
+      });
 
-      if (draft) {
-        const draftCategory = draft.useNewCategory
-          ? ""
-          : validCategoryId(draft.categoryId, categories);
-
-        setName(draft.name);
-        setPrice(draft.price);
-        setNewCategoryName(draft.newCategoryName);
-        setCategoryId(
-          draft.useNewCategory
-            ? ""
-            : draftCategory ?? lastCategory ?? (categories[0]?.id ?? ""),
-        );
-      } else {
-        setCategoryId(lastCategory ?? (categories[0]?.id ?? ""));
+      if (restored) {
+        setName(restored.name);
+        setPrice(restored.price);
+        setNewCategoryName(restored.newCategoryName);
+        setCategoryId(restored.categoryId);
+        restoredRef.current = true;
       }
 
       setHydrated(true);
@@ -238,7 +256,10 @@ export function MerchantProductCreate({
   }, [categories, draftKey, lastCategoryStorageKey, readOnly]);
 
   useEffect(() => {
-    if (!hydrated || readOnly || submitting || completedRef.current) return;
+    if (!hydrated || readOnly || editVersion === 0) return;
+
+    const storage = draftStorage();
+    if (!storage) return;
 
     const draft: ProductFormDraft = {
       name,
@@ -248,18 +269,23 @@ export function MerchantProductCreate({
       useNewCategory,
     };
 
-    writeProductFormDraft(window.localStorage, draftKey, draft);
+    writeProductFormDraft(storage, draftKey, draft);
   }, [
     categoryId,
     draftKey,
+    editVersion,
     hydrated,
     name,
     newCategoryName,
     price,
     readOnly,
-    submitting,
     useNewCategory,
   ]);
+
+  function markEdited() {
+    editedRef.current = true;
+    setEditVersion((version) => version + 1);
+  }
 
   function validate(): FieldErrors {
     const errors: FieldErrors = {};
@@ -291,41 +317,46 @@ export function MerchantProductCreate({
     setSubmitting(true);
 
     startTransition(async () => {
+      let result: Awaited<ReturnType<typeof createMerchantProductDraft>>;
+
       try {
-        const result = await createMerchantProductDraft({
+        result = await createMerchantProductDraft({
           name,
           price,
           categoryId: useNewCategory ? "" : categoryId,
           newCategoryName: useNewCategory ? newCategoryName : "",
         });
-
-        if (!result.ok) {
-          if (result.error === "INVALID_INPUT" && result.fields) {
-            setFieldErrors(result.fields);
-            setSaveError("INVALID_INPUT");
-          } else {
-            setSaveError(result.error);
-          }
-          return;
-        }
-
-        completedRef.current = true;
-        clearProductFormDraft(window.localStorage, draftKey);
-        writeLastCategory(
-          window.localStorage,
-          lastCategoryStorageKey,
-          result.categoryId,
-        );
-        window.sessionStorage.setItem("rabet:merchant-product-created", "1");
-        router.push("/app/products");
       } catch {
+        submittingRef.current = false;
+        setSubmitting(false);
         setSaveError("UNAVAILABLE");
-      } finally {
-        if (!completedRef.current) {
-          submittingRef.current = false;
-          setSubmitting(false);
-        }
+        return;
       }
+
+      if (!result.ok) {
+        submittingRef.current = false;
+        setSubmitting(false);
+
+        if (result.error === "INVALID_INPUT" && result.fields) {
+          setFieldErrors(result.fields);
+          setSaveError("INVALID_INPUT");
+        } else {
+          setSaveError(result.error);
+        }
+        return;
+      }
+
+      completedRef.current = true;
+
+      try {
+        const storage = draftStorage();
+        if (storage) {
+          clearProductFormDraft(storage, draftKey);
+          writeLastCategory(storage, lastCategoryStorageKey, result.categoryId);
+        }
+      } catch {}
+
+      router.push("/app/products#product-created");
     });
   }
 
@@ -383,6 +414,16 @@ export function MerchantProductCreate({
           </>
         ) : (
           <>
+            {languageUnavailable ? (
+              <p
+                role="alert"
+                className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm font-medium text-destructive"
+                data-testid="merchant-product-language-unavailable"
+              >
+                {copy.languageUnavailable}
+              </p>
+            ) : null}
+
             <form
               className="space-y-4 rounded-xl border border-border bg-card p-4 shadow-sm sm:p-5"
               noValidate
@@ -406,6 +447,7 @@ export function MerchantProductCreate({
                     setName(event.target.value);
                     setFieldErrors((current) => ({ ...current, name: false }));
                     setSaveError(null);
+                    markEdited();
                   }}
                   aria-invalid={fieldErrors.name ? "true" : undefined}
                   aria-describedby={fieldErrors.name ? "merchant-product-name-error" : undefined}
@@ -439,6 +481,7 @@ export function MerchantProductCreate({
                     setPrice(event.target.value);
                     setFieldErrors((current) => ({ ...current, price: false }));
                     setSaveError(null);
+                    markEdited();
                   }}
                   aria-invalid={fieldErrors.price ? "true" : undefined}
                   aria-describedby={fieldErrors.price ? "merchant-product-price-error" : undefined}
@@ -466,6 +509,7 @@ export function MerchantProductCreate({
                     setCategoryId(event.target.value);
                     setFieldErrors((current) => ({ ...current, category: false }));
                     setSaveError(null);
+                    markEdited();
                   }}
                   aria-invalid={fieldErrors.category ? "true" : undefined}
                   aria-describedby={fieldErrors.category ? "merchant-product-category-error" : undefined}
@@ -506,6 +550,7 @@ export function MerchantProductCreate({
                       setNewCategoryName(event.target.value);
                       setFieldErrors((current) => ({ ...current, newCategoryName: false }));
                       setSaveError(null);
+                      markEdited();
                     }}
                     aria-invalid={fieldErrors.newCategoryName ? "true" : undefined}
                     aria-describedby={fieldErrors.newCategoryName ? "merchant-product-new-category-error" : undefined}
@@ -537,7 +582,7 @@ export function MerchantProductCreate({
                 <Button
                   type="submit"
                   className="min-h-11 w-full sm:w-auto"
-                  disabled={submitting}
+                  disabled={submitting || languageUnavailable}
                   data-testid="merchant-product-submit"
                 >
                   {submitting ? (

@@ -81,7 +81,7 @@ export async function createMerchantProductDraft(
   const language = await resolveMerchantCatalogLanguage(getDb());
 
   if (!language) {
-    return { ok: false, error: "UNAVAILABLE" };
+    return { ok: false, error: "LANGUAGE_UNAVAILABLE" };
   }
 
   const result = await createMerchantCatalogProduct(
