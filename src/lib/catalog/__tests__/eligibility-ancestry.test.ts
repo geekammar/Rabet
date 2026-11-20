@@ -47,6 +47,19 @@ describe("shared category ancestry predicate", () => {
     expect(isCategoryAncestryActive("c4", (id) => rows.get(id))).toBe(false);
   });
 
+  it("rejects an unresolved scoped parent even when the target is active", () => {
+    const rows = chain(4);
+    rows.set("c3", { ...rows.get("c3")!, parentResolved: false });
+    expect(isCategoryAncestryActive("c4", (id) => rows.get(id))).toBe(false);
+    expect(isCategoryAncestryActive("c3", (id) => rows.get(id))).toBe(false);
+  });
+
+  it("treats a genuine root as resolved by default", () => {
+    const rows = chain(4);
+    expect(rows.get("c1")?.parentResolved).toBeUndefined();
+    expect(isCategoryAncestryActive("c1", (id) => rows.get(id))).toBe(true);
+  });
+
   it("rejects a cycle without looping", () => {
     const rows = chain(3);
     rows.set("c1", { id: "c1", parentId: "c3", isActive: true });

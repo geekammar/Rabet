@@ -7,6 +7,7 @@ import { Loader2 } from "lucide-react";
 
 import { saveMerchantCategoryAvailability } from "@/app/actions/merchant-catalog";
 import { Logo } from "@/components/brand/logo";
+import { isCategoryAncestryActive } from "@/lib/catalog/ancestry";
 import {
   MerchantLanguageToggle,
   type MerchantLocale,
@@ -20,6 +21,8 @@ export type MerchantCategoryItem = {
   revision: string;
   isActive: boolean;
   pathVisible: boolean;
+  parentId: string | null;
+  parentResolved: boolean;
 };
 
 type AvailabilityState = {
@@ -217,6 +220,33 @@ export function MerchantCategories({
   const copy = COPY[locale];
   const saving = isPending || pendingId !== null;
 
+  const availabilityById = new Map(
+    categories.map((category) => [
+      category.id,
+      availabilityViewFor(category, overrides, conflicts),
+    ]),
+  );
+  const categoryById = new Map(
+    categories.map((category) => [category.id, category]),
+  );
+
+  function pathVisibleFor(categoryId: string): boolean {
+    return isCategoryAncestryActive(categoryId, (id) => {
+      const category = categoryById.get(id);
+
+      if (!category) return undefined;
+
+      const availability = availabilityById.get(id);
+
+      return {
+        id: category.id,
+        parentId: category.parentId,
+        isActive: availability?.isActive ?? category.isActive,
+        parentResolved: category.parentResolved,
+      };
+    });
+  }
+
   function saveAvailability(
     category: MerchantCategoryItem,
     desiredIsActive: boolean,
@@ -388,6 +418,7 @@ export function MerchantCategories({
                   conflicts,
                 );
                 const rowSaving = pendingId === category.id;
+                const pathVisible = pathVisibleFor(category.id);
                 const enableDisabled =
                   saving ||
                   (!conflict && availability.isActive);
@@ -424,23 +455,21 @@ export function MerchantCategories({
                       </span>
                       <span
                         className={
-                          category.pathVisible
+                          pathVisible
                             ? "text-sm font-medium text-emerald-700 dark:text-emerald-300"
                             : "text-sm font-medium text-amber-800 dark:text-amber-200"
                         }
                         data-testid={`merchant-category-path-${category.id}`}
-                        data-path-visible={
-                          category.pathVisible ? "true" : "false"
-                        }
+                        data-path-visible={pathVisible ? "true" : "false"}
                       >
                         {copy.pathLabel}:{" "}
-                        {category.pathVisible
+                        {pathVisible
                           ? copy.pathAvailable
                           : copy.pathUnavailable}
                       </span>
                     </div>
 
-                    {!category.pathVisible ? (
+                    {!pathVisible ? (
                       <p
                         role="status"
                         className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"

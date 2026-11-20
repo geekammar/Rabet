@@ -938,14 +938,19 @@ describe.skipIf(!shouldRun)("merchant category availability mutation", () => {
     expect(byId.get(foreignChildId)).toMatchObject({
       isActive: true,
       pathVisible: false,
+      parentId: null,
+      parentResolved: false,
     });
     expect(byId.get(deletedAncestorChildId)).toMatchObject({
       isActive: true,
       pathVisible: false,
+      parentId: null,
+      parentResolved: false,
     });
     expect(byId.get(cycleChildId)).toMatchObject({
       isActive: true,
       pathVisible: false,
+      parentResolved: true,
     });
     expect(byId.has(foreignParent.id)).toBe(false);
 
@@ -977,6 +982,8 @@ describe.skipIf(!shouldRun)("merchant category availability mutation", () => {
     expect(savedChild).toMatchObject({
       isActive: false,
       pathVisible: false,
+      parentId: null,
+      parentResolved: false,
     });
     expect(JSON.stringify(afterSave)).not.toContain(foreignParent.id);
     expect(JSON.stringify(afterSave)).not.toContain(foreignParent.slug);

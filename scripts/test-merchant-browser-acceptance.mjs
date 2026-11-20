@@ -2249,6 +2249,188 @@ async function runJourney(cdp, fixture, authSecret) {
     "products warning before the next product step",
   );
 
+  // Delayed-refresh consistency: an available ancestor with an enabled child.
+  // A separate connection stops the ancestor after the page snapshot, then a
+  // stale action returns a conflict while the scoped refresh is held.
+  const repairAncestorId = crypto.randomUUID();
+  const repairChildId = crypto.randomUUID();
+  const repairSuffix = crypto.randomUUID();
+  const [rootOrderRow] = await pgClient`
+    select coalesce(max(sort_order), 0) + 1 as root_order
+    from category
+    where parent_id is null
+  `;
+  await pgClient`
+    insert into category (id, store_id, parent_id, slug, sort_order, is_active)
+    values
+      (
+        ${repairAncestorId},
+        ${empty.storeId},
+        null,
+        ${`repair-ancestor-${repairSuffix}`},
+        ${rootOrderRow.root_order},
+        true
+      ),
+      (
+        ${repairChildId},
+        ${empty.storeId},
+        ${repairAncestorId},
+        ${`repair-child-${repairSuffix}`},
+        0,
+        true
+      )
+  `;
+  await pgClient`
+    insert into category_translation (category_id, language_id, name)
+    select entry.category_id, language.id, entry.name
+    from (
+      values
+        (${repairAncestorId}::uuid, ${"قسم أصل الإصلاح"}::text),
+        (${repairChildId}::uuid, ${"قسم فرع الإصلاح"}::text)
+    ) as entry(category_id, name)
+    join language on language.code = 'ar'
+  `;
+
+  await navigate(`${BASE_URL}/app/categories`);
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="merchant-category-path-${repairAncestorId}"]')?.getAttribute('data-path-visible') === 'true' && document.querySelector('[data-testid="merchant-category-path-${repairChildId}"]')?.getAttribute('data-path-visible') === 'true'`,
+    "available ancestor and enabled child before stale conflict",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-saved-${repairAncestorId}"]`)).includes(
+      "مفعّلة",
+    ) &&
+      (await text(`[data-testid="merchant-category-saved-${repairChildId}"]`)).includes(
+        "مفعّلة",
+      ),
+    "The repair fixture should start with both categories enabled",
+  );
+
+  assert(
+    await evaluate(`(() => {
+      window.__categoryRefreshGate = { hold: false, held: false, done: false, release: null };
+      const originalFetch = window.fetch;
+      window.fetch = function (...args) {
+        const input = args[0];
+        const init = args[1];
+        const url =
+          typeof input === "string" ? input : (input && input.url) || String(input);
+        const method =
+          (init && init.method) || (input && input.method) || "GET";
+        if (
+          window.__categoryRefreshGate.hold &&
+          String(method).toUpperCase() === "GET" &&
+          url.includes("/app/categories")
+        ) {
+          window.__categoryRefreshGate.hold = false;
+          window.__categoryRefreshGate.held = true;
+          return new Promise((resolve, reject) => {
+            window.__categoryRefreshGate.release = () =>
+              originalFetch
+                .apply(this, args)
+                .then((response) => {
+                  window.__categoryRefreshGate.done = true;
+                  resolve(response);
+                }, reject);
+          });
+        }
+        return originalFetch.apply(this, args);
+      };
+      return true;
+    })()`),
+    "Could not install the delayed category refresh gate",
+  );
+
+  await pgClient`
+    update category set is_active = false where id = ${repairAncestorId}
+  `;
+  await evaluate("window.__categoryRefreshGate.hold = true");
+  await click(`[data-testid="merchant-category-disable-${repairAncestorId}"]`);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-category-conflict-${repairAncestorId}"]')) && window.__categoryRefreshGate?.held === true`,
+    "stale ancestor conflict before the scoped refresh is released",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-saved-${repairAncestorId}"]`)).includes(
+      "متوقفة",
+    ),
+    "The confirmed-off ancestor should keep the saved-off label during the delay",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-category-path-${repairAncestorId}"]')?.getAttribute('data-path-visible')`,
+    )) === "false",
+    "A confirmed-off ancestor must not show an available path during the delay",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-saved-${repairChildId}"]`)).includes(
+      "مفعّلة",
+    ),
+    "The enabled child should keep its saved-on label during the delay",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-category-path-${repairChildId}"]')?.getAttribute('data-path-visible')`,
+    )) === "false",
+    "The enabled child must not claim a confirmed path while its ancestor is confirmed off",
+  );
+  assert(
+    (await text(`[data-testid="merchant-category-path-notice-${repairChildId}"]`)).includes(
+      "يبقى هذا الفرع مخفيًا",
+    ),
+    "The child should explain that its branch remains hidden during the delay",
+  );
+  await expectNoHorizontalScroll("delayed category conflict");
+
+  await evaluate("window.__categoryRefreshGate.release()");
+  await waitFor(
+    cdp,
+    `window.__categoryRefreshGate?.done === true && document.querySelector('[data-testid="merchant-category-enable-${repairAncestorId}"]')?.disabled === false && document.querySelector('[data-testid="merchant-category-path-${repairAncestorId}"]')?.getAttribute('data-path-visible') === 'false' && document.querySelector('[data-testid="merchant-category-path-${repairChildId}"]')?.getAttribute('data-path-visible') === 'false' && document.querySelector('[data-testid="merchant-category-saved-${repairAncestorId}"]')?.textContent.includes("متوقفة")`,
+    "authoritative unavailable path after releasing the refresh",
+  );
+  assert(
+    (await pgClient`
+      select is_active from category where id = ${repairAncestorId}
+    `)[0].is_active === false,
+    "The released refresh should agree with the persisted stopped ancestor",
+  );
+  assert(
+    (await pgClient`
+      select is_active from category where id = ${repairChildId}
+    `)[0].is_active === true,
+    "Stopping the ancestor must not change the child's own availability",
+  );
+
+  await click(`[data-testid="merchant-category-enable-${repairAncestorId}"]`);
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="merchant-category-saved-${repairAncestorId}"]')?.textContent.includes("مفعّلة") && document.querySelector('[data-testid="merchant-category-path-${repairAncestorId}"]')?.getAttribute('data-path-visible') === 'true' && document.querySelector('[data-testid="merchant-category-path-${repairChildId}"]')?.getAttribute('data-path-visible') === 'true'`,
+    "permitted ancestor and child path after explicit re-enable",
+  );
+  assert(
+    (await pgClient`
+      select is_active from product where id = ${createdProductId}
+    `)[0].is_active === true,
+    "The repair flow must not change the existing product decision",
+  );
+  assert(
+    (await pgClient`
+      select c.is_active as child_active, root.is_active as root_active
+      from category c
+      join category root on root.id = ${repairAncestorId}
+      where c.id = ${repairChildId}
+    `)[0].child_active === true,
+    "The repair flow must not change the child category decision",
+  );
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)})) && Boolean(document.querySelector('[data-testid="merchant-product-available-${createdProductId}"]'))`,
+    "products warning preserved after repair category scenario",
+  );
+
   await click(emptyAvailabilityDisable);
   await waitFor(
     cdp,
@@ -2560,7 +2742,7 @@ async function waitFor(cdp, expression, label, timeoutMs = 12000) {
   let context = "";
   try {
     context = await cdp.evaluate(
-      "JSON.stringify({ path: window.location.pathname, text: document.body.innerText.slice(0, 500), rows: Array.from(document.querySelectorAll('[data-testid=\"merchant-product-row\"]')).map((row) => ({ id: row.getAttribute('data-product-id'), text: row.innerText.slice(0, 120) })) })",
+      "JSON.stringify({ path: window.location.pathname, text: document.body.innerText.slice(0, 500), rows: Array.from(document.querySelectorAll('[data-testid=\"merchant-product-row\"]')).map((row) => ({ id: row.getAttribute('data-product-id'), text: row.innerText.slice(0, 120) })), categories: Array.from(document.querySelectorAll('[data-testid=\"merchant-category-row\"]')).map((row) => ({ id: row.getAttribute('data-category-id'), saved: row.querySelector('[data-testid^=\"merchant-category-saved-\"]')?.textContent, path: row.querySelector('[data-testid^=\"merchant-category-path-\"]')?.getAttribute('data-path-visible'), conflict: Boolean(row.querySelector('[data-testid^=\"merchant-category-conflict-\"]')), text: row.innerText.slice(0, 160) })) })",
     );
   } catch {}
   fail(`Timed out waiting for ${label}${context ? ` — page: ${context}` : ""}`);

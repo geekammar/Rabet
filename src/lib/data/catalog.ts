@@ -65,6 +65,12 @@ export interface CatalogCategoryRecordWithRevision
   revision: string;
   /** Whether the category and every scoped ancestor are available. */
   pathVisible: boolean;
+  /**
+   * False when the stored parent is not part of the scoped rows (missing,
+   * soft-deleted or foreign). The parent id itself is not returned then, so a
+   * genuine root stays distinguishable from an unresolved parent.
+   */
+  parentResolved: boolean;
 }
 
 export interface CatalogProductRecord {
@@ -326,6 +332,7 @@ export async function listCatalogCategoriesForStore(
           updatedAt: row.updatedAt,
           revision: row.revision,
           pathVisible: false,
+          parentResolved: true,
           translations: {},
         };
         categories.set(row.id, record);
@@ -362,12 +369,12 @@ export async function listCatalogCategoriesForStore(
     }
 
     // A parent that is missing, soft-deleted or owned by another store is not
-    // part of the scoped result. Do not echo its id: the category keeps its
-    // own identity, but its unresolvable parent becomes indistinguishable from
-    // a root in the returned record.
+    // part of the scoped result. Do not echo its id, but keep the distinction
+    // between a genuine root and an unresolved parent for path derivation.
     for (const record of categories.values()) {
       if (record.parentId !== null && !categories.has(record.parentId)) {
         record.parentId = null;
+        record.parentResolved = false;
       }
     }
 

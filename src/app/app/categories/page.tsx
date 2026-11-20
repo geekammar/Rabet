@@ -41,6 +41,8 @@ export default async function MerchantCategoriesPage() {
         revision: category.revision,
         isActive: category.isActive,
         pathVisible: category.pathVisible,
+        parentId: category.parentId,
+        parentResolved: category.parentResolved,
       }))}
     />
   );
