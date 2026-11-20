@@ -250,6 +250,84 @@ export async function listCatalogCategories(
   }
 }
 
+export async function listCatalogCategoriesForStore(
+  db: Database,
+  scope: StoreScope,
+): Promise<CatalogCategoryRecord[]> {
+  assertStoreScope(scope);
+
+  try {
+    const rows = await db
+      .select({
+        id: category.id,
+        parentId: category.parentId,
+        slug: category.slug,
+        sortOrder: category.sortOrder,
+        isActive: category.isActive,
+        createdAt: category.createdAt,
+        updatedAt: category.updatedAt,
+        translationId: categoryTranslation.id,
+        translationLanguageId: categoryTranslation.languageId,
+        translationLanguageCode: language.code,
+        translationName: categoryTranslation.name,
+        translationDescription: categoryTranslation.description,
+      })
+      .from(category)
+      .leftJoin(
+        categoryTranslation,
+        eq(categoryTranslation.categoryId, category.id),
+      )
+      .leftJoin(language, eq(categoryTranslation.languageId, language.id))
+      .where(
+        and(eq(category.storeId, scope.storeId), isNull(category.deletedAt)),
+      )
+      .orderBy(
+        category.sortOrder,
+        category.createdAt,
+        category.id,
+        categoryTranslation.languageId,
+      );
+
+    const categories = new Map<string, CatalogCategoryRecord>();
+
+    for (const row of rows) {
+      let record = categories.get(row.id);
+
+      if (record === undefined) {
+        record = {
+          id: row.id,
+          parentId: row.parentId,
+          slug: row.slug,
+          sortOrder: row.sortOrder,
+          isActive: row.isActive,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+          translations: {},
+        };
+        categories.set(row.id, record);
+      }
+
+      if (
+        row.translationId !== null &&
+        row.translationLanguageId !== null &&
+        row.translationLanguageCode !== null &&
+        row.translationName !== null
+      ) {
+        record.translations[row.translationLanguageCode] = {
+          id: row.translationId,
+          languageId: row.translationLanguageId,
+          name: row.translationName,
+          description: row.translationDescription,
+        };
+      }
+    }
+
+    return [...categories.values()];
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
 /**
  * Lists all non-deleted products (optionally scoped to a category) with their saved translations.
  */
@@ -606,9 +684,9 @@ export type MerchantPriceWriteIdentity = {
  * The write-time merchant eligibility predicate.
  *
  * This mirrors `resolveMerchantEligibility` inside the same SQL statement as
- * the price update, so a membership revocation, session-version change or
- * store suspension committed before this statement starts can never be
- * bypassed by an access result resolved earlier in the request:
+ * the guarded merchant write, so a membership revocation, session-version
+ * change or store suspension committed before this statement starts can never
+ * be bypassed by an access result resolved earlier in the request:
  *
  * - the user is active and has the plain `user` platform role;
  * - `app_user.session_version` still matches the session claim;
@@ -616,11 +694,11 @@ export type MerchantPriceWriteIdentity = {
  * - that membership belongs to the scoped store;
  * - the store is in a writable lifecycle state (`onboarding` or `active`).
  *
- * The `UPDATE` evaluates these predicates itself; there is no separate
+ * The write statement evaluates these predicates itself; there is no separate
  * authorization read that the write could race against.
  */
-function merchantPriceWriteEligibilityWhere(
-  db: Database,
+export function merchantWriteEligibilityWhere(
+  db: Pick<Database, "select">,
   scope: StoreScope,
   identity: MerchantPriceWriteIdentity,
 ) {
@@ -704,7 +782,7 @@ export async function updateCatalogProductPriceForMerchant(
       .where(
         and(
           storeOwnedProductWhere(db, scope, productId),
-          merchantPriceWriteEligibilityWhere(db, scope, identity),
+          merchantWriteEligibilityWhere(db, scope, identity),
           eq(productRevisionSql(), expectedRevision),
         ),
       )
@@ -745,7 +823,7 @@ export async function readCatalogProductPriceForMerchant(
       .where(
         and(
           storeOwnedProductWhere(db, scope, productId),
-          merchantPriceWriteEligibilityWhere(db, scope, identity),
+          merchantWriteEligibilityWhere(db, scope, identity),
         ),
       )
       .limit(1);
