@@ -3,12 +3,15 @@ import "server-only";
 import type { Database } from "@/db/client";
 import type { MerchantAccess } from "@/lib/auth/merchant-session";
 import {
+  validateBoolean,
   validatePrice,
   validateProductRevision,
   validateUuid,
 } from "@/lib/catalog/validation";
 import {
+  readCatalogProductAvailabilityForMerchant,
   readCatalogProductPriceForMerchant,
+  updateCatalogProductAvailabilityForMerchant,
   updateCatalogProductPriceForMerchant,
 } from "@/lib/data/catalog";
 import { RabetDataError } from "@/lib/data/errors";
@@ -130,6 +133,105 @@ export async function updateMerchantCatalogProductPrice(
     }
 
     console.error("Merchant product price update failed.");
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+}
+
+export type MerchantProductAvailabilityError =
+  | "UNAVAILABLE"
+  | "DENIED"
+  | "NOT_FOUND"
+  | "INVALID_INPUT"
+  | "INVALID_REVISION"
+  | "CONFLICT";
+
+export type MerchantProductAvailabilityResult =
+  | { ok: true; productId: string; isActive: boolean; revision: string }
+  | {
+      ok: false;
+      error: "CONFLICT";
+      current: { isActive: boolean; revision: string };
+    }
+  | {
+      ok: false;
+      error: Exclude<MerchantProductAvailabilityError, "CONFLICT">;
+    };
+
+export type MerchantProductAvailabilityInput = {
+  productId: unknown;
+  isActive: unknown;
+  revision: unknown;
+};
+
+export async function updateMerchantCatalogProductAvailability(
+  db: Database,
+  access: MerchantAccess,
+  input: MerchantProductAvailabilityInput,
+): Promise<MerchantProductAvailabilityResult> {
+  if (access.readOnly) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const productId = validateUuid(input.productId, "Product");
+
+  if (!productId.success) {
+    return { ok: false, error: "NOT_FOUND" };
+  }
+
+  const isActive = validateBoolean(input.isActive, "Availability");
+
+  if (!isActive.success) {
+    return { ok: false, error: "INVALID_INPUT" };
+  }
+
+  const revision = validateProductRevision(input.revision);
+
+  if (!revision.success) {
+    return { ok: false, error: "INVALID_REVISION" };
+  }
+
+  const identity = {
+    userId: access.userId,
+    sessionVersion: access.sessionVersion,
+  };
+
+  try {
+    const updated = await updateCatalogProductAvailabilityForMerchant(
+      db,
+      access.scope,
+      identity,
+      productId.data,
+      isActive.data,
+      revision.data,
+    );
+
+    if (updated) {
+      return {
+        ok: true,
+        productId: productId.data,
+        isActive: updated.isActive,
+        revision: updated.revision,
+      };
+    }
+
+    const current = await readCatalogProductAvailabilityForMerchant(
+      db,
+      access.scope,
+      identity,
+      productId.data,
+    );
+
+    if (current) {
+      return { ok: false, error: "CONFLICT", current };
+    }
+
+    return { ok: false, error: "NOT_FOUND" };
+  } catch (error) {
+    if (error instanceof RabetDataError && error.code === "INVALID_INPUT") {
+      return { ok: false, error: "INVALID_INPUT" };
+    }
+
+    console.error("Merchant product availability update failed.");
     return { ok: false, error: "UNAVAILABLE" };
   }
 }

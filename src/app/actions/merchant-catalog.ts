@@ -7,7 +7,9 @@ import { getTransactionDb } from "@/db/transaction-client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { getMerchantAccess } from "@/lib/auth/merchant-session";
 import {
+  updateMerchantCatalogProductAvailability,
   updateMerchantCatalogProductPrice,
+  type MerchantProductAvailabilityResult,
   type MerchantProductPriceResult,
 } from "@/lib/merchant/catalog";
 import {
@@ -52,6 +54,41 @@ export async function saveMerchantProductPrice(
     price: submitted.price,
     revision: submitted.revision,
   });
+
+  if (result.ok) {
+    refresh();
+  }
+
+  return result;
+}
+
+export async function saveMerchantProductAvailability(
+  input: unknown,
+): Promise<MerchantProductAvailabilityResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+
+  const result = await updateMerchantCatalogProductAvailability(
+    getDb(),
+    access,
+    {
+      productId: submitted.productId,
+      isActive: submitted.isActive,
+      revision: submitted.revision,
+    },
+  );
 
   if (result.ok) {
     refresh();

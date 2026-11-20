@@ -4,7 +4,10 @@ import Link from "next/link";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { Loader2, Save } from "lucide-react";
 
-import { saveMerchantProductPrice } from "@/app/actions/merchant-catalog";
+import {
+  saveMerchantProductAvailability,
+  saveMerchantProductPrice,
+} from "@/app/actions/merchant-catalog";
 import { Logo } from "@/components/brand/logo";
 import {
   MerchantLanguageToggle,
@@ -20,6 +23,7 @@ export type MerchantProductItem = {
   price: string;
   revision: string;
   isActive: boolean;
+  categoryIsActive: boolean;
 };
 
 type PriceDraft = {
@@ -32,6 +36,24 @@ type PriceConflict = {
   price: string;
   revision: string;
 };
+
+type AvailabilityState = {
+  isActive: boolean;
+  revision: string;
+};
+
+function availabilityViewFor(
+  product: MerchantProductItem,
+  overrides: Record<string, AvailabilityState>,
+): AvailabilityState {
+  const entry = overrides[product.id];
+
+  if (entry && entry.revision >= product.revision) {
+    return entry;
+  }
+
+  return { isActive: product.isActive, revision: product.revision };
+}
 
 function draftViewFor(
   product: MerchantProductItem,
@@ -60,6 +82,13 @@ type PriceError =
   | "DENIED"
   | "NOT_FOUND"
   | "INVALID_PRICE"
+  | "INVALID_REVISION";
+
+type AvailabilityError =
+  | "UNAVAILABLE"
+  | "DENIED"
+  | "NOT_FOUND"
+  | "INVALID_INPUT"
   | "INVALID_REVISION";
 
 type Copy = {
@@ -93,6 +122,18 @@ type Copy = {
   latestPriceLabel: string;
   useLatestPrice: string;
   retryMyPrice: string;
+  availableInCatalog: string;
+  makeAvailable: string;
+  stopAvailability: string;
+  availabilitySaved: string;
+  savingAvailability: string;
+  inactiveCategoryWarning: string;
+  availabilityInvalidInput: string;
+  availabilityConflictTitle: string;
+  availabilityConflictBody: string;
+  latestAvailabilityLabel: string;
+  availableState: string;
+  unavailableState: string;
 };
 
 const COPY: Record<MerchantLocale, Copy> = {
@@ -129,6 +170,20 @@ const COPY: Record<MerchantLocale, Copy> = {
     latestPriceLabel: "أحدث سعر محفوظ",
     useLatestPrice: "استخدام أحدث سعر",
     retryMyPrice: "إعادة المحاولة بسعري",
+    availableInCatalog: "متاح في الكتالوج",
+    makeAvailable: "إتاحة المنتج",
+    stopAvailability: "إيقاف الإتاحة",
+    availabilitySaved: "تم حفظ حالة الإتاحة.",
+    savingAvailability: "جارٍ حفظ الإتاحة…",
+    inactiveCategoryWarning:
+      "القسم غير متاح حاليًا، لذلك يبقى المنتج مخفيًا عن العملاء حتى يصبح القسم متاحًا.",
+    availabilityInvalidInput: "تعذر قراءة حالة الإتاحة. أعد المحاولة.",
+    availabilityConflictTitle: "حفظ جهاز آخر تغييرًا أحدث.",
+    availabilityConflictBody:
+      "لم تُحفظ حالة الإتاحة حتى لا تستبدل التغيير الأحدث. راجع الحالة الأخيرة ثم اختر إتاحة المنتج أو إيقاف الإتاحة من جديد.",
+    latestAvailabilityLabel: "أحدث حالة محفوظة",
+    availableState: "متاح",
+    unavailableState: "غير متاح",
   },
   en: {
     dir: "ltr",
@@ -163,6 +218,20 @@ const COPY: Record<MerchantLocale, Copy> = {
     latestPriceLabel: "Latest saved price",
     useLatestPrice: "Use latest price",
     retryMyPrice: "Retry my price",
+    availableInCatalog: "Available in the catalog",
+    makeAvailable: "Make product available",
+    stopAvailability: "Stop availability",
+    availabilitySaved: "Availability saved.",
+    savingAvailability: "Saving availability…",
+    inactiveCategoryWarning:
+      "This category is currently unavailable, so the product stays hidden from customers until the category becomes available.",
+    availabilityInvalidInput: "The availability state could not be read. Try again.",
+    availabilityConflictTitle: "Another device saved a newer change.",
+    availabilityConflictBody:
+      "Your availability change was not saved so it could not replace the newer change. Review the latest state, then choose make product available or stop availability again.",
+    latestAvailabilityLabel: "Latest saved state",
+    availableState: "Available",
+    unavailableState: "Unavailable",
   },
 };
 
@@ -170,6 +239,21 @@ function errorMessage(error: PriceError, copy: Copy): string {
   switch (error) {
     case "INVALID_PRICE":
       return copy.invalidPrice;
+    case "INVALID_REVISION":
+      return copy.invalidRevision;
+    case "NOT_FOUND":
+      return copy.notFound;
+    case "DENIED":
+      return copy.denied;
+    case "UNAVAILABLE":
+      return copy.unavailable;
+  }
+}
+
+function availabilityErrorMessage(error: AvailabilityError, copy: Copy): string {
+  switch (error) {
+    case "INVALID_INPUT":
+      return copy.availabilityInvalidInput;
     case "INVALID_REVISION":
       return copy.invalidRevision;
     case "NOT_FOUND":
@@ -199,13 +283,29 @@ export function MerchantProducts({
     Record<string, PriceConflict | undefined>
   >({});
   const [savedId, setSavedId] = useState<string | null>(null);
+  const [availabilityOverrides, setAvailabilityOverrides] = useState<
+    Record<string, AvailabilityState>
+  >({});
+  const [availabilityErrors, setAvailabilityErrors] = useState<
+    Record<string, AvailabilityError | undefined>
+  >({});
+  const [availabilityConflicts, setAvailabilityConflicts] = useState<
+    Record<string, AvailabilityState | undefined>
+  >({});
+  const [availabilitySavedId, setAvailabilitySavedId] = useState<string | null>(
+    null,
+  );
   const [createdNotice, setCreatedNotice] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const [availabilityPendingId, setAvailabilityPendingId] = useState<
+    string | null
+  >(null);
   const pendingRef = useRef<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const copy = COPY[locale];
-  const saving = isPending || pendingId !== null;
+  const saving =
+    isPending || pendingId !== null || availabilityPendingId !== null;
 
   useEffect(() => {
     let created = false;
@@ -284,6 +384,67 @@ export function MerchantProducts({
       } finally {
         pendingRef.current = null;
         setPendingId(null);
+      }
+    });
+  }
+
+  function saveAvailability(
+    product: MerchantProductItem,
+    desiredIsActive: boolean,
+    expectedRevision: string,
+  ) {
+    if (readOnly || pendingRef.current !== null) return;
+
+    const productId = product.id;
+    pendingRef.current = productId;
+
+    setAvailabilityErrors((current) => ({
+      ...current,
+      [productId]: undefined,
+    }));
+    setAvailabilityConflicts((current) => ({
+      ...current,
+      [productId]: undefined,
+    }));
+    setAvailabilitySavedId(null);
+    setAvailabilityPendingId(productId);
+
+    startTransition(async () => {
+      try {
+        const result = await saveMerchantProductAvailability({
+          productId,
+          isActive: desiredIsActive,
+          revision: expectedRevision,
+        });
+
+        if (result.ok) {
+          setAvailabilityOverrides((current) => ({
+            ...current,
+            [result.productId]: {
+              isActive: result.isActive,
+              revision: result.revision,
+            },
+          }));
+          setAvailabilitySavedId(result.productId);
+        } else if (result.error === "CONFLICT") {
+          setAvailabilityConflicts((current) => ({
+            ...current,
+            [productId]: result.current,
+          }));
+        } else {
+          setAvailabilityErrors((current) => ({
+            ...current,
+            [productId]: result.error,
+          }));
+        }
+      } catch {
+        setAvailabilityErrors((current) => ({
+          ...current,
+          [productId]: "UNAVAILABLE",
+        }));
+      } finally {
+        pendingRef.current = null;
+        setAvailabilityPendingId(null);
       }
     });
   }
@@ -428,8 +589,25 @@ export function MerchantProducts({
                 const errorId = `merchant-price-error-${product.id}`;
                 const error = errors[product.id];
                 const conflict = conflicts[product.id];
-                const rowSaving = pendingId === product.id;
+                const availabilityError = availabilityErrors[product.id];
+                const availabilityConflict = availabilityConflicts[product.id];
+                const baseAvailability = availabilityViewFor(
+                  product,
+                  availabilityOverrides,
+                );
+                const availability =
+                  availabilityConflict ?? baseAvailability;
+                const rowSavingPrice = pendingId === product.id;
+                const rowSavingAvailability =
+                  availabilityPendingId === product.id;
+                const rowSaving = rowSavingPrice || rowSavingAvailability;
                 const draft = draftViewFor(product, drafts);
+                const enableDisabled =
+                  saving ||
+                  (!availabilityConflict && availability.isActive);
+                const disableDisabled =
+                  saving ||
+                  (!availabilityConflict && !availability.isActive);
 
                 return (
                   <li
@@ -445,7 +623,14 @@ export function MerchantProducts({
                       >
                         {product.name}
                       </h3>
-                      {product.isActive ? null : (
+                      {availability.isActive ? (
+                        <span
+                          className="text-sm font-medium text-emerald-700 dark:text-emerald-300"
+                          data-testid={`merchant-product-available-${product.id}`}
+                        >
+                          {copy.availableInCatalog}
+                        </span>
+                      ) : (
                         <Badge
                           variant="outline"
                           data-testid={`merchant-product-status-${product.id}`}
@@ -455,6 +640,16 @@ export function MerchantProducts({
                         </Badge>
                       )}
                     </div>
+
+                    {product.categoryIsActive ? null : (
+                      <p
+                        role="status"
+                        className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"
+                        data-testid={`merchant-product-category-inactive-${product.id}`}
+                      >
+                        {copy.inactiveCategoryWarning}
+                      </p>
+                    )}
 
                     {readOnly ? (
                       <div className="mt-2 flex flex-wrap items-baseline gap-2 text-sm">
@@ -532,7 +727,7 @@ export function MerchantProducts({
                             disabled={saving}
                             data-testid={`merchant-price-save-${product.id}`}
                           >
-                            {rowSaving ? (
+                            {rowSavingPrice ? (
                               <>
                                 <Loader2
                                   className="size-4 animate-spin"
@@ -613,6 +808,111 @@ export function MerchantProducts({
                         {copy.saved}
                       </p>
                     ) : null}
+
+                    {readOnly ? null : (
+                      <div className="mt-3 space-y-2 border-t border-border pt-3">
+                        <div className="flex flex-col gap-2 sm:flex-row">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="min-h-11 w-full sm:w-auto"
+                            disabled={enableDisabled}
+                            aria-busy={rowSavingAvailability}
+                            onClick={() =>
+                              saveAvailability(
+                                product,
+                                true,
+                                availability.revision,
+                              )
+                            }
+                            data-testid={`merchant-availability-enable-${product.id}`}
+                          >
+                            {rowSavingAvailability && !availability.isActive ? (
+                              <>
+                                <Loader2
+                                  className="size-4 animate-spin"
+                                  aria-hidden="true"
+                                />
+                                {copy.savingAvailability}
+                              </>
+                            ) : (
+                              copy.makeAvailable
+                            )}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="min-h-11 w-full sm:w-auto"
+                            disabled={disableDisabled}
+                            aria-busy={rowSavingAvailability}
+                            onClick={() =>
+                              saveAvailability(
+                                product,
+                                false,
+                                availability.revision,
+                              )
+                            }
+                            data-testid={`merchant-availability-disable-${product.id}`}
+                          >
+                            {rowSavingAvailability && availability.isActive ? (
+                              <>
+                                <Loader2
+                                  className="size-4 animate-spin"
+                                  aria-hidden="true"
+                                />
+                                {copy.savingAvailability}
+                              </>
+                            ) : (
+                              copy.stopAvailability
+                            )}
+                          </Button>
+                        </div>
+
+                        {availabilityError ? (
+                          <p
+                            role="alert"
+                            className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-medium text-destructive"
+                            data-testid={`merchant-availability-error-${product.id}`}
+                          >
+                            {availabilityErrorMessage(availabilityError, copy)}
+                          </p>
+                        ) : null}
+
+                        {availabilityConflict ? (
+                          <div
+                            role="alert"
+                            className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"
+                            data-testid={`merchant-availability-conflict-${product.id}`}
+                          >
+                            <p className="font-semibold">
+                              {copy.availabilityConflictTitle}
+                            </p>
+                            <p>{copy.availabilityConflictBody}</p>
+                            <p className="flex flex-wrap items-baseline gap-2">
+                              <span>{copy.latestAvailabilityLabel}:</span>
+                              <span
+                                className="font-semibold"
+                                data-testid={`merchant-availability-conflict-latest-${product.id}`}
+                              >
+                                {availabilityConflict.isActive
+                                  ? copy.availableState
+                                  : copy.unavailableState}
+                              </span>
+                            </p>
+                          </div>
+                        ) : null}
+
+                        {availabilitySavedId === product.id ? (
+                          <p
+                            role="status"
+                            className="text-sm font-medium text-emerald-700 dark:text-emerald-300"
+                            data-testid={`merchant-availability-saved-${product.id}`}
+                          >
+                            {copy.availabilitySaved}
+                          </p>
+                        ) : null}
+                      </div>
+                    )}
                   </li>
                 );
               })}
