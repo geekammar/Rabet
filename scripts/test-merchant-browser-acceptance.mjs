@@ -256,10 +256,10 @@ async function main() {
       `    if (!pg) pg = postgres(process.env.TEST_REAL_PG_URL);\n` +
       `    const { query, params } = JSON.parse(init.body);\n` +
       `    try {\n` +
-      `      const rows = await pg.unsafe(query, params || []);\n` +
+      `      const rows = await pg.unsafe(query, params || []).values();\n` +
       `      const cols = rows.columns || [];\n` +
       `      const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
-      `      const rowArrays = rows.map((r) => cols.map((c) => formatVal(r[c.name])));\n` +
+      `      const rowArrays = rows.map((r) => r.map((value) => formatVal(value)));\n` +
       `      return new Response(JSON.stringify({ rows: rowArrays, fields }), {\n` +
       `        status: 200, headers: { "content-type": "application/json" },\n` +
       `      });\n` +
@@ -282,11 +282,21 @@ async function main() {
   });
   const authSecret = crypto.randomBytes(32).toString("base64");
 
+  // The application client is the Neon HTTP driver. A `localhost` host keeps
+  // its request URL parseable and lets the preload route every `/sql` call to
+  // the disposable PostgreSQL database. The transaction client uses the same
+  // URL and reaches the same loopback instance over TCP.
+  const appDatabaseUrl = (() => {
+    const parsed = new URL(pgUrl);
+    if (parsed.hostname === "127.0.0.1") parsed.hostname = "localhost";
+    return parsed.toString();
+  })();
+
   const envFile = path.join(ownedTempDir, "test.env");
   writeFileSync(
     envFile,
     [
-      `export DATABASE_URL='${pgUrl}'`,
+      `export DATABASE_URL='${appDatabaseUrl}'`,
       `export TEST_REAL_PG_URL='${pgUrl}'`,
       `export AUTH_SECRET='${authSecret}'`,
       `export AUTH_URL='${BASE_URL}'`,
@@ -375,10 +385,81 @@ async function main() {
   });
   log("Chromium connected at a 360 px viewport.");
 
-  await runJourney(cdp, fixture, authSecret);
+  const journey = await runJourney(cdp, fixture, authSecret);
+  await runGateDisabledProbe(envFile, journey.merchantCookie);
 
   log("ALL MERCHANT BROWSER ACCEPTANCE CHECKS PASSED");
   await cleanup();
+}
+
+async function runGateDisabledProbe(envFile, merchantCookie) {
+  const port = 3445;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  log("Checking direct merchant routes with the feature gate disabled...");
+
+  const probeServer = spawn(
+    "bash",
+    [
+      "-c",
+      `source "${envFile}" && export RABET_MERCHANT_APP_ENABLED='false' && export AUTH_URL='${baseUrl}' && PORT=${port} node node_modules/next/dist/bin/next start`,
+    ],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+      env: { ...process.env },
+    },
+  );
+
+  try {
+    let ready = false;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      await sleep(500);
+      try {
+        const response = await fetch(`${baseUrl}/`);
+        if (response.status > 0) {
+          ready = true;
+          break;
+        }
+      } catch {}
+    }
+
+    assert(ready, "Feature-gate-off server failed to start within 20s");
+
+    const cookie = `rabet-merchant.session-token=${merchantCookie}`;
+    const products = await fetch(
+      `${baseUrl}/app/products?gateProbe=${Date.now()}`,
+      {
+        headers: { Cookie: cookie, "Cache-Control": "no-store" },
+      },
+    );
+    const login = await fetch(`${baseUrl}/app/login?gateProbe=${Date.now()}`, {
+      headers: { Cookie: cookie, "Cache-Control": "no-store" },
+    });
+    const productsBody = await products.text();
+    const loginBody = await login.text();
+
+    log(
+      `Feature-gate-off responses: products=${products.status}, login=${login.status}`,
+    );
+
+    assert(
+      products.status === 404 ||
+        !productsBody.includes('data-testid="merchant-products-page"'),
+      `Merchant products must be hidden when the feature gate is off (saw ${products.status})`,
+    );
+    assert(
+      login.status === 404 ||
+        !loginBody.includes('data-testid="merchant-login-page"'),
+      `Merchant login must be hidden when the feature gate is off (saw ${login.status})`,
+    );
+  } finally {
+    if (probeServer.pid) {
+      try {
+        process.kill(-probeServer.pid, "SIGKILL");
+      } catch {}
+    }
+  }
 }
 
 async function runJourney(cdp, fixture, authSecret) {
@@ -603,6 +684,440 @@ async function runJourney(cdp, fixture, authSecret) {
   );
   await expectNoHorizontalScroll("merchant setup (Arabic)");
 
+  assert(
+    await evaluate(
+      "Boolean(document.querySelector('[data-testid=\"merchant-products-link\"]'))",
+    ),
+    "Setup should link to the merchant products page",
+  );
+  await click('[data-testid="merchant-products-link"]');
+  await waitForUrl("/app/products", "merchant A products page");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-store-name\"]')?.textContent === " +
+      JSON.stringify(a.storeName),
+    "store A name on products page",
+  );
+  await waitFor(
+    cdp,
+    "document.querySelectorAll('[data-testid=\"merchant-product-row\"]').length === 3",
+    "merchant A product rows",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-products-page\"]').getAttribute('dir')",
+    )) === "rtl",
+    "Merchant products page should default to RTL Arabic",
+  );
+  await expectNoHorizontalScroll("merchant products (Arabic)");
+
+  const aProductIds = await evaluate(
+    "Array.from(document.querySelectorAll('[data-testid=\"merchant-product-row\"]')).map((row) => row.getAttribute('data-product-id'))",
+  );
+  assert(
+    JSON.stringify(aProductIds) ===
+      JSON.stringify([a.products.one.id, a.products.two.id, a.products.fallback.id]),
+    "Merchant A should see exactly A's products",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-name-${a.products.one.id}"]`)) ===
+      "منتج النور الأول",
+    "The Arabic product name should be preferred",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-name-${a.products.fallback.id}"]`)) ===
+      a.products.fallback.slug,
+    "A product without translations should fall back to its slug",
+  );
+  const aProductsText = await evaluate("document.body.innerText");
+  assert(
+    !aProductsText.includes("منتج القمر الأول") &&
+      !aProductsText.includes("Al Qamar Product One"),
+    "Merchant A must not see B's products",
+  );
+
+  await click('[data-testid="merchant-locale-en"]');
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-page\"]').getAttribute('dir') === 'ltr'",
+    "English merchant products direction",
+  );
+  assert(
+    (await evaluate("document.body.innerText")).includes("Store products"),
+    "Merchant products English copy should be available",
+  );
+  await click('[data-testid="merchant-locale-ar"]');
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-page\"]').getAttribute('dir') === 'rtl'",
+    "Arabic merchant products direction",
+  );
+
+  const aPriceInput = `[data-testid="merchant-price-input-${a.products.one.id}"]`;
+  const aSaveButton = `[data-testid="merchant-price-save-${a.products.one.id}"]`;
+  const aPriceError = `[data-testid="merchant-price-error-${a.products.one.id}"]`;
+  const aPriceSaved = `[data-testid="merchant-price-saved-${a.products.one.id}"]`;
+
+  await setValue(aPriceInput, "123.45");
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceSaved)})) && document.querySelector(${JSON.stringify(aPriceInput)})?.value === "123.45"`,
+    "merchant A exact price save",
+  );
+  assert(
+    (await evaluate(`document.querySelector(${JSON.stringify(aPriceInput)})?.value`)) ===
+      "123.45",
+    "The canonical persisted price should be visible after saving",
+  );
+
+  const savedPriceA = await pgClient`
+    select price::text as price from product where id = ${a.products.one.id}
+  `;
+  assert(savedPriceA[0].price === "123.45", "The exact price should be persisted");
+
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aPriceInput)})?.value === "123.45"`,
+    "merchant A saved price after reload",
+  );
+
+  // Repopulate the previous-success path, then change product one outside the
+  // browser. Saving product two triggers the scoped refresh that must replace
+  // the clean row with the newer server price.
+  await setValue(aPriceInput, "123.46");
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceSaved)})) && document.querySelector(${JSON.stringify(aPriceInput)})?.value === "123.46"`,
+    "merchant A second successful save",
+  );
+
+  await pgClient`
+    update product set price = '77.70' where id = ${a.products.one.id}
+  `;
+
+  const aSecondInput = `[data-testid="merchant-price-input-${a.products.two.id}"]`;
+  const aSecondSave = `[data-testid="merchant-price-save-${a.products.two.id}"]`;
+  const aSecondSaved = `[data-testid="merchant-price-saved-${a.products.two.id}"]`;
+  const aConfirmedPrice = "77.70";
+
+  await setValue(aSecondInput, "15.00");
+  assert(
+    await evaluate(`(() => {
+      window.__merchantPricePosts = 0;
+      const originalFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url =
+          typeof input === "string" ? input : (input && input.url) || String(input);
+        if (url.includes("/app/products") && init && init.method === "POST") {
+          window.__merchantPricePosts += 1;
+        }
+        return originalFetch.apply(this, arguments);
+      };
+      return true;
+    })()`),
+    "Could not instrument the merchant price action fetch calls",
+  );
+
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 700,
+    downloadThroughput: 1024 * 1024,
+    uploadThroughput: 1024 * 1024,
+  });
+
+  assert(
+    await evaluate(`(() => {
+      const input = document.querySelector(${JSON.stringify(aSecondInput)});
+      const form = input && input.closest("form");
+      if (!form) return false;
+      form.requestSubmit();
+      form.requestSubmit();
+      return true;
+    })()`),
+    "Could not submit the controlled pending price save",
+  );
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aSecondInput)})?.readOnly === true && document.querySelector(${JSON.stringify(aSecondSave)})?.disabled === true`,
+    "pending price field protection",
+  );
+
+  await evaluate(
+    `document.querySelector(${JSON.stringify(aSecondInput)})?.closest("form")?.requestSubmit()`,
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSecondSaved)})) && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "15.00" && document.querySelector(${JSON.stringify(aPriceInput)})?.value === ${JSON.stringify(aConfirmedPrice)}`,
+    "single pending save and reconciled server price",
+  );
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 0,
+    downloadThroughput: -1,
+    uploadThroughput: -1,
+  });
+
+  assert(
+    (await evaluate("window.__merchantPricePosts")) === 1,
+    "Rapid repeat submission must start exactly one price write",
+  );
+  assert(
+    (await evaluate(`document.querySelector(${JSON.stringify(aSecondInput)})?.readOnly`)) ===
+      false,
+    "The price field should be editable again after the save completes",
+  );
+
+  const aSecondConflict = `[data-testid="merchant-price-conflict-${a.products.two.id}"]`;
+  const aSecondConflictLatest = `[data-testid="merchant-price-conflict-latest-${a.products.two.id}"]`;
+  const aSecondUseLatest = `[data-testid="merchant-price-use-latest-${a.products.two.id}"]`;
+  const aSecondRetry = `[data-testid="merchant-price-retry-${a.products.two.id}"]`;
+
+  // Another device wins while this merchant's draft is open. The stale draft
+  // must not overwrite it, and the UI must offer explicit conflict choices.
+  await setValue(aSecondInput, "33.30");
+  await pgClient`
+    update product set price = '44.40' where id = ${a.products.two.id}
+  `;
+  await click(aSecondSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSecondConflict)})) && document.querySelector(${JSON.stringify(aSecondConflictLatest)})?.textContent === "44.40" && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "33.30"`,
+    "merchant stale price conflict and preserved draft",
+  );
+  await expectNoHorizontalScroll("merchant stale price conflict");
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.two.id}
+    `)[0].price === "44.40",
+    "The stale draft must not replace the winning price",
+  );
+
+  await evaluate("window.__merchantPricePosts = 0");
+  await click(aSecondUseLatest);
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aSecondInput)})?.value === "44.40" && !document.querySelector(${JSON.stringify(aSecondConflict)})`,
+    "use latest conflict resolution",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.two.id}
+    `)[0].price === "44.40",
+    "Using the latest price must not write a new value",
+  );
+  assert(
+    (await evaluate("window.__merchantPricePosts")) === 0,
+    "Using the latest price must not send a price-write request",
+  );
+
+  const aFallbackInput = `[data-testid="merchant-price-input-${a.products.fallback.id}"]`;
+  const aFallbackSave = `[data-testid="merchant-price-save-${a.products.fallback.id}"]`;
+  const aFallbackConflict = `[data-testid="merchant-price-conflict-${a.products.fallback.id}"]`;
+  const aFallbackConflictLatest = `[data-testid="merchant-price-conflict-latest-${a.products.fallback.id}"]`;
+  const aFallbackUseLatest = `[data-testid="merchant-price-use-latest-${a.products.fallback.id}"]`;
+
+  // Keep a genuine draft in another row while a third device price arrives.
+  // The adopted row is clean server state, so the normal scoped refresh from
+  // saving product one must show the third price and leave the draft alone.
+  await setValue(aFallbackInput, "9.99");
+  await pgClient`
+    update product set price = '47.70' where id = ${a.products.two.id}
+  `;
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceSaved)})) && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "47.70" && document.querySelector(${JSON.stringify(aFallbackInput)})?.value === "9.99"`,
+    "adopted row refresh and unrelated draft preservation",
+  );
+  assert(
+    (await evaluate("window.location.pathname")) === "/app/products",
+    "The adopted-row refresh must not use a hard navigation",
+  );
+
+  // A fresh edit after adoption must use the revision of the displayed price,
+  // not the older page props, and save without a spurious conflict.
+  await pgClient`
+    update product set price = '35.50' where id = ${a.products.fallback.id}
+  `;
+  await click(aFallbackSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aFallbackConflict)})) && document.querySelector(${JSON.stringify(aFallbackConflictLatest)})?.textContent === "35.50" && document.querySelector(${JSON.stringify(aFallbackInput)})?.value === "9.99"`,
+    "fallback conflict before adopted fresh edit",
+  );
+  await click(aFallbackUseLatest);
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aFallbackInput)})?.value === "35.50" && !document.querySelector(${JSON.stringify(aFallbackConflict)})`,
+    "fallback adopted latest price",
+  );
+  await setValue(aFallbackInput, "36.60");
+  await click(aFallbackSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-price-saved-${a.products.fallback.id}"]')) && document.querySelector(${JSON.stringify(aFallbackInput)})?.value === "36.60" && !document.querySelector(${JSON.stringify(aFallbackConflict)})`,
+    "fresh edit after adoption uses displayed revision",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.fallback.id}
+    `)[0].price === "36.60",
+    "Fresh edit after adoption should persist without a spurious conflict",
+  );
+
+  // A second conflict exposes the intentional retry path against the latest
+  // authorized revision and keeps the merchant's typed draft.
+  await setValue(aSecondInput, "55.50");
+  await pgClient`
+    update product set price = '66.60' where id = ${a.products.two.id}
+  `;
+  await click(aSecondSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSecondConflict)})) && document.querySelector(${JSON.stringify(aSecondConflictLatest)})?.textContent === "66.60" && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "55.50"`,
+    "second stale price conflict",
+  );
+  await click(aSecondRetry);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSecondSaved)})) && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "55.50" && !document.querySelector(${JSON.stringify(aSecondConflict)})`,
+    "intentional retry against latest revision",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.two.id}
+    `)[0].price === "55.50",
+    "Explicit retry should persist the merchant's reviewed draft",
+  );
+
+  await setValue(aPriceInput, "10.123");
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceError)}))`,
+    "invalid price field error",
+  );
+  assert(
+    (await evaluate(`document.querySelector(${JSON.stringify(aPriceInput)})?.value`)) ===
+      "10.123",
+    "The invalid draft should remain visible",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.one.id}
+    `)[0].price === aConfirmedPrice,
+    "An invalid price must not write",
+  );
+
+  const aRows = await pgClient`
+    select u.id as user_id, u.session_version, m.id as membership_id
+    from app_user u
+    join store_membership m on m.user_id = u.id
+    where lower(u.email) = ${a.email}
+  `;
+  assert(aRows.length === 1, "Merchant A should have exactly one membership");
+  const aRow = aRows[0];
+
+  await setValue(aPriceInput, "124.00");
+  await pgClient`
+    update store_membership set status = 'revoked' where id = ${aRow.membership_id}
+  `;
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceError)}))`,
+    "revoked membership save denial",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.one.id}
+    `)[0].price === aConfirmedPrice,
+    "A revoked membership save must not write",
+  );
+  await pgClient`
+    update store_membership set status = 'active' where id = ${aRow.membership_id}
+  `;
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSaveButton)}))`,
+    "products page after membership restore",
+  );
+
+  await setValue(aPriceInput, "125.00");
+  await pgClient`
+    update app_user set session_version = session_version + 1 where id = ${aRow.user_id}
+  `;
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceError)}))`,
+    "stale session_version save denial",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.one.id}
+    `)[0].price === aConfirmedPrice,
+    "A stale session_version save must not write",
+  );
+  await pgClient`
+    update app_user set session_version = session_version - 1 where id = ${aRow.user_id}
+  `;
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSaveButton)}))`,
+    "products page after session_version restore",
+  );
+
+  await setValue(aPriceInput, "126.00");
+  await pgClient`
+    update store set status = 'suspended' where id = ${a.storeId}
+  `;
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceError)}))`,
+    "suspended store save denial",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.one.id}
+    `)[0].price === aConfirmedPrice,
+    "A suspended store save must not write",
+  );
+
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-products-suspended-notice\"]'))",
+    "suspended products read-only notice",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelectorAll('[data-testid^=\"merchant-price-save-\"]').length",
+    )) === 0,
+    "A suspended store must not render enabled price controls",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-price-${a.products.one.id}"]`)) ===
+      aConfirmedPrice,
+    "A suspended store should still see its own product list",
+  );
+  await expectNoHorizontalScroll("suspended merchant products");
+  await pgClient`
+    update store set status = 'onboarding' where id = ${a.storeId}
+  `;
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aSaveButton)}))`,
+    "products page after store reactivation",
+  );
+
   await click('[data-testid="merchant-logout"]');
   await waitForUrl("/app/login", "merchant logout");
   await setValue('[data-testid="merchant-login-email"]', a.email);
@@ -678,6 +1193,51 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(
     (await text('[data-testid="merchant-store-name"]')) === b.storeName,
     "A store hint for A must not switch merchant B's store",
+  );
+
+  await navigate(`${BASE_URL}/app/products`);
+  await waitForUrl("/app/products", "merchant B products page");
+  await waitFor(
+    cdp,
+    "document.querySelectorAll('[data-testid=\"merchant-product-row\"]').length === 3",
+    "merchant B product rows",
+  );
+  const bProductIds = await evaluate(
+    "Array.from(document.querySelectorAll('[data-testid=\"merchant-product-row\"]')).map((row) => row.getAttribute('data-product-id'))",
+  );
+  assert(
+    JSON.stringify(bProductIds) ===
+      JSON.stringify([b.products.one.id, b.products.two.id, b.products.fallback.id]),
+    "Merchant B should see exactly B's products",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-name-${b.products.one.id}"]`)) ===
+      "منتج القمر الأول",
+    "Merchant B should see B's Arabic product name",
+  );
+  const bProductsText = await evaluate("document.body.innerText");
+  assert(
+    !bProductsText.includes("منتج النور الأول") &&
+      !bProductsText.includes("Al Noor Product One"),
+    "Merchant B must not see A's products",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-price-input-${b.products.one.id}"]')?.value`,
+    )) === "10.00",
+    "Merchant B should keep B's original price",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${b.products.one.id}
+    `)[0].price === "10.00",
+    "A's save must not change B's price",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.one.id}
+    `)[0].price === aConfirmedPrice,
+    "A's persisted price should remain independent of B",
   );
 
   const invalidPreview = await postJson("/api/merchant-invitations/preview", {
@@ -828,6 +1388,8 @@ async function runJourney(cdp, fixture, authSecret) {
     "operator overview page",
   );
   log("Merchant/operator isolation and the full merchant journey passed.");
+
+  return { merchantCookie: merchantCookie.value };
 }
 
 async function signInMerchant(cdp, navigate, setValue, click, waitForUrl, email, password) {
@@ -852,7 +1414,7 @@ async function waitFor(cdp, expression, label, timeoutMs = 12000) {
   let context = "";
   try {
     context = await cdp.evaluate(
-      "JSON.stringify({ path: window.location.pathname, text: document.body.innerText.slice(0, 500) })",
+      "JSON.stringify({ path: window.location.pathname, text: document.body.innerText.slice(0, 500), rows: Array.from(document.querySelectorAll('[data-testid=\"merchant-product-row\"]')).map((row) => ({ id: row.getAttribute('data-product-id'), text: row.innerText.slice(0, 120) })) })",
     );
   } catch {}
   fail(`Timed out waiting for ${label}${context ? ` — page: ${context}` : ""}`);

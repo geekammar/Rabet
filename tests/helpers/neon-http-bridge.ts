@@ -68,13 +68,17 @@ export async function startNeonHttpBridge(
   const executeOne = async (
     payload: ExecuteOnePayload,
   ): Promise<QueryResult> => {
-    const rows = await sql.unsafe(payload.query ?? "", payload.params ?? []);
+    // `.values()` keeps one value per selected column position. A row object
+    // would collapse duplicate column names (for example `product.id` and
+    // `product_translation.id`) into one key, which corrupts joined catalog
+    // reads before Drizzle ever sees them.
+    const rows = await sql
+      .unsafe(payload.query ?? "", payload.params ?? [])
+      .values();
     const columns = rows.columns ?? [];
 
     return {
-      rows: rows.map((row) =>
-        columns.map((column) => formatValue(row[column.name])),
-      ) as unknown[][],
+      rows: rows.map((row) => row.map((value) => formatValue(value))) as unknown[][],
       fields: columns.map((column) => ({
         name: column.name,
         dataTypeID: column.type,

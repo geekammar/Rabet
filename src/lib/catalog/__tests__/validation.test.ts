@@ -6,6 +6,7 @@ import {
   validateDetails,
   validateName,
   validatePrice,
+  validateProductRevision,
   validateSlug,
   validateUuid,
 } from "../validation";
@@ -82,6 +83,30 @@ describe("validatePrice", () => {
     expect(validatePrice("abc").success).toBe(false);
     expect(validatePrice("12.3.4").success).toBe(false);
     expect(validatePrice(null).success).toBe(false);
+  });
+});
+
+describe("validateProductRevision", () => {
+  it("accepts the exact microsecond UTC revision emitted by PostgreSQL", () => {
+    const revision = "2026-11-19T22:42:44.123456Z";
+    expect(validateProductRevision(revision)).toEqual({
+      success: true,
+      data: revision,
+    });
+  });
+
+  it("rejects missing, millisecond-only, offset-less or otherwise malformed revisions", () => {
+    for (const value of [
+      undefined,
+      null,
+      "",
+      "2026-11-19T22:42:44.123Z",
+      "2026-11-19T22:42:44.123456+00:00",
+      "2026-11-19 22:42:44.123456+00",
+      123456,
+    ]) {
+      expect(validateProductRevision(value).success).toBe(false);
+    }
   });
 });
 

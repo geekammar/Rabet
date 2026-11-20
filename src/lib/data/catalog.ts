@@ -4,12 +4,14 @@ import {
   and,
   eq,
   exists,
+  inArray,
   isNull,
   sql,
 } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
+  appUser,
   category,
   categoryTranslation,
   language,
@@ -17,6 +19,8 @@ import {
   productAction,
   productActionTranslation,
   productTranslation,
+  store,
+  storeMembership,
 } from "@/db/schema";
 import { validatePrice } from "@/lib/catalog/validation";
 import {
@@ -73,6 +77,11 @@ export interface CatalogProductRecord {
       details: string | null;
     }
   >;
+}
+
+export interface CatalogProductRecordWithRevision extends CatalogProductRecord {
+  /** Exact microsecond UTC `updated_at` revision, never a JavaScript Date. */
+  revision: string;
 }
 
 type BatchCapableDb = {
@@ -354,7 +363,7 @@ export async function listCatalogProductsForStore(
   db: Database,
   scope: StoreScope,
   categoryId?: string,
-): Promise<CatalogProductRecord[]> {
+): Promise<CatalogProductRecordWithRevision[]> {
   assertStoreScope(scope);
 
   try {
@@ -395,6 +404,7 @@ export async function listCatalogProductsForStore(
         sortOrder: product.sortOrder,
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
+        revision: productRevisionSql(),
         translationId: productTranslation.id,
         translationLanguageId: productTranslation.languageId,
         translationLanguageCode: language.code,
@@ -424,7 +434,7 @@ export async function listCatalogProductsForStore(
         productTranslation.languageId,
       );
 
-    const products = new Map<string, CatalogProductRecord>();
+    const products = new Map<string, CatalogProductRecordWithRevision>();
 
     for (const row of rows) {
       let record = products.get(row.id);
@@ -439,6 +449,7 @@ export async function listCatalogProductsForStore(
           sortOrder: row.sortOrder,
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
+          revision: row.revision,
           translations: {},
         };
         products.set(row.id, record);
@@ -548,6 +559,11 @@ export async function updateCatalogProductAvailabilityForStore(
  * maintains `updated_at`.
  *
  * Returns `true` when the row was updated and `false` for every no-match case.
+ *
+ * This is the Phase 1 scoped primitive used by the catalog-scope acceptance
+ * tests. The production merchant path uses
+ * `updateCatalogProductPriceForMerchant`, which adds the write-time
+ * eligibility predicates to the same guarded statement.
  */
 export async function updateCatalogProductPriceForStore(
   db: Database,
@@ -570,6 +586,171 @@ export async function updateCatalogProductPriceForStore(
       .returning({ id: product.id });
 
     return updated.length > 0;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/** The exact UTC revision expression shared by reads and guarded writes. */
+function productRevisionSql() {
+  return sql<string>`to_char(${product.updatedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+}
+
+/** The server-derived identity required to bind a merchant price write. */
+export type MerchantPriceWriteIdentity = {
+  userId: string;
+  sessionVersion: number;
+};
+
+/**
+ * The write-time merchant eligibility predicate.
+ *
+ * This mirrors `resolveMerchantEligibility` inside the same SQL statement as
+ * the price update, so a membership revocation, session-version change or
+ * store suspension committed before this statement starts can never be
+ * bypassed by an access result resolved earlier in the request:
+ *
+ * - the user is active and has the plain `user` platform role;
+ * - `app_user.session_version` still matches the session claim;
+ * - the user has exactly one active owner membership;
+ * - that membership belongs to the scoped store;
+ * - the store is in a writable lifecycle state (`onboarding` or `active`).
+ *
+ * The `UPDATE` evaluates these predicates itself; there is no separate
+ * authorization read that the write could race against.
+ */
+function merchantPriceWriteEligibilityWhere(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+) {
+  return and(
+    exists(
+      db
+        .select({ id: appUser.id })
+        .from(appUser)
+        .where(
+          and(
+            eq(appUser.id, identity.userId),
+            eq(appUser.status, "active"),
+            eq(appUser.platformRole, "user"),
+            eq(appUser.sessionVersion, identity.sessionVersion),
+          ),
+        ),
+    ),
+    exists(
+      db
+        .select({ id: storeMembership.id })
+        .from(storeMembership)
+        .innerJoin(store, eq(store.id, storeMembership.storeId))
+        .where(
+          and(
+            eq(storeMembership.userId, identity.userId),
+            eq(storeMembership.storeId, scope.storeId),
+            eq(storeMembership.role, "owner"),
+            eq(storeMembership.status, "active"),
+            inArray(store.status, ["onboarding", "active"]),
+          ),
+        ),
+    ),
+    sql`(
+      select count(*)::int
+      from ${storeMembership}
+      where ${storeMembership.userId} = ${identity.userId}
+        and ${storeMembership.role} = 'owner'
+        and ${storeMembership.status} = 'active'
+    ) = 1`,
+  );
+}
+
+/**
+ * Updates one product's price only while the merchant write eligibility still
+ * holds in the database.
+ *
+ * The eligible user id, session version and store scope are all server-derived
+ * and are supplied as query parameters. The product/category ownership and
+ * deletion predicates are the same used by the scoped catalog mutations, so a
+ * missing, foreign, deleted or otherwise ineligible product and a merchant
+ * whose eligibility changed all produce the same no-match result.
+ *
+ * Only `price` is set; availability, translations, actions, category, slug and
+ * ownership are left alone, and the database trigger still maintains
+ * `updated_at`.
+ */
+export type MerchantPriceWriteResult = {
+  price: string;
+  revision: string;
+};
+
+export async function updateCatalogProductPriceForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  productId: string,
+  price: unknown,
+  expectedRevision: string,
+): Promise<MerchantPriceWriteResult | null> {
+  assertStoreScope(scope);
+
+  const priceResult = validatePrice(price);
+  if (!priceResult.success) {
+    throw new RabetDataError("INVALID_INPUT", priceResult.error);
+  }
+
+  try {
+    const updated = await db
+      .update(product)
+      .set({ price: priceResult.data })
+      .where(
+        and(
+          storeOwnedProductWhere(db, scope, productId),
+          merchantPriceWriteEligibilityWhere(db, scope, identity),
+          eq(productRevisionSql(), expectedRevision),
+        ),
+      )
+      .returning({
+        price: product.price,
+        revision: productRevisionSql(),
+      });
+
+    return updated[0] ?? null;
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+/**
+ * Reads the latest authorized price and revision after a guarded write lost its
+ * revision precondition.
+ *
+ * The same product/category and merchant eligibility predicates gate this read,
+ * so a revoked membership, suspended store, foreign product or ineligible row
+ * yields `null` and never discloses another row's price or revision.
+ */
+export async function readCatalogProductPriceForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  productId: string,
+): Promise<MerchantPriceWriteResult | null> {
+  assertStoreScope(scope);
+
+  try {
+    const rows = await db
+      .select({
+        price: product.price,
+        revision: productRevisionSql(),
+      })
+      .from(product)
+      .where(
+        and(
+          storeOwnedProductWhere(db, scope, productId),
+          merchantPriceWriteEligibilityWhere(db, scope, identity),
+        ),
+      )
+      .limit(1);
+
+    return rows[0] ?? null;
   } catch (error) {
     throw mapDatabaseError(error);
   }

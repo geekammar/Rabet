@@ -1153,16 +1153,21 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
   });
 });
 
-describe("Phase 1 scoped-operation surface", () => {
-  it("is not wired into any production route, action, page or loader", () => {
+describe("scoped-operation production surface", () => {
+  it("wires only the reviewed merchant list and price paths", () => {
     const srcRoot = path.resolve(import.meta.dirname, "../../src");
+    const catalogModule = path.join("lib", "data", "catalog.ts");
+    const storeScopeModule = path.join("lib", "data", "store-scope.ts");
+    const merchantResolver = path.join("lib", "auth", "merchant-session.ts");
+    const merchantCatalog = path.join("lib", "merchant", "catalog.ts");
+    const productsPage = path.join("app", "app", "products", "page.tsx");
+
     const allowed = new Set([
-      path.join("lib", "data", "catalog.ts"),
-      path.join("lib", "data", "store-scope.ts"),
-      // Phase 2B-2 adds the single production issuer: the authenticated
-      // merchant resolver. No page, action, route or loader calls the scoped
-      // catalog operations themselves.
-      path.join("lib", "auth", "merchant-session.ts"),
+      catalogModule,
+      storeScopeModule,
+      merchantResolver,
+      merchantCatalog,
+      productsPage,
     ]);
 
     const walk = (dir: string): string[] =>
@@ -1172,7 +1177,12 @@ describe("Phase 1 scoped-operation surface", () => {
           : [path.join(dir, entry.name)],
       );
 
-    const offenders: string[] = [];
+    const listOffenders: string[] = [];
+    const priceOffenders: string[] = [];
+    const merchantPriceOffenders: string[] = [];
+    const merchantPriceReadOffenders: string[] = [];
+    const availabilityOffenders: string[] = [];
+    const scopeIssuerOffenders: string[] = [];
 
     for (const file of walk(srcRoot)) {
       const relative = path.relative(srcRoot, file);
@@ -1180,17 +1190,53 @@ describe("Phase 1 scoped-operation surface", () => {
 
       const source = readFileSync(file, "utf8");
 
-      if (
-        source.includes("listCatalogProductsForStore") ||
-        source.includes("updateCatalogProductAvailabilityForStore") ||
-        source.includes("updateCatalogProductPriceForStore") ||
-        source.includes("createStoreScopeForExistingStore")
-      ) {
-        offenders.push(relative);
+      if (source.includes("listCatalogProductsForStore")) {
+        listOffenders.push(relative);
+      }
+      if (source.includes("updateCatalogProductPriceForStore")) {
+        priceOffenders.push(relative);
+      }
+      if (source.includes("updateCatalogProductPriceForMerchant")) {
+        merchantPriceOffenders.push(relative);
+      }
+      if (source.includes("readCatalogProductPriceForMerchant")) {
+        merchantPriceReadOffenders.push(relative);
+      }
+      if (source.includes("updateCatalogProductAvailabilityForStore")) {
+        availabilityOffenders.push(relative);
+      }
+      if (source.includes("createStoreScopeForExistingStore")) {
+        scopeIssuerOffenders.push(relative);
       }
     }
 
-    expect(offenders).toEqual([]);
+    // The list is reachable only from the protected merchant page; the price
+    // mutation only through the merchant mutation module. Availability remains
+    // test-only, and the scope issuer is still only the data layer plus the
+    // authenticated merchant resolver.
+    expect(listOffenders).toEqual([]);
+    expect(priceOffenders).toEqual([]);
+    expect(merchantPriceOffenders).toEqual([]);
+    expect(merchantPriceReadOffenders).toEqual([]);
+    expect(availabilityOffenders).toEqual([]);
+    expect(scopeIssuerOffenders).toEqual([]);
+
+    const page = readFileSync(path.join(srcRoot, productsPage), "utf8");
+    expect(page).toContain("requireMerchantAccess");
+    expect(page).toContain("listCatalogProductsForStore");
+    expect(page).not.toContain("updateCatalogProductPriceForStore");
+    expect(page).not.toContain("updateCatalogProductPriceForMerchant");
+    expect(page).not.toContain("readCatalogProductPriceForMerchant");
+    expect(page).not.toContain("searchParams");
+    expect(page).not.toContain("storeId");
+
+    const merchantModule = readFileSync(
+      path.join(srcRoot, merchantCatalog),
+      "utf8",
+    );
+    expect(merchantModule).toContain("updateCatalogProductPriceForMerchant");
+    expect(merchantModule).toContain("readCatalogProductPriceForMerchant");
+    expect(merchantModule).not.toContain("updateCatalogProductPriceForStore");
 
     const barrel = readFileSync(
       path.join(srcRoot, "lib", "data", "index.ts"),

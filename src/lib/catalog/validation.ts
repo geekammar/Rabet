@@ -19,6 +19,16 @@ export const MAX_PRICE_INTEGER_DIGITS = 16; // 16 integer + 2 fractional = 18 di
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * The exact UTC revision emitted by the catalog read.
+ *
+ * PostgreSQL `timestamptz` has microsecond precision. The browser receives a
+ * canonical string with all six fractional digits, never a JavaScript Date
+ * rounded to milliseconds.
+ */
+const PRODUCT_REVISION_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
 const SLUG_REGEX = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/i;
 
 export type ValidationResult<T> =
@@ -245,6 +255,25 @@ export function validatePrice(raw: unknown): ValidationResult<string> {
   const normalizedPrice = `${intPart}.${decPart}`;
 
   return { success: true, data: normalizedPrice };
+}
+
+/**
+ * Validates the server-provided product revision used as a write precondition.
+ *
+ * The revision is not authorization; it only prevents a stale draft from
+ * silently replacing a newer price.
+ */
+export function validateProductRevision(
+  raw: unknown,
+): ValidationResult<string> {
+  if (typeof raw !== "string" || !PRODUCT_REVISION_REGEX.test(raw)) {
+    return {
+      success: false,
+      error: "The product revision is missing or malformed.",
+    };
+  }
+
+  return { success: true, data: raw };
 }
 
 /**
