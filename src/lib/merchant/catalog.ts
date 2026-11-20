@@ -3,7 +3,6 @@ import "server-only";
 import type { Database } from "@/db/client";
 import type { MerchantAccess } from "@/lib/auth/merchant-session";
 import {
-  validateBoolean,
   validatePrice,
   validateProductRevision,
   validateUuid,
@@ -178,9 +177,7 @@ export async function updateMerchantCatalogProductAvailability(
     return { ok: false, error: "NOT_FOUND" };
   }
 
-  const isActive = validateBoolean(input.isActive, "Availability");
-
-  if (!isActive.success) {
+  if (typeof input.isActive !== "boolean") {
     return { ok: false, error: "INVALID_INPUT" };
   }
 
@@ -201,7 +198,7 @@ export async function updateMerchantCatalogProductAvailability(
       access.scope,
       identity,
       productId.data,
-      isActive.data,
+      input.isActive,
       revision.data,
     );
 

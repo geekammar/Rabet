@@ -23,7 +23,7 @@ export type MerchantProductItem = {
   price: string;
   revision: string;
   isActive: boolean;
-  categoryIsActive: boolean;
+  categoryPathVisible: boolean;
 };
 
 type PriceDraft = {
@@ -45,14 +45,20 @@ type AvailabilityState = {
 function availabilityViewFor(
   product: MerchantProductItem,
   overrides: Record<string, AvailabilityState>,
+  conflicts: Record<string, AvailabilityState | undefined>,
 ): AvailabilityState {
-  const entry = overrides[product.id];
+  let latest: AvailabilityState = {
+    isActive: product.isActive,
+    revision: product.revision,
+  };
 
-  if (entry && entry.revision >= product.revision) {
-    return entry;
+  for (const entry of [overrides[product.id], conflicts[product.id]]) {
+    if (entry && entry.revision >= latest.revision) {
+      latest = entry;
+    }
   }
 
-  return { isActive: product.isActive, revision: product.revision };
+  return latest;
 }
 
 function draftViewFor(
@@ -123,6 +129,7 @@ type Copy = {
   useLatestPrice: string;
   retryMyPrice: string;
   availableInCatalog: string;
+  availabilityOnCategoryHidden: string;
   makeAvailable: string;
   stopAvailability: string;
   availabilitySaved: string;
@@ -171,12 +178,13 @@ const COPY: Record<MerchantLocale, Copy> = {
     useLatestPrice: "استخدام أحدث سعر",
     retryMyPrice: "إعادة المحاولة بسعري",
     availableInCatalog: "متاح في الكتالوج",
+    availabilityOnCategoryHidden: "الإتاحة مفعّلة",
     makeAvailable: "إتاحة المنتج",
     stopAvailability: "إيقاف الإتاحة",
     availabilitySaved: "تم حفظ حالة الإتاحة.",
     savingAvailability: "جارٍ حفظ الإتاحة…",
     inactiveCategoryWarning:
-      "القسم غير متاح حاليًا، لذلك يبقى المنتج مخفيًا عن العملاء حتى يصبح القسم متاحًا.",
+      "القسم غير متاح أو أن أحد أقسامه الأعلى غير متاح، لذلك يبقى المنتج مخفيًا عن العملاء حتى يتاح مسار القسم بالكامل.",
     availabilityInvalidInput: "تعذر قراءة حالة الإتاحة. أعد المحاولة.",
     availabilityConflictTitle: "حفظ جهاز آخر تغييرًا أحدث.",
     availabilityConflictBody:
@@ -219,12 +227,13 @@ const COPY: Record<MerchantLocale, Copy> = {
     useLatestPrice: "Use latest price",
     retryMyPrice: "Retry my price",
     availableInCatalog: "Available in the catalog",
+    availabilityOnCategoryHidden: "Availability is on",
     makeAvailable: "Make product available",
     stopAvailability: "Stop availability",
     availabilitySaved: "Availability saved.",
     savingAvailability: "Saving availability…",
     inactiveCategoryWarning:
-      "This category is currently unavailable, so the product stays hidden from customers until the category becomes available.",
+      "This category or one of its parent categories is unavailable, so the product stays hidden from customers until the full category path is available.",
     availabilityInvalidInput: "The availability state could not be read. Try again.",
     availabilityConflictTitle: "Another device saved a newer change.",
     availabilityConflictBody:
@@ -402,10 +411,6 @@ export function MerchantProducts({
       ...current,
       [productId]: undefined,
     }));
-    setAvailabilityConflicts((current) => ({
-      ...current,
-      [productId]: undefined,
-    }));
     setAvailabilitySavedId(null);
     setAvailabilityPendingId(productId);
 
@@ -425,12 +430,24 @@ export function MerchantProducts({
               revision: result.revision,
             },
           }));
-          setAvailabilitySavedId(result.productId);
-        } else if (result.error === "CONFLICT") {
           setAvailabilityConflicts((current) => ({
             ...current,
-            [productId]: result.current,
+            [productId]: undefined,
           }));
+          setAvailabilitySavedId(result.productId);
+        } else if (result.error === "CONFLICT") {
+          setAvailabilityConflicts((current) => {
+            const existing = current[productId];
+
+            if (existing && existing.revision > result.current.revision) {
+              return current;
+            }
+
+            return {
+              ...current,
+              [productId]: result.current,
+            };
+          });
         } else {
           setAvailabilityErrors((current) => ({
             ...current,
@@ -591,12 +608,11 @@ export function MerchantProducts({
                 const conflict = conflicts[product.id];
                 const availabilityError = availabilityErrors[product.id];
                 const availabilityConflict = availabilityConflicts[product.id];
-                const baseAvailability = availabilityViewFor(
+                const availability = availabilityViewFor(
                   product,
                   availabilityOverrides,
+                  availabilityConflicts,
                 );
-                const availability =
-                  availabilityConflict ?? baseAvailability;
                 const rowSavingPrice = pendingId === product.id;
                 const rowSavingAvailability =
                   availabilityPendingId === product.id;
@@ -628,7 +644,9 @@ export function MerchantProducts({
                           className="text-sm font-medium text-emerald-700 dark:text-emerald-300"
                           data-testid={`merchant-product-available-${product.id}`}
                         >
-                          {copy.availableInCatalog}
+                          {product.categoryPathVisible
+                            ? copy.availableInCatalog
+                            : copy.availabilityOnCategoryHidden}
                         </span>
                       ) : (
                         <Badge
@@ -641,7 +659,7 @@ export function MerchantProducts({
                       )}
                     </div>
 
-                    {product.categoryIsActive ? null : (
+                    {product.categoryPathVisible ? null : (
                       <p
                         role="status"
                         className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"
@@ -894,7 +912,7 @@ export function MerchantProducts({
                                 className="font-semibold"
                                 data-testid={`merchant-availability-conflict-latest-${product.id}`}
                               >
-                                {availabilityConflict.isActive
+                                {availability.isActive
                                   ? copy.availableState
                                   : copy.unavailableState}
                               </span>

@@ -135,12 +135,17 @@ async function seedMerchant(
 async function seedCategory(
   storeId: string,
   storeKey: string,
-  options: { isActive?: boolean; deleted?: boolean } = {},
+  options: {
+    isActive?: boolean;
+    deleted?: boolean;
+    parentId?: string;
+  } = {},
 ) {
   const [row] = await db()
     .insert(category)
     .values({
       storeId,
+      parentId: options.parentId ?? null,
       slug: `${storeKey}-category-${crypto.randomUUID()}`,
       sortOrder: nextOrder(),
       isActive: options.isActive ?? true,
@@ -429,6 +434,249 @@ describe.skipIf(!shouldRun)("merchant catalog availability mutation", () => {
     );
   });
 
+  it("reports full category-path visibility for a fully active path, an inactive direct category and an active child beneath an inactive root", async () => {
+    const a = await seedMerchant(
+      "availability.category.path@example.test",
+      "Category Path Store",
+      "availability-category-path",
+    );
+    const activeRootId = await seedCategory(
+      a.storeId,
+      "availability-active-root",
+    );
+    const activeChildId = await seedCategory(
+      a.storeId,
+      "availability-active-child",
+      { parentId: activeRootId },
+    );
+    const inactiveRootId = await seedCategory(
+      a.storeId,
+      "availability-inactive-root",
+      { isActive: false },
+    );
+    const activeChildUnderInactiveId = await seedCategory(
+      a.storeId,
+      "availability-active-child-under-inactive",
+      { parentId: inactiveRootId },
+    );
+    const inactiveDirectId = await seedCategory(
+      a.storeId,
+      "availability-inactive-direct",
+      { isActive: false },
+    );
+    const fullyVisibleProductId = await seedProduct(
+      a.storeId,
+      activeChildId,
+      "availability-fully-visible",
+    );
+    const inactiveAncestorProductId = await seedProduct(
+      a.storeId,
+      activeChildUnderInactiveId,
+      "availability-inactive-ancestor",
+    );
+    const inactiveDirectProductId = await seedProduct(
+      a.storeId,
+      inactiveDirectId,
+      "availability-inactive-direct",
+    );
+    const access = await resolveMerchantAccess(db(), claims(a.userId));
+
+    const scoped = await listCatalogProductsForStore(appDb(), access!.scope);
+    const byId = new Map(scoped.map((entry) => [entry.id, entry]));
+
+    expect(byId.get(fullyVisibleProductId)).toMatchObject({
+      categoryIsActive: true,
+      categoryPathVisible: true,
+    });
+    expect(byId.get(inactiveAncestorProductId)).toMatchObject({
+      categoryIsActive: true,
+      categoryPathVisible: false,
+    });
+    expect(byId.get(inactiveDirectProductId)).toMatchObject({
+      categoryIsActive: false,
+      categoryPathVisible: false,
+    });
+
+    const categoriesBefore = await db()
+      .select({
+        id: category.id,
+        isActive: category.isActive,
+        deletedAt: category.deletedAt,
+        updatedAt: category.updatedAt,
+      })
+      .from(category)
+      .where(eq(category.storeId, a.storeId))
+      .orderBy(category.id);
+    const before = await readProductState(inactiveAncestorProductId);
+
+    const enabled = await updateMerchantCatalogProductAvailability(
+      appDb(),
+      access!,
+      {
+        productId: inactiveAncestorProductId,
+        isActive: true,
+        revision: await readRevision(inactiveAncestorProductId),
+      },
+    );
+
+    expect(enabled).toMatchObject({
+      ok: true,
+      productId: inactiveAncestorProductId,
+      isActive: true,
+    });
+    expectOnlyAvailabilityChanged(
+      before,
+      await readProductState(inactiveAncestorProductId),
+      true,
+    );
+    expect(
+      await db()
+        .select({
+          id: category.id,
+          isActive: category.isActive,
+          deletedAt: category.deletedAt,
+          updatedAt: category.updatedAt,
+        })
+        .from(category)
+        .where(eq(category.storeId, a.storeId))
+        .orderBy(category.id),
+    ).toEqual(categoriesBefore);
+
+    const after = await listCatalogProductsForStore(appDb(), access!.scope);
+    const inactiveAncestorAfter = after.find(
+      (entry) => entry.id === inactiveAncestorProductId,
+    );
+    expect(inactiveAncestorAfter).toMatchObject({
+      isActive: true,
+      categoryIsActive: true,
+      categoryPathVisible: false,
+    });
+  });
+
+  it("treats soft-deleted, foreign and cyclic ancestry conservatively without leaking foreign category data", async () => {
+    const a = await seedMerchant(
+      "availability.invalid.path.a@example.test",
+      "Invalid Path Store A",
+      "availability-invalid-path-a",
+    );
+    const b = await seedMerchant(
+      "availability.invalid.path.b@example.test",
+      "Invalid Path Store B",
+      "availability-invalid-path-b",
+    );
+    const foreignParentId = await seedCategory(
+      b.storeId,
+      "availability-foreign-parent",
+    );
+    const [foreignParent] = await db()
+      .select({ id: category.id, slug: category.slug })
+      .from(category)
+      .where(eq(category.id, foreignParentId));
+    const foreignChildId = await seedCategory(
+      a.storeId,
+      "availability-foreign-child",
+      { parentId: foreignParentId },
+    );
+    const foreignProductId = await seedProduct(
+      a.storeId,
+      foreignChildId,
+      "availability-foreign-ancestry",
+    );
+
+    const deletedParentId = await seedCategory(
+      a.storeId,
+      "availability-deleted-parent",
+    );
+    const deletedAncestorChildId = await seedCategory(
+      a.storeId,
+      "availability-deleted-ancestor-child",
+      { parentId: deletedParentId },
+    );
+    const deletedAncestorProductId = await seedProduct(
+      a.storeId,
+      deletedAncestorChildId,
+      "availability-deleted-ancestor",
+    );
+    await db()
+      .update(category)
+      .set({ deletedAt: new Date() })
+      .where(eq(category.id, deletedParentId));
+
+    const cycleParentId = await seedCategory(
+      a.storeId,
+      "availability-cycle-parent",
+    );
+    const cycleChildId = await seedCategory(
+      a.storeId,
+      "availability-cycle-child",
+      { parentId: cycleParentId },
+    );
+    const cycleProductId = await seedProduct(
+      a.storeId,
+      cycleChildId,
+      "availability-cycle",
+    );
+    await db().execute(
+      sql`alter table category disable trigger category_check_ancestry`,
+    );
+    try {
+      await db()
+        .update(category)
+        .set({ parentId: cycleChildId })
+        .where(eq(category.id, cycleParentId));
+    } finally {
+      await db().execute(
+        sql`alter table category enable trigger category_check_ancestry`,
+      );
+    }
+
+    const access = await resolveMerchantAccess(db(), claims(a.userId));
+    const scoped = await listCatalogProductsForStore(appDb(), access!.scope);
+    const byId = new Map(scoped.map((entry) => [entry.id, entry]));
+
+    expect(byId.get(foreignProductId)).toMatchObject({
+      categoryIsActive: true,
+      categoryPathVisible: false,
+    });
+    expect(byId.get(deletedAncestorProductId)).toMatchObject({
+      categoryIsActive: true,
+      categoryPathVisible: false,
+    });
+    expect(byId.get(cycleProductId)).toMatchObject({
+      categoryIsActive: true,
+      categoryPathVisible: false,
+    });
+    expect(JSON.stringify(scoped)).not.toContain(foreignParent!.id);
+    expect(JSON.stringify(scoped)).not.toContain(foreignParent!.slug);
+    expect(JSON.stringify(scoped)).not.toContain("availability-foreign-parent");
+
+    const before = await readProductState(deletedAncestorProductId);
+    const enabled = await updateMerchantCatalogProductAvailability(
+      appDb(),
+      access!,
+      {
+        productId: deletedAncestorProductId,
+        isActive: true,
+        revision: await readRevision(deletedAncestorProductId),
+      },
+    );
+
+    expect(enabled).toMatchObject({ ok: true, isActive: true });
+    expectOnlyAvailabilityChanged(
+      before,
+      await readProductState(deletedAncestorProductId),
+      true,
+    );
+    const [deletedParent] = await db()
+      .select({ isActive: category.isActive, deletedAt: category.deletedAt })
+      .from(category)
+      .where(eq(category.id, deletedParentId));
+    expect(deletedParent).toMatchObject({
+      isActive: true,
+      deletedAt: expect.any(Date),
+    });
+  });
+
   it("returns the same safe not-found result for missing, foreign, soft-deleted, cross-linked and deleted-category rows without writing", async () => {
     const a = await seedMerchant(
       "availability.safe.a@example.test",
@@ -579,6 +827,12 @@ describe.skipIf(!shouldRun)("merchant catalog availability mutation", () => {
     for (const invalidBoolean of [
       undefined,
       null,
+      "true",
+      "false",
+      "1",
+      "0",
+      "on",
+      "off",
       "yes",
       "toggle",
       1,

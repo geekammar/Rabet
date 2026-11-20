@@ -22,6 +22,7 @@ import {
   store,
   storeMembership,
 } from "@/db/schema";
+import { isCategoryAncestryActive } from "@/lib/catalog/eligibility";
 import { validatePrice } from "@/lib/catalog/validation";
 import {
   mapDatabaseError,
@@ -84,6 +85,8 @@ export interface CatalogProductRecordWithRevision extends CatalogProductRecord {
   revision: string;
   /** Whether the product's non-deleted same-store category is active. */
   categoryIsActive: boolean;
+  /** Whether the full same-store category path is active and traversable. */
+  categoryPathVisible: boolean;
 }
 
 type BatchCapableDb = {
@@ -532,6 +535,7 @@ export async function listCatalogProductsForStore(
           updatedAt: row.updatedAt,
           revision: row.revision,
           categoryIsActive: row.categoryIsActive,
+          categoryPathVisible: false,
           translations: {},
         };
         products.set(row.id, record);
@@ -550,6 +554,39 @@ export async function listCatalogProductsForStore(
           description: row.translationDescription,
           details: row.translationDetails,
         };
+      }
+    }
+
+    if (products.size > 0) {
+      const categories = await db
+        .select({
+          id: category.id,
+          parentId: category.parentId,
+          isActive: category.isActive,
+        })
+        .from(category)
+        .where(
+          and(
+            eq(category.storeId, scope.storeId),
+            isNull(category.deletedAt),
+          ),
+        );
+      const categoryById = new Map(
+        categories.map((row) => [row.id, row]),
+      );
+      const pathVisibility = new Map<string, boolean>();
+
+      for (const record of products.values()) {
+        let visible = pathVisibility.get(record.categoryId);
+
+        if (visible === undefined) {
+          visible = isCategoryAncestryActive(record.categoryId, (id) =>
+            categoryById.get(id),
+          );
+          pathVisibility.set(record.categoryId, visible);
+        }
+
+        record.categoryPathVisible = visible;
       }
     }
 

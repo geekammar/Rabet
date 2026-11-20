@@ -567,10 +567,24 @@ describe.skipIf(!shouldRun)("store-scoped catalog", () => {
       fixture.productANoTranslationId,
     ]);
     const filteredCategoryQueries = categoryGateQueries(filteredQueries);
-    expect(filteredCategoryQueries).toHaveLength(1);
+    expect(filteredCategoryQueries).toHaveLength(2);
     expect(filteredCategoryQueries[0].query).toContain('from "category"');
     expect(filteredCategoryQueries[0].query).toContain(
       '"category"."deleted_at" is null',
+    );
+    expect(filteredCategoryQueries[0].parameters).toContain(
+      fixture.categoryAId,
+    );
+    expect(filteredCategoryQueries[1].query).toContain('from "category"');
+    expect(filteredCategoryQueries[1].query).toMatch(
+      /"category"\."store_id"\s*=\s*\$\d+/,
+    );
+    expect(filteredCategoryQueries[1].query).toContain(
+      '"category"."deleted_at" is null',
+    );
+    expect(filteredCategoryQueries[1].parameters).toContain(scopeA.storeId);
+    expect(filteredCategoryQueries[1].parameters).not.toContain(
+      fixture.categoryAId,
     );
     const filteredCatalogQueries = catalogDataQueries(filteredQueries);
     expect(filteredCatalogQueries).toHaveLength(1);

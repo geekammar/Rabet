@@ -1105,13 +1105,20 @@ async function runJourney(cdp, fixture, authSecret) {
     "adopt latest price after availability refresh",
   );
 
+  const aTwoConflict = `[data-testid="merchant-availability-conflict-${a.products.two.id}"]`;
+  const aTwoConflictLatest = `[data-testid="merchant-availability-conflict-latest-${a.products.two.id}"]`;
+  const aTwoDisable = `[data-testid="merchant-availability-disable-${a.products.two.id}"]`;
+  const aTwoAvailable = `[data-testid="merchant-product-available-${a.products.two.id}"]`;
+  const aFallbackSaved = `[data-testid="merchant-price-saved-${a.products.fallback.id}"]`;
+
+  await setValue(aPriceInput, "12.34");
   await pgClient`
     update product set is_active = false where id = ${a.products.two.id}
   `;
-  await click(`[data-testid="merchant-availability-disable-${a.products.two.id}"]`);
+  await click(aTwoDisable);
   await waitFor(
     cdp,
-    `Boolean(document.querySelector('[data-testid="merchant-availability-conflict-${a.products.two.id}"]')) && document.querySelector('[data-testid="merchant-availability-conflict-latest-${a.products.two.id}"]')?.textContent === "غير متاح"`,
+    `Boolean(document.querySelector(${JSON.stringify(aTwoConflict)})) && document.querySelector(${JSON.stringify(aTwoConflictLatest)})?.textContent === "غير متاح"`,
     "stale availability conflict from freshly authorized data",
   );
   assert(
@@ -1127,21 +1134,54 @@ async function runJourney(cdp, fixture, authSecret) {
     "An availability conflict must leave the price unchanged",
   );
 
+  await pgClient`
+    update product set is_active = true where id = ${a.products.two.id}
+  `;
+  await setValue(aFallbackInput, "36.70");
+  await click(aFallbackSave);
   await waitFor(
     cdp,
-    `document.querySelector('[data-testid="merchant-availability-enable-${a.products.two.id}"]')?.disabled === false`,
-    "availability conflict decision control ready",
+    `Boolean(document.querySelector(${JSON.stringify(aFallbackSaved)})) && Boolean(document.querySelector(${JSON.stringify(aTwoAvailable)})) && document.querySelector(${JSON.stringify(aTwoConflictLatest)})?.textContent === "متاح" && document.querySelector(${JSON.stringify(aPriceInput)})?.value === "12.34"`,
+    "newer scoped refresh wins over the conflict snapshot and preserves the price draft",
   );
-  await click(`[data-testid="merchant-availability-enable-${a.products.two.id}"]`);
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.fallback.id}
+    `)[0].price === "36.70",
+    "Saving row B should persist its price and trigger the normal scoped refresh",
+  );
+
+  await pgClient`
+    update product set is_active = true where id = ${a.products.two.id}
+  `;
+  await click(aTwoDisable);
   await waitFor(
     cdp,
-    `Boolean(document.querySelector('[data-testid="merchant-availability-saved-${a.products.two.id}"]')) && !document.querySelector('[data-testid="merchant-availability-conflict-${a.products.two.id}"]') && Boolean(document.querySelector('[data-testid="merchant-product-available-${a.products.two.id}"]'))`,
-    "fresh explicit availability decision after conflict",
+    `Boolean(document.querySelector(${JSON.stringify(aTwoConflict)})) && document.querySelector(${JSON.stringify(aTwoConflictLatest)})?.textContent === "متاح" && Boolean(document.querySelector(${JSON.stringify(aTwoAvailable)}))`,
+    "failed availability follow-up keeps the newest confirmed state",
   );
   assert(
     (await pgClient`
       select is_active from product where id = ${a.products.two.id}
     `)[0].is_active === true,
+    "A failed availability follow-up must not overwrite the newer state",
+  );
+
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aTwoDisable)})?.disabled === false`,
+    "availability conflict decision control ready",
+  );
+  await click(aTwoDisable);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-availability-saved-${a.products.two.id}"]')) && !document.querySelector(${JSON.stringify(aTwoConflict)}) && Boolean(document.querySelector('[data-testid="merchant-product-status-${a.products.two.id}"]'))`,
+    "fresh explicit availability decision after conflict",
+  );
+  assert(
+    (await pgClient`
+      select is_active from product where id = ${a.products.two.id}
+    `)[0].is_active === false,
     "A fresh availability decision should persist after a conflict",
   );
 
@@ -1820,6 +1860,10 @@ async function runJourney(cdp, fixture, authSecret) {
       `Boolean(document.querySelector(${JSON.stringify(emptyCategoryWarning)}))`,
     )) === true,
     "A product under the newly created inactive category should show the category warning",
+  );
+  assert(
+    (await text(emptyCategoryWarning)).includes("أحد أقسامه الأعلى"),
+    "The Arabic category warning should explain that a parent category can hide the product",
   );
   assert(
     (await text(`[data-testid="merchant-product-status-${createdProductId}"]`)) ===
