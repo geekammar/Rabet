@@ -436,11 +436,18 @@ async function runGateDisabledProbe(envFile, merchantCookie) {
     const login = await fetch(`${baseUrl}/app/login?gateProbe=${Date.now()}`, {
       headers: { Cookie: cookie, "Cache-Control": "no-store" },
     });
+    const createProduct = await fetch(
+      `${baseUrl}/app/products/new?gateProbe=${Date.now()}`,
+      {
+        headers: { Cookie: cookie, "Cache-Control": "no-store" },
+      },
+    );
     const productsBody = await products.text();
     const loginBody = await login.text();
+    const createProductBody = await createProduct.text();
 
     log(
-      `Feature-gate-off responses: products=${products.status}, login=${login.status}`,
+      `Feature-gate-off responses: products=${products.status}, login=${login.status}, create=${createProduct.status}`,
     );
 
     assert(
@@ -453,6 +460,13 @@ async function runGateDisabledProbe(envFile, merchantCookie) {
         !loginBody.includes('data-testid="merchant-login-page"'),
       `Merchant login must be hidden when the feature gate is off (saw ${login.status})`,
     );
+    assert(
+      createProduct.status === 404 ||
+        !createProductBody.includes(
+          'data-testid="merchant-product-create-page"',
+        ),
+      `Merchant product creation must be hidden when the feature gate is off (saw ${createProduct.status})`,
+    );
   } finally {
     if (probeServer.pid) {
       try {
@@ -463,7 +477,7 @@ async function runGateDisabledProbe(envFile, merchantCookie) {
 }
 
 async function runJourney(cdp, fixture, authSecret) {
-  const { a, b, expired, revoked, used } = fixture;
+  const { a, b, empty, expired, revoked, used } = fixture;
 
   const evaluate = (expression) => cdp.evaluate(expression);
   const navigate = async (url) => {
@@ -703,6 +717,11 @@ async function runJourney(cdp, fixture, authSecret) {
     "document.querySelectorAll('[data-testid=\"merchant-product-row\"]').length === 3",
     "merchant A product rows",
   );
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "merchant A products hydration",
+  );
   assert(
     (await evaluate(
       "document.querySelector('[data-testid=\"merchant-products-page\"]').getAttribute('dir')",
@@ -779,7 +798,7 @@ async function runJourney(cdp, fixture, authSecret) {
   await navigate(`${BASE_URL}/app/products`);
   await waitFor(
     cdp,
-    `document.querySelector(${JSON.stringify(aPriceInput)})?.value === "123.45"`,
+    `document.querySelector(${JSON.stringify(aPriceInput)})?.value === "123.45" && document.querySelector('[data-testid="merchant-products-page"]')?.getAttribute('data-hydrated') === 'true'`,
     "merchant A saved price after reload",
   );
 
@@ -1362,6 +1381,514 @@ async function runJourney(cdp, fixture, authSecret) {
 
   await click('[data-testid="merchant-logout"]');
   await waitForUrl("/app/login", "merchant B logout");
+
+  await navigate(`${BASE_URL}/invite#token=${encodeURIComponent(empty.token)}`);
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"invite-email\"]')?.textContent === " +
+      JSON.stringify(empty.email),
+    "empty store invitation preview",
+  );
+  assert((await text('[data-testid="invite-store"]')) === empty.storeName, "Invite should show empty store name");
+  await setValue('[data-testid="invite-password"]', fixture.password);
+  await setValue('[data-testid="invite-confirmation"]', fixture.password);
+  await click('[data-testid="invite-submit"]');
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"invite-success\"]'))",
+    "empty store invitation acceptance",
+  );
+
+  await navigate(`${BASE_URL}/app/login`);
+  await setValue('[data-testid="merchant-login-email"]', empty.email);
+  await setValue('[data-testid="merchant-login-password"]', fixture.password);
+  await click('[data-testid="merchant-login-submit"]');
+  await waitForUrl("/app/setup", "empty merchant setup page");
+
+  await navigate(`${BASE_URL}/app/products`);
+  await waitForUrl("/app/products", "empty merchant products page");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-products-empty\"]')) && document.querySelector('[data-testid=\"merchant-products-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "empty products state",
+  );
+  assert(
+    await evaluate(
+      "Boolean(document.querySelector('[data-testid=\"merchant-add-first-product-link\"]'))",
+    ),
+    "The empty state should offer adding the first product",
+  );
+  assert(
+    await evaluate(
+      "Boolean(document.querySelector('[data-testid=\"merchant-add-product-link\"]'))",
+    ),
+    "The products page should show a visible add-product entry",
+  );
+  await expectNoHorizontalScroll("empty merchant products (Arabic)");
+
+  await click('[data-testid="merchant-add-first-product-link"]');
+  await waitForUrl("/app/products/new", "merchant add-product form");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-product-create-form\"]')) && document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "merchant add-product form ready",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-create-page\"]').getAttribute('dir')",
+    )) === "rtl",
+    "The add-product form should default to RTL Arabic",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-category\"]')?.value",
+    )) === "",
+    "A store with no categories should start in create-category mode",
+  );
+  await expectNoHorizontalScroll("merchant add-product form (Arabic)");
+
+  await setValue('[data-testid="merchant-product-name"]', "منتج البداية الأول");
+  await setValue('[data-testid="merchant-product-price"]', "87.65");
+  await setValue('[data-testid="merchant-product-new-category"]', "قسم البداية");
+  await sleep(150);
+  await navigate(`${BASE_URL}/app/products/new`);
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-product-name\"]')?.value === 'منتج البداية الأول' && document.querySelector('[data-testid=\"merchant-product-price\"]')?.value === '87.65' && document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "restored seven-day product draft",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-new-category\"]')?.value",
+    )) === "قسم البداية",
+    "The draft should retain the new category name",
+  );
+  const emptyDraftKey = await evaluate(`(() => {
+    return Object.keys(window.localStorage).find((key) =>
+      key.startsWith("rabet:draft:") && key.includes(${JSON.stringify(empty.storeId)})
+    ) ?? null;
+  })()`);
+  assert(emptyDraftKey, "The draft key should include the authenticated merchant store");
+
+  const savedAtBeforeReload = await evaluate(
+    `JSON.parse(window.localStorage.getItem(${JSON.stringify(emptyDraftKey)})).savedAt`,
+  );
+  await navigate(`${BASE_URL}/app/products/new`);
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-product-name\"]')?.value === 'منتج البداية الأول' && document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "draft reload before timestamp check",
+  );
+  const savedAtAfterReload = await evaluate(
+    `JSON.parse(window.localStorage.getItem(${JSON.stringify(emptyDraftKey)})).savedAt`,
+  );
+  assert(
+    savedAtAfterReload === savedAtBeforeReload,
+    "Reloading the form without an edit must not renew the draft timestamp",
+  );
+  await sleep(30);
+  await setValue('[data-testid="merchant-product-price"]', "87.66");
+  await waitFor(
+    cdp,
+    `JSON.parse(window.localStorage.getItem(${JSON.stringify(emptyDraftKey)})).savedAt > ${savedAtAfterReload}`,
+    "draft timestamp refreshed after an edit",
+  );
+
+  await evaluate(`(() => {
+    const key = ${JSON.stringify(emptyDraftKey)};
+    const draft = JSON.parse(window.localStorage.getItem(key));
+    draft.savedAt = Date.now() - 8 * 24 * 60 * 60 * 1000;
+    window.localStorage.setItem(key, JSON.stringify(draft));
+    window.localStorage.setItem(
+      "rabet:draft:" + ${JSON.stringify(empty.storeId)} + ":another-user:merchant-product-create",
+      JSON.stringify({
+        version: 1,
+        savedAt: Date.now(),
+        name: "مسودة مستخدم آخر",
+        price: "1.00",
+        categoryId: "",
+        newCategoryName: "",
+        useNewCategory: true,
+      }),
+    );
+    return true;
+  })()`);
+  await navigate(`${BASE_URL}/app/products/new`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-product-name\"]')) && document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "expired draft form reload",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-name\"]')?.value",
+    )) === "",
+    "An expired draft must be ignored",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-price\"]')?.value",
+    )) === "",
+    "An expired draft price must be ignored",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-name\"]')?.value",
+    )) !== "مسودة مستخدم آخر",
+    "Another user's draft must not be loaded",
+  );
+
+  await setValue('[data-testid="merchant-product-name"]', "منتج البداية الأول");
+  await setValue('[data-testid="merchant-product-price"]', "87.65");
+  await setValue('[data-testid="merchant-product-new-category"]', "قسم البداية");
+  assert(
+    await evaluate(`(() => {
+      window.__merchantProductCreatePosts = 0;
+      const originalFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url =
+          typeof input === "string" ? input : (input && input.url) || String(input);
+        if (url.includes("/app/products/new") && init && init.method === "POST") {
+          window.__merchantProductCreatePosts += 1;
+        }
+        return originalFetch.apply(this, arguments);
+      };
+      return true;
+    })()`),
+    "Could not instrument the merchant product-create action fetch calls",
+  );
+
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 700,
+    downloadThroughput: 1024 * 1024,
+    uploadThroughput: 1024 * 1024,
+  });
+  assert(
+    await evaluate(`(() => {
+      const form = document.querySelector('[data-testid="merchant-product-create-form"]');
+      if (!form) return false;
+      form.requestSubmit();
+      form.requestSubmit();
+      return true;
+    })()`),
+    "Could not submit the controlled first product draft",
+  );
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-product-submit\"]')?.disabled === true",
+    "pending first product protection",
+  );
+  await evaluate(
+    `document.querySelector('[data-testid="merchant-product-create-form"]')?.requestSubmit()`,
+  );
+  await waitForUrl("/app/products", "first draft product products list");
+  await cdp.send("Network.emulateNetworkConditions", {
+    offline: false,
+    latency: 0,
+    downloadThroughput: -1,
+    uploadThroughput: -1,
+  });
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-product-created-notice\"]')) && document.querySelectorAll('[data-testid=\"merchant-product-row\"]').length === 1",
+    "first draft product success and list row",
+  );
+  assert(
+    (await evaluate("window.__merchantProductCreatePosts")) === 1,
+    "Rapid repeat submission must start exactly one product write",
+  );
+  assert(
+    (await text('[data-testid="merchant-product-created-notice"]')) === "تمت إضافة المنتج.",
+    "The success notice should use the approved Arabic copy",
+  );
+  const createdProductId = await evaluate(
+    "document.querySelector('[data-testid=\"merchant-product-row\"]')?.getAttribute('data-product-id') ?? null",
+  );
+  assert(createdProductId !== null, "The draft product row should be visible");
+  assert(
+    (await text(`[data-testid="merchant-product-status-${createdProductId}"]`)) ===
+      "مسودة",
+    "The newly created unavailable product should show the Arabic draft label",
+  );
+  await click('[data-testid="merchant-locale-en"]');
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="merchant-product-status-${createdProductId}"]')?.textContent === 'Draft'`,
+    "English draft label",
+  );
+  await click('[data-testid="merchant-locale-ar"]');
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="merchant-product-status-${createdProductId}"]')?.textContent === 'مسودة'`,
+    "Arabic draft label restored",
+  );
+  const emptyProductName = await evaluate(
+    "document.querySelector('[data-testid^=\"merchant-product-name-\"]')?.textContent ?? null",
+  );
+  assert(emptyProductName === "منتج البداية الأول", "The saved product name should appear in the scoped list");
+  await expectNoHorizontalScroll("first draft product list (Arabic)");
+
+  const emptyDraftCleared = await evaluate(
+    `window.localStorage.getItem(${JSON.stringify(emptyDraftKey)}) === null`,
+  );
+  assert(emptyDraftCleared, "A successful save must clear the user/store draft");
+
+  const emptyCatalog = await pgClient`
+    select
+      p.id as product_id,
+      p.store_id as product_store_id,
+      p.category_id,
+      p.price::text as price,
+      p.is_active as product_active,
+      c.store_id as category_store_id,
+      c.is_active as category_active,
+      pt.name as product_name,
+      ct.name as category_name,
+      (select count(*)::int from category where store_id = ${empty.storeId}) as category_count,
+      (select count(*)::int from product where store_id = ${empty.storeId}) as product_count
+    from product p
+    join category c on c.id = p.category_id
+    join product_translation pt on pt.product_id = p.id
+    join category_translation ct on ct.category_id = c.id
+    where p.store_id = ${empty.storeId}
+  `;
+  assert(emptyCatalog.length === 1, "Empty store A should persist exactly one product");
+  assert(emptyCatalog[0].category_count === 1, "The inline category should be created once");
+  assert(emptyCatalog[0].product_count === 1, "Duplicate submissions must not create extra products");
+  assert(emptyCatalog[0].product_store_id === empty.storeId, "The product must belong to the empty store");
+  assert(emptyCatalog[0].category_store_id === empty.storeId, "The category must belong to the empty store");
+  assert(emptyCatalog[0].price === "87.65", "The exact decimal price should persist");
+  assert(emptyCatalog[0].product_active === false, "A new product must start unavailable");
+  assert(emptyCatalog[0].category_active === false, "A new category must start inactive");
+  assert(emptyCatalog[0].product_name === "منتج البداية الأول", "The product translation should persist");
+  assert(emptyCatalog[0].category_name === "قسم البداية", "The category translation should persist");
+
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "document.querySelectorAll('[data-testid=\"merchant-product-row\"]').length === 1 && document.querySelector('[data-testid=\"merchant-product-name-" + emptyCatalog[0].product_id + "\"]')?.textContent === 'منتج البداية الأول' && document.querySelector('[data-testid=\"merchant-product-status-" + emptyCatalog[0].product_id + "\"]')?.textContent === 'مسودة'",
+    "first draft product and status after reload",
+  );
+
+  await click('[data-testid="merchant-add-product-link"]');
+  await waitForUrl("/app/products/new", "add another product form");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-product-category\"]')?.value === " +
+      JSON.stringify(emptyCatalog[0].category_id) +
+      " && document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "last-used category restored only from the current store list",
+  );
+  assert(
+    (await evaluate(
+      "Boolean(document.querySelector('[data-testid=\"merchant-product-new-category\"]'))",
+    )) === false,
+    "An existing remembered category should not reopen create-category mode",
+  );
+
+  await setValue('[data-testid="merchant-product-name"]', "منتج خطأ");
+  await setValue('[data-testid="merchant-product-price"]', "9.999");
+  await sleep(150);
+  const savedAtBeforeInvalidSubmit = await evaluate(
+    `JSON.parse(window.localStorage.getItem(${JSON.stringify(emptyDraftKey)})).savedAt`,
+  );
+  await click('[data-testid="merchant-product-submit"]');
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-product-price-error\"]'))",
+    "invalid product price error",
+  );
+  await sleep(150);
+  const savedAtAfterInvalidSubmit = await evaluate(
+    `JSON.parse(window.localStorage.getItem(${JSON.stringify(emptyDraftKey)})).savedAt`,
+  );
+  assert(
+    savedAtAfterInvalidSubmit === savedAtBeforeInvalidSubmit,
+    "A failed submission without a new edit must not renew the draft timestamp",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-name\"]')?.value",
+    )) === "منتج خطأ",
+    "The form should retain its name after validation failure",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-price\"]')?.value",
+    )) === "9.999",
+    "The form should retain its invalid price for correction",
+  );
+  assert(
+    (
+      await pgClient`
+        select count(*)::int as count from product where store_id = ${empty.storeId}
+      `
+    )[0].count === 1,
+    "Invalid input must not create another product",
+  );
+
+  const availableProductId = crypto.randomUUID();
+  await pgClient`
+    insert into product (id, store_id, category_id, slug, price, is_active, sort_order)
+    values (
+      ${availableProductId},
+      ${empty.storeId},
+      ${emptyCatalog[0].category_id},
+      ${`available-fixture-${crypto.randomUUID()}`},
+      '12.50',
+      true,
+      99
+    )
+  `;
+  await pgClient`
+    insert into product_translation (product_id, language_id, name)
+    select ${availableProductId}, id, 'منتج متاح'
+    from language
+    where code = 'en'
+  `;
+
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "document.querySelectorAll('[data-testid=\"merchant-product-row\"]').length === 2",
+    "draft and available fixture rows",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-status-${emptyCatalog[0].product_id}"]`)) ===
+      "مسودة",
+    "The unavailable fixture row should keep the draft label",
+  );
+  assert(
+    (await evaluate(
+      `document.querySelector('[data-testid="merchant-product-status-${availableProductId}"]') === null`,
+    )) === true,
+    "An available fixture row must not show the draft label",
+  );
+
+  await pgClient`
+    update store set status = 'suspended' where id = ${empty.storeId}
+  `;
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-products-suspended-notice\"]'))",
+    "empty store suspended notice",
+  );
+  assert(
+    (await text(`[data-testid="merchant-product-status-${emptyCatalog[0].product_id}"]`)) ===
+      "مسودة",
+    "The draft label should remain visible in suspended read-only mode",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelectorAll('[data-testid=\"merchant-add-product-link\"], [data-testid=\"merchant-add-first-product-link\"]').length",
+    )) === 0,
+    "A suspended store must not render add-product actions",
+  );
+  await navigate(`${BASE_URL}/app/products/new`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-product-create-suspended-notice\"]'))",
+    "suspended add-product read-only notice",
+  );
+  assert(
+    (await evaluate(
+      "Boolean(document.querySelector('[data-testid=\"merchant-product-create-form\"]'))",
+    )) === false,
+    "A suspended store must not render the create form",
+  );
+  await expectNoHorizontalScroll("suspended add-product page");
+  await pgClient`
+    update store set status = 'onboarding' where id = ${empty.storeId}
+  `;
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-add-product-link\"]'))",
+    "empty store restored after suspension",
+  );
+  const localBlockedScript = await cdp.send(
+    "Page.addScriptToEvaluateOnNewDocument",
+    {
+      source:
+        "Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new Error('local storage blocked'); } });",
+    },
+  );
+  await navigate(`${BASE_URL}/app/products/new`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-product-create-form\"]')) && document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "form usable without local storage",
+  );
+  await setValue('[data-testid="merchant-product-name"]', "نموذج بلا تخزين محلي");
+  await setValue('[data-testid="merchant-product-price"]', "1.00");
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"merchant-product-name\"]')?.value",
+    )) === "نموذج بلا تخزين محلي",
+    "The form should remain usable when local draft storage is unavailable",
+  );
+  await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
+    identifier: localBlockedScript.identifier,
+  });
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-add-product-link\"]'))",
+    "products page after local storage failure probe",
+  );
+
+  const beforeStorageFailure = (
+    await pgClient`
+      select count(*)::int as count from product where store_id = ${empty.storeId}
+    `
+  )[0].count;
+  const sessionBlockedScript = await cdp.send(
+    "Page.addScriptToEvaluateOnNewDocument",
+    {
+      source:
+        "Object.defineProperty(window, 'sessionStorage', { configurable: true, get() { throw new Error('session storage blocked'); } });",
+    },
+  );
+  await navigate(`${BASE_URL}/app/products/new`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-product-create-form\"]')) && document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "form usable without session storage",
+  );
+  await setValue('[data-testid="merchant-product-name"]', "منتج بعد تعذر الجلسة");
+  await setValue('[data-testid="merchant-product-price"]', "12.34");
+  await click('[data-testid="merchant-product-submit"]');
+  await waitForUrl("/app/products", "success despite session storage failure");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-product-created-notice\"]'))",
+    "success notice despite session storage failure",
+  );
+  await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
+    identifier: sessionBlockedScript.identifier,
+  });
+
+  const afterStorageFailure = (
+    await pgClient`
+      select count(*)::int as count from product where store_id = ${empty.storeId}
+    `
+  )[0].count;
+  assert(
+    afterStorageFailure === beforeStorageFailure + 1,
+    "A storage failure after server success must create exactly one product",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid^=\"merchant-product-name-\"]')?.textContent ?? ''",
+    )).length > 0,
+    "The product list should render after a storage failure",
+  );
+
+  await click('[data-testid="merchant-logout"]');
+  await waitForUrl("/app/login", "empty store merchant logout");
+  log("Empty-store first category and draft product journey passed.");
 
   // Mint an operator session exactly as the operator Auth.js instance would
   // (same secret, role claim and cookie name). This proves cookie-namespace

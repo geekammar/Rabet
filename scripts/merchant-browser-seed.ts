@@ -79,6 +79,11 @@ async function main() {
       "متجر القمر",
       "browser-store-b",
     );
+    const empty = await issue(
+      "merchant.empty@example.test",
+      "متجر البداية",
+      "browser-store-empty",
+    );
 
     await db
       .insert(language)
@@ -290,6 +295,14 @@ async function main() {
         email: b.invitedEmail,
         token: b.token,
         products: catalogB,
+      },
+      empty: {
+        invitationId: empty.invitationId,
+        storeId: empty.storeId,
+        storeSlug: empty.storeSlug,
+        storeName: "متجر البداية",
+        email: empty.invitedEmail,
+        token: empty.token,
       },
       throttle: {
         invitationId: throttle.invitationId,

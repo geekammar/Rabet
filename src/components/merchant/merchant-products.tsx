@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { Loader2, Save } from "lucide-react";
 
 import { saveMerchantProductPrice } from "@/app/actions/merchant-catalog";
@@ -11,6 +11,7 @@ import {
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
 import { MerchantLogoutButton } from "@/components/merchant/merchant-logout-button";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 export type MerchantProductItem = {
@@ -18,6 +19,7 @@ export type MerchantProductItem = {
   name: string;
   price: string;
   revision: string;
+  isActive: boolean;
 };
 
 type PriceDraft = {
@@ -66,6 +68,7 @@ type Copy = {
   subtitle: string;
   storeLabel: string;
   productsLabel: string;
+  draftStatus: string;
   priceLabel: string;
   save: string;
   saving: string;
@@ -75,6 +78,9 @@ type Copy = {
   suspendedTitle: string;
   suspendedBody: string;
   setupLink: string;
+  addProduct: string;
+  addFirstProduct: string;
+  createdNotice: string;
   logout: string;
   languageLabel: string;
   invalidPrice: string;
@@ -96,6 +102,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     subtitle: "راجع منتجات متجرك وحدّث سعر كل منتج.",
     storeLabel: "المتجر",
     productsLabel: "المنتجات",
+    draftStatus: "مسودة",
     priceLabel: "السعر",
     save: "حفظ السعر",
     saving: "جارٍ حفظ السعر…",
@@ -106,6 +113,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     suspendedBody:
       "يمكنك الاطلاع على الأسعار فقط. التعديلات غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
     setupLink: "إعداد المتجر",
+    addProduct: "إضافة منتج",
+    addFirstProduct: "إضافة أول منتج",
+    createdNotice: "تمت إضافة المنتج.",
     logout: "تسجيل الخروج",
     languageLabel: "لغة الصفحة",
     invalidPrice: "أدخل سعرًا صالحًا من رقمين عشريين على الأكثر.",
@@ -126,6 +136,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     subtitle: "Review your store products and update each product price.",
     storeLabel: "Store",
     productsLabel: "Products",
+    draftStatus: "Draft",
     priceLabel: "Price",
     save: "Save price",
     saving: "Saving price…",
@@ -136,6 +147,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     suspendedBody:
       "You can review prices only. Editing is unavailable until a platform administrator reactivates the store.",
     setupLink: "Store setup",
+    addProduct: "Add product",
+    addFirstProduct: "Add first product",
+    createdNotice: "Product added.",
     logout: "Sign out",
     languageLabel: "Page language",
     invalidPrice: "Enter a valid price with no more than two decimal places.",
@@ -185,11 +199,33 @@ export function MerchantProducts({
     Record<string, PriceConflict | undefined>
   >({});
   const [savedId, setSavedId] = useState<string | null>(null);
+  const [createdNotice, setCreatedNotice] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const pendingRef = useRef<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const copy = COPY[locale];
   const saving = isPending || pendingId !== null;
+
+  useEffect(() => {
+    let created = false;
+
+    try {
+      if (window.location.hash === "#product-created") {
+        created = true;
+        window.history.replaceState(
+          null,
+          "",
+          `${window.location.pathname}${window.location.search}`,
+        );
+      }
+    } catch {}
+
+    queueMicrotask(() => {
+      setHydrated(true);
+      if (created) setCreatedNotice(true);
+    });
+  }, []);
 
   function savePrice(
     product: MerchantProductItem,
@@ -294,6 +330,7 @@ export function MerchantProducts({
       lang={locale}
       className="flex min-h-dvh w-full flex-col bg-background"
       data-testid="merchant-products-page"
+      data-hydrated={hydrated ? "true" : "false"}
     >
       <header className="border-b border-border">
         <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center justify-between gap-3 px-4 py-4">
@@ -325,11 +362,20 @@ export function MerchantProducts({
               </span>
             </p>
           </div>
-          <Button asChild variant="outline" className="min-h-11">
-            <Link href="/app/setup" data-testid="merchant-setup-link">
-              {copy.setupLink}
-            </Link>
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {readOnly ? null : (
+              <Button asChild className="min-h-11">
+                <Link href="/app/products/new" data-testid="merchant-add-product-link">
+                  {copy.addProduct}
+                </Link>
+              </Button>
+            )}
+            <Button asChild variant="outline" className="min-h-11">
+              <Link href="/app/setup" data-testid="merchant-setup-link">
+                {copy.setupLink}
+              </Link>
+            </Button>
+          </div>
         </div>
 
         {readOnly ? (
@@ -341,6 +387,16 @@ export function MerchantProducts({
             <p className="font-semibold">{copy.suspendedTitle}</p>
             <p className="mt-1">{copy.suspendedBody}</p>
           </div>
+        ) : null}
+
+        {createdNotice ? (
+          <p
+            role="status"
+            className="rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm font-medium text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-100"
+            data-testid="merchant-product-created-notice"
+          >
+            {copy.createdNotice}
+          </p>
         ) : null}
 
         <section className="space-y-3" aria-label={copy.productsLabel}>
@@ -357,6 +413,13 @@ export function MerchantProducts({
               <p className="mt-1 text-sm text-muted-foreground">
                 {copy.emptyBody}
               </p>
+              {readOnly ? null : (
+                <Button asChild className="mt-4 min-h-11">
+                  <Link href="/app/products/new" data-testid="merchant-add-first-product-link">
+                    {copy.addFirstProduct}
+                  </Link>
+                </Button>
+              )}
             </div>
           ) : (
             <ul className="space-y-3">
@@ -375,12 +438,23 @@ export function MerchantProducts({
                     data-testid="merchant-product-row"
                     data-product-id={product.id}
                   >
-                    <h3
-                      className="break-words font-heading text-base font-semibold"
-                      data-testid={`merchant-product-name-${product.id}`}
-                    >
-                      {product.name}
-                    </h3>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3
+                        className="break-words font-heading text-base font-semibold"
+                        data-testid={`merchant-product-name-${product.id}`}
+                      >
+                        {product.name}
+                      </h3>
+                      {product.isActive ? null : (
+                        <Badge
+                          variant="outline"
+                          data-testid={`merchant-product-status-${product.id}`}
+                          data-status="draft"
+                        >
+                          {copy.draftStatus}
+                        </Badge>
+                      )}
+                    </div>
 
                     {readOnly ? (
                       <div className="mt-2 flex flex-wrap items-baseline gap-2 text-sm">

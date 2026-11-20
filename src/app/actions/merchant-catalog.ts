@@ -1,14 +1,20 @@
 "use server";
 
-import { refresh } from "next/cache";
+import { revalidatePath, refresh } from "next/cache";
 
 import { getDb } from "@/db/client";
+import { getTransactionDb } from "@/db/transaction-client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { getMerchantAccess } from "@/lib/auth/merchant-session";
 import {
   updateMerchantCatalogProductPrice,
   type MerchantProductPriceResult,
 } from "@/lib/merchant/catalog";
+import {
+  createMerchantCatalogProduct,
+  resolveMerchantCatalogLanguage,
+  type MerchantProductCreateResult,
+} from "@/lib/merchant/product-create";
 
 /**
  * Saves one exact decimal price for a product in the signed-in merchant's own
@@ -49,6 +55,50 @@ export async function saveMerchantProductPrice(
 
   if (result.ok) {
     refresh();
+  }
+
+  return result;
+}
+
+export async function createMerchantProductDraft(
+  input: unknown,
+): Promise<MerchantProductCreateResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+
+  const language = await resolveMerchantCatalogLanguage(getDb());
+
+  if (!language) {
+    return { ok: false, error: "LANGUAGE_UNAVAILABLE" };
+  }
+
+  const result = await createMerchantCatalogProduct(
+    getTransactionDb(),
+    access,
+    language,
+    {
+      name: submitted.name,
+      price: submitted.price,
+      categoryId: submitted.categoryId,
+      newCategoryName: submitted.newCategoryName,
+    },
+  );
+
+  if (result.ok) {
+    revalidatePath("/app/products");
+    revalidatePath("/app/products/new");
   }
 
   return result;
