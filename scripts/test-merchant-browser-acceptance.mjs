@@ -895,6 +895,7 @@ async function runJourney(cdp, fixture, authSecret) {
     "The stale draft must not replace the winning price",
   );
 
+  await evaluate("window.__merchantPricePosts = 0");
   await click(aSecondUseLatest);
   await waitFor(
     cdp,
@@ -906,6 +907,65 @@ async function runJourney(cdp, fixture, authSecret) {
       select price::text as price from product where id = ${a.products.two.id}
     `)[0].price === "44.40",
     "Using the latest price must not write a new value",
+  );
+  assert(
+    (await evaluate("window.__merchantPricePosts")) === 0,
+    "Using the latest price must not send a price-write request",
+  );
+
+  const aFallbackInput = `[data-testid="merchant-price-input-${a.products.fallback.id}"]`;
+  const aFallbackSave = `[data-testid="merchant-price-save-${a.products.fallback.id}"]`;
+  const aFallbackConflict = `[data-testid="merchant-price-conflict-${a.products.fallback.id}"]`;
+  const aFallbackConflictLatest = `[data-testid="merchant-price-conflict-latest-${a.products.fallback.id}"]`;
+  const aFallbackUseLatest = `[data-testid="merchant-price-use-latest-${a.products.fallback.id}"]`;
+
+  // Keep a genuine draft in another row while a third device price arrives.
+  // The adopted row is clean server state, so the normal scoped refresh from
+  // saving product one must show the third price and leave the draft alone.
+  await setValue(aFallbackInput, "9.99");
+  await pgClient`
+    update product set price = '47.70' where id = ${a.products.two.id}
+  `;
+  await click(aSaveButton);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aPriceSaved)})) && document.querySelector(${JSON.stringify(aSecondInput)})?.value === "47.70" && document.querySelector(${JSON.stringify(aFallbackInput)})?.value === "9.99"`,
+    "adopted row refresh and unrelated draft preservation",
+  );
+  assert(
+    (await evaluate("window.location.pathname")) === "/app/products",
+    "The adopted-row refresh must not use a hard navigation",
+  );
+
+  // A fresh edit after adoption must use the revision of the displayed price,
+  // not the older page props, and save without a spurious conflict.
+  await pgClient`
+    update product set price = '35.50' where id = ${a.products.fallback.id}
+  `;
+  await click(aFallbackSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector(${JSON.stringify(aFallbackConflict)})) && document.querySelector(${JSON.stringify(aFallbackConflictLatest)})?.textContent === "35.50" && document.querySelector(${JSON.stringify(aFallbackInput)})?.value === "9.99"`,
+    "fallback conflict before adopted fresh edit",
+  );
+  await click(aFallbackUseLatest);
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(aFallbackInput)})?.value === "35.50" && !document.querySelector(${JSON.stringify(aFallbackConflict)})`,
+    "fallback adopted latest price",
+  );
+  await setValue(aFallbackInput, "36.60");
+  await click(aFallbackSave);
+  await waitFor(
+    cdp,
+    `Boolean(document.querySelector('[data-testid="merchant-price-saved-${a.products.fallback.id}"]')) && document.querySelector(${JSON.stringify(aFallbackInput)})?.value === "36.60" && !document.querySelector(${JSON.stringify(aFallbackConflict)})`,
+    "fresh edit after adoption uses displayed revision",
+  );
+  assert(
+    (await pgClient`
+      select price::text as price from product where id = ${a.products.fallback.id}
+    `)[0].price === "36.60",
+    "Fresh edit after adoption should persist without a spurious conflict",
   );
 
   // A second conflict exposes the intentional retry path against the latest

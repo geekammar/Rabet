@@ -31,19 +31,26 @@ type PriceConflict = {
   revision: string;
 };
 
-function draftFor(
+function draftViewFor(
   product: MerchantProductItem,
   drafts: Record<string, PriceDraft>,
-): string {
+): PriceDraft {
   const entry = drafts[product.id];
 
   if (entry) {
-    if (entry.dirty || entry.baseRevision === product.revision) {
-      return entry.value;
+    // A dirty draft always wins. A clean overlay is an adopted or confirmed
+    // server value and remains visible until props deliver a newer revision.
+    // Canonical UTC revisions sort lexicographically.
+    if (entry.dirty || entry.baseRevision >= product.revision) {
+      return entry;
     }
   }
 
-  return product.price;
+  return {
+    value: product.price,
+    baseRevision: product.revision,
+    dirty: false,
+  };
 }
 
 type PriceError =
@@ -217,7 +224,7 @@ export function MerchantProducts({
             ...current,
             [result.productId]: {
               value: result.price,
-              baseRevision: product.revision,
+              baseRevision: expectedRevision,
               dirty: false,
             },
           }));
@@ -248,15 +255,11 @@ export function MerchantProducts({
   function submitPrice(
     event: React.FormEvent<HTMLFormElement>,
     product: MerchantProductItem,
-    draft: string,
+    draft: PriceDraft,
   ) {
     event.preventDefault();
 
-    const entry = drafts[product.id];
-    const expectedRevision =
-      entry?.dirty === true ? entry.baseRevision : product.revision;
-
-    savePrice(product, draft, expectedRevision);
+    savePrice(product, draft.value, draft.baseRevision);
   }
 
   function adoptLatestPrice(product: MerchantProductItem) {
@@ -269,7 +272,7 @@ export function MerchantProducts({
       [product.id]: {
         value: conflict.price,
         baseRevision: conflict.revision,
-        dirty: true,
+        dirty: false,
       },
     }));
     setConflicts((current) => ({ ...current, [product.id]: undefined }));
@@ -363,7 +366,7 @@ export function MerchantProducts({
                 const error = errors[product.id];
                 const conflict = conflicts[product.id];
                 const rowSaving = pendingId === product.id;
-                const draft = draftFor(product, drafts);
+                const draft = draftViewFor(product, drafts);
 
                 return (
                   <li
@@ -416,7 +419,7 @@ export function MerchantProducts({
                             dir="ltr"
                             autoComplete="off"
                             spellCheck={false}
-                            value={draft}
+                            value={draft.value}
                             readOnly={rowSaving}
                             onChange={(event) => {
                               if (pendingRef.current === product.id) return;
@@ -433,7 +436,7 @@ export function MerchantProducts({
                                     baseRevision:
                                       existing?.dirty === true
                                         ? existing.baseRevision
-                                        : product.revision,
+                                        : draft.baseRevision,
                                     dirty: true,
                                   },
                                 };
@@ -518,7 +521,7 @@ export function MerchantProducts({
                             type="button"
                             className="min-h-11 w-full sm:w-auto"
                             disabled={saving}
-                            onClick={() => retryDraft(product, draft)}
+                            onClick={() => retryDraft(product, draft.value)}
                             data-testid={`merchant-price-retry-${product.id}`}
                           >
                             {copy.retryMyPrice}
