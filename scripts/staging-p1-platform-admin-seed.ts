@@ -68,6 +68,7 @@ async function main() {
 
       let userId: string;
       let sessionVersion: number;
+      let passwordChanged = true;
 
       if (existing.length === 0) {
         const [created] = await tx
@@ -93,20 +94,42 @@ async function main() {
           );
         }
 
-        const [updated] = await tx
-          .update(appUser)
-          .set({
-            status: "active",
-            sessionVersion: identity.sessionVersion + 1,
-          })
-          .where(sql`${appUser.id} = ${identity.id}`)
-          .returning({
-            id: appUser.id,
-            sessionVersion: appUser.sessionVersion,
-          });
+        const credential = await tx
+          .select({ passwordHash: merchantCredential.passwordHash })
+          .from(merchantCredential)
+          .where(sql`${merchantCredential.userId} = ${identity.id}`)
+          .limit(1);
 
-        userId = updated.id;
-        sessionVersion = updated.sessionVersion;
+        passwordChanged = credential[0]?.passwordHash !== passwordHash;
+
+        if (passwordChanged) {
+          const [updated] = await tx
+            .update(appUser)
+            .set({
+              status: "active",
+              sessionVersion: identity.sessionVersion + 1,
+            })
+            .where(sql`${appUser.id} = ${identity.id}`)
+            .returning({
+              id: appUser.id,
+              sessionVersion: appUser.sessionVersion,
+            });
+
+          userId = updated.id;
+          sessionVersion = updated.sessionVersion;
+        } else {
+          const [updated] = await tx
+            .update(appUser)
+            .set({ status: "active" })
+            .where(sql`${appUser.id} = ${identity.id}`)
+            .returning({
+              id: appUser.id,
+              sessionVersion: appUser.sessionVersion,
+            });
+
+          userId = updated.id;
+          sessionVersion = updated.sessionVersion;
+        }
       }
 
       const credential = await tx
@@ -120,7 +143,7 @@ async function main() {
           userId,
           passwordHash,
         });
-      } else {
+      } else if (passwordChanged) {
         await tx
           .update(merchantCredential)
           .set({ passwordHash })
