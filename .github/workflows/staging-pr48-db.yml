@@ -16,6 +16,7 @@ on:
           - seed
           - verify
           - reset-all
+          - android-seed
         default: all
         required: true
       candidate_sha:
@@ -73,7 +74,7 @@ jobs:
           NEON_DEV_DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
           STAGING_DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
           SEED_ARTIFACT_PASSPHRASE: ${{ secrets.SEED_ARTIFACT_PASSPHRASE }}
-          RABET_STAGING_MODE: ${{ inputs.action || (contains(github.event.head_commit.message, '[reset]') && 'reset-all' || 'all') }}
+          RABET_STAGING_MODE: ${{ inputs.action || (contains(github.event.head_commit.message, '[reset]') && 'reset-all' || (contains(github.event.head_commit.message, '[android]') && 'android-seed' || 'all')) }}
           RABET_CANDIDATE_SHA: ${{ inputs.candidate_sha || 'e484a2ec59cbc39d58265f3be485821779c8713a' }}
           RABET_CODE_ROOT: /tmp/rabet-candidate
           RABET_CONFIRM: ${{ inputs.confirm || 'PROVISION_STAGING_DB' }}
@@ -86,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           found=0
-          for file in /tmp/pr48-staging-bundle.json /tmp/pr48-merchant-fixture.json; do
+          for file in /tmp/pr48-staging-bundle.json /tmp/pr48-merchant-fixture.json /tmp/pr48-android-fixture.json; do
             if [ -f "$file" ]; then
               openssl enc -aes-256-cbc -pbkdf2 -salt -in "$file" -out "$file.enc" -pass env:SEED_ARTIFACT_PASSPHRASE
               rm -f "$file"
