@@ -7,20 +7,17 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 
 import * as schema from "@/db/schema";
-import { appUser } from "@/db/schema";
-import {
-  acceptMerchantInvitation,
-  issueMerchantInvitation,
-} from "@/lib/merchant-invitation/service";
 import * as actions from "../../scripts/neon-prod-actions.mjs";
 import * as wizard from "../../scripts/setup-neon-dev.mjs";
 import { hasTestCluster, testClusterUrl } from "./helpers";
 
 const shouldRun = hasTestCluster();
 const repo = process.cwd();
-const PASSWORD = "prod-upgrade-merchant-password-123";
+const DUMMY_PASSWORD_HASH =
+  "$argon2id$v=19$m=19456,t=2,p=1$IVqmOMF8kb6Oey9CzBxW6g$W1ORGaoNecXUIAAxF5tB3m6gcbC3d/3Wl/TnTfYI/M0";
 
 let baseUrl: string | null = null;
 let databaseName = "";
@@ -83,31 +80,75 @@ beforeAll(async () => {
   const db = drizzle({ client: setupPool, schema });
   await migrate(db, { migrationsFolder: prefixDir });
 
-  const [adminUser] = await db
-    .insert(appUser)
-    .values({
-      email: `prod-upgrade-admin-${crypto.randomUUID()}@example.test`,
-      platformRole: "super_admin",
-    })
-    .returning();
+  // Seed the literal 0008 baseline with raw SQL. The current invitation
+  // service expects the later 0010 column, so it cannot be used to write a
+  // baseline row before the upgrade under test.
+  const [adminUser] = await db.execute<{ id: string }>(sql`
+    insert into app_user (email, platform_role)
+    values (${`prod-upgrade-admin-${crypto.randomUUID()}@example.test`}, 'super_admin')
+    returning id
+  `);
+  const [merchantUser] = await db.execute<{ id: string }>(sql`
+    insert into app_user (email)
+    values ('prod.upgrade.merchant@example.test')
+    returning id
+  `);
 
-  const accepted = await issueMerchantInvitation(db, {
-    actorUserId: adminUser.id,
-    storeName: "Production Upgrade Accepted Store",
-    storeSlug: `prod-upgrade-accepted-${crypto.randomUUID()}`,
-    invitedEmail: "prod.upgrade.merchant@example.test",
-  });
-  await acceptMerchantInvitation(db, {
-    token: accepted.token,
-    password: PASSWORD,
-  });
+  await db.execute(sql`
+    insert into merchant_credential (user_id, password_hash)
+    values (${merchantUser.id}, ${DUMMY_PASSWORD_HASH})
+  `);
 
-  await issueMerchantInvitation(db, {
-    actorUserId: adminUser.id,
-    storeName: "Production Upgrade Pending Store",
-    storeSlug: `prod-upgrade-pending-${crypto.randomUUID()}`,
-    invitedEmail: "prod.upgrade.pending@example.test",
-  });
+  const [acceptedStore] = await db.execute<{ id: string }>(sql`
+    insert into store (name, slug, status)
+    values (
+      'Production Upgrade Accepted Store',
+      ${`prod-upgrade-accepted-${crypto.randomUUID()}`},
+      'onboarding'
+    )
+    returning id
+  `);
+  await db.execute(sql`
+    insert into merchant_invitation (
+      store_id, invited_email, token_digest, expires_at,
+      invited_by_user_id, accepted_at
+    )
+    values (
+      ${acceptedStore.id},
+      'prod.upgrade.merchant@example.test',
+      ${crypto.randomBytes(32).toString("hex")},
+      now() + interval '7 days',
+      ${adminUser.id},
+      now()
+    )
+  `);
+  await db.execute(sql`
+    insert into store_membership (store_id, user_id, role, status)
+    values (${acceptedStore.id}, ${merchantUser.id}, 'owner', 'active')
+  `);
+
+  const [pendingStore] = await db.execute<{ id: string }>(sql`
+    insert into store (name, slug, status)
+    values (
+      'Production Upgrade Pending Store',
+      ${`prod-upgrade-pending-${crypto.randomUUID()}`},
+      'onboarding'
+    )
+    returning id
+  `);
+  await db.execute(sql`
+    insert into merchant_invitation (
+      store_id, invited_email, token_digest, expires_at,
+      invited_by_user_id
+    )
+    values (
+      ${pendingStore.id},
+      'prod.upgrade.pending@example.test',
+      ${crypto.randomBytes(32).toString("hex")},
+      now() + interval '7 days',
+      ${adminUser.id}
+    )
+  `);
 });
 
 afterAll(async () => {
@@ -127,9 +168,9 @@ afterAll(async () => {
   }
 });
 
-describe.skipIf(!shouldRun)("real production runner 0008 to 0009 upgrade", () => {
+describe.skipIf(!shouldRun)("real production runner 0008 to 0010 upgrade", () => {
   it(
-    "validates 0008, applies only 0009, and preserves invitation and credential rows",
+    "validates 0008, applies 0009 and 0010, and preserves invitation and credential rows",
     async () => {
       const { io, output } = testIo();
       const before = await setupPool!`
@@ -173,6 +214,7 @@ describe.skipIf(!shouldRun)("real production runner 0008 to 0009 upgrade", () =>
       expect(result.outcome).toBe("migrated");
       expect(result.writes.migrationsApplied).toEqual([
         "0009_merchant_auth_throttle",
+        "0010_wonderful_siren",
       ]);
       expect(output()).toContain(
         "Verified healthy prior release (0008_merchant_invitations_and_credentials)",
@@ -207,10 +249,18 @@ describe.skipIf(!shouldRun)("real production runner 0008 to 0009 upgrade", () =>
       `;
       expect(index).toHaveLength(1);
 
+      const revokerColumn = await setupPool!`
+        select column_name from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'merchant_invitation'
+          and column_name = 'revoked_by_user_id'
+      `;
+      expect(revokerColumn).toHaveLength(1);
+
       const ledger = await setupPool!`
         select count(*)::int as count from drizzle.__drizzle_migrations
       `;
-      expect(ledger[0].count).toBe(10);
+      expect(ledger[0].count).toBe(11);
     },
     120_000,
   );

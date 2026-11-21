@@ -118,6 +118,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0007_admin_login_throttle",
   "0008_merchant_invitations_and_credentials",
   "0009_merchant_auth_throttle",
+  "0010_wonderful_siren",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -329,13 +330,14 @@ export const CRITICAL_CONSTRAINTS_V7 = [
   "merchant_invitation_invited_by_user_id_app_user_id_fk",
 ];
 
-/** CHECK, domain and ownership constraints the current chain requires (0009 adds throttle). */
+/** CHECK, domain and ownership constraints the current chain requires (0010 adds the revoker FK). */
 export const CRITICAL_CONSTRAINTS = [
   ...CRITICAL_CONSTRAINTS_V7,
   "merchant_auth_throttle_scope_key_pk",
   "merchant_auth_throttle_scope_check",
   "merchant_auth_throttle_key_format_check",
   "merchant_auth_throttle_attempt_count_check",
+  "merchant_invitation_revoked_by_user_id_app_user_id_fk",
 ];
 
 /** Notification update triggers created by migration 0003. */
