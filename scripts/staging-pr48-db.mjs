@@ -6,8 +6,6 @@ import { spawnSync } from "node:child_process";
 import postgres from "postgres";
 
 import {
-  EXPECTED_DEV_DB_NAME,
-  EXPECTED_DEV_HOST,
   QUERIES,
   computeMigrationHashes,
   createPostgresSql,
@@ -17,6 +15,8 @@ import {
   verifyMigrationFiles,
 } from "./setup-neon-dev.mjs";
 
+const EXPECTED_DEV_HOST = "ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech";
+const EXPECTED_DEV_DB_NAME = "neondb";
 const STAGING_DB_NAME = "rabet_staging_pr48";
 const STAGING_DB_USER = "rabet_staging";
 const STAGING_ENV_NAME = "staging-pr48";
