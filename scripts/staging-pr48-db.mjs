@@ -23,7 +23,7 @@ const STAGING_DB_USER = "rabet_staging";
 const STAGING_ENV_NAME = "staging-pr48";
 const REVIEWED_SHA = "e484a2ec59cbc39d58265f3be485821779c8713a";
 const CONFIRMATION = "PROVISION_STAGING_DB";
-const MODES = new Set(["all", "provision", "migrate", "seed", "verify", "reset-all", "android-seed"]);
+const MODES = new Set(["all", "provision", "migrate", "seed", "verify", "reset-all", "android-seed", "desktop-seed"]);
 
 const mode = process.env.RABET_STAGING_MODE ?? "all";
 const candidateSha = (process.env.RABET_CANDIDATE_SHA ?? "").trim().toLowerCase();
@@ -481,6 +481,104 @@ async function androidSeed() {
   return { seeded: true, summary };
 }
 
+async function desktopSeed() {
+  const parsed = readDevTarget();
+  const stagingUrl = buildStagingUrl(parsed);
+  await assertStagingTarget(stagingUrl);
+
+  const existing = await (async () => {
+    const connection = createPostgresSql(stagingUrl);
+
+    try {
+      return await connection.query(
+        "select count(*)::int as count from public.store where slug like 'desktop-store-%'",
+      );
+    } finally {
+      await connection.close();
+    }
+  })();
+
+  if (Number(existing[0]?.count ?? 0) > 0) {
+    out("desktop fixture stores already exist; refusing to create duplicates");
+    return { seeded: false };
+  }
+
+  const sourcePath = path.join(process.cwd(), "scripts", "staging-pr48-desktop-seed.ts");
+  const candidatePath = path.join(codeRoot, "scripts", "staging-pr48-desktop-seed.ts");
+  fs.copyFileSync(sourcePath, candidatePath);
+
+  const outputPath = "/tmp/pr48-desktop-fixture.json";
+  const result = spawnSync(
+    "npx",
+    [
+      "tsx",
+      "--tsconfig",
+      "scripts/tsconfig.seed.json",
+      "scripts/staging-pr48-desktop-seed.ts",
+    ],
+    {
+      cwd: codeRoot,
+      env: {
+        ...process.env,
+        SEED_DATABASE_URL: stagingUrl,
+        SEED_OUTPUT: outputPath,
+      },
+      encoding: "utf8",
+      timeout: 300_000,
+    },
+  );
+
+  if (result.status !== 0) {
+    fail(`desktop fixture seed exited ${result.status}: ${result.stderr || result.stdout}`);
+  }
+
+  const fixture = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+  const summary = {
+    environment: STAGING_ENV_NAME,
+    candidateSha,
+    hostMasked: maskEndpoint(parsed.host),
+    database: STAGING_DB_NAME,
+    user: STAGING_DB_USER,
+    seededAt: new Date().toISOString(),
+    stores: {
+      a: {
+        id: fixture.a.storeId,
+        slug: fixture.a.storeSlug,
+        name: fixture.a.storeName,
+        email: fixture.a.email,
+        expiresAt: fixture.a.expiresAt,
+      },
+      b: {
+        id: fixture.b.storeId,
+        slug: fixture.b.storeSlug,
+        name: fixture.b.storeName,
+        email: fixture.b.email,
+        expiresAt: fixture.b.expiresAt,
+      },
+      empty: {
+        id: fixture.empty.storeId,
+        slug: fixture.empty.storeSlug,
+        name: fixture.empty.storeName,
+        email: fixture.empty.email,
+        expiresAt: fixture.empty.expiresAt,
+      },
+    },
+    products: {
+      a: fixture.a.products,
+      b: fixture.b.products,
+    },
+  };
+
+  fs.writeFileSync(
+    "/tmp/pr48-desktop-summary.json",
+    `${JSON.stringify(summary, null, 2)}\n`,
+    { mode: 0o644 },
+  );
+
+  out("seeded Desktop A/B/Empty fixtures");
+  return { seeded: true, summary };
+}
+
 async function verify() {
   const parsed = readDevTarget();
   const stagingUrl = buildStagingUrl(parsed);
@@ -559,6 +657,8 @@ async function main() {
     await verify();
   } else if (mode === "android-seed") {
     await androidSeed();
+  } else if (mode === "desktop-seed") {
+    await desktopSeed();
   } else {
     await provision();
     await migrate();
