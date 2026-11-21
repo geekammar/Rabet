@@ -225,6 +225,11 @@ export const merchantCredential = pgTable(
  * while no owner accepts, and the service serializes acceptance so exactly one
  * active owner and one consumed invitation can result. `accepted_at` and
  * `revoked_at` are terminal markers and are mutually exclusive.
+ *
+ * The issuing and revoking platform identities are retained on the row, so the
+ * invitation history is itself the audit record. `revoked_by_user_id` is
+ * nullable because rows revoked before this column existed have no recorded
+ * actor; new revocations always write the authenticated Super Admin.
  */
 export const merchantInvitation = pgTable(
   "merchant_invitation",
@@ -242,6 +247,9 @@ export const merchantInvitation = pgTable(
       .references(() => appUser.id, { onDelete: "restrict" }),
     acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: "date" }),
     revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "date" }),
+    revokedByUserId: uuid("revoked_by_user_id").references(() => appUser.id, {
+      onDelete: "restrict",
+    }),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),

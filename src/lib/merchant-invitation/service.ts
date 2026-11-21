@@ -91,6 +91,7 @@ export type IssueMerchantInvitationInput = {
 export type IssuedMerchantInvitation = {
   invitationId: string;
   storeId: string;
+  storeName: string;
   storeSlug: string;
   invitedEmail: string;
   expiresAt: Date;
@@ -105,6 +106,7 @@ export type RevokeMerchantInvitationInput = {
 export type RevokedMerchantInvitation = {
   invitationId: string;
   storeId: string;
+  revokedByUserId: string;
 };
 
 export type AcceptMerchantInvitationInput = {
@@ -330,7 +332,7 @@ export async function issueMerchantInvitation(
       const [createdStore] = await tx
         .insert(store)
         .values({ name: storeName, slug: storeSlug, status: "onboarding" })
-        .returning({ id: store.id, slug: store.slug });
+        .returning({ id: store.id, name: store.name, slug: store.slug });
 
       const [invitation] = await tx
         .insert(merchantInvitation)
@@ -351,6 +353,7 @@ export async function issueMerchantInvitation(
       return {
         invitationId: invitation.id,
         storeId: invitation.storeId,
+        storeName: createdStore.name,
         storeSlug: createdStore.slug,
         invitedEmail: invitation.invitedEmail,
         expiresAt: invitation.expiresAt,
@@ -384,7 +387,7 @@ export async function revokeMerchantInvitation(
 
   try {
     return await db.transaction(async (tx) => {
-      await requireActiveSuperAdmin(tx, input.actorUserId);
+      const actor = await requireActiveSuperAdmin(tx, input.actorUserId);
 
       const rows = await tx
         .select({
@@ -413,7 +416,10 @@ export async function revokeMerchantInvitation(
 
       const updated = await tx
         .update(merchantInvitation)
-        .set({ revokedAt: sql`clock_timestamp()` })
+        .set({
+          revokedAt: sql`clock_timestamp()`,
+          revokedByUserId: actor.id,
+        })
         .where(
           and(
             eq(merchantInvitation.id, invitation.id),
@@ -425,11 +431,20 @@ export async function revokeMerchantInvitation(
         .returning({
           invitationId: merchantInvitation.id,
           storeId: merchantInvitation.storeId,
+          revokedByUserId: merchantInvitation.revokedByUserId,
         });
 
       if (updated.length !== 1) throw rejection();
 
-      return updated[0];
+      const revoked = updated[0];
+
+      if (revoked.revokedByUserId === null) throw rejection();
+
+      return {
+        invitationId: revoked.invitationId,
+        storeId: revoked.storeId,
+        revokedByUserId: revoked.revokedByUserId,
+      };
     });
   } catch (error) {
     if (error instanceof MerchantInvitationError) throw error;
