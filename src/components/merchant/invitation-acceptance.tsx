@@ -4,12 +4,15 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
-import { Logo } from "@/components/brand/logo";
+import { InvitationBrand } from "@/components/merchant/invitation-brand";
 import {
   MerchantLanguageToggle,
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
 import { Button } from "@/components/ui/button";
+import {
+  INVITATION_PAGE_TITLE,
+} from "@/lib/merchant-invitation/branding";
 import { classifyInvitationFailure } from "@/lib/merchant-invitation/responses";
 
 type Phase =
@@ -50,11 +53,11 @@ type Copy = {
   languageLabel: string;
 };
 
-const COPY: Record<MerchantLocale, Copy> = {
+export const INVITATION_COPY: Record<MerchantLocale, Copy> = {
   ar: {
     dir: "rtl",
-    title: "قبول دعوة التاجر",
-    subtitle: "أكمل إنشاء حسابك للبدء في إعداد متجرك.",
+    title: INVITATION_PAGE_TITLE.ar,
+    subtitle: "أنشئ حسابك للبدء في إعداد متجرك.",
     emailLabel: "البريد الإلكتروني المدعو",
     storeLabel: "المتجر",
     passwordLabel: "كلمة المرور",
@@ -76,7 +79,7 @@ const COPY: Record<MerchantLocale, Copy> = {
   },
   en: {
     dir: "ltr",
-    title: "Accept merchant invitation",
+    title: INVITATION_PAGE_TITLE.en,
     subtitle: "Create your account to start setting up your store.",
     emailLabel: "Invited email",
     storeLabel: "Store",
@@ -123,7 +126,11 @@ export function InvitationAcceptance() {
   const [showPassword, setShowPassword] = useState(false);
   const passwordRef = useRef<HTMLInputElement>(null);
   const confirmationRef = useRef<HTMLInputElement>(null);
-  const copy = COPY[locale];
+  const copy = INVITATION_COPY[locale];
+
+  useEffect(() => {
+    document.title = INVITATION_PAGE_TITLE[locale];
+  }, [locale]);
 
   useEffect(() => {
     const fragmentToken = readFragmentToken();
@@ -291,7 +298,7 @@ export function InvitationAcceptance() {
       <main className="flex flex-1 items-center justify-center px-4 py-8">
         <div className="w-full max-w-sm space-y-6">
           <div className="flex items-center justify-between gap-3">
-            <Logo className="text-lg" />
+            <InvitationBrand locale={locale} />
             <MerchantLanguageToggle
               locale={locale}
               onChange={setLocale}
