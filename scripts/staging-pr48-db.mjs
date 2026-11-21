@@ -175,16 +175,13 @@ async function provision() {
     }
 
     const role = (await sql`select 1 as present from pg_roles where rolname = ${STAGING_DB_USER}`)[0];
-    if (role) {
-      await sql.unsafe(
-        `alter role "${STAGING_DB_USER}" with login password '${escapedPassword}' ` +
-          "nosuperuser nocreatedb nocreaterole noreplication",
-      );
-    } else {
+    if (!role) {
       await sql.unsafe(
         `create role "${STAGING_DB_USER}" with login password '${escapedPassword}' ` +
           "nosuperuser nocreatedb nocreaterole noreplication",
       );
+    } else {
+      out("staging role already exists; preserving its credential");
     }
 
     const database = (
