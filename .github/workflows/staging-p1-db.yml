@@ -1,0 +1,77 @@
+name: P1 Staging Candidate Database
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact combined P1 staging candidate SHA (40-character)."
+        type: string
+        required: true
+      platform_admin_email:
+        description: "Named Staging-only Super Admin email."
+        type: string
+        default: "platform.admin.staging@example.test"
+        required: true
+      platform_admin_password_hash:
+        description: "Argon2id PHC hash for the Staging-only Super Admin (never the password)."
+        type: string
+        required: true
+      confirm:
+        description: 'Type MIGRATE_STAGING_P1 to authorize the Staging-only migration and seed.'
+        type: string
+        default: ""
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p1-staging-db
+  cancel-in-progress: false
+
+jobs:
+  staging-db:
+    name: Migrate and provision the Staging candidate
+    runs-on: ubuntu-latest
+    environment: staging-pr48
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout the exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Verify the checked-out candidate
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply the Staging-only migration and provision the Super Admin
+        env:
+          NEON_DEV_DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
+          STAGING_DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+          RABET_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PLATFORM_ADMIN_EMAIL: ${{ inputs.platform_admin_email }}
+          PLATFORM_ADMIN_PASSWORD_HASH: ${{ inputs.platform_admin_password_hash }}
+          RABET_CONFIRM: ${{ inputs.confirm }}
+        run: node scripts/staging-p1-apply.mjs
+
+      - name: Upload the sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p1-staging-summary
+          path: /tmp/p1-staging-summary.json
+          if-no-files-found: warn
+          retention-days: 7
