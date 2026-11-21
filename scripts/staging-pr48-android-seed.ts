@@ -86,6 +86,7 @@ async function main() {
     async function seedCatalog(input: {
       storeId: string;
       storeKey: string;
+      rootSortOrder: number;
       names: {
         oneAr: string;
         oneEn: string;
@@ -98,7 +99,7 @@ async function main() {
         .values({
           storeId: input.storeId,
           slug: `${input.storeKey}-category`,
-          sortOrder: 0,
+          sortOrder: input.rootSortOrder,
           isActive: true,
         })
         .returning({ id: category.id });
@@ -160,6 +161,7 @@ async function main() {
     const catalogA = await seedCatalog({
       storeId: a.storeId,
       storeKey: "android-store-a",
+      rootSortOrder: 100,
       names: {
         oneAr: "منتج أندرويد الأول",
         oneEn: "Android Product One",
@@ -171,6 +173,7 @@ async function main() {
     const catalogB = await seedCatalog({
       storeId: b.storeId,
       storeKey: "android-store-b",
+      rootSortOrder: 101,
       names: {
         oneAr: "منتج أندرويد ب الأول",
         oneEn: "Android B Product One",
