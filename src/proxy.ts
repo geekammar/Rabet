@@ -1,3 +1,5 @@
+import { getToken } from "next-auth/jwt";
+
 import { auth } from "@/auth";
 import {
   checkOperatorAccess,
@@ -30,6 +32,10 @@ import {
  * rest of the Auth.js handler stays outside the proxy.
  */
 
+/** Platform pages that require an authenticated Super Admin session. */
+const PLATFORM_PROTECTED_PREFIXES = ["/platform/invitations"] as const;
+const PLATFORM_SESSION_COOKIE = "rabet-platform.session-token";
+
 /** Dashboard sections that require an authenticated administrator. */
 const PROTECTED_PREFIXES = [
   "/overview",
@@ -51,7 +57,44 @@ function isProtectedPath(pathname: string): boolean {
   );
 }
 
-export const proxy = auth((req) => {
+function isPlatformProtectedPath(pathname: string): boolean {
+  return PLATFORM_PROTECTED_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+}
+
+/**
+ * Optimistic platform-session check for early redirects only.
+ *
+ * The authoritative decision remains `requirePlatformAdmin()` on the page and
+ * every Server Action, which re-reads the identity and session version from
+ * the database. This helper only reads the encrypted platform cookie so an
+ * unauthenticated or merchant visitor does not receive the platform shell.
+ */
+async function hasOptimisticPlatformSession(req: {
+  headers: Headers;
+  nextUrl: URL;
+}): Promise<boolean> {
+  const secret = process.env.AUTH_SECRET;
+
+  if (!secret) return false;
+
+  try {
+    const token = await getToken({
+      req,
+      secret,
+      cookieName: PLATFORM_SESSION_COOKIE,
+      salt: PLATFORM_SESSION_COOKIE,
+      secureCookie: req.nextUrl.protocol === "https:",
+    });
+
+    return token?.role === "platform_admin";
+  } catch {
+    return false;
+  }
+}
+
+export const proxy = auth(async (req) => {
   // Operator access is checked before Auth.js or any credential work. This
   // applies to both the login Server Action path and the direct credentials
   // callback, and returns the same 401 for missing, invalid or unconfigured
@@ -61,6 +104,15 @@ export const proxy = auth((req) => {
     !checkOperatorAccess(req.headers.get("authorization"))
   ) {
     return operatorAccessChallenge();
+  }
+
+  // Platform administration has its own Auth.js instance and cookie. This is
+  // an early redirect only; the page and actions enforce the real gate.
+  if (
+    isPlatformProtectedPath(req.nextUrl.pathname) &&
+    !(await hasOptimisticPlatformSession(req))
+  ) {
+    return Response.redirect(new URL("/platform/login", req.nextUrl.origin));
   }
 
   // `req.auth` is the session resolved by Auth.js, or `null`. Reading it here
