@@ -78,6 +78,7 @@ import {
   CRITICAL_CONSTRAINTS_V5,
   CRITICAL_CONSTRAINTS_V6,
   CRITICAL_CONSTRAINTS_V7,
+  CRITICAL_CONSTRAINTS_V8,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
@@ -86,6 +87,7 @@ import {
   EXPECTED_INDEXES_V5,
   EXPECTED_INDEXES_V6,
   EXPECTED_INDEXES_V7,
+  EXPECTED_INDEXES_V8,
   EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
@@ -95,6 +97,7 @@ import {
   EXPECTED_TABLES_V5,
   EXPECTED_TABLES_V6,
   EXPECTED_TABLES_V7,
+  EXPECTED_TABLES_V8,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -617,7 +620,9 @@ export async function validateTarget(ctx, options = {}) {
               ? CRITICAL_CONSTRAINTS_V5
               : expectedTables === EXPECTED_TABLES_V6
                 ? CRITICAL_CONSTRAINTS_V6
-                : CRITICAL_CONSTRAINTS);
+                : expectedTables === EXPECTED_TABLES_V8
+                  ? CRITICAL_CONSTRAINTS_V8
+                  : CRITICAL_CONSTRAINTS);
   const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
 
   const prefixCount = options.expectedHashes
@@ -1388,6 +1393,29 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 10 &&
+        inspected.state.pending.length === 1 &&
+        inspected.state.pending[0] === "0010_wonderful_siren"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V8,
+          expectedIndexes: EXPECTED_INDEXES_V8,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V8,
+          expectedHashes: ctx.committedHashes.slice(0, 10).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 10 migrations recorded, " +
+              "but live schema does not match the supported prior release (0009_merchant_auth_throttle).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 9 &&
         inspected.state.pending[0] === "0009_merchant_auth_throttle"
       ) {
@@ -1594,6 +1622,10 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV9 =
+        inspected.state.appliedCount === 10 &&
+        inspected.state.pending.length === 1 &&
+        inspected.state.pending[0] === "0010_wonderful_siren";
       const isKnownPriorReleaseV8 =
         inspected.state.appliedCount === 9 &&
         inspected.state.pending[0] === "0009_merchant_auth_throttle";
@@ -1619,7 +1651,33 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV8) {
+      if (isKnownPriorReleaseV9) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V8,
+          expectedIndexes: EXPECTED_INDEXES_V8,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V8,
+          expectedHashes: ctx.committedHashes.slice(0, 10).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0009_merchant_auth_throttle). " +
+              "Proceeding with migration to 0010_wonderful_siren.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV8) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V7,
