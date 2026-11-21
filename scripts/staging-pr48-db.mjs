@@ -17,6 +17,7 @@ import {
 
 const EXPECTED_DEV_HOST = "ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech";
 const EXPECTED_DEV_DB_NAME = "neondb";
+const EXPECTED_DEV_DB_OWNER = "neondb_owner";
 const STAGING_DB_NAME = "rabet_staging_pr48";
 const STAGING_DB_USER = "rabet_staging";
 const STAGING_ENV_NAME = "staging-pr48";
@@ -195,11 +196,17 @@ async function provision() {
     await sql.unsafe(
       `grant connect, create, temporary on database "${STAGING_DB_NAME}" to "${STAGING_DB_USER}"`,
     );
+    await sql.unsafe(
+      `grant connect, temporary on database "${EXPECTED_DEV_DB_NAME}" to "${EXPECTED_DEV_DB_OWNER}"`,
+    );
     await sql
       .unsafe(
-        `revoke connect on database "${EXPECTED_DEV_DB_NAME}" from "${STAGING_DB_USER}"`,
+        `grant connect on database "${EXPECTED_DEV_DB_NAME}" to neon_service`,
       )
       .catch(() => {});
+    await sql.unsafe(
+      `revoke connect, temporary on database "${EXPECTED_DEV_DB_NAME}" from public`,
+    );
   });
 
   const ownerUrl = new URL(devUrl);
