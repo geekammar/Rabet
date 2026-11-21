@@ -96,9 +96,9 @@ async function assertStagingTarget(stagingUrl) {
   });
 
   try {
-    const rows = await sql.query(
-      "select current_database() as database, current_user as role, version() as version",
-    );
+    const rows = await sql`
+      select current_database() as database, current_user as role, version() as version
+    `;
     const row = rows[0];
 
     if (row?.database !== STAGING_DB_NAME) {
@@ -133,7 +133,7 @@ async function verifyMigrationHistory(stagingUrl) {
   });
 
   try {
-    const rows = await sql.query(QUERIES.drizzleMigrations);
+    const rows = await sql.unsafe(QUERIES.drizzleMigrations);
 
     if (rows.length !== expected.length) {
       fail(
