@@ -113,6 +113,8 @@ type Copy = {
   suspendedTitle: string;
   suspendedBody: string;
   setupLink: string;
+  categoriesLink: string;
+  manageCategories: string;
   addProduct: string;
   addFirstProduct: string;
   createdNotice: string;
@@ -161,6 +163,8 @@ const COPY: Record<MerchantLocale, Copy> = {
     suspendedBody:
       "يمكنك الاطلاع على الأسعار فقط. التعديلات غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
     setupLink: "إعداد المتجر",
+    categoriesLink: "الأقسام",
+    manageCategories: "إدارة الأقسام",
     addProduct: "إضافة منتج",
     addFirstProduct: "إضافة أول منتج",
     createdNotice: "تمت إضافة المنتج.",
@@ -210,6 +214,8 @@ const COPY: Record<MerchantLocale, Copy> = {
     suspendedBody:
       "You can review prices only. Editing is unavailable until a platform administrator reactivates the store.",
     setupLink: "Store setup",
+    categoriesLink: "Categories",
+    manageCategories: "Manage categories",
     addProduct: "Add product",
     addFirstProduct: "Add first product",
     createdNotice: "Product added.",
@@ -549,6 +555,11 @@ export function MerchantProducts({
               </Button>
             )}
             <Button asChild variant="outline" className="min-h-11">
+              <Link href="/app/categories" data-testid="merchant-categories-link">
+                {copy.categoriesLink}
+              </Link>
+            </Button>
+            <Button asChild variant="outline" className="min-h-11">
               <Link href="/app/setup" data-testid="merchant-setup-link">
                 {copy.setupLink}
               </Link>
@@ -660,13 +671,22 @@ export function MerchantProducts({
                     </div>
 
                     {product.categoryPathVisible ? null : (
-                      <p
+                      <div
                         role="status"
                         className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"
                         data-testid={`merchant-product-category-inactive-${product.id}`}
                       >
-                        {copy.inactiveCategoryWarning}
-                      </p>
+                        <p>{copy.inactiveCategoryWarning}</p>
+                        {readOnly ? null : (
+                          <Link
+                            href="/app/categories"
+                            className="mt-1 inline-flex min-h-11 items-center font-semibold underline underline-offset-4"
+                            data-testid={`merchant-product-category-manage-${product.id}`}
+                          >
+                            {copy.manageCategories}
+                          </Link>
+                        )}
+                      </div>
                     )}
 
                     {readOnly ? (

@@ -277,6 +277,23 @@ export function validateProductRevision(
 }
 
 /**
+ * Validates the server-provided category revision used as a write
+ * precondition. It uses the same exact microsecond UTC format as products.
+ */
+export function validateCategoryRevision(
+  raw: unknown,
+): ValidationResult<string> {
+  if (typeof raw !== "string" || !PRODUCT_REVISION_REGEX.test(raw)) {
+    return {
+      success: false,
+      error: "The category revision is missing or malformed.",
+    };
+  }
+
+  return { success: true, data: raw };
+}
+
+/**
  * Validates a boolean value strictly from an action payload or checkbox.
  * Rejects undefined, null, numbers, or malformed strings.
  */
