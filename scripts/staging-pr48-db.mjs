@@ -22,7 +22,7 @@ const STAGING_DB_USER = "rabet_staging";
 const STAGING_ENV_NAME = "staging-pr48";
 const REVIEWED_SHA = "e484a2ec59cbc39d58265f3be485821779c8713a";
 const CONFIRMATION = "PROVISION_STAGING_DB";
-const MODES = new Set(["all", "provision", "migrate", "seed", "verify"]);
+const MODES = new Set(["all", "provision", "migrate", "seed", "verify", "reset-all"]);
 
 const mode = process.env.RABET_STAGING_MODE ?? "all";
 const candidateSha = (process.env.RABET_CANDIDATE_SHA ?? "").trim().toLowerCase();
@@ -244,6 +244,24 @@ async function provision() {
   );
 }
 
+async function reset() {
+  const parsed = readDevTarget();
+
+  await withDevSql(async (connection) => {
+    const meta = (await connection`select current_database() as database`)[0];
+    if (meta?.database !== EXPECTED_DEV_DB_NAME) {
+      fail("Refusing to reset from an unexpected development database.");
+    }
+
+    await connection.unsafe(
+      `select pg_terminate_backend(pid) from pg_stat_activity where datname = '${STAGING_DB_NAME}' and pid <> pg_backend_pid()`,
+    );
+    await connection.unsafe(`drop database if exists "${STAGING_DB_NAME}"`);
+  });
+
+  out(`reset ${maskEndpoint(parsed.host)}/${STAGING_DB_NAME}`);
+}
+
 async function migrate() {
   const parsed = readDevTarget();
   const stagingUrl = buildStagingUrl(parsed);
@@ -430,6 +448,12 @@ async function main() {
   } else if (mode === "seed") {
     await seed();
   } else if (mode === "verify") {
+    await verify();
+  } else if (mode === "reset-all") {
+    await reset();
+    await provision();
+    await migrate();
+    await seed();
     await verify();
   } else {
     await provision();
