@@ -1125,6 +1125,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
     expect(output()).toContain("0005_tenant_identity_foundation");
@@ -1180,6 +1181,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1218,6 +1220,7 @@ describe("production runner flows and execution", () => {
     expect(result.state?.pending).toEqual([
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1257,6 +1260,7 @@ describe("production runner flows and execution", () => {
     expect(result.writes.migrationsApplied).toEqual([
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0007_admin_login_throttle)",
@@ -1354,6 +1358,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1450,6 +1455,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0005_tenant_identity_foundation)",
@@ -1513,6 +1519,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0006_tenant_ownership_expansion)",
@@ -2042,6 +2049,10 @@ function apply0009To(scenario: Scenario) {
   scenario.constraints = [
     ...scenario.constraints,
     ...UPGRADE_0009_CONSTRAINTS.map((name) => ({ name, type: "c" })),
+    {
+      name: "merchant_invitation_revoked_by_user_id_app_user_id_fk",
+      type: "c",
+    },
   ];
   scenario.applied = committed.map((entry, index) => ({
     id: String(index + 1),
@@ -2050,7 +2061,7 @@ function apply0009To(scenario: Scenario) {
   }));
 }
 
-describe("production runner 0008 to 0009 upgrade", () => {
+describe("production runner 0008 to 0010 upgrade", () => {
   const env = {
     [actions.PROD_URL_ENV]: GOOD_URL,
     [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
@@ -2084,7 +2095,7 @@ describe("production runner 0008 to 0009 upgrade", () => {
     expect(output()).toContain("0009_merchant_auth_throttle");
   });
 
-  it("migrate validates 0008 first, applies only 0009, and validates the result", async () => {
+  it("migrate validates 0008 first, applies 0009 and 0010, and validates the result", async () => {
     const { io, output } = testIo();
     const scenario = upgrade0008Scenario();
     const executedCommands: string[] = [];
@@ -2113,6 +2124,7 @@ describe("production runner 0008 to 0009 upgrade", () => {
     expect(result.outcome).toBe("migrated");
     expect(result.writes.migrationsApplied).toEqual([
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),

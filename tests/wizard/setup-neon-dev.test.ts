@@ -648,6 +648,7 @@ describe("committed migration files", () => {
       "bed929c8ccac4c045c8ee46e0fe020a30b3cd97566cb424e44feab4dc93d7824",
       "1b9338e24b64b323122260912be7fe11de0a27293606708d71706f2e11b0238f",
       "26be06319fb273b9925c2bdf349eb202116342174f90804ddf81ae05fdd10b6f",
+      "d97778b12e63e8d3c72d931c8d9688b2ba4bc77b5eda0632676aa0c81e4ad40e",
     ]);
   });
 
