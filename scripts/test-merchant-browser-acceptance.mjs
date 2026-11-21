@@ -602,6 +602,16 @@ async function runJourney(cdp, fixture, authSecret) {
     "Invitation page should default to RTL Arabic",
   );
   await expectNoHorizontalScroll("invite (Arabic)");
+  assert(
+    (await evaluate("document.body.innerText")).includes("دعوة لإدارة متجرك على نكمل"),
+    "Arabic Nokmel invitation copy should be available",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"invite-brand\"]')?.getAttribute('aria-label')",
+    )) === "نكمل",
+    "Arabic invitation brand should be accessible",
+  );
 
   await click('[data-testid="merchant-locale-en"]');
   await waitFor(
@@ -610,8 +620,16 @@ async function runJourney(cdp, fixture, authSecret) {
     "English invitation direction",
   );
   assert(
-    (await evaluate("document.body.innerText")).includes("Accept merchant invitation"),
+    (await evaluate("document.body.innerText")).includes(
+      "You’re invited to manage your store on Nokmel",
+    ),
     "English invitation copy should be available",
+  );
+  assert(
+    (await evaluate(
+      "document.querySelector('[data-testid=\"invite-brand\"]')?.getAttribute('aria-label')",
+    )) === "Nokmel",
+    "English invitation brand should be accessible",
   );
   await click('[data-testid="merchant-locale-ar"]');
 

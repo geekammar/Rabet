@@ -365,6 +365,10 @@ export const EXPECTED_TREE_FKS = {
 
 /** The GitHub repository this wizard is allowed to provision. */
 export const EXPECTED_REPO = "github.com/geekammar/rabet";
+export const EXPECTED_REPOS = [
+  EXPECTED_REPO,
+  "github.com/geekammar/nokmel",
+];
 
 /** The dedicated Neon development project the owner created. */
 export const EXPECTED_NEON_PROJECT = "Rabet_dev";
@@ -1754,15 +1758,16 @@ async function runCheckProject(ctx) {
     );
   } else {
     const normalized = normalizeRemote(remote.stdout);
+    const knownRepo = EXPECTED_REPOS.find((repo) => normalized.includes(repo));
 
-    if (!normalized.includes(EXPECTED_REPO)) {
+    if (!knownRepo) {
       problems.push(
         `The git remote is ${redact(remote.stdout).trim()}, which is not the ` +
-          `Rabet repository (${EXPECTED_REPO}). The wizard refuses to migrate ` +
-          "a database from an unrelated checkout.",
+          `Rabet/Nokmel repository (${EXPECTED_REPOS.join(" or ")}). The wizard ` +
+          "refuses to migrate a database from an unrelated checkout.",
       );
     } else {
-      note(ctx, `Repository   ${EXPECTED_REPO} ✓`);
+      note(ctx, `Repository   ${knownRepo} ✓`);
     }
   }
 
