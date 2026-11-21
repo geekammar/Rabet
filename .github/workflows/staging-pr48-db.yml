@@ -1,6 +1,9 @@
 name: PR48 Staging Database
 
 on:
+  push:
+    branches:
+      - chore/pr48-staging-gate-a
   workflow_dispatch:
     inputs:
       action:
@@ -54,8 +57,8 @@ jobs:
       - name: Create the reviewed candidate worktree
         run: |
           set -euo pipefail
-          git worktree add --detach /tmp/rabet-candidate "${{ inputs.candidate_sha }}"
-          test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+          git worktree add --detach /tmp/rabet-candidate "${{ inputs.candidate_sha || 'e484a2ec59cbc39d58265f3be485821779c8713a' }}"
+          test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${{ inputs.candidate_sha || 'e484a2ec59cbc39d58265f3be485821779c8713a' }}"
 
       - name: Install orchestration dependencies
         run: npm ci
@@ -69,14 +72,14 @@ jobs:
           NEON_DEV_DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
           STAGING_DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
           SEED_ARTIFACT_PASSPHRASE: ${{ secrets.SEED_ARTIFACT_PASSPHRASE }}
-          RABET_STAGING_MODE: ${{ inputs.action }}
-          RABET_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          RABET_STAGING_MODE: ${{ inputs.action || 'all' }}
+          RABET_CANDIDATE_SHA: ${{ inputs.candidate_sha || 'e484a2ec59cbc39d58265f3be485821779c8713a' }}
           RABET_CODE_ROOT: /tmp/rabet-candidate
-          RABET_CONFIRM: ${{ inputs.confirm }}
+          RABET_CONFIRM: ${{ inputs.confirm || 'PROVISION_STAGING_DB' }}
         run: node scripts/staging-pr48-db.mjs
 
       - name: Encrypt temporary credential bundles
-        if: ${{ inputs.action == 'all' || inputs.action == 'provision' || inputs.action == 'seed' }}
+        if: always()
         env:
           SEED_ARTIFACT_PASSPHRASE: ${{ secrets.SEED_ARTIFACT_PASSPHRASE }}
         run: |
@@ -94,7 +97,7 @@ jobs:
           fi
 
       - name: Upload encrypted credential bundle
-        if: ${{ inputs.action == 'all' || inputs.action == 'provision' || inputs.action == 'seed' }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pr48-staging-secrets
