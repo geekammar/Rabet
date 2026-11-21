@@ -191,17 +191,12 @@ async function provision() {
       await sql`select 1 as present from pg_database where datname = ${STAGING_DB_NAME}`
     )[0];
     if (!database) {
-      await sql.unsafe(
-        `create database "${STAGING_DB_NAME}" owner "${STAGING_DB_USER}"`,
-      );
+      await sql.unsafe(`create database "${STAGING_DB_NAME}"`);
     }
 
-    await sql.unsafe(
-      `alter database "${STAGING_DB_NAME}" owner to "${STAGING_DB_USER}"`,
-    );
     await sql.unsafe(`revoke all on database "${STAGING_DB_NAME}" from public`);
     await sql.unsafe(
-      `grant connect, temporary on database "${STAGING_DB_NAME}" to "${STAGING_DB_USER}"`,
+      `grant connect, create, temporary on database "${STAGING_DB_NAME}" to "${STAGING_DB_USER}"`,
     );
     await sql
       .unsafe(
@@ -209,6 +204,24 @@ async function provision() {
       )
       .catch(() => {});
   });
+
+  const ownerUrl = new URL(devUrl);
+  ownerUrl.pathname = `/${STAGING_DB_NAME}`;
+  ownerUrl.searchParams.set("sslmode", "require");
+  const ownerSql = postgres(ownerUrl.toString(), {
+    max: 1,
+    connect_timeout: 30,
+    idle_timeout: 30,
+    ssl: "require",
+  });
+
+  try {
+    await ownerSql.unsafe(
+      `grant create, usage on schema public to "${STAGING_DB_USER}"`,
+    );
+  } finally {
+    await ownerSql.end({ timeout: 5 }).catch(() => {});
+  }
 
   const stagingUrl = buildStagingUrl(parsed);
   await assertStagingTarget(stagingUrl);
