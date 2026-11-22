@@ -13,6 +13,7 @@ import {
   MerchantLanguageToggle,
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
+import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { MerchantLogoutButton } from "@/components/merchant/merchant-logout-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -284,12 +285,14 @@ export function MerchantProducts({
   storeName,
   readOnly,
   products,
+  initialLocale,
 }: {
   storeName: string;
   readOnly: boolean;
   products: MerchantProductItem[];
+  initialLocale: MerchantLocale;
 }) {
-  const [locale, setLocale] = useState<MerchantLocale>("ar");
+  const [locale, setLocale] = useMerchantLocale(initialLocale, "products");
   const [drafts, setDrafts] = useState<Record<string, PriceDraft>>({});
   const [errors, setErrors] = useState<Record<string, PriceError | undefined>>(
     {},

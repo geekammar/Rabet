@@ -23,6 +23,18 @@ vi.mock("next/server", () => ({
 
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
+
+const cookieLocale = vi.hoisted(() => ({ value: undefined as string | undefined }));
+
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    get: (name: string) =>
+      name === "rabet-merchant-locale" && cookieLocale.value
+        ? { name, value: cookieLocale.value }
+        : undefined,
+  }),
 }));
 
 vi.mock("@/lib/auth/merchant-gate", () => ({
@@ -38,7 +50,7 @@ const { InvitationBrand } = await import(
 const { INVITATION_BRAND, INVITATION_PAGE_TITLE } = await import(
   "@/lib/merchant-invitation/branding"
 );
-const { metadata } = await import("@/app/invite/page");
+const { generateMetadata } = await import("@/app/invite/page");
 
 describe("merchant invitation branding", () => {
   it("uses the exact Nokmel Arabic and English copy", () => {
@@ -62,7 +74,9 @@ describe("merchant invitation branding", () => {
   });
 
   it("renders the Arabic brand, title and description without legacy Rabet copy", () => {
-    const html = renderToStaticMarkup(createElement(InvitationAcceptance));
+    const html = renderToStaticMarkup(
+      createElement(InvitationAcceptance, { initialLocale: "ar" }),
+    );
 
     expect(html).toContain('aria-label="نكمل"');
     expect(html).toContain(">نكمل<");
@@ -83,11 +97,28 @@ describe("merchant invitation branding", () => {
     expect(html).not.toContain("Rabet");
   });
 
-  it("uses the Nokmel page title in server metadata", () => {
+  it("uses the Nokmel page title in server metadata", async () => {
+    cookieLocale.value = undefined;
+    const metadata = await generateMetadata();
+
     expect(metadata.title).toBe(INVITATION_PAGE_TITLE.ar);
     expect(metadata.description).toBe(
       "Accept a Nokmel merchant invitation.",
     );
     expect(metadata.title).not.toMatch(/Rabet/);
+    expect(metadata.robots).toEqual({ index: false, follow: false });
+  });
+
+  it("localizes the invitation document metadata from the saved locale", async () => {
+    cookieLocale.value = "en";
+
+    try {
+      const metadata = await generateMetadata();
+
+      expect(metadata.title).toBe(INVITATION_PAGE_TITLE.en);
+      expect(metadata.robots).toEqual({ index: false, follow: false });
+    } finally {
+      cookieLocale.value = undefined;
+    }
   });
 });

@@ -9,6 +9,7 @@ import {
   MerchantLanguageToggle,
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
+import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
 import {
   INVITATION_PAGE_TITLE,
@@ -116,8 +117,12 @@ function readFragmentToken(): string | null {
   return token && token.length > 0 ? token : null;
 }
 
-export function InvitationAcceptance() {
-  const [locale, setLocale] = useState<MerchantLocale>("ar");
+export function InvitationAcceptance({
+  initialLocale,
+}: {
+  initialLocale: MerchantLocale;
+}) {
+  const [locale, setLocale] = useMerchantLocale(initialLocale, "invite");
   const [phase, setPhase] = useState<Phase>("previewing");
   const tokenRef = useRef<string | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -127,10 +132,6 @@ export function InvitationAcceptance() {
   const passwordRef = useRef<HTMLInputElement>(null);
   const confirmationRef = useRef<HTMLInputElement>(null);
   const copy = INVITATION_COPY[locale];
-
-  useEffect(() => {
-    document.title = INVITATION_PAGE_TITLE[locale];
-  }, [locale]);
 
   useEffect(() => {
     const fragmentToken = readFragmentToken();

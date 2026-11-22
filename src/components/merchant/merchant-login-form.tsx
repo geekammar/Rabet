@@ -12,6 +12,7 @@ import {
   MerchantLanguageToggle,
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
+import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
 
 const COPY = {
@@ -45,12 +46,16 @@ const COPY = {
   },
 };
 
-export function MerchantLoginForm() {
+export function MerchantLoginForm({
+  initialLocale,
+}: {
+  initialLocale: MerchantLocale;
+}) {
   const [state, formAction, pending] = useActionState<MerchantLoginState, FormData>(
     merchantLogin,
     {},
   );
-  const [locale, setLocale] = useState<MerchantLocale>("ar");
+  const [locale, setLocale] = useMerchantLocale(initialLocale, "login");
   const [email, setEmail] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const copy = COPY[locale];

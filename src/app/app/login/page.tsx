@@ -5,12 +5,17 @@ import { notFound, redirect } from "next/navigation";
 import { MerchantLoginForm } from "@/components/merchant/merchant-login-form";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { getMerchantAccess } from "@/lib/auth/merchant-session";
+import {
+  readMerchantLocale,
+  merchantPageMetadata,
+} from "@/lib/merchant/locale-server";
 
-export const metadata: Metadata = {
-  title: "تسجيل دخول التاجر",
-  description: "Sign in to your Rabet merchant store.",
-  robots: { index: false, follow: false },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  return merchantPageMetadata(
+    "login",
+    "Sign in to your Rabet merchant store.",
+  );
+}
 
 export const instant = false;
 
@@ -23,5 +28,7 @@ export default async function MerchantLoginPage() {
 
   if (access) redirect("/app/setup");
 
-  return <MerchantLoginForm />;
+  const initialLocale = await readMerchantLocale();
+
+  return <MerchantLoginForm initialLocale={initialLocale} />;
 }

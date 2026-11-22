@@ -7,13 +7,18 @@ import { MerchantProductCreate } from "@/components/merchant/merchant-product-cr
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
 import { listCatalogCategoriesForStore } from "@/lib/data/catalog";
+import {
+  readMerchantLocale,
+  merchantPageMetadata,
+} from "@/lib/merchant/locale-server";
 import { resolveMerchantCatalogLanguage } from "@/lib/merchant/product-create";
 
-export const metadata: Metadata = {
-  title: "إضافة منتج",
-  description: "Add the first draft product to the signed-in merchant store.",
-  robots: { index: false, follow: false },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  return merchantPageMetadata(
+    "productCreate",
+    "Add the first draft product to the signed-in merchant store.",
+  );
+}
 
 export const instant = false;
 
@@ -24,11 +29,12 @@ export default async function MerchantProductCreatePage() {
 
   const access = await requireMerchantAccess();
   const db = getDb();
-  const [categories, language] = await Promise.all([
+  const [categories, language, initialLocale] = await Promise.all([
     access.readOnly
       ? Promise.resolve([])
       : listCatalogCategoriesForStore(db, access.scope),
     resolveMerchantCatalogLanguage(db),
+    readMerchantLocale(),
   ]);
 
   const options = categories.map((category) => ({
@@ -50,6 +56,7 @@ export default async function MerchantProductCreatePage() {
       readOnly={access.readOnly}
       languageUnavailable={language === null}
       categories={options}
+      initialLocale={initialLocale}
     />
   );
 }
