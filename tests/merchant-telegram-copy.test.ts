@@ -21,6 +21,8 @@ describe("merchant Telegram connection copy", () => {
       expect(copy.errors.activation_lease_lost.length).toBeGreaterThan(0);
       expect(copy.errors.activation_conflict.length).toBeGreaterThan(0);
       expect(copy.errors.activation_superseded.length).toBeGreaterThan(0);
+      expect(copy.errors.REVIEW.length).toBeGreaterThan(0);
+      expect(copy.errors.webhook_outcome_unknown.length).toBeGreaterThan(0);
     }
   });
 

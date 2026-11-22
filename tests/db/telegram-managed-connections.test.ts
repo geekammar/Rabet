@@ -757,7 +757,9 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
     const failingApi = botApi(6003, "RetryStoreBot", {
       setWebhook: vi.fn(async () => ({
         ok: false as const,
-        error: "setWebhook failed",
+        error: "setWebhook explicitly rejected",
+        errorKind: "api_error" as const,
+        httpStatus: 400,
       })),
     });
 
@@ -1520,6 +1522,199 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       .where(eq(telegramConnection.id, prepared.result.connectionId));
     expect(winner.status).toBe("ready");
     expect(winner.webhookOperationId).toBeNull();
+  });
+
+  it("keeps an ambiguous setWebhook timeout in review, blocks same-bot retries, and leaves another store usable", async () => {
+    const timedOutApi = botApi(6050, "UncertainTimeoutBot");
+    let pendingUrl = "";
+    let currentUrl = "";
+
+    timedOutApi.setWebhook = vi.fn(
+      async (input: { url: string; secretToken: string }) => {
+        pendingUrl = input.url;
+        return {
+          ok: false as const,
+          error: "Telegram request timed out",
+          errorKind: "timeout" as const,
+        };
+      },
+    );
+    timedOutApi.getWebhookInfo = vi.fn(async () => ({
+      ok: true as const,
+      result: { url: currentUrl },
+    }));
+
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7571,
+      6050,
+      "UncertainTimeoutBot",
+      { managedApi: timedOutApi },
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const result = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => timedOutApi },
+    );
+
+    expect(result.status).toBe("review");
+    expect(timedOutApi.setWebhook).toHaveBeenCalledTimes(1);
+    expect(timedOutApi.deleteWebhook).not.toHaveBeenCalled();
+
+    const [reviewedConnection] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(reviewedConnection.status).toBe("needs_review");
+
+    const [reviewedAttempt] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, prepared.started.attemptId));
+    expect(reviewedAttempt.status).toBe("failed");
+    expect(reviewedAttempt.failureCode).toBe("webhook_outcome_unknown");
+
+    const reviewState = await readMerchantTelegramConnectionState(appDb(), {
+      scope: await scope(fixture.storeAId),
+      merchantUserId: fixture.userAId,
+    });
+    expect(reviewState).toEqual({
+      state: "failed",
+      reason: "webhook_outcome_unknown",
+      retryable: false,
+    });
+
+    // Model the old request applying after its transport result was lost.
+    currentUrl = pendingUrl;
+    expect(currentUrl).toContain(`?v=${prepared.started.attemptId}`);
+
+    const [stillReviewed] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(stillReviewed.status).toBe("needs_review");
+
+    // Start Over / reconnect for the same bot is blocked without a mutation.
+    const blockedApi = botApi(6050, "UncertainTimeoutBot");
+    const blocked = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7571,
+      6050,
+      "UncertainTimeoutBot",
+      { managedApi: blockedApi },
+    );
+    expect(blocked.result.status).toBe("bot_review");
+    expect(blockedApi.setWebhook).not.toHaveBeenCalled();
+
+    await db()
+      .update(telegramConnection)
+      .set({ webhookOperationExpiresAt: new Date(Date.now() - 1000) })
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+
+    const stillBlocked = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => blockedApi },
+    );
+    expect(stillBlocked.status).toBe("conflict");
+    expect(blockedApi.setWebhook).not.toHaveBeenCalled();
+
+    // A different store/bot is unaffected.
+    const otherApi = botApi(6051, "IndependentStoreBot");
+    const otherPrepared = await provision(
+      fixture.storeBId,
+      fixture.userBId,
+      7572,
+      6051,
+      "IndependentStoreBot",
+      { managedApi: otherApi },
+    );
+    expect(otherPrepared.result.status).toBe("awaiting_confirmation");
+    if (otherPrepared.result.status !== "awaiting_confirmation") return;
+
+    const otherConfirmed = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeBId,
+        merchantUserId: fixture.userBId,
+        connectionId: otherPrepared.result.connectionId,
+      },
+      { createBotApi: () => otherApi },
+    );
+    expect(otherConfirmed.status).toBe("ready");
+    expect(otherApi.setWebhook).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a successful setWebhook response followed by failed verification in review", async () => {
+    const api = botApi(6052, "VerificationUncertainBot");
+    let call = 0;
+    api.getWebhookInfo = vi.fn(async () => {
+      call += 1;
+
+      if (call === 1) {
+        return { ok: true as const, result: { url: "" } };
+      }
+
+      return {
+        ok: false as const,
+        error: "verification unavailable",
+        errorKind: "timeout" as const,
+      };
+    });
+
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7581,
+      6052,
+      "VerificationUncertainBot",
+      { managedApi: api },
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const result = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => api },
+    );
+
+    expect(result.status).toBe("review");
+    expect(api.setWebhook).toHaveBeenCalledTimes(1);
+    expect(api.deleteWebhook).not.toHaveBeenCalled();
+
+    const [connection] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(connection.status).toBe("needs_review");
+    expect(connection.webhookOperationId).not.toBeNull();
+
+    const [attempt] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, prepared.started.attemptId));
+    expect(attempt.status).toBe("failed");
+    expect(attempt.failureCode).toBe("webhook_outcome_unknown");
   });
 
   it("rejects missing and invalid webhook secrets before claiming an update", async () => {

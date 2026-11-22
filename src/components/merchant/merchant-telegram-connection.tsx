@@ -214,16 +214,18 @@ export function MerchantTelegramConnection({
               : copy.failedTitle}
           </p>
           <p className="text-sm text-muted-foreground">{failureMessage}</p>
-          <Button
-            type="button"
-            className="min-h-11"
-            disabled={readOnly || isPending}
-            onClick={startConnection}
-            data-testid="merchant-telegram-retry"
-          >
-            <RefreshCw className="size-4" aria-hidden="true" />
-            {copy.retry}
-          </Button>
+          {state.retryable ? (
+            <Button
+              type="button"
+              className="min-h-11"
+              disabled={readOnly || isPending}
+              onClick={startConnection}
+              data-testid="merchant-telegram-retry"
+            >
+              <RefreshCw className="size-4" aria-hidden="true" />
+              {copy.retry}
+            </Button>
+          ) : null}
         </div>
       ) : null}
 

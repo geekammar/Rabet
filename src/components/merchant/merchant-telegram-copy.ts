@@ -75,7 +75,11 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       webhook_inspection_failed: "تعذر فحص ويبهوك البوت. أعد المحاولة.",
       secret_unavailable: "تعذر تجهيز بيانات البوت. أعد المحاولة.",
       foreign_webhook: "هذا البوت مرتبط بويبهوك آخر لا يملكه هذا المتجر.",
+      webhook_outcome_unknown:
+        "لم نتمكن من تأكيد نتيجة تسجيل ويبهوك البوت. البوت قيد المراجعة ولا يمكن إعادة المحاولة أو إنشاء بوت آخر الآن. تواصل مع الدعم.",
       RETRYABLE: "لم يكتمل تفعيل تيليجرام. أعد المحاولة.",
+      REVIEW:
+        "البوت قيد المراجعة الأمنية. لا تبدأ من جديد أو تنشئ بوتًا آخر. تواصل مع الدعم.",
       unavailable: "حالة الاتصال غير متاحة الآن. أعد المحاولة.",
       failed: "لم يكتمل ربط البوت. أعد المحاولة.",
     },
@@ -130,7 +134,11 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       webhook_inspection_failed: "The bot webhook could not be inspected. Try again.",
       secret_unavailable: "The bot credentials could not be prepared. Try again.",
       foreign_webhook: "This bot already has a webhook that is not owned by this store.",
+      webhook_outcome_unknown:
+        "We could not confirm whether the bot webhook was registered. The bot is under review; do not retry or create another bot. Contact support.",
       RETRYABLE: "Telegram activation did not complete. Try again.",
+      REVIEW:
+        "This bot is under security review. Do not start over or create another bot. Contact support.",
       unavailable: "The connection state is unavailable right now. Try again.",
       failed: "The bot connection was not completed. Try again.",
     },

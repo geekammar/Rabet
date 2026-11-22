@@ -26,6 +26,7 @@ export type MerchantTelegramActionResult =
         | "EXPIRED"
         | "CONFLICT"
         | "RETRYABLE"
+        | "REVIEW"
         | "OPERATION_FAILED";
     };
 
@@ -149,6 +150,11 @@ export async function confirmMerchantTelegramConnection(
     if (result.status === "retryable") {
       revalidatePath("/app/setup");
       return { ok: false, error: "RETRYABLE" };
+    }
+
+    if (result.status === "review") {
+      revalidatePath("/app/setup");
+      return { ok: false, error: "REVIEW" };
     }
 
     revalidatePath("/app/setup");
