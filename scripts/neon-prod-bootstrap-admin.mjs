@@ -31,10 +31,10 @@ import {
   EXPECTED_DB_NAME_ENV,
   EXPECTED_HOST_ENV,
   PROD_URL_ENV,
-  redact,
   validateGithubContext,
   validateProdUrl,
 } from "./neon-prod-actions.mjs";
+import { redact } from "./setup-neon-dev.mjs";
 
 export const BOOTSTRAP_CONFIRMATION = "PROVISION_RABET_SUPER_ADMIN";
 export const ADMIN_EMAIL_ENV = "RABET_PLATFORM_ADMIN_EMAIL";

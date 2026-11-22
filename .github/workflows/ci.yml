@@ -62,6 +62,51 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The Production bootstrap entry point runs directly under Node on the
+      # runner, not through Vitest's module loader. This smoke check executes
+      # the real file with its no-secret help path so a broken ESM import fails
+      # PR CI before any manual Production run can reach the database.
+      - name: Production bootstrap CLI loads under Node.js
+        env:
+          RABET_BOOTSTRAP_HELP: "1"
+        run: |
+          set +e
+          output="$(node scripts/neon-prod-bootstrap-admin.mjs 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "${output}"
+          if [ "${status}" -ne 0 ]; then
+            echo "Expected exit 0 from the bootstrap help path, got ${status}." >&2
+            exit 1
+          fi
+
+          expected_header="rabet platform-admin-bootstrap — manual Production owner bootstrap"
+          if [ "${output%%$'\n'*}" != "${expected_header}" ]; then
+            echo "Unexpected bootstrap help header." >&2
+            exit 1
+          fi
+
+          for expected_line in \
+            "NEON_PROD_DATABASE_URL" \
+            "NEON_PROD_EXPECTED_HOST" \
+            "NEON_PROD_EXPECTED_DB_NAME" \
+            "RABET_PLATFORM_ADMIN_EMAIL" \
+            "RABET_PLATFORM_ADMIN_PASSWORD_HASH" \
+            "RABET_PLATFORM_ADMIN_CONFIRM" \
+            "PROVISION_RABET_SUPER_ADMIN" \
+            "The hash is never accepted as a workflow input and is never printed."; do
+            if ! printf '%s\n' "${output}" | grep -Fq -- "${expected_line}"; then
+              echo "Missing expected help line: ${expected_line}" >&2
+              exit 1
+            fi
+          done
+
+          line_count="$(printf '%s\n' "${output}" | wc -l)"
+          if [ "${line_count}" -ne 12 ]; then
+            echo "Expected 12 help lines, got ${line_count}." >&2
+            exit 1
+          fi
+
       - name: Lint
         run: npm run lint
 
