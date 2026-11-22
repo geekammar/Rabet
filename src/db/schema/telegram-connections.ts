@@ -166,6 +166,19 @@ export const telegramConnection = pgTable(
     webhookSecretHash: text("webhook_secret_hash").notNull(),
     webhookUrl: text("webhook_url").notNull(),
     status: text("status").notNull().default("provisioning"),
+    // Durable activation ownership: the confirmed attempt that last claimed or
+    // completed external webhook activation for this connection. Every write
+    // that changes activation state is conditional on this identity.
+    activationAttemptId: uuid("activation_attempt_id"),
+    // Short-lived per-bot external-operation lease. Only the operation that
+    // owns this lease may call setWebhook/deleteWebhook. The lease is claimed
+    // in a short transaction and revalidated immediately before the call.
+    webhookOperationId: uuid("webhook_operation_id"),
+    webhookOperationAttemptId: uuid("webhook_operation_attempt_id"),
+    webhookOperationExpiresAt: timestamp("webhook_operation_expires_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
     verifiedAt: timestamp("verified_at", { withTimezone: true, mode: "date" }),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
@@ -196,6 +209,18 @@ export const telegramConnection = pgTable(
     check(
       "telegram_connection_webhook_url_https_check",
       sql`${table.webhookUrl} ~ '^https://'`,
+    ),
+    check(
+      "telegram_connection_webhook_operation_consistency_check",
+      sql`(
+        (${table.webhookOperationId} IS NULL
+          AND ${table.webhookOperationAttemptId} IS NULL
+          AND ${table.webhookOperationExpiresAt} IS NULL)
+        OR
+        (${table.webhookOperationId} IS NOT NULL
+          AND ${table.webhookOperationAttemptId} IS NOT NULL
+          AND ${table.webhookOperationExpiresAt} IS NOT NULL)
+      )`,
     ),
   ],
 );

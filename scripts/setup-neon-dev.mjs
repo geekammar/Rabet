@@ -123,6 +123,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0009_merchant_auth_throttle",
   "0010_wonderful_siren",
   "0011_careless_hulk",
+  "0012_mushy_scream",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -173,6 +174,9 @@ export const EXPECTED_TABLES_V8 = EXPECTED_TABLES.filter(
 
 /** The exact twenty-five-table inventory through 0010 (no new table). */
 export const EXPECTED_TABLES_V9 = [...EXPECTED_TABLES_V8];
+
+/** The twenty-eight-table inventory through 0011 (managed bot tables included). */
+export const EXPECTED_TABLES_V10 = [...EXPECTED_TABLES];
 
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
 export const EXPECTED_TABLES_V3 = EXPECTED_TABLES_V4.filter(
@@ -275,8 +279,8 @@ export const EXPECTED_INDEXES_V7 = EXPECTED_INDEXES_V8.filter(
 /** Indexes present through 0010 (0010 adds no index). */
 export const EXPECTED_INDEXES_V9 = [...EXPECTED_INDEXES_V8];
 
-/** Indexes the current chain requires (0011 adds managed bot connections). */
-export const EXPECTED_INDEXES = [
+/** Indexes present through 0011 (managed bot connection indexes). */
+export const EXPECTED_INDEXES_V10 = [
   ...EXPECTED_INDEXES_V9,
   "telegram_connection_bot_id_unique",
   "telegram_connection_store_idx",
@@ -289,6 +293,9 @@ export const EXPECTED_INDEXES = [
   "telegram_managed_update_bot_update_unique",
   "telegram_managed_update_status_idx",
 ];
+
+/** Indexes the current chain requires (0012 adds no index). */
+export const EXPECTED_INDEXES = [...EXPECTED_INDEXES_V10];
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
 export const CRITICAL_CONSTRAINTS_V2 = [
@@ -385,8 +392,8 @@ export const CRITICAL_CONSTRAINTS_V9 = [
   "merchant_invitation_revoked_by_user_id_app_user_id_fk",
 ];
 
-/** CHECK, domain and ownership constraints the current chain requires (0011 adds managed bots). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, domain and ownership constraints present through 0011 (managed bots). */
+export const CRITICAL_CONSTRAINTS_V10 = [
   ...CRITICAL_CONSTRAINTS_V9,
   "telegram_connection_store_id_store_id_fk",
   "telegram_connection_status_check",
@@ -406,6 +413,12 @@ export const CRITICAL_CONSTRAINTS = [
   "telegram_managed_update_status_check",
   "telegram_managed_update_update_id_positive_check",
   "telegram_managed_update_bot_id_positive_check",
+];
+
+/** CHECK constraints the current chain requires (0012 adds activation fencing). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V10,
+  "telegram_connection_webhook_operation_consistency_check",
 ];
 
 /** Notification update triggers created by migration 0003. */

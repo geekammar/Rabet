@@ -389,7 +389,7 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
     const journal = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from drizzle.__drizzle_migrations
     `);
-    expect(journal[0].count).toBe(12);
+    expect(journal[0].count).toBe(13);
 
     const tables = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from information_schema.tables

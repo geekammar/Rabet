@@ -56,7 +56,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
       sql`select count(*)::int as count from drizzle.__drizzle_migrations`,
     );
 
-    expect(rows[0].count).toBe(12);
+    expect(rows[0].count).toBe(13);
   });
 
   it("re-applying the chain is a no-op that duplicates no objects", async () => {
@@ -165,7 +165,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
     // applied before this run, so the journal still holds them — the point is
     // that the broken migration was *not* recorded and built nothing.
     expect(probes[0].count).toBe(0);
-    expect(applied[0].count).toBe(12);
+    expect(applied[0].count).toBe(13);
 
     // The committed schema is intact, not half-dropped.
     const tables = await db.execute<{ count: number }>(

@@ -1070,7 +1070,7 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
     expect(connections).toHaveLength(0);
   });
 
-  it("does not activate a cancelled attempt when webhook registration returns late, and removes only its own webhook", async () => {
+  it("does not activate a cancelled attempt when webhook registration returns late and never deletes the webhook it set", async () => {
     const setWebhook = deferred<{ ok: true; result: true }>();
     let currentWebhookUrl = "";
     const managed = botApi(6023, "LateActivationBot");
@@ -1130,8 +1130,8 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       .from(telegramConnection)
       .where(eq(telegramConnection.id, prepared.result.connectionId));
     expect(connection.status).not.toBe("ready");
-    expect(currentWebhookUrl).toBe("");
-    expect(managed.deleteWebhook).toHaveBeenCalledTimes(1);
+    expect(currentWebhookUrl).toContain("?v=");
+    expect(managed.deleteWebhook).not.toHaveBeenCalled();
   });
 
   it("does not activate an expired attempt when webhook registration returns late", async () => {
@@ -1193,8 +1193,333 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       .from(telegramConnection)
       .where(eq(telegramConnection.id, prepared.result.connectionId));
     expect(connection.status).toBe("revoked");
-    expect(currentWebhookUrl).toBe("");
-    expect(managed.deleteWebhook).toHaveBeenCalledTimes(1);
+    expect(currentWebhookUrl).toContain("?v=");
+    expect(managed.deleteWebhook).not.toHaveBeenCalled();
+  });
+
+  it("prevents an older activation from mutating or releasing a newer successful same-bot activation", async () => {
+    const oldApi = botApi(6030, "StaleActivationBot");
+    const oldInfo = deferred<{ ok: true; result: { url: string } }>();
+    oldApi.getWebhookInfo = vi.fn(() => oldInfo.promise);
+
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7531,
+      6030,
+      "StaleActivationBot",
+      { managedApi: oldApi },
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const oldPending = confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => oldApi },
+    );
+
+    await vi.waitFor(() => {
+      expect(oldApi.getWebhookInfo).toHaveBeenCalledTimes(1);
+    });
+
+    const newApi = botApi(6030, "StaleActivationBot");
+    const replacement = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7531,
+      6030,
+      "StaleActivationBot",
+      { managedApi: newApi },
+    );
+
+    expect(replacement.result.status).toBe("awaiting_confirmation");
+    if (replacement.result.status !== "awaiting_confirmation") return;
+
+    const busy = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: replacement.result.connectionId,
+      },
+      { createBotApi: () => newApi },
+    );
+    expect(busy.status).toBe("conflict");
+
+    await db()
+      .update(telegramConnection)
+      .set({ webhookOperationExpiresAt: new Date(Date.now() - 1000) })
+      .where(eq(telegramConnection.id, replacement.result.connectionId));
+
+    const newConfirmation = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: replacement.result.connectionId,
+      },
+      { createBotApi: () => newApi },
+    );
+    expect(newConfirmation.status).toBe("ready");
+
+    oldInfo.resolve({ ok: true, result: { url: "" } });
+    const stale = await oldPending;
+    expect(stale.status === "retryable" || stale.status === "superseded").toBe(
+      true,
+    );
+    expect(oldApi.setWebhook).not.toHaveBeenCalled();
+
+    const [winner] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, replacement.result.connectionId));
+    expect(winner.status).toBe("ready");
+    expect(winner.webhookUrl).toBe(newApi.getWebhookUrl());
+    expect(winner.webhookSecretHash).toBe(
+      hashWebhookSecret(newApi.getWebhookSecret()),
+    );
+    expect(winner.webhookOperationId).toBeNull();
+
+    const [staleAttempt] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, prepared.started.attemptId));
+    expect(staleAttempt.status).toBe("cancelled");
+  });
+
+  it("prevents a stale terminal decision from changing a newer ready connection", async () => {
+    const oldApi = botApi(6032, "ForeignRaceBot");
+    const oldInfo = deferred<{
+      ok: true;
+      result: { url: string };
+    }>();
+    oldApi.getWebhookInfo = vi.fn(() => oldInfo.promise);
+
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7541,
+      6032,
+      "ForeignRaceBot",
+      { managedApi: oldApi },
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const oldPending = confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => oldApi },
+    );
+
+    await vi.waitFor(() => {
+      expect(oldApi.getWebhookInfo).toHaveBeenCalledTimes(1);
+    });
+
+    const newApi = botApi(6032, "ForeignRaceBot");
+    const replacement = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7541,
+      6032,
+      "ForeignRaceBot",
+      { managedApi: newApi },
+    );
+    expect(replacement.result.status).toBe("awaiting_confirmation");
+    if (replacement.result.status !== "awaiting_confirmation") return;
+
+    const busy = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: replacement.result.connectionId,
+      },
+      { createBotApi: () => newApi },
+    );
+    expect(busy.status).toBe("conflict");
+
+    await db()
+      .update(telegramConnection)
+      .set({ webhookOperationExpiresAt: new Date(Date.now() - 1000) })
+      .where(eq(telegramConnection.id, replacement.result.connectionId));
+
+    const newConfirmation = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: replacement.result.connectionId,
+      },
+      { createBotApi: () => newApi },
+    );
+    expect(newConfirmation.status).toBe("ready");
+
+    oldInfo.resolve({
+      ok: true,
+      result: { url: "https://foreign.example.test/test-hook" },
+    });
+    const stale = await oldPending;
+    expect(stale.status).toBe("foreign_webhook");
+    expect(oldApi.setWebhook).not.toHaveBeenCalled();
+    expect(oldApi.deleteWebhook).not.toHaveBeenCalled();
+
+    const [winner] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, replacement.result.connectionId));
+    expect(winner.status).toBe("ready");
+    expect(winner.webhookUrl).toBe(newApi.getWebhookUrl());
+    expect(winner.webhookSecretHash).toBe(
+      hashWebhookSecret(newApi.getWebhookSecret()),
+    );
+  });
+
+  it("recovers an abandoned activation claim after its lease expires", async () => {
+    const oldApi = botApi(6033, "AbandonedClaimBot");
+    const oldInfo = deferred<{ ok: true; result: { url: string } }>();
+    oldApi.getWebhookInfo = vi.fn(() => oldInfo.promise);
+
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7551,
+      6033,
+      "AbandonedClaimBot",
+      { managedApi: oldApi },
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const oldPending = confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => oldApi },
+    );
+
+    await vi.waitFor(() => {
+      expect(oldApi.getWebhookInfo).toHaveBeenCalledTimes(1);
+    });
+
+    await db()
+      .update(telegramConnection)
+      .set({ webhookOperationExpiresAt: new Date(Date.now() - 1000) })
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+
+    const recoveryApi = botApi(6033, "AbandonedClaimBot");
+    const recovered = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => recoveryApi },
+    );
+
+    expect(recovered.status).toBe("ready");
+
+    oldInfo.resolve({ ok: true, result: { url: "" } });
+    const stale = await oldPending;
+    expect(stale.status === "retryable" || stale.status === "superseded").toBe(
+      true,
+    );
+    expect(oldApi.setWebhook).not.toHaveBeenCalled();
+
+    const [winner] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(winner.status).toBe("ready");
+    expect(winner.webhookUrl).toBe(recoveryApi.getWebhookUrl());
+    expect(winner.webhookSecretHash).toBe(
+      hashWebhookSecret(recoveryApi.getWebhookSecret()),
+    );
+  });
+
+  it("allows only one concurrent confirmation to mutate the webhook", async () => {
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7561,
+      6034,
+      "ConcurrentConfirmBot",
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const apiOne = botApi(6034, "ConcurrentConfirmBot");
+    const apiTwo = botApi(6034, "ConcurrentConfirmBot");
+    const firstInfo = deferred<{ ok: true; result: { url: string } }>();
+    let firstInspection = true;
+    apiOne.getWebhookInfo = vi.fn(() => {
+      if (firstInspection) {
+        firstInspection = false;
+        return firstInfo.promise;
+      }
+
+      return Promise.resolve({
+        ok: true as const,
+        result: { url: apiOne.getWebhookUrl() },
+      });
+    });
+
+    const onePending = confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => apiOne },
+    );
+
+    await vi.waitFor(() => {
+      expect(apiOne.getWebhookInfo).toHaveBeenCalledTimes(1);
+    });
+
+    const two = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => apiTwo },
+    );
+    expect(two.status).toBe("conflict");
+
+    firstInfo.resolve({ ok: true, result: { url: "" } });
+    const one = await onePending;
+    expect(one.status).toBe("ready");
+    const totalSetWebhookCalls =
+      (apiOne.setWebhook as ReturnType<typeof vi.fn>).mock.calls.length +
+      (apiTwo.setWebhook as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(totalSetWebhookCalls).toBe(1);
+
+    const [winner] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(winner.status).toBe("ready");
+    expect(winner.webhookOperationId).toBeNull();
   });
 
   it("rejects missing and invalid webhook secrets before claiming an update", async () => {

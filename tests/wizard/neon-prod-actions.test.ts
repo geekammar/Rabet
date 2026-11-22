@@ -1127,6 +1127,7 @@ describe("production runner flows and execution", () => {
       "0009_merchant_auth_throttle",
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
     expect(output()).toContain("0005_tenant_identity_foundation");
@@ -1184,6 +1185,7 @@ describe("production runner flows and execution", () => {
       "0009_merchant_auth_throttle",
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1224,6 +1226,7 @@ describe("production runner flows and execution", () => {
       "0009_merchant_auth_throttle",
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1265,12 +1268,13 @@ describe("production runner flows and execution", () => {
       "0009_merchant_auth_throttle",
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0007_admin_login_throttle)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0011_careless_hulk",
+      "Proceeding with migration to 0012_mushy_scream",
     );
     expect(output()).toContain("Production migration complete");
   });
@@ -1364,6 +1368,7 @@ describe("production runner flows and execution", () => {
       "0009_merchant_auth_throttle",
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1462,12 +1467,13 @@ describe("production runner flows and execution", () => {
       "0009_merchant_auth_throttle",
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0005_tenant_identity_foundation)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0011_careless_hulk",
+      "Proceeding with migration to 0012_mushy_scream",
     );
   });
 
@@ -1527,12 +1533,13 @@ describe("production runner flows and execution", () => {
       "0009_merchant_auth_throttle",
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0006_tenant_ownership_expansion)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0011_careless_hulk",
+      "Proceeding with migration to 0012_mushy_scream",
     );
   });
 
@@ -2119,6 +2126,7 @@ describe("production runner 0008 to 0010 upgrade", () => {
       "0009_merchant_auth_throttle",
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2127,7 +2135,7 @@ describe("production runner 0008 to 0010 upgrade", () => {
       "Verified healthy prior release (0008_merchant_invitations_and_credentials)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0011_careless_hulk",
+      "Proceeding with migration to 0012_mushy_scream",
     );
     expect(output()).toContain("Validating the result on live database");
   });
@@ -2224,6 +2232,7 @@ describe("production runner 0009 to 0010 upgrade", () => {
     expect(result.state?.pending).toEqual([
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(output()).toContain("Validating prior release schema on target");
@@ -2260,6 +2269,7 @@ describe("production runner 0009 to 0010 upgrade", () => {
     expect(result.writes.migrationsApplied).toEqual([
       "0010_wonderful_siren",
       "0011_careless_hulk",
+      "0012_mushy_scream",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2268,7 +2278,7 @@ describe("production runner 0009 to 0010 upgrade", () => {
       "Verified healthy prior release (0009_merchant_auth_throttle)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0011_careless_hulk",
+      "Proceeding with migration to 0012_mushy_scream",
     );
     expect(output()).toContain("Validating the result on live database");
   });
@@ -2358,13 +2368,16 @@ describe("production runner 0010 to 0011 upgrade", () => {
     expect(result.ok, output()).toBe(true);
     expect(result.outcome).toBe("inspected");
     expect(commandCalled).toBe(false);
-    expect(result.state?.pending).toEqual(["0011_careless_hulk"]);
+    expect(result.state?.pending).toEqual([
+      "0011_careless_hulk",
+      "0012_mushy_scream",
+    ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(output()).toContain("Validating prior release schema on target");
     expect(output()).toContain("0010_wonderful_siren");
   });
 
-  it("migrate validates 0010 first, applies only 0011, and validates the result", async () => {
+  it("migrate validates 0010 first, applies the remaining chain, and validates the result", async () => {
     const { io, output } = testIo();
     const scenario = upgrade0010Scenario();
     const executedCommands: string[] = [];
@@ -2391,7 +2404,10 @@ describe("production runner 0010 to 0011 upgrade", () => {
 
     expect(result.ok, output()).toBe(true);
     expect(result.outcome).toBe("migrated");
-    expect(result.writes.migrationsApplied).toEqual(["0011_careless_hulk"]);
+    expect(result.writes.migrationsApplied).toEqual([
+      "0011_careless_hulk",
+      "0012_mushy_scream",
+    ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
     ).toHaveLength(1);
@@ -2399,7 +2415,7 @@ describe("production runner 0010 to 0011 upgrade", () => {
       "Verified healthy prior release (0010_wonderful_siren)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0011_careless_hulk",
+      "Proceeding with migration to 0012_mushy_scream",
     );
     expect(output()).toContain("Validating the result on live database");
   });
@@ -2433,5 +2449,104 @@ describe("production runner 0010 to 0011 upgrade", () => {
     expect(output()).toContain(
       "does not match the verified prior release schema",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0011 → 0012 upgrade regression — managed bot tables present, activation
+// fencing constraint pending.
+// ---------------------------------------------------------------------------
+
+function upgrade0011Scenario(): Scenario {
+  const scenario = configuredScenario();
+
+  scenario.applied = committed.slice(0, 12).map((entry, index) => ({
+    id: String(index + 1),
+    hash: entry.hash,
+    created_at: String(entry.when),
+  }));
+  scenario.constraints = wizard.CRITICAL_CONSTRAINTS
+    .filter(
+      (name) =>
+        name !== "telegram_connection_webhook_operation_consistency_check",
+    )
+    .map((name) => ({ name, type: "c" }));
+
+  return scenario;
+}
+
+describe("production runner 0011 to 0012 upgrade", () => {
+  const env = {
+    [actions.PROD_URL_ENV]: GOOD_URL,
+    [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+    [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+  };
+
+  it("inspect validates the healthy 0011 baseline and reports one pending migration", async () => {
+    const { io, output } = testIo();
+    const scenario = upgrade0011Scenario();
+    let commandCalled = false;
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandCalled = true;
+        return { code: 0 };
+      },
+      mode: "inspect",
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok, output()).toBe(true);
+    expect(result.outcome).toBe("inspected");
+    expect(commandCalled).toBe(false);
+    expect(result.state?.pending).toEqual(["0012_mushy_scream"]);
+    expect(result.writes.migrationsApplied).toEqual([]);
+    expect(output()).toContain("Validating prior release schema on target");
+    expect(output()).toContain("0011_careless_hulk");
+  });
+
+  it("migrate validates 0011 first, applies only 0012, and validates the result", async () => {
+    const { io, output } = testIo();
+    const scenario = upgrade0011Scenario();
+    const executedCommands: string[] = [];
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async (opts) => {
+        executedCommands.push(`${opts.command} ${opts.args.join(" ")}`);
+
+        if (opts.args.includes("db:migrate")) {
+          applyMigrationsTo(scenario);
+        }
+
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok, output()).toBe(true);
+    expect(result.outcome).toBe("migrated");
+    expect(result.writes.migrationsApplied).toEqual(["0012_mushy_scream"]);
+    expect(
+      executedCommands.filter((command) => command.includes("db:migrate")),
+    ).toHaveLength(1);
+    expect(output()).toContain(
+      "Verified healthy prior release (0011_careless_hulk)",
+    );
+    expect(output()).toContain(
+      "Proceeding with migration to 0012_mushy_scream",
+    );
+    expect(output()).toContain("Validating the result on live database");
   });
 });
