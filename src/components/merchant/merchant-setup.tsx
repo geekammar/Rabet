@@ -182,6 +182,7 @@ export function MerchantSetup({
 
         <MerchantTelegramConnection
           state={telegramConnection}
+          storeStatus={status}
           locale={locale}
           readOnly={readOnly}
         />

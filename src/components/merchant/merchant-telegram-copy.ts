@@ -18,6 +18,8 @@ type Copy = {
   startOver: string;
   connectedTitle: string;
   connectedBody: string;
+  unpublishedBody: string;
+  publish: string;
   openBot: string;
   expiredTitle: string;
   failedTitle: string;
@@ -31,14 +33,14 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     intro:
       "اربط بوتًا واحدًا لخدمة عملاء متجرك. يتم إنشاء البوت عبر تيليجرام ثم تؤكد ارتباطه هنا.",
     notConnected: "لم يتم ربط بوت المتجر بعد.",
-    connect: "ربط تيليجرام",
+    connect: "إنشاء بوت متجري على تيليجرام",
     retry: "إعادة المحاولة",
     waitingTitle: "بانتظار تأكيد تيليجرام…",
     waitingOpen: "افتح تيليجرام وأنشئ بوت متجرك من الرسالة.",
     waitingTelegram:
-      "تم فتح الرابط. أكمل إنشاء البوت في تيليجرام ثم ارجع وحدّث الحالة.",
+      "أكمل إنشاء البوت في تيليجرام، ثم ارجع لتأكيد الربط.",
     waitingProvisioning:
-      "تم استلام البوت. يجري التحقق من بياناته وربط الويبهوك…",
+      "بانتظار اكتمال إنشاء البوت في تيليجرام…",
     openTelegram: "فتح تيليجرام",
     refresh: "تحديث الحالة",
     confirmTitle: "تأكيد بوت المتجر",
@@ -48,11 +50,14 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     startOver: "البدء من جديد",
     connectedTitle: "تم ربط البوت",
     connectedBody: "هذا البوت متصل بمتجرك وهو جاهز لاستقبال العملاء.",
+    unpublishedBody: "البوت متصل. انشر متجرك عشان يبدأ يستقبل العملاء.",
+    publish: "انشر متجري",
     openBot: "فتح البوت في تيليجرام",
     expiredTitle: "انتهت صلاحية رابط الربط.",
     failedTitle: "لم يكتمل ربط البوت.",
     readOnly: "المتجر موقوف مؤقتًا، ولا يمكن تغيير اتصال تيليجرام الآن.",
     errors: {
+      BOT_REQUIRED: "تأكد من اتصال البوت قبل نشر متجرك.",
       UNAVAILABLE: "ربط تيليجرام غير متاح في هذه البيئة.",
       DENIED: "لا يمكن تنفيذ هذا الإجراء لحسابك أو حالة متجرك الحالية.",
       NOT_FOUND: "لم يعد هذا الارتباط موجودًا. ابدأ محاولة جديدة.",
@@ -89,7 +94,7 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     intro:
       "Connect one bot to serve your store customers. Telegram creates the bot, then you confirm the connection here.",
     notConnected: "No store bot is connected yet.",
-    connect: "Connect Telegram",
+    connect: "Create my Telegram store bot",
     retry: "Try again",
     waitingTitle: "Waiting for Telegram…",
     waitingOpen: "Open Telegram and create your store bot from the message.",
@@ -106,12 +111,15 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     startOver: "Start over",
     connectedTitle: "Bot connected",
     connectedBody: "This bot is connected to your store and ready for customers.",
+    unpublishedBody: "Your bot is connected. Publish your store to start welcoming customers.",
+    publish: "Publish my store",
     openBot: "Open the bot in Telegram",
     expiredTitle: "The connection link expired.",
     failedTitle: "The bot connection was not completed.",
     readOnly:
       "The store is suspended, so the Telegram connection cannot be changed right now.",
     errors: {
+      BOT_REQUIRED: "Connect your bot before publishing your store.",
       UNAVAILABLE: "Telegram connection is not available in this environment.",
       DENIED: "This action is not allowed for your account or store state.",
       NOT_FOUND: "This connection no longer exists. Start a new attempt.",

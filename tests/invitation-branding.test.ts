@@ -60,7 +60,7 @@ describe("merchant invitation branding", () => {
     expect(INVITATION_COPY.ar.subtitle).toBe(
       "أنشئ حسابك للبدء في إعداد متجرك.",
     );
-    expect(INVITATION_COPY.ar.submit).toBe("قبول الدعوة وإنشاء الحساب");
+    expect(INVITATION_COPY.ar.submit).toBe("افتح متجري");
 
     expect(INVITATION_COPY.en.title).toBe(
       "You’re invited to manage your store on Nokmel",
@@ -69,7 +69,7 @@ describe("merchant invitation branding", () => {
       "Create your account to start setting up your store.",
     );
     expect(INVITATION_COPY.en.submit).toBe(
-      "Accept invitation and create account",
+      "Open my store",
     );
   });
 

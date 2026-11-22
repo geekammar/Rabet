@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, ExternalLink, RefreshCw, Send } from "lucide-react";
 
@@ -10,16 +10,19 @@ import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-pro
 import {
   confirmMerchantTelegramConnection,
   startMerchantTelegramConnection,
+  publishMerchantTelegramStore,
   type MerchantTelegramActionResult,
 } from "@/app/actions/merchant-telegram";
 import { Button } from "@/components/ui/button";
 
 export function MerchantTelegramConnection({
   state,
+  storeStatus,
   locale,
   readOnly,
 }: {
   state: MerchantTelegramConnectionState;
+  storeStatus: "onboarding" | "active" | "suspended";
   locale: MerchantLocale;
   readOnly: boolean;
 }) {
@@ -33,10 +36,31 @@ export function MerchantTelegramConnection({
     ? copy.errors[failureReason] ?? copy.errors.failed
     : null;
 
+  const waiting = state.state === "waiting";
+
+  useEffect(() => {
+    if (!waiting || readOnly) return;
+
+    function refreshWhenVisible() {
+      if (document.visibilityState === "visible") router.refresh();
+    }
+
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    const interval = window.setInterval(refreshWhenVisible, 5_000);
+
+    return () => {
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.clearInterval(interval);
+    };
+  }, [waiting, readOnly, router]);
+
   function handleResult(result: MerchantTelegramActionResult) {
     if (result.ok) {
       setActionError(null);
       router.refresh();
+      if (result.deepLink) window.location.assign(result.deepLink);
       return;
     }
 
@@ -185,24 +209,43 @@ export function MerchantTelegramConnection({
 
       {state.state === "connected" ? (
         <div className="space-y-3" data-testid="merchant-telegram-connected-panel">
-          <p className="text-sm text-muted-foreground">{copy.connectedBody}</p>
+          <p className="text-sm text-muted-foreground">
+            {storeStatus === "active" ? copy.connectedBody : storeStatus === "onboarding" ? copy.unpublishedBody : copy.readOnly}
+          </p>
           <p
             className="break-all rounded-lg border border-border bg-muted/30 p-3 font-mono text-sm"
             data-testid="merchant-telegram-bot-username"
           >
             @{state.botUsername}
           </p>
-          <Button asChild className="min-h-11">
-            <a
-              href={state.openUrl}
-              target="_blank"
-              rel="noreferrer"
-              data-testid="merchant-telegram-open-bot"
+          {storeStatus === "onboarding" && !readOnly ? (
+            <Button
+              type="button"
+              className="min-h-11"
+              disabled={isPending}
+              onClick={() => startTransition(async () => {
+                const result = await publishMerchantTelegramStore();
+                handleResult(result);
+                if (!result.ok) router.refresh();
+              })}
+              data-testid="merchant-store-publish"
             >
-              <ExternalLink className="size-4" aria-hidden="true" />
-              {copy.openBot}
-            </a>
-          </Button>
+              {copy.publish}
+            </Button>
+          ) : null}
+          {storeStatus === "active" ? (
+            <Button asChild className="min-h-11">
+              <a
+                href={state.openUrl}
+                target="_blank"
+                rel="noreferrer"
+                data-testid="merchant-telegram-open-bot"
+              >
+                <ExternalLink className="size-4" aria-hidden="true" />
+                {copy.openBot}
+              </a>
+            </Button>
+          ) : null}
         </div>
       ) : null}
 

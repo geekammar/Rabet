@@ -1,5 +1,7 @@
 "use server";
 
+import { and, eq, sql } from "drizzle-orm";
+import { store, telegramConnection } from "@/db/schema";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
@@ -13,10 +15,11 @@ import { readManagerBotConfig } from "@/lib/telegram/manager-config";
 import {
   confirmTelegramConnection,
   createTelegramLinkAttempt,
+  merchantManagerDeepLink,
 } from "@/lib/telegram/manager-provisioning";
 
 export type MerchantTelegramActionResult =
-  | { ok: true }
+  | { ok: true; deepLink?: string }
   | {
       ok: false;
       error:
@@ -27,6 +30,7 @@ export type MerchantTelegramActionResult =
         | "CONFLICT"
         | "RETRYABLE"
         | "REVIEW"
+        | "BOT_REQUIRED"
         | "OPERATION_FAILED";
     };
 
@@ -116,12 +120,13 @@ export async function startMerchantTelegramConnection(): Promise<MerchantTelegra
     return { ok: false, error: "UNAVAILABLE" };
   }
 
+  let nonce: string;
   try {
-    await createTelegramLinkAttempt(getTransactionDb(), {
+    ({ nonce } = await createTelegramLinkAttempt(getTransactionDb(), {
       storeId: access.store.id,
       merchantUserId: access.userId,
       managerBotUsername: managerUsername,
-    });
+    }));
   } catch (error) {
     console.error(
       "[merchant-telegram] connect start failed",
@@ -142,7 +147,7 @@ export async function startMerchantTelegramConnection(): Promise<MerchantTelegra
 
   try {
     revalidatePath("/app/setup");
-    return { ok: true };
+    return { ok: true, deepLink: merchantManagerDeepLink(managerUsername, nonce) };
   } catch (error) {
     console.error(
       "[merchant-telegram] connect start failed",
@@ -221,6 +226,35 @@ export async function confirmMerchantTelegramConnection(
             ? "CONFLICT"
             : "NOT_FOUND",
     };
+  } catch {
+    return { ok: false, error: "OPERATION_FAILED" };
+  }
+}
+
+/** Explicitly publishes the signed-in owner's onboarding store once its bot is ready. */
+export async function publishMerchantTelegramStore(): Promise<MerchantTelegramActionResult> {
+  const access = await getMerchantAccess();
+  if (!access || access.readOnly) return { ok: false, error: "DENIED" };
+  if (access.store.status === "active") return { ok: true };
+
+  try {
+    const [published] = await getTransactionDb()
+      .update(store)
+      .set({ status: "active" })
+      .where(and(
+        eq(store.id, access.store.id),
+        eq(store.status, "onboarding"),
+        sql`exists (
+          select 1 from ${telegramConnection}
+          where ${telegramConnection.storeId} = ${store.id}
+            and ${telegramConnection.status} = 'ready'
+        )`,
+      ))
+      .returning({ id: store.id });
+
+    // A concurrent successful publish is reflected on the next render.
+    revalidatePath("/app/setup");
+    return published ? { ok: true } : { ok: false, error: "BOT_REQUIRED" };
   } catch {
     return { ok: false, error: "OPERATION_FAILED" };
   }

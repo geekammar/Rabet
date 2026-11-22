@@ -339,6 +339,10 @@ export async function bindLinkAttemptToTelegramUser(
   }
 }
 
+export function merchantManagerDeepLink(managerUsername: string, nonce: string): string {
+  return `https://t.me/${encodeURIComponent(managerUsername)}?start=${encodeURIComponent(nonce)}`;
+}
+
 function creationLink(attempt: LinkAttemptLookup): string {
   const username = suggestedBotUsername(attempt.storeSlug);
   return `https://t.me/newbot/${encodeURIComponent(
@@ -1891,9 +1895,7 @@ function stateFromAttempt(
 
   return {
     state: "waiting",
-    deepLink: `https://t.me/${encodeURIComponent(
-      attempt.managerBotUsername,
-    )}?start=${encodeURIComponent(nonce)}`,
+    deepLink: merchantManagerDeepLink(attempt.managerBotUsername, nonce),
     expiresAt: attempt.expiresAt.toISOString(),
     telegramBound: attempt.telegramUserId !== null,
   };
