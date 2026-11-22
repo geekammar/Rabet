@@ -118,6 +118,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0007_admin_login_throttle",
   "0008_merchant_invitations_and_credentials",
   "0009_merchant_auth_throttle",
+  "0010_wonderful_siren",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -150,6 +151,9 @@ export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
 export const EXPECTED_TABLES_V7 = EXPECTED_TABLES.filter(
   (t) => !MERCHANT_SESSION_TABLES.has(t),
 );
+
+/** The exact twenty-five-table inventory through 0009 (merchant_auth_throttle included). */
+export const EXPECTED_TABLES_V8 = [...EXPECTED_TABLES];
 
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
 export const EXPECTED_TABLES_V3 = EXPECTED_TABLES_V4.filter(
@@ -249,6 +253,9 @@ export const EXPECTED_INDEXES_V7 = EXPECTED_INDEXES.filter(
   (name) => name !== "merchant_auth_throttle_window_idx",
 );
 
+/** Indexes present through 0009 (0008 indexes plus the throttle window index). */
+export const EXPECTED_INDEXES_V8 = [...EXPECTED_INDEXES];
+
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
 export const CRITICAL_CONSTRAINTS_V2 = [
   "bot_setting_singleton_check",
@@ -329,13 +336,19 @@ export const CRITICAL_CONSTRAINTS_V7 = [
   "merchant_invitation_invited_by_user_id_app_user_id_fk",
 ];
 
-/** CHECK, domain and ownership constraints the current chain requires (0009 adds throttle). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, domain and ownership constraints present through 0009. */
+export const CRITICAL_CONSTRAINTS_V8 = [
   ...CRITICAL_CONSTRAINTS_V7,
   "merchant_auth_throttle_scope_key_pk",
   "merchant_auth_throttle_scope_check",
   "merchant_auth_throttle_key_format_check",
   "merchant_auth_throttle_attempt_count_check",
+];
+
+/** CHECK, domain and ownership constraints the current chain requires (0010 adds the revoker FK). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V8,
+  "merchant_invitation_revoked_by_user_id_app_user_id_fk",
 ];
 
 /** Notification update triggers created by migration 0003. */
@@ -352,6 +365,10 @@ export const EXPECTED_TREE_FKS = {
 
 /** The GitHub repository this wizard is allowed to provision. */
 export const EXPECTED_REPO = "github.com/geekammar/rabet";
+export const EXPECTED_REPOS = [
+  EXPECTED_REPO,
+  "github.com/geekammar/nokmel",
+];
 
 /** The dedicated Neon development project the owner created. */
 export const EXPECTED_NEON_PROJECT = "Rabet_dev";
@@ -1741,15 +1758,16 @@ async function runCheckProject(ctx) {
     );
   } else {
     const normalized = normalizeRemote(remote.stdout);
+    const knownRepo = EXPECTED_REPOS.find((repo) => normalized.includes(repo));
 
-    if (!normalized.includes(EXPECTED_REPO)) {
+    if (!knownRepo) {
       problems.push(
         `The git remote is ${redact(remote.stdout).trim()}, which is not the ` +
-          `Rabet repository (${EXPECTED_REPO}). The wizard refuses to migrate ` +
-          "a database from an unrelated checkout.",
+          `Rabet/Nokmel repository (${EXPECTED_REPOS.join(" or ")}). The wizard ` +
+          "refuses to migrate a database from an unrelated checkout.",
       );
     } else {
-      note(ctx, `Repository   ${EXPECTED_REPO} ✓`);
+      note(ctx, `Repository   ${knownRepo} ✓`);
     }
   }
 

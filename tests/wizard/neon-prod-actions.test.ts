@@ -1125,6 +1125,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
     expect(output()).toContain("0005_tenant_identity_foundation");
@@ -1180,6 +1181,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1218,6 +1220,7 @@ describe("production runner flows and execution", () => {
     expect(result.state?.pending).toEqual([
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1257,6 +1260,7 @@ describe("production runner flows and execution", () => {
     expect(result.writes.migrationsApplied).toEqual([
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0007_admin_login_throttle)",
@@ -1354,6 +1358,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1450,6 +1455,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0005_tenant_identity_foundation)",
@@ -1513,6 +1519,7 @@ describe("production runner flows and execution", () => {
       "0007_admin_login_throttle",
       "0008_merchant_invitations_and_credentials",
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0006_tenant_ownership_expansion)",
@@ -2042,6 +2049,10 @@ function apply0009To(scenario: Scenario) {
   scenario.constraints = [
     ...scenario.constraints,
     ...UPGRADE_0009_CONSTRAINTS.map((name) => ({ name, type: "c" })),
+    {
+      name: "merchant_invitation_revoked_by_user_id_app_user_id_fk",
+      type: "c",
+    },
   ];
   scenario.applied = committed.map((entry, index) => ({
     id: String(index + 1),
@@ -2050,7 +2061,7 @@ function apply0009To(scenario: Scenario) {
   }));
 }
 
-describe("production runner 0008 to 0009 upgrade", () => {
+describe("production runner 0008 to 0010 upgrade", () => {
   const env = {
     [actions.PROD_URL_ENV]: GOOD_URL,
     [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
@@ -2084,7 +2095,7 @@ describe("production runner 0008 to 0009 upgrade", () => {
     expect(output()).toContain("0009_merchant_auth_throttle");
   });
 
-  it("migrate validates 0008 first, applies only 0009, and validates the result", async () => {
+  it("migrate validates 0008 first, applies 0009 and 0010, and validates the result", async () => {
     const { io, output } = testIo();
     const scenario = upgrade0008Scenario();
     const executedCommands: string[] = [];
@@ -2113,6 +2124,7 @@ describe("production runner 0008 to 0009 upgrade", () => {
     expect(result.outcome).toBe("migrated");
     expect(result.writes.migrationsApplied).toEqual([
       "0009_merchant_auth_throttle",
+      "0010_wonderful_siren",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2131,6 +2143,152 @@ describe("production runner 0008 to 0009 upgrade", () => {
     const scenario = upgrade0008Scenario();
     scenario.appTables = scenario.appTables.filter(
       (table) => table !== "merchant_credential",
+    );
+    let commandCalled = false;
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandCalled = true;
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.outcome).toBe("manual-review");
+    expect(commandCalled).toBe(false);
+    expect(output()).toContain(
+      "does not match the verified prior release schema",
+    );
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// 0009 → 0010 upgrade regression — a literal 0009 baseline fixture, built on
+// the 0008 fixture plus the 0009 throttle table, index and constraints.
+// ---------------------------------------------------------------------------
+
+function upgrade0009Scenario(): Scenario {
+  const scenario = upgrade0008Scenario();
+
+  scenario.applied = committed.slice(0, 10).map((entry, index) => ({
+    id: String(index + 1),
+    hash: entry.hash,
+    created_at: String(entry.when),
+  }));
+  scenario.appTables = [...scenario.appTables, "merchant_auth_throttle"];
+  scenario.indexes = [...scenario.indexes, ...UPGRADE_0009_INDEXES];
+  scenario.constraints = [
+    ...scenario.constraints,
+    ...UPGRADE_0009_CONSTRAINTS.map((name) => ({ name, type: "c" })),
+  ];
+
+  return scenario;
+}
+
+function apply0010To(scenario: Scenario) {
+  scenario.constraints = [
+    ...scenario.constraints,
+    {
+      name: "merchant_invitation_revoked_by_user_id_app_user_id_fk",
+      type: "c",
+    },
+  ];
+  scenario.applied = committed.map((entry, index) => ({
+    id: String(index + 1),
+    hash: entry.hash,
+    created_at: String(entry.when),
+  }));
+}
+
+describe("production runner 0009 to 0010 upgrade", () => {
+  const env = {
+    [actions.PROD_URL_ENV]: GOOD_URL,
+    [actions.EXPECTED_HOST_ENV]: FIXTURE_HOST,
+    [actions.EXPECTED_DB_NAME_ENV]: FIXTURE_DB,
+  };
+
+  it("inspect validates the healthy 0009 baseline before reporting success", async () => {
+    const { io, output } = testIo();
+    const scenario = upgrade0009Scenario();
+    let commandCalled = false;
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async () => {
+        commandCalled = true;
+        return { code: 0 };
+      },
+      mode: "inspect",
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("inspected");
+    expect(commandCalled).toBe(false);
+    expect(result.state?.pending).toEqual(["0010_wonderful_siren"]);
+    expect(result.writes.migrationsApplied).toEqual([]);
+    expect(output()).toContain("Validating prior release schema on target");
+    expect(output()).toContain("0009_merchant_auth_throttle");
+  });
+
+  it("migrate validates 0009 first, applies only 0010, and validates the result", async () => {
+    const { io, output } = testIo();
+    const scenario = upgrade0009Scenario();
+    const executedCommands: string[] = [];
+
+    const result = await actions.runProdActions({
+      io,
+      connect: async () => createFakeSql(scenario),
+      runCommand: async (opts) => {
+        executedCommands.push(`${opts.command} ${opts.args.join(" ")}`);
+
+        if (opts.args.includes("db:migrate")) {
+          apply0010To(scenario);
+        }
+
+        return { code: 0 };
+      },
+      mode: "migrate",
+      confirm: actions.MIGRATE_CONFIRMATION,
+      env,
+      root,
+      expectedHost: FIXTURE_HOST,
+      expectedDbName: FIXTURE_DB,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("migrated");
+    expect(result.writes.migrationsApplied).toEqual(["0010_wonderful_siren"]);
+    expect(
+      executedCommands.filter((command) => command.includes("db:migrate")),
+    ).toHaveLength(1);
+    expect(output()).toContain(
+      "Verified healthy prior release (0009_merchant_auth_throttle)",
+    );
+    expect(output()).toContain(
+      "Proceeding with migration to 0010_wonderful_siren",
+    );
+    expect(output()).toContain("Validating the result on live database");
+  });
+
+  it("rejects a damaged 0009 throttle baseline before running the migration command", async () => {
+    const { io, output } = testIo();
+    const scenario = upgrade0009Scenario();
+    scenario.appTables = scenario.appTables.filter(
+      (table) => table !== "merchant_auth_throttle",
     );
     let commandCalled = false;
 

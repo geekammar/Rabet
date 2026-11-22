@@ -1,0 +1,2 @@
+ALTER TABLE "merchant_invitation" ADD COLUMN "revoked_by_user_id" uuid;--> statement-breakpoint
+ALTER TABLE "merchant_invitation" ADD CONSTRAINT "merchant_invitation_revoked_by_user_id_app_user_id_fk" FOREIGN KEY ("revoked_by_user_id") REFERENCES "public"."app_user"("id") ON DELETE restrict ON UPDATE no action;

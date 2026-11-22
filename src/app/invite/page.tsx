@@ -4,10 +4,14 @@ import { notFound } from "next/navigation";
 
 import { InvitationAcceptance } from "@/components/merchant/invitation-acceptance";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
+import {
+  INVITATION_BRAND,
+  INVITATION_PAGE_TITLE,
+} from "@/lib/merchant-invitation/branding";
 
 export const metadata: Metadata = {
-  title: "قبول الدعوة",
-  description: "Accept a Rabet merchant invitation.",
+  title: INVITATION_PAGE_TITLE.ar,
+  description: `Accept a ${INVITATION_BRAND.en} merchant invitation.`,
   robots: { index: false, follow: false },
 };
 
