@@ -1,4 +1,3 @@
-import { signIn } from "@/auth-merchant";
 import { getTransactionDb } from "@/db/transaction-client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import {
@@ -129,6 +128,7 @@ export async function POST(request: Request): Promise<Response> {
   // remains usable through the ordinary login screen.
   if (email) {
     try {
+      const { signIn } = await import("@/auth-merchant");
       const destination: unknown = await signIn("credentials", {
         email, password, redirect: false, redirectTo: "/app/setup",
       });
