@@ -1,0 +1,114 @@
+# Neon PROD — bootstrap the named platform Super Admin
+#
+# Manual, Production-only, one-account bootstrap. This workflow is deliberately
+# separate from the Staging seed and from the migration runner.
+#
+# Secret handoff (owner action, never a workflow input):
+#   1. Generate an Argon2id PHC hash locally with scripts/generate-admin-hash.mjs.
+#   2. Store it as the Production environment secret
+#      RABET_PLATFORM_ADMIN_PASSWORD_HASH.
+#   3. Keep the plaintext password only in the approved private credential store.
+# The hash is read from `secrets.*`; it is never an input, output, artifact or log.
+
+name: Neon PROD bootstrap platform Super Admin
+
+on:
+  workflow_dispatch:
+    inputs:
+      admin_email:
+        description: "Named Production Super Admin email (non-secret)."
+        type: string
+        required: true
+      confirm:
+        description: "Type PROVISION_RABET_SUPER_ADMIN exactly to authorize the one-account bootstrap."
+        type: string
+        default: ""
+        required: true
+
+concurrency:
+  group: neon-prod-bootstrap-admin
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Validate dispatch context and confirmation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate execution context
+        env:
+          RABET_REF: ${{ github.ref }}
+          RABET_EVENT: ${{ github.event_name }}
+          RABET_EMAIL: ${{ inputs.admin_email }}
+          RABET_CONFIRM: ${{ inputs.confirm }}
+        run: |
+          node - <<'NODE'
+            const ref = process.env.RABET_REF ?? "";
+            const eventName = process.env.RABET_EVENT ?? "";
+            const email = (process.env.RABET_EMAIL ?? "").trim().toLowerCase();
+            const confirm = process.env.RABET_CONFIRM ?? "";
+            const expected = "PROVISION_RABET_SUPER_ADMIN";
+
+            if (eventName !== "workflow_dispatch") {
+              console.error("Refusing to run: only manual workflow_dispatch is allowed.");
+              process.exit(1);
+            }
+            if (ref !== "refs/heads/main") {
+              console.error(`Refusing to run: ref "${ref}" is not refs/heads/main.`);
+              process.exit(1);
+            }
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+              console.error("Refusing to run: admin_email is not a valid email address.");
+              process.exit(1);
+            }
+            if (confirm !== expected) {
+              console.error(
+                `Refusing to run: confirm must equal "${expected}" exactly.`,
+              );
+              process.exit(1);
+            }
+
+            console.log("Bootstrap context valid. Ref: refs/heads/main.");
+          NODE
+
+  bootstrap:
+    name: Bootstrap the Production platform Super Admin
+    needs: guard
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: Production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the transactional owner bootstrap
+        env:
+          NEON_PROD_DATABASE_URL: ${{ secrets.NEON_PROD_DATABASE_URL }}
+          NEON_PROD_EXPECTED_HOST: ${{ vars.NEON_PROD_EXPECTED_HOST }}
+          NEON_PROD_EXPECTED_DB_NAME: ${{ vars.NEON_PROD_EXPECTED_DB_NAME }}
+          RABET_PLATFORM_ADMIN_EMAIL: ${{ inputs.admin_email }}
+          RABET_PLATFORM_ADMIN_PASSWORD_HASH: ${{ secrets.RABET_PLATFORM_ADMIN_PASSWORD_HASH }}
+          RABET_PLATFORM_ADMIN_CONFIRM: ${{ inputs.confirm }}
+        run: node scripts/neon-prod-bootstrap-admin.mjs
+
+      - name: Report execution summary
+        run: |
+          echo "Production platform Super Admin bootstrap completed."
+          echo "  environment:       Production"
+          echo "  target:            approved host/database from Production variables"
+          echo "  credential source: RABET_PLATFORM_ADMIN_PASSWORD_HASH (Production secret)"
+          echo "  password/hash:     never printed or uploaded"
+          echo "  staging seed:      never used"
