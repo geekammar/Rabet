@@ -543,6 +543,38 @@ async function runJourney(cdp, fixture, authSecret) {
       label,
     );
   };
+  const expectMerchantLocale = async (
+    pageTestId,
+    locale,
+    expectedTitle,
+    label,
+  ) => {
+    const direction = locale === "ar" ? "rtl" : "ltr";
+
+    await waitFor(
+      cdp,
+      `document.querySelector('[data-testid="${pageTestId}"]')?.getAttribute('dir') === ${JSON.stringify(direction)} && ` +
+        `document.querySelector('[data-testid="${pageTestId}"]')?.getAttribute('lang') === ${JSON.stringify(locale)}`,
+      `${label} ${locale} direction and language`,
+    );
+    await waitFor(
+      cdp,
+      `document.querySelector('[data-testid="merchant-locale-${locale}"]')?.getAttribute('aria-pressed') === 'true'`,
+      `${label} active ${locale} toggle`,
+    );
+    await waitFor(
+      cdp,
+      `document.title === ${JSON.stringify(expectedTitle)}`,
+      `${label} ${locale} document title`,
+    );
+  };
+  const expectInputValue = async (selector, expected, label) => {
+    await waitFor(
+      cdp,
+      `document.querySelector(${JSON.stringify(selector)})?.value === ${JSON.stringify(expected)}`,
+      label,
+    );
+  };
   const postJson = async (pathname, body) =>
     evaluate(`(async () => {
       const response = await fetch(${JSON.stringify(pathname)}, {
@@ -613,11 +645,15 @@ async function runJourney(cdp, fixture, authSecret) {
     "Arabic invitation brand should be accessible",
   );
 
+  const inviteTitleAr = "دعوة لإدارة متجرك على نكمل — Rabet";
+  const inviteTitleEn = "You’re invited to manage your store on Nokmel — Rabet";
+
   await click('[data-testid="merchant-locale-en"]');
-  await waitFor(
-    cdp,
-    "document.querySelector('[data-testid=\"invite-page\"]').getAttribute('dir') === 'ltr'",
-    "English invitation direction",
+  await expectMerchantLocale(
+    "invite-page",
+    "en",
+    inviteTitleEn,
+    "English invitation",
   );
   assert(
     (await evaluate("document.body.innerText")).includes(
@@ -631,7 +667,27 @@ async function runJourney(cdp, fixture, authSecret) {
     )) === "Nokmel",
     "English invitation brand should be accessible",
   );
+
+  await navigate(`${BASE_URL}/invite#token=${encodeURIComponent(a.token)}`);
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"invite-email\"]')?.textContent === " +
+      JSON.stringify(a.email),
+    "invitation A preview after locale reload",
+  );
+  await expectMerchantLocale(
+    "invite-page",
+    "en",
+    inviteTitleEn,
+    "English invitation after reload",
+  );
   await click('[data-testid="merchant-locale-ar"]');
+  await expectMerchantLocale(
+    "invite-page",
+    "ar",
+    inviteTitleAr,
+    "Arabic invitation restored",
+  );
 
   const stillPending = await pgClient`
     select accepted_at from merchant_invitation where id = ${a.invitationId}
@@ -648,6 +704,13 @@ async function runJourney(cdp, fixture, authSecret) {
   );
 
   await setValue('[data-testid="invite-confirmation"]', fixture.password);
+  await click('[data-testid="merchant-locale-en"]');
+  await expectMerchantLocale(
+    "invite-page",
+    "en",
+    inviteTitleEn,
+    "English invitation submission",
+  );
   await cdp.send("Network.emulateNetworkConditions", {
     offline: false,
     latency: 250,
@@ -693,17 +756,24 @@ async function runJourney(cdp, fixture, authSecret) {
   await click('[data-testid="invite-login-link"]');
   await waitForUrl("/app/login", "redirect to merchant login");
   await waitFor(cdp, "Boolean(document.querySelector('[data-testid=\"merchant-login-email\"]'))", "merchant login form");
-  assert(
-    (await evaluate("document.querySelector('[data-testid=\"merchant-login-page\"]').getAttribute('dir')")) === "rtl",
-    "Merchant login should default to RTL Arabic",
+  await expectMerchantLocale(
+    "merchant-login-page",
+    "en",
+    "Merchant sign in — Rabet",
+    "English login after invitation",
   );
-  await expectNoHorizontalScroll("merchant login (Arabic)");
-  await click('[data-testid="merchant-locale-en"]');
   assert(
     (await evaluate("document.body.innerText")).includes("Merchant sign in"),
     "Merchant login English copy should be available",
   );
   await click('[data-testid="merchant-locale-ar"]');
+  await expectMerchantLocale(
+    "merchant-login-page",
+    "ar",
+    "تسجيل دخول التاجر — Rabet",
+    "Arabic login restored",
+  );
+  await expectNoHorizontalScroll("merchant login (Arabic)");
 
   await setValue('[data-testid="merchant-login-email"]', a.email);
   await setValue('[data-testid="merchant-login-password"]', "wrong-password-123");
@@ -1558,6 +1628,13 @@ async function runJourney(cdp, fixture, authSecret) {
   assert(
     (await evaluate("document.body.innerText")).includes("Too many attempts"),
     "Rate-limited preview should show the English temporary message",
+  );
+  await click('[data-testid="merchant-locale-ar"]');
+  await expectMerchantLocale(
+    "invite-page",
+    "ar",
+    inviteTitleAr,
+    "Arabic restored after rate-limit message",
   );
 
   const bRows = await pgClient`
@@ -2705,9 +2782,448 @@ async function runJourney(cdp, fixture, authSecret) {
     "The product list should render after a storage failure",
   );
 
+  log("Checking persistent merchant language across the accepted journey...");
+  await navigate(`${BASE_URL}/app/setup`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-setup-page\"]'))",
+    "language journey setup page",
+  );
+  await expectMerchantLocale(
+    "merchant-setup-page",
+    "ar",
+    "إعداد المتجر — Rabet",
+    "Arabic setup default",
+  );
+  await click('[data-testid="merchant-locale-en"]');
+  await expectMerchantLocale(
+    "merchant-setup-page",
+    "en",
+    "Store setup — Rabet",
+    "English setup selection",
+  );
+  await click('[data-testid="merchant-products-link"]');
+  await waitForUrl("/app/products", "language journey products page");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "language journey products hydration",
+  );
+  await expectMerchantLocale(
+    "merchant-products-page",
+    "en",
+    "Store products — Rabet",
+    "English products after internal navigation",
+  );
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "language journey products reload hydration",
+  );
+  await expectMerchantLocale(
+    "merchant-products-page",
+    "en",
+    "Store products — Rabet",
+    "English products after full reload",
+  );
+
+  const localeProductId = await evaluate(
+    "document.querySelector('[data-testid=\"merchant-product-row\"]')?.getAttribute('data-product-id') ?? null",
+  );
+  assert(localeProductId !== null, "The locale journey needs a product row");
+  const localePriceInput = `[data-testid="merchant-price-input-${localeProductId}"]`;
+  await setValue(localePriceInput, "77.77");
+  await evaluate(`(() => {
+    window.__merchantLocaleWrites = 0;
+    const originalFetch = window.fetch;
+    window.fetch = function (input, init) {
+      if (init && init.method === "POST") {
+        window.__merchantLocaleWrites += 1;
+      }
+      return originalFetch.call(this, input, init);
+    };
+    return true;
+  })()`);
+  await click('[data-testid="merchant-locale-ar"]');
+  await expectMerchantLocale(
+    "merchant-products-page",
+    "ar",
+    "منتجات المتجر — Rabet",
+    "Arabic products after toggle",
+  );
+  await expectInputValue(
+    localePriceInput,
+    "77.77",
+    "Typed price should survive Arabic selection",
+  );
+  await click('[data-testid="merchant-locale-en"]');
+  await expectMerchantLocale(
+    "merchant-products-page",
+    "en",
+    "Store products — Rabet",
+    "English products restored",
+  );
+  await expectInputValue(
+    localePriceInput,
+    "77.77",
+    "Typed price should survive English selection",
+  );
+  assert(
+    (await evaluate("window.__merchantLocaleWrites")) === 0,
+    "Changing language must not submit or replay a product mutation",
+  );
+
+  await click('[data-testid="merchant-add-product-link"]');
+  await waitForUrl("/app/products/new", "language journey add product page");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "language journey add product hydration",
+  );
+  await expectMerchantLocale(
+    "merchant-product-create-page",
+    "en",
+    "Add product — Rabet",
+    "English add product",
+  );
+  await setValue('[data-testid="merchant-product-name"]', "Locale persistence draft");
+  await setValue('[data-testid="merchant-product-price"]', "4.20");
+  await click('[data-testid="merchant-locale-ar"]');
+  await expectMerchantLocale(
+    "merchant-product-create-page",
+    "ar",
+    "إضافة منتج — Rabet",
+    "Arabic add product",
+  );
+  await expectInputValue(
+    '[data-testid="merchant-product-name"]',
+    "Locale persistence draft",
+    "Typed product name should survive Arabic selection",
+  );
+  await expectInputValue(
+    '[data-testid="merchant-product-price"]',
+    "4.20",
+    "Typed product price should survive Arabic selection",
+  );
+  await click('[data-testid="merchant-locale-en"]');
+  await expectMerchantLocale(
+    "merchant-product-create-page",
+    "en",
+    "Add product — Rabet",
+    "English add product restored",
+  );
+  await expectInputValue(
+    '[data-testid="merchant-product-name"]',
+    "Locale persistence draft",
+    "Typed product name should survive English selection",
+  );
+  assert(
+    (await evaluate("window.__merchantLocaleWrites")) === 0,
+    "Language toggles on the create form must not submit a product",
+  );
+
+  await navigate(`${BASE_URL}/app/categories`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-categories-page\"]'))",
+    "language journey categories page",
+  );
+  await expectMerchantLocale(
+    "merchant-categories-page",
+    "en",
+    "Store categories — Rabet",
+    "English categories after direct navigation",
+  );
+
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "language journey products before back",
+  );
+  await expectMerchantLocale(
+    "merchant-products-page",
+    "en",
+    "Store products — Rabet",
+    "English products before back test",
+  );
+  await click('[data-testid="merchant-categories-link"]');
+  await waitForUrl("/app/categories", "language journey categories for back");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-categories-page\"]'))",
+    "language journey categories hydration for back",
+  );
+  await click('[data-testid="merchant-locale-ar"]');
+  await expectMerchantLocale(
+    "merchant-categories-page",
+    "ar",
+    "أقسام المتجر — Rabet",
+    "Arabic categories before back",
+  );
+  await evaluate("window.history.back()");
+  await waitForUrl("/app/products", "language journey back to products");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "language journey back products hydration",
+  );
+  await expectMerchantLocale(
+    "merchant-products-page",
+    "ar",
+    "منتجات المتجر — Rabet",
+    "Arabic products after Back",
+  );
+
+  await navigate(`${BASE_URL}/app/products`);
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-products-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "language journey Arabic products reload",
+  );
+  await expectMerchantLocale(
+    "merchant-products-page",
+    "ar",
+    "منتجات المتجر — Rabet",
+    "Arabic products after reload",
+  );
+  await navigate(`${BASE_URL}/app/products/new`);
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-product-create-page\"]')?.getAttribute('data-hydrated') === 'true'",
+    "language journey Arabic add product direct navigation",
+  );
+  await expectMerchantLocale(
+    "merchant-product-create-page",
+    "ar",
+    "إضافة منتج — Rabet",
+    "Arabic add product after direct navigation",
+  );
+  log("Persistent merchant language checks passed.");
+
   await click('[data-testid="merchant-logout"]');
   await waitForUrl("/app/login", "empty store merchant logout");
   log("Empty-store first category and draft product journey passed.");
+
+  log("Checking accessible invitation revocation...");
+  const adminRows = await pgClient`
+    select email, session_version
+    from app_user
+    where id = ${fixture.adminUserId}
+  `;
+  assert(adminRows.length === 1, "The seeded platform Super Admin should exist");
+  const platformCookie = await encodeAuthJwt({
+    token: {
+      platformAdminId: fixture.adminUserId,
+      role: "platform_admin",
+      sessionVersion: adminRows[0].session_version,
+    },
+    secret: authSecret,
+    salt: "rabet-platform.session-token",
+  });
+  await cdp.send("Network.setCookie", {
+    name: "rabet-platform.session-token",
+    value: platformCookie,
+    domain: "127.0.0.1",
+    path: "/",
+    httpOnly: true,
+  });
+  await navigate(`${BASE_URL}/platform/invitations`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"platform-invitations-page\"]'))",
+    "platform invitations page",
+  );
+
+  const revokeStamp = Date.now();
+  const revokeEmail = `revoke.ui.${revokeStamp}@example.test`;
+  const revokeSlug = `revoke-ui-${revokeStamp}`;
+  await setValue('[data-testid="platform-invitation-email"]', revokeEmail);
+  await setValue('[data-testid="platform-invitation-store-name"]', "Revoke UI Store");
+  await setValue('[data-testid="platform-invitation-store-slug"]', revokeSlug);
+  await click('[data-testid="platform-invitation-issue-submit"]');
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"platform-issued-invitation\"]'))",
+    "one-time invitation reveal",
+  );
+  const issuedLink = await evaluate(
+    "document.querySelector('[data-testid=\"platform-invitation-link\"]')?.value ?? ''",
+  );
+  assert(issuedLink.includes("/invite#token="), "Issued link should use the fragment token");
+  assert(
+    !(await evaluate("window.location.href")).includes("#token="),
+    "The invitation management URL must not receive the token fragment",
+  );
+  const issuedToken = decodeURIComponent(issuedLink.split("#token=")[1] ?? "");
+  assert(issuedToken.length > 0, "The issued link should contain a token");
+
+  const issuedRows = await pgClient`
+    select id, revoked_at::text as revoked_at, revoked_by_user_id
+    from merchant_invitation
+    where invited_email = ${revokeEmail}
+  `;
+  assert(issuedRows.length === 1, "The issued invitation should be persisted");
+  const issuedInvitation = issuedRows[0];
+  assert(issuedInvitation.revoked_at === null, "The issued invitation starts pending");
+
+  await evaluate(`(() => {
+    window.__platformRevokePosts = 0;
+    const originalFetch = window.fetch;
+    window.fetch = function (input, init) {
+      if (init && init.method === "POST") {
+        window.__platformRevokePosts += 1;
+      }
+      return originalFetch.call(this, input, init);
+    };
+    return true;
+  })()`);
+
+  const revokeButton = `[data-testid="platform-revoke-${issuedInvitation.id}"]`;
+  const revokeDialog = "document.querySelector('[data-testid=\"platform-revoke-dialog\"]')";
+
+  await click(revokeButton);
+  await waitFor(cdp, `Boolean(${revokeDialog})`, "revoke confirmation dialog");
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="platform-revoke-dialog"]')?.innerText.includes(${JSON.stringify(revokeEmail)})`,
+    "revoke dialog names the invitation",
+  );
+  assert(
+    (await evaluate("document.activeElement?.getAttribute('data-testid')")) ===
+      "platform-revoke-cancel",
+    "Opening the dialog should focus Cancel",
+  );
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Escape",
+    code: "Escape",
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27,
+  });
+  await cdp.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Escape",
+    code: "Escape",
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27,
+  });
+  await waitFor(
+    cdp,
+    `!document.querySelector('[data-testid="platform-revoke-dialog"]')`,
+    "Escape closes the revoke dialog",
+  );
+  await waitFor(
+    cdp,
+    `document.activeElement?.getAttribute('data-testid') === ${JSON.stringify(`platform-revoke-${issuedInvitation.id}`)}`,
+    "Escape restores focus to the row action",
+  );
+  assert(
+    (await evaluate("window.__platformRevokePosts")) === 0,
+    "Escape must not send a revoke request",
+  );
+  assert(
+    (
+      await pgClient`
+        select revoked_at::text as revoked_at from merchant_invitation where id = ${issuedInvitation.id}
+      `
+    )[0].revoked_at === null,
+    "Escape must not revoke the invitation",
+  );
+
+  await click(revokeButton);
+  await waitFor(cdp, `Boolean(${revokeDialog})`, "revoke dialog for Cancel");
+  await click('[data-testid="platform-revoke-cancel"]');
+  await waitFor(
+    cdp,
+    `!document.querySelector('[data-testid="platform-revoke-dialog"]')`,
+    "Cancel closes the revoke dialog",
+  );
+  assert(
+    (await evaluate("window.__platformRevokePosts")) === 0,
+    "Cancel must not send a revoke request",
+  );
+  assert(
+    (
+      await pgClient`
+        select revoked_at::text as revoked_at from merchant_invitation where id = ${issuedInvitation.id}
+      `
+    )[0].revoked_at === null,
+    "Cancel must not revoke the invitation",
+  );
+
+  await click(revokeButton);
+  await waitFor(cdp, `Boolean(${revokeDialog})`, "revoke dialog for confirmation");
+  await evaluate(`(() => {
+    const button = document.querySelector('[data-testid="platform-revoke-confirm"]');
+    button.click();
+    button.click();
+    return true;
+  })()`);
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="platform-revoke-confirm"]')?.textContent?.includes("Revoking…") === true`,
+    "revoke pending state",
+  );
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"platform-revoke-feedback\"]')) && !document.querySelector('[data-testid=\"platform-revoke-dialog\"]')",
+    "revoke success feedback",
+  );
+  await waitFor(
+    cdp,
+    `document.activeElement?.getAttribute('data-testid') === 'platform-revoke-feedback'`,
+    "success focus moves to the feedback",
+  );
+  assert(
+    (await text('[data-testid="platform-revoke-feedback"]')).includes(revokeEmail),
+    "Success feedback should name the revoked invitation",
+  );
+  assert(
+    (await evaluate("window.__platformRevokePosts")) === 1,
+    "A repeated confirmation must start exactly one revoke request",
+  );
+
+  const revokedRows = await pgClient`
+    select revoked_at, revoked_by_user_id
+    from merchant_invitation
+    where id = ${issuedInvitation.id}
+  `;
+  assert(revokedRows[0].revoked_at !== null, "Confirm should persist revoked_at");
+  assert(
+    revokedRows[0].revoked_by_user_id === fixture.adminUserId,
+    "Confirm should audit the revoking Super Admin",
+  );
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="platform-invitation-${issuedInvitation.id}"]')?.innerText.includes("Revoked")`,
+    "revoked row status",
+  );
+  assert(
+    (await evaluate(`document.querySelector('[data-testid="platform-invitation-${issuedInvitation.id}"]')?.innerText ?? ""`)).includes(
+      adminRows[0].email,
+    ),
+    "The invitation history should show the revoking Super Admin",
+  );
+
+  const revokedPreview = await postJson("/api/merchant-invitations/preview", {
+    token: issuedToken,
+  });
+  assert(revokedPreview.status === 400, "A revoked invitation token should be rejected");
+  await navigate(`${BASE_URL}/invite#token=${encodeURIComponent(issuedToken)}`);
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"invite-error\"]'))",
+    "revoked invitation link rejection",
+  );
+  assert(
+    (await evaluate("document.body.innerText")).includes(
+      "هذه الدعوة غير صالحة أو منتهية",
+    ),
+    "The revoked link should explain that it can no longer be used",
+  );
+  log("Invitation revocation Cancel, Confirm, audit and invalid-link checks passed.");
 
   // Mint an operator session exactly as the operator Auth.js instance would
   // (same secret, role claim and cookie name). This proves cookie-namespace

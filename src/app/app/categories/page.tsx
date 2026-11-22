@@ -8,12 +8,17 @@ import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
 import { listCatalogCategoriesForStore } from "@/lib/data/catalog";
 import { resolveMerchantCategoryName } from "@/lib/merchant/category-display";
+import {
+  readMerchantLocale,
+  merchantPageMetadata,
+} from "@/lib/merchant/locale-server";
 
-export const metadata: Metadata = {
-  title: "أقسام المتجر",
-  description: "Review and control the signed-in merchant store categories.",
-  robots: { index: false, follow: false },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  return merchantPageMetadata(
+    "categories",
+    "Review and control the signed-in merchant store categories.",
+  );
+}
 
 export const instant = false;
 
@@ -23,15 +28,16 @@ export default async function MerchantCategoriesPage() {
   if (!isMerchantAppEnabled()) notFound();
 
   const access = await requireMerchantAccess();
-  const categories = await listCatalogCategoriesForStore(
-    getDb(),
-    access.scope,
-  );
+  const [categories, initialLocale] = await Promise.all([
+    listCatalogCategoriesForStore(getDb(), access.scope),
+    readMerchantLocale(),
+  ]);
 
   return (
     <MerchantCategories
       storeName={access.store.name}
       readOnly={access.readOnly}
+      initialLocale={initialLocale}
       categories={categories.map((category) => ({
         id: category.id,
         name: resolveMerchantCategoryName(
