@@ -98,7 +98,21 @@ export async function createTelegramLinkAttempt(
   const expiresAt = new Date(now.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS);
   const nonce = generateLinkNonce();
   const nonceDigest = hashLinkNonce(nonce);
-  const encryptedNonce = encryptConnectionSecret(nonce);
+  let encryptedNonce: { ciphertext: string; keyId: string };
+
+  try {
+    encryptedNonce = encryptConnectionSecret(nonce);
+  } catch (error) {
+    console.error("[merchant-telegram] link attempt failed", {
+      phase: "encrypt_nonce",
+      category:
+        error instanceof Error &&
+        /^[A-Za-z0-9_]{1,64}$/.test(error.name)
+          ? error.name
+          : "unknown",
+    });
+    throw error;
+  }
 
   try {
     return await db.transaction(async (tx) => {
@@ -165,6 +179,19 @@ export async function createTelegramLinkAttempt(
       return { attemptId: attempt.id, nonce, expiresAt };
     });
   } catch (error) {
+    console.error("[merchant-telegram] link attempt failed", {
+      phase: "attempt_transaction",
+      category:
+        error instanceof RabetDataError
+          ? error.code
+          : isUniqueViolation(error)
+            ? "CONFLICT"
+            : error instanceof Error &&
+                /^[A-Za-z0-9_]{1,64}$/.test(error.name)
+              ? error.name
+              : "unknown",
+    });
+
     if (isUniqueViolation(error)) {
       throw new RabetDataError(
         "CONFLICT",
