@@ -4,16 +4,15 @@ import { notFound } from "next/navigation";
 
 import { InvitationAcceptance } from "@/components/merchant/invitation-acceptance";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
-import {
-  INVITATION_BRAND,
-  INVITATION_PAGE_TITLE,
-} from "@/lib/merchant-invitation/branding";
+import { readMerchantLocale, merchantPageMetadata } from "@/lib/merchant/locale-server";
+import { INVITATION_BRAND } from "@/lib/merchant-invitation/branding";
 
-export const metadata: Metadata = {
-  title: INVITATION_PAGE_TITLE.ar,
-  description: `Accept a ${INVITATION_BRAND.en} merchant invitation.`,
-  robots: { index: false, follow: false },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  return merchantPageMetadata(
+    "invite",
+    `Accept a ${INVITATION_BRAND.en} merchant invitation.`,
+  );
+}
 
 export const instant = false;
 
@@ -22,5 +21,7 @@ export default async function InvitePage() {
 
   if (!isMerchantAppEnabled()) notFound();
 
-  return <InvitationAcceptance />;
+  const initialLocale = await readMerchantLocale();
+
+  return <InvitationAcceptance initialLocale={initialLocale} />;
 }

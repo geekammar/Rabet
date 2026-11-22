@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -14,12 +14,19 @@ import {
   issuePlatformInvitation,
   revokePlatformInvitation,
   type PlatformIssueState,
-  type PlatformRevokeState,
 } from "@/app/actions/platform-invitations";
 import { platformLogout } from "@/app/actions/platform-auth";
 import { Logo } from "@/components/brand/logo";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 
 export type PlatformInvitationView = {
   id: string;
@@ -114,6 +121,7 @@ function IssueInvitationForm() {
             required
             className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm shadow-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
             placeholder="owner@example.com"
+            data-testid="platform-invitation-email"
           />
         </div>
 
@@ -129,6 +137,7 @@ function IssueInvitationForm() {
             maxLength={255}
             className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm shadow-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
             placeholder="Store name"
+            data-testid="platform-invitation-store-name"
           />
         </div>
 
@@ -146,11 +155,17 @@ function IssueInvitationForm() {
             spellCheck={false}
             className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm shadow-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
             placeholder="my-store"
+            data-testid="platform-invitation-store-slug"
           />
         </div>
 
         <div className="sm:col-span-2">
-          <Button type="submit" className="min-h-11" disabled={pending}>
+          <Button
+            type="submit"
+            className="min-h-11"
+            disabled={pending}
+            data-testid="platform-invitation-issue-submit"
+          >
             {pending ? (
               <Loader2 className="size-4 animate-spin" aria-hidden="true" />
             ) : null}
@@ -245,50 +260,144 @@ function IssueInvitationForm() {
   );
 }
 
-function RevokeInvitation({ invitationId }: { invitationId: string }) {
-  const [state, formAction, pending] = useActionState<
-    PlatformRevokeState,
-    FormData
-  >(revokePlatformInvitation, {});
+function RevokeInvitationDialog({
+  invitation,
+  onCancel,
+  onRevoked,
+  onFocusAfterSuccess,
+  onRestoreFocus,
+}: {
+  invitation: PlatformInvitationView | null;
+  onCancel: () => void;
+  onRevoked: (
+    invitation: PlatformInvitationView,
+    message: string,
+  ) => void;
+  onFocusAfterSuccess: () => void;
+  onRestoreFocus: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
+  const succeededRef = useRef(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  async function confirmRevocation() {
+    if (!invitation || pendingRef.current) return;
+
+    pendingRef.current = true;
+    setPending(true);
+    setError(null);
+
+    const formData = new FormData();
+    formData.set("invitationId", invitation.id);
+
+    try {
+      const state = await revokePlatformInvitation(undefined, formData);
+
+      if (state.status === "success") {
+        succeededRef.current = true;
+        onRevoked(invitation, state.message ?? "Invitation revoked.");
+      } else {
+        setError(
+          state.message ?? "The invitation could not be revoked. Try again.",
+        );
+      }
+    } catch {
+      setError("The invitation could not be revoked. Try again.");
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  }
 
   return (
-    <form
-      action={formAction}
-      onSubmit={(event) => {
-        if (
-          !window.confirm(
-            "Revoke this invitation? The link will stop working immediately.",
-          )
-        ) {
-          event.preventDefault();
-        }
+    <Sheet
+      open={invitation !== null}
+      onOpenChange={(open) => {
+        if (!open && !pendingRef.current) onCancel();
       }}
-      className="space-y-1"
     >
-      <input type="hidden" name="invitationId" value={invitationId} />
-      <Button
-        type="submit"
-        variant="destructive"
-        size="sm"
-        disabled={pending}
-        className="min-h-9"
+      <SheetContent
+        side="bottom"
+        showCloseButton={false}
+        data-testid="platform-revoke-dialog"
+        className="mx-auto w-full max-w-lg gap-0 overflow-y-auto border-border p-0 sm:rounded-t-2xl"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          cancelRef.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+
+          if (succeededRef.current) {
+            onFocusAfterSuccess();
+          } else {
+            onRestoreFocus();
+          }
+        }}
       >
-        {pending ? (
-          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+        {invitation ? (
+          <>
+            <SheetHeader className="border-b border-border">
+              <SheetTitle>Revoke invitation?</SheetTitle>
+              <SheetDescription>
+                This revokes the invitation for{" "}
+                <strong
+                  className="break-all font-medium text-foreground"
+                  data-testid="platform-revoke-email"
+                >
+                  {invitation.invitedEmail}
+                </strong>{" "}
+                to {invitation.storeName} ({invitation.storeSlug}). The
+                invitation link will stop working immediately and cannot be
+                used to create an account.
+              </SheetDescription>
+            </SheetHeader>
+
+            <div className="space-y-3 p-4">
+              {error ? (
+                <p
+                  role="alert"
+                  data-testid="platform-revoke-error"
+                  className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+                >
+                  {error}
+                </p>
+              ) : null}
+            </div>
+
+            <SheetFooter className="border-t border-border sm:flex-row sm:justify-end">
+              <Button
+                ref={cancelRef}
+                type="button"
+                variant="outline"
+                className="min-h-11"
+                disabled={pending}
+                onClick={onCancel}
+                data-testid="platform-revoke-cancel"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                className="min-h-11"
+                disabled={pending}
+                aria-busy={pending}
+                onClick={() => void confirmRevocation()}
+                data-testid="platform-revoke-confirm"
+              >
+                {pending ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                ) : null}
+                {pending ? "Revoking…" : "Revoke invitation"}
+              </Button>
+            </SheetFooter>
+          </>
         ) : null}
-        {pending ? "Revoking…" : "Revoke"}
-      </Button>
-      {state?.status === "error" ? (
-        <p role="alert" className="max-w-56 text-xs text-destructive">
-          {state.message}
-        </p>
-      ) : null}
-      {state?.status === "success" ? (
-        <p role="status" className="max-w-56 text-xs text-muted-foreground">
-          {state.message}
-        </p>
-      ) : null}
-    </form>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -302,6 +411,46 @@ export function PlatformInvitations({
   const pendingCount = invitations.filter(
     (invitation) => invitation.status === "pending",
   ).length;
+  const [revokeTarget, setRevokeTarget] =
+    useState<PlatformInvitationView | null>(null);
+  const [revokeFeedback, setRevokeFeedback] = useState<string | null>(null);
+  const feedbackRef = useRef<HTMLParagraphElement>(null);
+  const historyHeadingRef = useRef<HTMLHeadingElement>(null);
+  const revokeTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  function requestRevocation(
+    invitation: PlatformInvitationView,
+    trigger: HTMLButtonElement,
+  ) {
+    revokeTriggerRef.current = trigger;
+    setRevokeFeedback(null);
+    setRevokeTarget(invitation);
+  }
+
+  function handleRevoked(
+    invitation: PlatformInvitationView,
+    message: string,
+  ) {
+    setRevokeTarget(null);
+    setRevokeFeedback(
+      `Invitation for ${invitation.invitedEmail} was revoked. ${message} The link no longer works.`,
+    );
+  }
+
+  function focusRevokeFeedback() {
+    feedbackRef.current?.focus();
+  }
+
+  function restoreRevokeFocus() {
+    const trigger = revokeTriggerRef.current;
+
+    if (trigger?.isConnected) {
+      trigger.focus();
+      return;
+    }
+
+    historyHeadingRef.current?.focus();
+  }
 
   return (
     <div
@@ -347,11 +496,27 @@ export function PlatformInvitations({
           </Badge>
         </div>
 
+        {revokeFeedback ? (
+          <p
+            ref={feedbackRef}
+            role="status"
+            tabIndex={-1}
+            data-testid="platform-revoke-feedback"
+            className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-900 outline-none focus-visible:ring-3 focus-visible:ring-ring/50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-100"
+          >
+            {revokeFeedback}
+          </p>
+        ) : null}
+
         <IssueInvitationForm />
 
         <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="font-heading text-lg font-semibold">
+            <h2
+              ref={historyHeadingRef}
+              tabIndex={-1}
+              className="font-heading text-lg font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
               Invitation history
             </h2>
             <p className="text-sm text-muted-foreground">
@@ -447,7 +612,18 @@ export function PlatformInvitations({
                       </td>
                       <td className="px-3 py-3 align-top">
                         {invitation.status === "pending" ? (
-                          <RevokeInvitation invitationId={invitation.id} />
+                          <Button
+                            type="button"
+                            variant="destructive"
+                            size="sm"
+                            className="min-h-9"
+                            onClick={(event) =>
+                              requestRevocation(invitation, event.currentTarget)
+                            }
+                            data-testid={`platform-revoke-${invitation.id}`}
+                          >
+                            Revoke
+                          </Button>
                         ) : (
                           <span className="text-xs text-muted-foreground">—</span>
                         )}
@@ -460,6 +636,15 @@ export function PlatformInvitations({
           )}
         </section>
       </main>
+
+      <RevokeInvitationDialog
+        key={revokeTarget?.id ?? "closed"}
+        invitation={revokeTarget}
+        onCancel={() => setRevokeTarget(null)}
+        onRevoked={handleRevoked}
+        onFocusAfterSuccess={focusRevokeFeedback}
+        onRestoreFocus={restoreRevokeFocus}
+      />
     </div>
   );
 }

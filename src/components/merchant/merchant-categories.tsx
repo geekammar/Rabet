@@ -12,6 +12,7 @@ import {
   MerchantLanguageToggle,
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
+import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { MerchantLogoutButton } from "@/components/merchant/merchant-logout-button";
 import { Button } from "@/components/ui/button";
 
@@ -197,13 +198,15 @@ export function MerchantCategories({
   storeName,
   readOnly,
   categories,
+  initialLocale,
 }: {
   storeName: string;
   readOnly: boolean;
   categories: MerchantCategoryItem[];
+  initialLocale: MerchantLocale;
 }) {
   const router = useRouter();
-  const [locale, setLocale] = useState<MerchantLocale>("ar");
+  const [locale, setLocale] = useMerchantLocale(initialLocale, "categories");
   const [overrides, setOverrides] = useState<
     Record<string, AvailabilityState>
   >({});

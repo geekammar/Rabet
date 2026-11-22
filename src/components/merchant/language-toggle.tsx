@@ -1,8 +1,9 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import type { MerchantLocale } from "@/lib/merchant/locale";
 
-export type MerchantLocale = "ar" | "en";
+export type { MerchantLocale } from "@/lib/merchant/locale";
 
 export function MerchantLanguageToggle({
   locale,
