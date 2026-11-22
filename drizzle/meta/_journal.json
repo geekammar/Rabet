@@ -78,6 +78,13 @@
       "when": 1795294155625,
       "tag": "0010_wonderful_siren",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795370226851,
+      "tag": "0011_careless_hulk",
+      "breakpoints": true
     }
   ]
 }

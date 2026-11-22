@@ -79,6 +79,7 @@ import {
   CRITICAL_CONSTRAINTS_V6,
   CRITICAL_CONSTRAINTS_V7,
   CRITICAL_CONSTRAINTS_V8,
+  CRITICAL_CONSTRAINTS_V9,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
@@ -88,6 +89,7 @@ import {
   EXPECTED_INDEXES_V6,
   EXPECTED_INDEXES_V7,
   EXPECTED_INDEXES_V8,
+  EXPECTED_INDEXES_V9,
   EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
@@ -98,6 +100,7 @@ import {
   EXPECTED_TABLES_V6,
   EXPECTED_TABLES_V7,
   EXPECTED_TABLES_V8,
+  EXPECTED_TABLES_V9,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -622,7 +625,9 @@ export async function validateTarget(ctx, options = {}) {
                 ? CRITICAL_CONSTRAINTS_V6
                 : expectedTables === EXPECTED_TABLES_V8
                   ? CRITICAL_CONSTRAINTS_V8
-                  : CRITICAL_CONSTRAINTS);
+                  : expectedTables === EXPECTED_TABLES_V9
+                    ? CRITICAL_CONSTRAINTS_V9
+                    : CRITICAL_CONSTRAINTS);
   const expectedTreeFks = options.expectedTreeFks ?? EXPECTED_TREE_FKS;
 
   const prefixCount = options.expectedHashes
@@ -1393,8 +1398,29 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 11 &&
+        inspected.state.pending[0] === "0011_careless_hulk"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V9,
+          expectedIndexes: EXPECTED_INDEXES_V9,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V9,
+          expectedHashes: ctx.committedHashes.slice(0, 11).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 11 migrations recorded, " +
+              "but live schema does not match the supported prior release (0010_wonderful_siren).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 10 &&
-        inspected.state.pending.length === 1 &&
         inspected.state.pending[0] === "0010_wonderful_siren"
       ) {
         header("Validating prior release schema on target (read-only)");
@@ -1622,9 +1648,11 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV10 =
+        inspected.state.appliedCount === 11 &&
+        inspected.state.pending[0] === "0011_careless_hulk";
       const isKnownPriorReleaseV9 =
         inspected.state.appliedCount === 10 &&
-        inspected.state.pending.length === 1 &&
         inspected.state.pending[0] === "0010_wonderful_siren";
       const isKnownPriorReleaseV8 =
         inspected.state.appliedCount === 9 &&
@@ -1651,7 +1679,33 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV9) {
+      if (isKnownPriorReleaseV10) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V9,
+          expectedIndexes: EXPECTED_INDEXES_V9,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V9,
+          expectedHashes: ctx.committedHashes.slice(0, 11).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0010_wonderful_siren). " +
+              "Proceeding with migration to 0011_careless_hulk.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV9) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V8,
@@ -1665,7 +1719,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0009_merchant_auth_throttle). " +
-              "Proceeding with migration to 0010_wonderful_siren.",
+              "Proceeding with migration to 0011_careless_hulk.",
           );
         } else {
           io.line("");
@@ -1691,7 +1745,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0008_merchant_invitations_and_credentials). " +
-              "Proceeding with migration to 0009_merchant_auth_throttle.",
+              "Proceeding with migration to 0011_careless_hulk.",
           );
         } else {
           io.line("");
@@ -1717,7 +1771,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0007_admin_login_throttle). " +
-              "Proceeding with migration to 0008_merchant_invitations_and_credentials.",
+              "Proceeding with migration to 0011_careless_hulk.",
           );
         } else {
           io.line("");
@@ -1743,7 +1797,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0006_tenant_ownership_expansion). " +
-              "Proceeding with migration to 0007_admin_login_throttle.",
+              "Proceeding with migration to 0011_careless_hulk.",
           );
         } else {
           io.line("");
@@ -1769,7 +1823,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0005_tenant_identity_foundation). " +
-              "Proceeding with migration to 0006_tenant_ownership_expansion.",
+              "Proceeding with migration to 0011_careless_hulk.",
           );
         } else {
           io.line("");
@@ -1795,7 +1849,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0004_storefront_menu). " +
-              "Proceeding with migration to 0005_tenant_identity_foundation.",
+              "Proceeding with migration to 0011_careless_hulk.",
           );
         } else {
           io.line("");
@@ -1821,7 +1875,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0003_seller_notifications). " +
-              "Proceeding with migration to 0004_storefront_menu.",
+              "Proceeding with migration to 0011_careless_hulk.",
           );
         } else {
           io.line("");
@@ -1847,7 +1901,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0002_payment_methods). " +
-              "Proceeding with migration to 0003_seller_notifications.",
+              "Proceeding with migration to 0011_careless_hulk.",
           );
         } else {
           io.line("");

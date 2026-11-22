@@ -65,6 +65,8 @@ const ALL_STORE_ID_TABLES = [
   ...OWNERSHIP_TABLES,
   "store_membership",
   "merchant_invitation",
+  "telegram_connection",
+  "telegram_link_attempt",
 ] as const;
 
 const DERIVED_TABLES = [
@@ -387,13 +389,13 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
     const journal = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from drizzle.__drizzle_migrations
     `);
-    expect(journal[0].count).toBe(11);
+    expect(journal[0].count).toBe(12);
 
     const tables = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from information_schema.tables
       where table_schema = 'public'
     `);
-    expect(tables[0].count).toBe(25);
+    expect(tables[0].count).toBe(28);
 
     const columns = await testDb!.db.execute<{
       table_name: string;
@@ -413,7 +415,9 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
       expect(column.data_type).toBe("uuid");
       expect(column.is_nullable).toBe(
         column.table_name === "store_membership" ||
-          column.table_name === "merchant_invitation"
+          column.table_name === "merchant_invitation" ||
+          column.table_name === "telegram_connection" ||
+          column.table_name === "telegram_link_attempt"
           ? "NO"
           : "YES",
       );

@@ -9,9 +9,11 @@ import {
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
 import { MerchantLogoutButton } from "@/components/merchant/merchant-logout-button";
+import { MerchantTelegramConnection } from "@/components/merchant/merchant-telegram-connection";
 import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
 import type { StoreStatus } from "@/db/schema/tenant";
+import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 
 type Copy = {
   dir: "rtl" | "ltr";
@@ -53,7 +55,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     suspendedBody:
       "يمكنك الاطلاع على حالة المتجر فقط. التعديلات غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
     pendingBody:
-      "سيتم تفعيل خطوات إعداد المتجر في مرحلة لاحقة. لا توجد تعديلات على بيانات المتجر في هذه المرحلة.",
+      "اربط بوت المتجر أدناه ليتمكن العملاء من تصفح منتجاتك على تيليجرام. ستبقى بقية خطوات الإعداد مراحل لاحقة.",
   },
   en: {
     dir: "ltr",
@@ -76,7 +78,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     suspendedBody:
       "You can review the store status only. Editing is unavailable until a platform administrator reactivates the store.",
     pendingBody:
-      "The remaining store setup steps will be enabled in a later phase. No store data is changed in this phase.",
+      "Connect your store bot below so customers can browse your products on Telegram. The remaining setup steps arrive in later phases.",
   },
 };
 
@@ -94,12 +96,14 @@ export function MerchantSetup({
   status,
   readOnly,
   initialLocale,
+  telegramConnection,
 }: {
   storeName: string;
   email: string;
   status: StoreStatus;
   readOnly: boolean;
   initialLocale: MerchantLocale;
+  telegramConnection: MerchantTelegramConnectionState;
 }) {
   const [locale, setLocale] = useMerchantLocale(initialLocale, "setup");
   const copy = COPY[locale];
@@ -175,6 +179,12 @@ export function MerchantSetup({
             </div>
           </dl>
         </section>
+
+        <MerchantTelegramConnection
+          state={telegramConnection}
+          locale={locale}
+          readOnly={readOnly}
+        />
 
         <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">

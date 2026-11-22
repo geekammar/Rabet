@@ -319,7 +319,10 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
     expect(result.ok, output()).toBe(true);
     expect(result.outcome).toBe("inspected");
     expect(commandCalled).toBe(false);
-    expect(result.state?.pending).toEqual(["0010_wonderful_siren"]);
+    expect(result.state?.pending).toEqual([
+      "0010_wonderful_siren",
+      "0011_careless_hulk",
+    ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(await snapshot(baseline)).toEqual(beforeSnapshot);
     expect(await ledger(baseline)).toEqual(beforeLedger);
@@ -347,7 +350,10 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
 
     expect(result.ok, output()).toBe(true);
     expect(result.outcome).toBe("migrated");
-    expect(result.writes.migrationsApplied).toEqual(["0010_wonderful_siren"]);
+    expect(result.writes.migrationsApplied).toEqual([
+      "0010_wonderful_siren",
+      "0011_careless_hulk",
+    ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
     ).toHaveLength(1);
@@ -355,14 +361,17 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
       "Verified healthy prior release (0009_merchant_auth_throttle)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0010_wonderful_siren",
+      "Proceeding with migration to 0011_careless_hulk",
     );
 
     const afterLedger = await ledger(baseline);
-    expect(afterLedger).toHaveLength(11);
+    expect(afterLedger).toHaveLength(12);
     expect(afterLedger.slice(0, beforeLedger.length)).toEqual(beforeLedger);
     expect(afterLedger[10].hash).toBe(
       committed.find((entry) => entry.tag === "0010_wonderful_siren")?.hash,
+    );
+    expect(afterLedger[11].hash).toBe(
+      committed.find((entry) => entry.tag === "0011_careless_hulk")?.hash,
     );
 
     const afterSchema = await schemaState(baseline);
