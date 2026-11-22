@@ -112,6 +112,7 @@ export type RevokedMerchantInvitation = {
 export type AcceptMerchantInvitationInput = {
   token: unknown;
   password: unknown;
+  storeName?: unknown;
 };
 
 export type AcceptedMerchantInvitation = {
@@ -500,6 +501,9 @@ export async function acceptMerchantInvitation(
 ): Promise<AcceptedMerchantInvitation> {
   const token = parseToken(input.token);
   const password = normalizePassword(input.password);
+  const storeName = input.storeName === undefined
+    ? undefined
+    : normalizeStoreName(input.storeName);
   const tokenDigest = digestToken(token);
   let passwordHash: string;
 
@@ -566,6 +570,10 @@ export async function acceptMerchantInvitation(
         .limit(1);
 
       if (existingOwner.length !== 0) throw rejection();
+
+      if (storeName !== undefined) {
+        await tx.update(store).set({ name: storeName }).where(eq(store.id, invitation.storeId));
+      }
 
       const [identity] = await tx
         .insert(appUser)

@@ -628,7 +628,7 @@ async function runJourney(cdp, fixture, authSecret) {
       JSON.stringify(a.email),
     "invitation A preview",
   );
-  assert((await text('[data-testid="invite-store"]')) === a.storeName, "Invite should show store A name");
+  assert((await evaluate("document.querySelector('[data-testid=\"invite-store\"]').value")) === a.storeName, "Invite should show store A name");
   assert(
     (await evaluate("document.querySelector('[data-testid=\"invite-page\"]').getAttribute('dir')")) === "rtl",
     "Invitation page should default to RTL Arabic",
@@ -694,16 +694,14 @@ async function runJourney(cdp, fixture, authSecret) {
   `;
   assert(stillPending[0].accepted_at === null, "Previewing the invitation must not consume it");
 
-  await setValue('[data-testid="invite-password"]', fixture.password);
-  await setValue('[data-testid="invite-confirmation"]', fixture.password + "-different");
+  await setValue('[data-testid="invite-password"]', "short");
   await click('[data-testid="invite-submit"]');
   await waitFor(
     cdp,
-    "document.body.innerText.includes('كلمتا المرور غير متطابقتين')",
-    "password mismatch field error",
+    "Boolean(document.querySelector('#invite-password-error'))",
+    "password length field error",
   );
-
-  await setValue('[data-testid="invite-confirmation"]', fixture.password);
+  await setValue('[data-testid="invite-password"]', fixture.password);
   await click('[data-testid="merchant-locale-en"]');
   await expectMerchantLocale(
     "invite-page",
@@ -723,11 +721,7 @@ async function runJourney(cdp, fixture, authSecret) {
     "document.querySelector('[data-testid=\"invite-submit\"]')?.disabled === true",
     "acceptance pending state",
   );
-  await waitFor(
-    cdp,
-    "Boolean(document.querySelector('[data-testid=\"invite-success\"]'))",
-    "acceptance success",
-  );
+  await waitForUrl("/app/setup", "setup directly after accepting invitation A");
   await cdp.send("Network.emulateNetworkConditions", {
     offline: false,
     latency: 0,
@@ -753,7 +747,7 @@ async function runJourney(cdp, fixture, authSecret) {
   `;
   assert(membershipA[0].count === 1, "Second submission must not create a second membership");
 
-  await click('[data-testid="invite-login-link"]');
+  await click('[data-testid="merchant-logout"]');
   await waitForUrl("/app/login", "redirect to merchant login");
   await waitFor(cdp, "Boolean(document.querySelector('[data-testid=\"merchant-login-email\"]'))", "merchant login form");
   await expectMerchantLocale(
@@ -1443,20 +1437,10 @@ async function runJourney(cdp, fixture, authSecret) {
       JSON.stringify(b.email),
     "invitation B preview",
   );
-  assert((await text('[data-testid="invite-store"]')) === b.storeName, "Invite should show store B name");
+  assert((await evaluate("document.querySelector('[data-testid=\"invite-store\"]').value")) === b.storeName, "Invite should show store B name");
   await setValue('[data-testid="invite-password"]', fixture.password);
   await setValue('[data-testid="invite-confirmation"]', fixture.password);
   await click('[data-testid="invite-submit"]');
-  await waitFor(
-    cdp,
-    "Boolean(document.querySelector('[data-testid=\"invite-success\"]'))",
-    "invitation B acceptance",
-  );
-
-  await navigate(`${BASE_URL}/app/login`);
-  await setValue('[data-testid="merchant-login-email"]', b.email);
-  await setValue('[data-testid="merchant-login-password"]', fixture.password);
-  await click('[data-testid="merchant-login-submit"]');
   await waitForUrl("/app/setup", "merchant B setup page");
   await waitFor(
     cdp,
@@ -1712,20 +1696,10 @@ async function runJourney(cdp, fixture, authSecret) {
       JSON.stringify(empty.email),
     "empty store invitation preview",
   );
-  assert((await text('[data-testid="invite-store"]')) === empty.storeName, "Invite should show empty store name");
+  assert((await evaluate("document.querySelector('[data-testid=\"invite-store\"]').value")) === empty.storeName, "Invite should show empty store name");
   await setValue('[data-testid="invite-password"]', fixture.password);
   await setValue('[data-testid="invite-confirmation"]', fixture.password);
   await click('[data-testid="invite-submit"]');
-  await waitFor(
-    cdp,
-    "Boolean(document.querySelector('[data-testid=\"invite-success\"]'))",
-    "empty store invitation acceptance",
-  );
-
-  await navigate(`${BASE_URL}/app/login`);
-  await setValue('[data-testid="merchant-login-email"]', empty.email);
-  await setValue('[data-testid="merchant-login-password"]', fixture.password);
-  await click('[data-testid="merchant-login-submit"]');
   await waitForUrl("/app/setup", "empty merchant setup page");
 
   await navigate(`${BASE_URL}/app/products`);
