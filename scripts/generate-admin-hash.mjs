@@ -9,9 +9,21 @@
  *
  * It prompts for the password (twice, to guard against a typo), hashes it with
  * Argon2id using OWASP-recommended cost parameters, and prints only the
- * resulting PHC string. Copy that string into `ADMIN_PASSWORD_HASH` in your
- * `.env.local` (local dev) or the Vercel environment variables UI
- * (preview/production).
+ * resulting PHC string.
+ *
+ * There are two different credentials an operator may be provisioning:
+ *
+ *   Legacy single administrator (existing app configuration)
+ *     Set `ADMIN_EMAIL` and put the hash in `ADMIN_PASSWORD_HASH` in the
+ *     environment that runs the app (for local development, `.env.local`).
+ *
+ *   Named platform Super Admin (database-backed owner account)
+ *     Put the hash in GitHub → Settings → Environments → Production →
+ *     environment secret `RABET_PLATFORM_ADMIN_PASSWORD_HASH`. This is the
+ *     secret consumed by the manual Production bootstrap workflow; it is
+ *     never `ADMIN_PASSWORD_HASH`, a workflow input, or a repository file.
+ *
+ * The helper only prints one hash; it does not know or choose the destination.
  *
  * The script never writes the plaintext anywhere and never logs it. On an
  * interactive terminal the password is read with the terminal switched to raw
@@ -216,5 +228,9 @@ const passwordHash = await hash(password, HASH_OPTIONS);
 // Print ONLY the hash. The plaintext password is never echoed or stored.
 console.log(passwordHash);
 console.error(
-  "\nCopy the line above into ADMIN_PASSWORD_HASH. Do not commit it.",
+  "\nCopy the line above to the intended destination only:\n" +
+    "  - legacy single administrator: ADMIN_PASSWORD_HASH in the app environment\n" +
+    "  - named platform Super Admin: GitHub -> Settings -> Environments -> " +
+    "Production -> secret RABET_PLATFORM_ADMIN_PASSWORD_HASH\n" +
+    "Do not commit it or paste it into a workflow input.",
 );

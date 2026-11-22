@@ -198,6 +198,15 @@ describe("documentation does not encourage password exposure", () => {
     expect(source).not.toContain("'your-password'");
     expect(source).not.toMatch(/printf\s+'%s'\s+'[^']/);
   });
+
+  it("distinguishes the legacy admin variable from the platform Super Admin secret", () => {
+    const source = readFileSync(scriptPath, "utf8");
+    expect(source).toContain("ADMIN_PASSWORD_HASH");
+    expect(source).toContain("RABET_PLATFORM_ADMIN_PASSWORD_HASH");
+    expect(source).toContain("Environments");
+    expect(source).toContain("Production");
+    expect(source).not.toMatch(/Vercel/);
+  });
 });
 
 describe("generated hash is accepted by the app's own configuration check", () => {
