@@ -27,6 +27,10 @@
 #
 #   - main branch only. Both the workflow gate and script enforce
 #     GITHUB_REF=refs/heads/main and GITHUB_EVENT_NAME=workflow_dispatch.
+#   - Both inspect and migrate require a non-secret expected_sha input: a full
+#     40-character commit SHA that must equal GITHUB_SHA. The Production job
+#     checks out that event commit and re-verifies `git rev-parse HEAD` before
+#     any database step.
 #   - Fixed GitHub Environment: Production.
 #   - Non-secret target identity settings (NEON_PROD_EXPECTED_HOST and
 #     NEON_PROD_EXPECTED_DB_NAME) must be explicitly configured in the
@@ -47,6 +51,10 @@ name: Neon PROD database
 on:
   workflow_dispatch:
     inputs:
+      expected_sha:
+        description: "Required for inspect and migrate — exact 40-character commit SHA on main; must equal the workflow event SHA."
+        type: string
+        required: true
       mode:
         description: "inspect = read-only report (default). migrate = apply pending production migrations."
         type: choice
@@ -72,20 +80,23 @@ permissions:
 
 jobs:
   guard:
-    name: Validate dispatch context, mode and confirmation
+    name: Validate dispatch context, approved SHA, mode and confirmation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Validate execution context, mode and confirmation
+      - name: Validate execution context, approved SHA, mode and confirmation
         env:
           RABET_REF: ${{ github.ref }}
           RABET_EVENT: ${{ github.event_name }}
+          RABET_EXPECTED_SHA: ${{ inputs.expected_sha }}
           RABET_MODE: ${{ inputs.mode }}
           RABET_CONFIRM: ${{ inputs.confirm }}
         run: |
           node - <<'NODE'
             const ref = process.env.RABET_REF ?? "";
             const eventName = process.env.RABET_EVENT ?? "";
+            const expectedSha = (process.env.RABET_EXPECTED_SHA ?? "").trim().toLowerCase();
+            const workflowSha = (process.env.GITHUB_SHA ?? "").trim().toLowerCase();
             const mode = process.env.RABET_MODE ?? "";
             const confirm = process.env.RABET_CONFIRM ?? "";
             const expectedConfirm = "MIGRATE_RABET_PROD";
@@ -106,6 +117,22 @@ jobs:
               process.exit(1);
             }
 
+            if (!/^[0-9a-f]{40}$/.test(expectedSha)) {
+              console.error(
+                "Refusing to run: expected_sha must be a full 40-character " +
+                  "hexadecimal commit SHA approved for this Production run.",
+              );
+              process.exit(1);
+            }
+
+            if (expectedSha !== workflowSha) {
+              console.error(
+                `Refusing to run: expected_sha (${expectedSha}) does not match ` +
+                  `the workflow event commit (${workflowSha || "missing"}).`,
+              );
+              process.exit(1);
+            }
+
             if (mode !== "inspect" && mode !== "migrate") {
               console.error(
                 `Refusing to run: unknown mode "${mode}". ` +
@@ -122,7 +149,10 @@ jobs:
               process.exit(1);
             }
 
-            console.log(`Execution context valid. Mode: ${mode}. Ref: ${ref}.`);
+            console.log(
+              `Execution context valid. Mode: ${mode}. Ref: ${ref}. ` +
+                `Approved SHA: ${expectedSha}.`,
+            );
           NODE
 
   neon-prod:
@@ -134,8 +164,30 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
+      # Bind execution to the dispatched event commit, not the moving main tip.
+      - name: Checkout the workflow event commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Verify checked-out commit is the approved SHA
+        env:
+          RABET_EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          APPROVED_SHA="$(printf '%s' "${RABET_EXPECTED_SHA}" | tr '[:upper:]' '[:lower:]' | xargs)"
+          if ! printf '%s' "${APPROVED_SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::expected_sha must be a full 40-character hexadecimal commit SHA."
+            exit 1
+          fi
+
+          CHECKOUT_SHA="$(git rev-parse HEAD)"
+          if [ "${CHECKOUT_SHA}" != "${APPROVED_SHA}" ]; then
+            echo "::error::Checked-out HEAD (${CHECKOUT_SHA}) does not match the approved expected_sha (${APPROVED_SHA})."
+            exit 1
+          fi
+
+          echo "Checked-out HEAD ${CHECKOUT_SHA} matches the approved SHA."
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
@@ -208,9 +260,13 @@ jobs:
         run: node scripts/neon-prod-actions.mjs
 
       - name: Report execution summary
+        env:
+          RABET_EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
+          APPROVED_SHA="$(printf '%s' "${RABET_EXPECTED_SHA}" | tr '[:upper:]' '[:lower:]' | xargs)"
           echo "Neon PROD database runner completed."
           echo "  mode:              ${{ inputs.mode }}"
+          echo "  approved SHA:      ${APPROVED_SHA}"
           echo "  environment:       Production"
           echo "  target secret:     NEON_PROD_DATABASE_URL (Production Environment secret)"
           echo "  expected host var: NEON_PROD_EXPECTED_HOST (Production Environment variable)"

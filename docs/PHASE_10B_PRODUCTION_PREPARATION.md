@@ -58,8 +58,8 @@ Security is enforced at two distinct boundaries:
    - Provides administrative authorization control before any runner accesses the `Production` environment.
 2. **Workflow Guards (Pre-Flight & Execution Gates):**
    - Implemented in `.github/workflows/neon-prod-migrate.yml` and `scripts/neon-prod-actions.mjs`.
-   - A dedicated `guard` job runs *before* the `Production`-environment job starts, with no environment, no checkout, and no secret access. It immediately rejects invalid event triggers (must be manual `workflow_dispatch`), non-main branches (`refs/heads/main` only), invalid modes, and missing/untrimmed confirmation phrases (`MIGRATE_RABET_PROD` literally).
-   - The `neon-prod` job has `needs: guard` and `if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'`, ensuring the Production-environment job is never entered for invalid requests.
+   - A dedicated `guard` job runs *before* the `Production`-environment job starts, with no environment, no checkout, and no secret access. It immediately rejects invalid event triggers (must be manual `workflow_dispatch`), non-main branches (`refs/heads/main` only), missing or malformed `expected_sha` values, an `expected_sha` that does not equal `GITHUB_SHA`, invalid modes, and missing/untrimmed confirmation phrases (`MIGRATE_RABET_PROD` literally).
+   - The `neon-prod` job has `needs: guard` and `if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'`, ensuring the Production-environment job is never entered for invalid requests. It checks out the workflow event commit, verifies `git rev-parse HEAD` equals `expected_sha`, and only then runs any database step.
    - The CLI runner (`scripts/neon-prod-actions.mjs`) independently verifies the GitHub Actions context before opening any database connection and refuses execution outside GitHub Actions.
 
 #### Configuration Steps
@@ -91,6 +91,7 @@ Follow this exact six-step sequence to inspect, backup, migrate, verify, and act
 1. **Step 1 — Read-Only Inspection (`inspect` mode):**
    - Navigate to **Actions → Neon PROD database → Run workflow**.
    - Select `Use workflow from Branch: main`.
+   - Expected SHA: paste the exact full 40-character reviewed commit SHA (required for inspect and migrate; must equal the workflow event SHA).
    - Mode: **`inspect`** (default).
    - Leave `confirm` empty.
    - Click **Run workflow**.
@@ -108,6 +109,7 @@ Follow this exact six-step sequence to inspect, backup, migrate, verify, and act
 3. **Step 3 — Migrate Only with Authorization (`migrate` mode):**
    - In **Actions → Neon PROD database → Run workflow**:
    - Select `Use workflow from Branch: main`.
+   - Expected SHA: paste the same exact full 40-character reviewed commit SHA.
    - Mode: select **`migrate`**.
    - Confirmation: type **`MIGRATE_RABET_PROD`** exactly (literal match, no leading or trailing whitespace).
    - Click **Run workflow**.

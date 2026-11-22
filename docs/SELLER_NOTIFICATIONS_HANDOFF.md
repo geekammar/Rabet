@@ -178,6 +178,7 @@ When deploying to Production (to be executed only after Ammar's independent revi
 - Open GitHub Actions in the repository: **Neon PROD database** (`.github/workflows/neon-prod-migrate.yml`).
 - Click **Run workflow**:
   - Branch: `main`
+  - Expected SHA: the exact 40-character reviewed commit SHA (required; must equal the workflow event SHA)
   - Mode: `inspect` (default)
 - Review the workflow run output to confirm:
   - PostgreSQL connectivity and target identity (`NEON_PROD_EXPECTED_HOST`, `NEON_PROD_EXPECTED_DB_NAME`).
@@ -188,6 +189,7 @@ When deploying to Production (to be executed only after Ammar's independent revi
 ### Step 3: Production Migration Execution
 - In GitHub Actions, trigger **Neon PROD database** again:
   - Branch: `main`
+  - Expected SHA: the same exact 40-character reviewed commit SHA
   - Mode: `migrate`
   - Confirmation phrase: type `MIGRATE_RABET_PROD` exactly.
 - The workflow applies `0003_seller_notifications.sql` in a single isolated transaction and verifies table creation, triggers, and journal entry integrity.

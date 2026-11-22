@@ -69,7 +69,7 @@ function PaymentMethodsUpgradeRequired({ message }: { message: string }) {
             Run the approved migration runner workflow to apply pending migrations. Existing catalog features, inquiries, and customer Telegram bot journeys remain fully operational.
           </p>
           <div className="font-mono bg-muted p-2 rounded text-[11px] text-muted-foreground">
-            gh workflow run neon-prod-migrate.yml -f mode=migrate -f confirm=MIGRATE_RABET_PROD
+            gh workflow run neon-prod-migrate.yml -f expected_sha=&lt;approved-main-sha&gt; -f mode=migrate -f confirm=MIGRATE_RABET_PROD
           </div>
         </div>
       </div>
