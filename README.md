@@ -342,6 +342,7 @@ exposed as the "Neon PROD database" action) and runner script (`scripts/neon-pro
 
 The runner enforces strict safety properties before opening a connection or writing:
 - Gated to manual `workflow_dispatch` on `refs/heads/main` only (pre-flight guard job rejects invalid inputs before checkout or secret exposure).
+- Requires a non-secret `expected_sha` input: a full 40-character commit SHA that must equal `GITHUB_SHA`. The Production job checks out that workflow event commit and verifies `git rev-parse HEAD` before any database step.
 - Dedicated `Production` GitHub Environment.
 - Explicit non-secret target settings (`NEON_PROD_EXPECTED_HOST` and `NEON_PROD_EXPECTED_DB_NAME`) must match the unpooled endpoint and database name.
 - Direct unpooled connection secret (`NEON_PROD_DATABASE_URL`) with required `?sslmode=require`. Rejects pooled (`-pooler`) and development endpoints.
@@ -361,8 +362,10 @@ For every new migration, including `drizzle/0004_storefront_menu.sql`:
    confirm `0004_storefront_menu.sql` is the only pending migration.
 4. Apply only that committed migration through the authorized GitHub Actions
    production runner, after explicit owner approval and a verified restore
-   point. If inspection shows different pending migrations, drift or an
-   ambiguous state, stop and escalate instead of writing.
+   point. Pass the exact approved 40-character commit SHA as the required
+   `expected_sha` input for both `inspect` and `migrate`. If inspection shows
+   different pending migrations, drift or an ambiguous state, stop and
+   escalate instead of writing.
 5. Verify the resulting schema and application functionality.
 6. Run the focused Muse acceptance for the changed feature.
 
@@ -393,7 +396,8 @@ Production migrations are **manual and runner-restricted**. They are never run
 from the development VPS, a local machine, a Vercel build or application startup,
 and never through `drizzle-kit push`. The authorized path is the manual
 `Neon PROD database` GitHub Actions workflow described above, on `main`, with the
-fixed target pinning, a verified restore point and owner approval. Use the
+required approved `expected_sha`, fixed target pinning, a verified restore point
+and owner approval. Use the
 release order in "Release order for a new additive migration"; the underlying
 operator runbook is in
 [docs/PHASE_10B_PRODUCTION_PREPARATION.md](./docs/PHASE_10B_PRODUCTION_PREPARATION.md).

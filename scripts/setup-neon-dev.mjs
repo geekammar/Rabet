@@ -77,7 +77,7 @@ import postgres from "postgres";
 
 const WIZARD = "rabet db:setup:dev";
 
-/** The twenty-five domain tables created by the committed chain. */
+/** The twenty-eight domain tables created by the committed chain. */
 export const EXPECTED_TABLES = [
   "admin_login_throttle",
   "app_user",
@@ -103,6 +103,9 @@ export const EXPECTED_TABLES = [
   "seller_notification_setting",
   "store",
   "store_membership",
+  "telegram_connection",
+  "telegram_link_attempt",
+  "telegram_managed_update",
   "telegram_update",
 ];
 
@@ -119,6 +122,8 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0008_merchant_invitations_and_credentials",
   "0009_merchant_auth_throttle",
   "0010_wonderful_siren",
+  "0011_careless_hulk",
+  "0012_mushy_scream",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -127,13 +132,19 @@ const MERCHANT_INVITATION_TABLES = new Set([
   "merchant_invitation",
 ]);
 const MERCHANT_SESSION_TABLES = new Set(["merchant_auth_throttle"]);
+const MANAGED_TELEGRAM_TABLES = new Set([
+  "telegram_connection",
+  "telegram_link_attempt",
+  "telegram_managed_update",
+]);
 
 /** The twenty-one domain tables present in the 0005 tenant-identity baseline. */
 export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
   (t) =>
     t !== "admin_login_throttle" &&
     !MERCHANT_INVITATION_TABLES.has(t) &&
-    !MERCHANT_SESSION_TABLES.has(t),
+    !MERCHANT_SESSION_TABLES.has(t) &&
+    !MANAGED_TELEGRAM_TABLES.has(t),
 );
 
 /** The twenty-one tables present in the 0006 ownership baseline (no new table until 0008). */
@@ -141,7 +152,10 @@ export const EXPECTED_TABLES_V5 = [...EXPECTED_TABLES_V4];
 
 /** The twenty-two tables present in the 0007 login-throttle baseline. */
 export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
-  (t) => !MERCHANT_INVITATION_TABLES.has(t) && !MERCHANT_SESSION_TABLES.has(t),
+  (t) =>
+    !MERCHANT_INVITATION_TABLES.has(t) &&
+    !MERCHANT_SESSION_TABLES.has(t) &&
+    !MANAGED_TELEGRAM_TABLES.has(t),
 );
 
 /**
@@ -149,11 +163,20 @@ export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
  * credential and invitation tables included, merchant_auth_throttle excluded.
  */
 export const EXPECTED_TABLES_V7 = EXPECTED_TABLES.filter(
-  (t) => !MERCHANT_SESSION_TABLES.has(t),
+  (t) =>
+    !MERCHANT_SESSION_TABLES.has(t) && !MANAGED_TELEGRAM_TABLES.has(t),
 );
 
 /** The exact twenty-five-table inventory through 0009 (merchant_auth_throttle included). */
-export const EXPECTED_TABLES_V8 = [...EXPECTED_TABLES];
+export const EXPECTED_TABLES_V8 = EXPECTED_TABLES.filter(
+  (t) => !MANAGED_TELEGRAM_TABLES.has(t),
+);
+
+/** The exact twenty-five-table inventory through 0010 (no new table). */
+export const EXPECTED_TABLES_V9 = [...EXPECTED_TABLES_V8];
+
+/** The twenty-eight-table inventory through 0011 (managed bot tables included). */
+export const EXPECTED_TABLES_V10 = [...EXPECTED_TABLES];
 
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
 export const EXPECTED_TABLES_V3 = EXPECTED_TABLES_V4.filter(
@@ -238,8 +261,8 @@ export const EXPECTED_INDEXES_V5 = [
 export const EXPECTED_INDEXES_V6 = [...EXPECTED_INDEXES_V5];
 
 
-/** Indexes the current chain requires (0008 adds credentials/invitations; 0009 adds throttle). */
-export const EXPECTED_INDEXES = [
+/** Indexes present through 0009 (0008 indexes plus the throttle window index). */
+export const EXPECTED_INDEXES_V8 = [
   ...EXPECTED_INDEXES_V6,
   "merchant_credential_user_id_unique",
   "merchant_invitation_token_digest_unique",
@@ -249,12 +272,30 @@ export const EXPECTED_INDEXES = [
 ];
 
 /** Indexes present through 0008 (credentials and invitations, no 0009 throttle index). */
-export const EXPECTED_INDEXES_V7 = EXPECTED_INDEXES.filter(
+export const EXPECTED_INDEXES_V7 = EXPECTED_INDEXES_V8.filter(
   (name) => name !== "merchant_auth_throttle_window_idx",
 );
 
-/** Indexes present through 0009 (0008 indexes plus the throttle window index). */
-export const EXPECTED_INDEXES_V8 = [...EXPECTED_INDEXES];
+/** Indexes present through 0010 (0010 adds no index). */
+export const EXPECTED_INDEXES_V9 = [...EXPECTED_INDEXES_V8];
+
+/** Indexes present through 0011 (managed bot connection indexes). */
+export const EXPECTED_INDEXES_V10 = [
+  ...EXPECTED_INDEXES_V9,
+  "telegram_connection_bot_id_unique",
+  "telegram_connection_store_idx",
+  "telegram_connection_one_active_per_store_idx",
+  "telegram_link_attempt_nonce_digest_unique",
+  "telegram_link_attempt_store_idx",
+  "telegram_link_attempt_telegram_user_idx",
+  "telegram_link_attempt_one_active_per_store_idx",
+  "telegram_link_attempt_one_active_per_user_idx",
+  "telegram_managed_update_bot_update_unique",
+  "telegram_managed_update_status_idx",
+];
+
+/** Indexes the current chain requires (0012 adds no index). */
+export const EXPECTED_INDEXES = [...EXPECTED_INDEXES_V10];
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
 export const CRITICAL_CONSTRAINTS_V2 = [
@@ -345,10 +386,39 @@ export const CRITICAL_CONSTRAINTS_V8 = [
   "merchant_auth_throttle_attempt_count_check",
 ];
 
-/** CHECK, domain and ownership constraints the current chain requires (0010 adds the revoker FK). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, domain and ownership constraints present through 0010. */
+export const CRITICAL_CONSTRAINTS_V9 = [
   ...CRITICAL_CONSTRAINTS_V8,
   "merchant_invitation_revoked_by_user_id_app_user_id_fk",
+];
+
+/** CHECK, domain and ownership constraints present through 0011 (managed bots). */
+export const CRITICAL_CONSTRAINTS_V10 = [
+  ...CRITICAL_CONSTRAINTS_V9,
+  "telegram_connection_store_id_store_id_fk",
+  "telegram_connection_status_check",
+  "telegram_connection_bot_id_positive_check",
+  "telegram_connection_webhook_secret_hash_format_check",
+  "telegram_connection_webhook_url_https_check",
+  "telegram_link_attempt_store_id_store_id_fk",
+  "telegram_link_attempt_merchant_user_id_app_user_id_fk",
+  "telegram_link_attempt_connection_id_telegram_connection_id_fk",
+  "telegram_link_attempt_nonce_digest_format_check",
+  "telegram_link_attempt_status_check",
+  "telegram_link_attempt_expiry_after_creation_check",
+  "telegram_link_attempt_telegram_user_positive_check",
+  "telegram_link_attempt_telegram_bot_positive_check",
+  "telegram_managed_update_connection_id_telegram_connection_id_fk",
+  "telegram_managed_update_attempt_id_telegram_link_attempt_id_fk",
+  "telegram_managed_update_status_check",
+  "telegram_managed_update_update_id_positive_check",
+  "telegram_managed_update_bot_id_positive_check",
+];
+
+/** CHECK constraints the current chain requires (0012 adds activation fencing). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V10,
+  "telegram_connection_webhook_operation_consistency_check",
 ];
 
 /** Notification update triggers created by migration 0003. */
@@ -365,6 +435,10 @@ export const EXPECTED_TREE_FKS = {
 
 /** The GitHub repository this wizard is allowed to provision. */
 export const EXPECTED_REPO = "github.com/geekammar/rabet";
+export const EXPECTED_REPOS = [
+  EXPECTED_REPO,
+  "github.com/geekammar/nokmel",
+];
 
 /** The dedicated Neon development project the owner created. */
 export const EXPECTED_NEON_PROJECT = "Rabet_dev";
@@ -1754,15 +1828,16 @@ async function runCheckProject(ctx) {
     );
   } else {
     const normalized = normalizeRemote(remote.stdout);
+    const knownRepo = EXPECTED_REPOS.find((repo) => normalized.includes(repo));
 
-    if (!normalized.includes(EXPECTED_REPO)) {
+    if (!knownRepo) {
       problems.push(
         `The git remote is ${redact(remote.stdout).trim()}, which is not the ` +
-          `Rabet repository (${EXPECTED_REPO}). The wizard refuses to migrate ` +
-          "a database from an unrelated checkout.",
+          `Rabet/Nokmel repository (${EXPECTED_REPOS.join(" or ")}). The wizard ` +
+          "refuses to migrate a database from an unrelated checkout.",
       );
     } else {
-      note(ctx, `Repository   ${EXPECTED_REPO} ✓`);
+      note(ctx, `Repository   ${knownRepo} ✓`);
     }
   }
 

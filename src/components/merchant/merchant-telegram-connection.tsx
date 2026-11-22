@@ -1,0 +1,243 @@
+"use client";
+
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import { CheckCircle2, ExternalLink, RefreshCw, Send } from "lucide-react";
+
+import type { MerchantLocale } from "@/components/merchant/language-toggle";
+import { MERCHANT_TELEGRAM_COPY } from "@/components/merchant/merchant-telegram-copy";
+import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
+import {
+  confirmMerchantTelegramConnection,
+  startMerchantTelegramConnection,
+  type MerchantTelegramActionResult,
+} from "@/app/actions/merchant-telegram";
+import { Button } from "@/components/ui/button";
+
+export function MerchantTelegramConnection({
+  state,
+  locale,
+  readOnly,
+}: {
+  state: MerchantTelegramConnectionState;
+  locale: MerchantLocale;
+  readOnly: boolean;
+}) {
+  const copy = MERCHANT_TELEGRAM_COPY[locale];
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const failureReason = state.state === "failed" ? state.reason : null;
+  const failureMessage = failureReason
+    ? copy.errors[failureReason] ?? copy.errors.failed
+    : null;
+
+  function handleResult(result: MerchantTelegramActionResult) {
+    if (result.ok) {
+      setActionError(null);
+      router.refresh();
+      return;
+    }
+
+    setActionError(copy.errors[result.error] ?? copy.errors.OPERATION_FAILED);
+  }
+
+  function startConnection() {
+    setActionError(null);
+    startTransition(async () => {
+      handleResult(await startMerchantTelegramConnection());
+    });
+  }
+
+  function confirmConnection(connectionId: string) {
+    setActionError(null);
+    startTransition(async () => {
+      handleResult(
+        await confirmMerchantTelegramConnection({ connectionId }),
+      );
+    });
+  }
+
+  return (
+    <section
+      className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm"
+      data-testid="merchant-telegram-connection"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h2 className="flex items-center gap-2 font-heading text-lg font-semibold">
+            <Send className="size-4 text-muted-foreground" aria-hidden="true" />
+            {copy.title}
+          </h2>
+          <p className="text-sm text-muted-foreground">{copy.intro}</p>
+        </div>
+        {state.state === "connected" ? (
+          <span
+            className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-emerald-300 bg-emerald-50 px-3 text-sm font-medium text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200"
+            data-testid="merchant-telegram-connected"
+          >
+            <CheckCircle2 className="size-4" aria-hidden="true" />
+            {copy.connectedTitle}
+          </span>
+        ) : null}
+      </div>
+
+      {readOnly ? (
+        <p className="rounded-lg border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+          {copy.readOnly}
+        </p>
+      ) : null}
+
+      {state.state === "not_connected" ? (
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">{copy.notConnected}</p>
+          <Button
+            type="button"
+            className="min-h-11"
+            disabled={readOnly || isPending}
+            onClick={startConnection}
+            data-testid="merchant-telegram-connect"
+          >
+            <Send className="size-4" aria-hidden="true" />
+            {copy.connect}
+          </Button>
+        </div>
+      ) : null}
+
+      {state.state === "waiting" ? (
+        <div className="space-y-3" data-testid="merchant-telegram-waiting">
+          <p className="font-medium">{copy.waitingTitle}</p>
+          <p className="text-sm text-muted-foreground">
+            {state.telegramBound
+              ? copy.waitingProvisioning
+              : copy.waitingOpen}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild className="min-h-11">
+              <a
+                href={state.deepLink}
+                target="_blank"
+                rel="noreferrer"
+                data-testid="merchant-telegram-open"
+              >
+                <ExternalLink className="size-4" aria-hidden="true" />
+                {copy.openTelegram}
+              </a>
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              onClick={() => router.refresh()}
+              disabled={isPending}
+              data-testid="merchant-telegram-refresh"
+            >
+              <RefreshCw className="size-4" aria-hidden="true" />
+              {copy.refresh}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {state.state === "confirm" ? (
+        <div className="space-y-3" data-testid="merchant-telegram-confirm">
+          <p className="font-medium">{copy.confirmTitle}</p>
+          <p className="text-sm text-muted-foreground">{copy.confirmBody}</p>
+          <p
+            className="break-all rounded-lg border border-border bg-muted/30 p-3 font-mono text-sm"
+            data-testid="merchant-telegram-bot-username"
+          >
+            @{state.botUsername}
+          </p>
+          {state.lastError ? (
+            <p
+              role="status"
+              className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+              data-testid="merchant-telegram-activation-error"
+            >
+              {copy.errors[state.lastError] ?? copy.errors.OPERATION_FAILED}
+            </p>
+          ) : null}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              className="min-h-11"
+              disabled={readOnly || isPending}
+              onClick={() => confirmConnection(state.connectionId)}
+              data-testid="merchant-telegram-confirm-button"
+            >
+              <CheckCircle2 className="size-4" aria-hidden="true" />
+              {copy.confirm}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              disabled={readOnly || isPending}
+              onClick={startConnection}
+            >
+              {copy.startOver}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {state.state === "connected" ? (
+        <div className="space-y-3" data-testid="merchant-telegram-connected-panel">
+          <p className="text-sm text-muted-foreground">{copy.connectedBody}</p>
+          <p
+            className="break-all rounded-lg border border-border bg-muted/30 p-3 font-mono text-sm"
+            data-testid="merchant-telegram-bot-username"
+          >
+            @{state.botUsername}
+          </p>
+          <Button asChild className="min-h-11">
+            <a
+              href={state.openUrl}
+              target="_blank"
+              rel="noreferrer"
+              data-testid="merchant-telegram-open-bot"
+            >
+              <ExternalLink className="size-4" aria-hidden="true" />
+              {copy.openBot}
+            </a>
+          </Button>
+        </div>
+      ) : null}
+
+      {state.state === "failed" ? (
+        <div className="space-y-3" data-testid="merchant-telegram-failed">
+          <p className="font-medium">
+            {state.reason === "expired"
+              ? copy.expiredTitle
+              : copy.failedTitle}
+          </p>
+          <p className="text-sm text-muted-foreground">{failureMessage}</p>
+          {state.retryable ? (
+            <Button
+              type="button"
+              className="min-h-11"
+              disabled={readOnly || isPending}
+              onClick={startConnection}
+              data-testid="merchant-telegram-retry"
+            >
+              <RefreshCw className="size-4" aria-hidden="true" />
+              {copy.retry}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {actionError ? (
+        <p
+          role="status"
+          className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+          data-testid="merchant-telegram-error"
+        >
+          {actionError}
+        </p>
+      ) : null}
+    </section>
+  );
+}

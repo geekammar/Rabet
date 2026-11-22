@@ -37,4 +37,5 @@ export * from "./payment-methods";
 export * from "./seller-notifications";
 export * from "./settings";
 export * from "./telegram";
+export * from "./telegram-connections";
 export * from "./tenant";
