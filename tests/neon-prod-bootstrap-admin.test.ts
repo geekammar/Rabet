@@ -12,8 +12,8 @@ import {
 } from "../scripts/neon-prod-bootstrap-admin.mjs";
 
 const PROD_URL =
-  "postgresql://prod_owner:never-print-this@ep-prod-123456789.us-east-2.aws.neon.tech/neondb?sslmode=require";
-const PROD_HOST = "ep-prod-123456789.us-east-2.aws.neon.tech";
+  "postgresql://prod_owner:never-print-this@ep-cool-name-12345.us-east-2.aws.neon.tech/neondb?sslmode=require";
+const PROD_HOST = "ep-cool-name-12345.us-east-2.aws.neon.tech";
 const VALID_HASH =
   "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHlzYWx0eXNhbHQ$aGFzaHZhbHVlaGFzaHZhbHVl";
 
