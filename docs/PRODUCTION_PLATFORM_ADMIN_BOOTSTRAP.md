@@ -28,6 +28,11 @@ The workflow reads the hash from `secrets.RABET_PLATFORM_ADMIN_PASSWORD_HASH`.
 GitHub masks the value in logs. The script prints only the target host/database
 (masked), outcome and user id.
 
+The bootstrap accepts only the documented generator's Argon2id policy:
+`argon2id`, version 19, memory cost 19456 KiB, time cost 2, parallelism 1,
+16-byte salt and 32-byte digest in canonical unpadded base64. Other PHC values
+are rejected before any database connection or write.
+
 ## Approved target
 
 The workflow reuses the existing Production environment variables:

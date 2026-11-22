@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { hash } from "@node-rs/argon2";
 
 import {
   ADMIN_CONFIRM_ENV,
@@ -14,8 +15,24 @@ import {
 const PROD_URL =
   "postgresql://prod_owner:never-print-this@ep-cool-name-12345.us-east-2.aws.neon.tech/neondb?sslmode=require";
 const PROD_HOST = "ep-cool-name-12345.us-east-2.aws.neon.tech";
-const VALID_HASH =
-  "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHlzYWx0eXNhbHQ$aGFzaHZhbHVlaGFzaHZhbHVl";
+const HASH_OPTIONS = {
+  algorithm: 2,
+  memoryCost: 19456,
+  timeCost: 2,
+  parallelism: 1,
+} as const;
+const VALID_HASH = await hash(
+  "synthetic-bootstrap-password-123",
+  HASH_OPTIONS,
+);
+const LEGACY_REGEX_ACCEPTED_BUT_UNUSABLE =
+  "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA";
+const CORRECT_LENGTH_BUT_WRONG_PARAMS =
+  `$argon2id$v=19$m=19456,t=3,p=1$${"A".repeat(22)}$${"B".repeat(43)}`;
+const CORRECT_LENGTH_BUT_OLD_VERSION =
+  `$argon2id$v=16$m=19456,t=2,p=1$${"A".repeat(22)}$${"B".repeat(43)}`;
+const SHORT_DIGEST =
+  `$argon2id$v=19$m=19456,t=2,p=1$${"A".repeat(22)}$${"B".repeat(42)}`;
 
 function baseEnv(overrides: Record<string, string | undefined> = {}) {
   return {
@@ -77,7 +94,32 @@ describe("production platform admin bootstrap input", () => {
     expect(valid.ok).toBe(true);
   });
 
-  it("rejects a wrong confirmation, invalid email and missing/invalid hash without echoing it", () => {
+  it("accepts only the documented generator policy", () => {
+    const accepted = validateBootstrapInput(baseEnv(), {
+      requireGithubContext: false,
+      allowTestTarget: false,
+    });
+    expect(accepted.ok).toBe(true);
+
+    for (const invalid of [
+      LEGACY_REGEX_ACCEPTED_BUT_UNUSABLE,
+      CORRECT_LENGTH_BUT_WRONG_PARAMS,
+      CORRECT_LENGTH_BUT_OLD_VERSION,
+      SHORT_DIGEST,
+      "plaintext-not-allowed",
+    ]) {
+      const result = validateBootstrapInput(
+        baseEnv({ [ADMIN_HASH_ENV]: invalid }),
+        { requireGithubContext: false, allowTestTarget: false },
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.problems.join(" ")).not.toContain(invalid);
+      }
+    }
+  });
+
+  it("rejects a wrong confirmation and invalid email without echoing the hash", () => {
     const wrongConfirm = validateBootstrapInput(
       baseEnv({ [ADMIN_CONFIRM_ENV]: "provision" }),
       { requireGithubContext: false, allowTestTarget: false },
@@ -91,13 +133,13 @@ describe("production platform admin bootstrap input", () => {
     expect(invalidEmail.ok).toBe(false);
 
     const invalidHash = validateBootstrapInput(
-      baseEnv({ [ADMIN_HASH_ENV]: "plaintext-not-allowed" }),
+      baseEnv({ [ADMIN_HASH_ENV]: LEGACY_REGEX_ACCEPTED_BUT_UNUSABLE }),
       { requireGithubContext: false, allowTestTarget: false },
     );
     expect(invalidHash.ok).toBe(false);
     if (!invalidHash.ok) {
       expect(invalidHash.problems.join(" ")).not.toContain(
-        "plaintext-not-allowed",
+        LEGACY_REGEX_ACCEPTED_BUT_UNUSABLE,
       );
     }
   });

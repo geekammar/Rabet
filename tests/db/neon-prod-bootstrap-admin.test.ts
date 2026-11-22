@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { hash } from "@node-rs/argon2";
 import { sql } from "drizzle-orm";
 
+import { verifyPlatformAdminCredentials } from "@/lib/auth/platform-credentials";
 import {
   ADMIN_CONFIRM_ENV,
   ADMIN_EMAIL_ENV,
@@ -48,6 +49,7 @@ beforeEach(async () => {
   await testDb.db.execute(
     sql`drop function if exists fail_bootstrap_credential()`,
   );
+  await testDb.db.execute(sql`delete from merchant_auth_throttle`);
   await testDb.db.execute(sql`delete from merchant_credential`);
   await testDb.db.execute(sql`delete from app_user`);
 });
@@ -132,6 +134,30 @@ describe.skipIf(!shouldRun)("production platform admin bootstrap", () => {
       email,
     });
     expect(await accountRows(email)).toHaveLength(1);
+  });
+
+  it("provisions a credential that authenticates through the application verifier", async () => {
+    const email = "owner.verified@example.test";
+    const result = await bootstrap(email);
+
+    const identity = await verifyPlatformAdminCredentials(
+      email,
+      TEST_PASSWORD,
+      { db: db() },
+    );
+
+    expect(identity).toEqual({
+      id: result.userId,
+      email,
+      role: "platform_admin",
+      sessionVersion: 0,
+    });
+
+    expect(
+      await verifyPlatformAdminCredentials(email, "wrong-password-123", {
+        db: db(),
+      }),
+    ).toBeNull();
   });
 
   it("adds a credential to an existing active Super Admin without overwriting anything", async () => {
@@ -264,5 +290,28 @@ describe.skipIf(!shouldRun)("production platform admin bootstrap", () => {
 
     expect(connected).toBe(false);
     expect(await accountRows("owner.wrong-target@example.test")).toHaveLength(0);
+  });
+
+  it("rejects a previous-regex-accepted unusable hash before any database access", async () => {
+    const email = "owner.invalid-hash@example.test";
+    let connected = false;
+    const env = envFor(email, {
+      [ADMIN_HASH_ENV]: "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA",
+    });
+
+    await expect(
+      bootstrapPlatformAdmin({
+        env,
+        connect: () => {
+          connected = true;
+          throw new Error("must not connect");
+        },
+        requireGithubContext: false,
+        allowTestTarget: true,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(connected).toBe(false);
+    expect(await accountRows(email)).toHaveLength(0);
   });
 });

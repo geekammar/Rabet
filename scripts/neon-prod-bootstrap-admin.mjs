@@ -25,6 +25,7 @@ import { pathToFileURL } from "node:url";
 import path from "node:path";
 
 import postgres from "postgres";
+import { parseOptions } from "@node-rs/argon2";
 
 import {
   EXPECTED_DB_NAME_ENV,
@@ -42,8 +43,23 @@ export const ADMIN_CONFIRM_ENV = "RABET_PLATFORM_ADMIN_CONFIRM";
 
 const EMAIL_MAX_LENGTH = 254;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ARGON2ID_PATTERN =
-  /^\$argon2id\$v=\d+\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/;
+
+/**
+ * The documented generator's exact Argon2id policy.
+ *
+ * `@node-rs/argon2`'s parser validates the PHC encoding/decoding and reports
+ * the decoded sizes; the structural check keeps the accepted text canonical
+ * (standard unpadded base64, 16-byte salt, 32-byte digest).
+ */
+const ARGON2ID_ALGORITHM = 2; // Algorithm.Argon2id
+const ARGON2_VERSION_V19 = 1; // Version.V0x13
+const ARGON2_MEMORY_COST = 19456;
+const ARGON2_TIME_COST = 2;
+const ARGON2_PARALLELISM = 1;
+const ARGON2_SALT_BYTES = 16;
+const ARGON2_OUTPUT_BYTES = 32;
+const ARGON2_PHC_SHAPE =
+  /^\$argon2id\$v=19\$m=19456,t=2,p=1\$[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{43}$/;
 
 export class PlatformAdminBootstrapError extends Error {
   constructor(code, message, options) {
@@ -70,7 +86,26 @@ function readHash(raw) {
   if (typeof raw !== "string") return null;
   const hash = raw.trim();
   if (hash.length < 20 || hash.length > 1024) return null;
-  return ARGON2ID_PATTERN.test(hash) ? hash : null;
+  if (!ARGON2_PHC_SHAPE.test(hash)) return null;
+
+  try {
+    const parsed = parseOptions(hash);
+    if (
+      parsed.algorithm !== ARGON2ID_ALGORITHM ||
+      parsed.version !== ARGON2_VERSION_V19 ||
+      parsed.memoryCost !== ARGON2_MEMORY_COST ||
+      parsed.timeCost !== ARGON2_TIME_COST ||
+      parsed.parallelism !== ARGON2_PARALLELISM ||
+      parsed.saltLen !== ARGON2_SALT_BYTES ||
+      parsed.outputLen !== ARGON2_OUTPUT_BYTES
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return hash;
 }
 
 /**
