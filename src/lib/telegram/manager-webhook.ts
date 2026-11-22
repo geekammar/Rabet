@@ -271,7 +271,7 @@ export async function handleManagerTelegramWebhookRequest(
       const origin =
         options?.webhookOrigin ?? resolveTrustedAppOrigin();
 
-      await handleManagedBotEvent(
+      const result = await handleManagedBotEvent(
         db,
         {
           creatorUserId: update.creatorUserId,
@@ -286,6 +286,12 @@ export async function handleManagerTelegramWebhookRequest(
           now: options?.now,
         },
       );
+
+      if (result.status === "retryable") {
+        // The attempt stays active; a later Telegram redelivery or the
+        // merchant's retry action can recover without a fresh bot.
+        throw new Error(`Retryable managed bot preparation failure: ${result.reason}`);
+      }
     }
 
     const marked = await markManagedTelegramUpdateProcessed(db, {

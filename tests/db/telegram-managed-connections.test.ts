@@ -19,6 +19,7 @@ import {
   decryptConnectionSecret,
   encryptConnectionSecret,
   hashWebhookSecret,
+  verifyWebhookSecret,
 } from "@/lib/telegram/connection-secrets";
 import type { TelegramBotApiClient } from "@/lib/telegram/manager-api";
 import {
@@ -310,14 +311,20 @@ function managerApi(
   } as TelegramBotApiClient;
 }
 
+type TrackedBotApi = TelegramBotApiClient & {
+  getWebhookUrl(): string;
+  getWebhookSecret(): string;
+};
+
 function botApi(
   botId: number,
   username: string,
   overrides: Partial<TelegramBotApiClient> = {},
-): TelegramBotApiClient {
+): TrackedBotApi {
   let lastWebhookUrl = "";
+  let lastWebhookSecret = "";
 
-  return {
+  const api: TrackedBotApi = {
     getMe: vi.fn(async () => ({
       ok: true as const,
       result: { id: botId, is_bot: true, first_name: username, username },
@@ -326,17 +333,26 @@ function botApi(
       ok: false as const,
       error: "not used",
     })),
-    setWebhook: vi.fn(async (input: { url: string }) => {
+    setWebhook: vi.fn(async (input: { url: string; secretToken: string }) => {
       lastWebhookUrl = input.url;
+      lastWebhookSecret = input.secretToken;
       return { ok: true as const, result: true as const };
     }),
     getWebhookInfo: vi.fn(async () => ({
       ok: true as const,
       result: { url: lastWebhookUrl },
     })),
-    deleteWebhook: vi.fn(async () => ({ ok: true as const, result: true as const })),
+    deleteWebhook: vi.fn(async () => {
+      lastWebhookUrl = "";
+      lastWebhookSecret = "";
+      return { ok: true as const, result: true as const };
+    }),
+    getWebhookUrl: () => lastWebhookUrl,
+    getWebhookSecret: () => lastWebhookSecret,
     ...overrides,
-  } as TelegramBotApiClient;
+  } as TrackedBotApi;
+
+  return api;
 }
 
 async function provision(
@@ -348,6 +364,7 @@ async function provision(
   overrides: {
     manager?: Partial<TelegramBotApiClient>;
     managed?: Partial<TelegramBotApiClient>;
+    managedApi?: TelegramBotApiClient;
   } = {},
 ) {
   const started = await createTelegramLinkAttempt(db(), {
@@ -384,6 +401,11 @@ async function provision(
       managerApi: manager,
       webhookOrigin: "https://app.example.test",
       createBotApi: () => {
+        if (overrides.managedApi) {
+          created = overrides.managedApi;
+          return created;
+        }
+
         created = botApi(botId, botUsername, overrides.managed);
         return created;
       },
@@ -391,6 +413,15 @@ async function provision(
   );
 
   return { started, manager, managed: created, result };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+
+  return { promise, resolve };
 }
 
 function webhookRequest(body: unknown, secret?: string): Request {
@@ -530,7 +561,7 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
     expect(expiredBind.status).toBe("expired");
   });
 
-  it("provisions and verifies a managed bot, requires merchant confirmation, and stores no plaintext token", async () => {
+  it("prepares a candidate without touching the webhook, then activates only after merchant confirmation", async () => {
     const { result, managed } = await provision(
       fixture.storeAId,
       fixture.userAId,
@@ -557,8 +588,10 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       decryptConnectionSecret(connection.tokenCiphertext, connection.tokenKeyId),
     ).toBe("6001:AA-managed-token");
 
-    expect(managed?.setWebhook).toHaveBeenCalledTimes(1);
-    expect(managed?.getWebhookInfo).toHaveBeenCalledTimes(1);
+    // The verified manager event must not register or remove a webhook.
+    expect(managed?.setWebhook).not.toHaveBeenCalled();
+    expect(managed?.getWebhookInfo).not.toHaveBeenCalled();
+    expect(managed?.deleteWebhook).not.toHaveBeenCalled();
 
     const stateA = await readMerchantTelegramConnectionState(appDb(), {
       scope: await scope(fixture.storeAId),
@@ -567,6 +600,7 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
     expect(stateA.state).toBe("confirm");
     if (stateA.state === "confirm") {
       expect(stateA.botUsername).toBe("AStoreBot");
+      expect(stateA.lastError).toBeNull();
     }
 
     const stateB = await readMerchantTelegramConnectionState(appDb(), {
@@ -581,13 +615,36 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       connectionId: result.connectionId,
     });
     expect(denied.status).toBe("not_found");
+    expect(managed?.setWebhook).not.toHaveBeenCalled();
 
-    const confirmed = await confirmTelegramConnection(db(), {
-      storeId: fixture.storeAId,
-      merchantUserId: fixture.userAId,
-      connectionId: result.connectionId,
-    });
+    const confirmed = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: result.connectionId,
+      },
+      { createBotApi: () => managed! },
+    );
     expect(confirmed.status).toBe("ready");
+
+    expect(managed?.setWebhook).toHaveBeenCalledTimes(1);
+    expect(managed?.getWebhookInfo).toHaveBeenCalledTimes(2);
+
+    const [activated] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, result.connectionId));
+
+    expect(activated.status).toBe("ready");
+    expect(activated.webhookUrl).toBe(managed!.getWebhookUrl());
+    expect(activated.webhookUrl).toContain(
+      `/api/telegram/webhook/managed/${result.connectionId}`,
+    );
+    expect(new URL(activated.webhookUrl).searchParams.has("v")).toBe(true);
+    expect(activated.webhookSecretHash).toBe(
+      hashWebhookSecret(managed!.getWebhookSecret()),
+    );
 
     const connected = await readMerchantTelegramConnectionState(appDb(), {
       scope: await scope(fixture.storeAId),
@@ -598,6 +655,40 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       expect(connected.botUsername).toBe("AStoreBot");
       expect(connected.openUrl).toBe("https://t.me/AStoreBot");
     }
+
+    const routedTransport = createFakeTelegramTransport();
+    const routed = await handleManagedTelegramWebhookRequest(
+      webhookRequest(
+        {
+          update_id: 4242,
+          message: {
+            message_id: 4242,
+            from: { id: 7101, is_bot: false, first_name: "Customer" },
+            chat: { id: 7101, type: "private" },
+            date: 1,
+            text: "/start",
+          },
+        },
+        managed!.getWebhookSecret(),
+      ),
+      result.connectionId,
+      { db: appDb(), transport: routedTransport },
+    );
+    expect(routed.status).toBe(200);
+    expect(routedTransport.sentMessages).toHaveLength(1);
+    expect(routedTransport.sentMessages[0].text).toContain("Managed Store A");
+
+    const repeated = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: result.connectionId,
+      },
+      { createBotApi: () => managed! },
+    );
+    expect(repeated.status).toBe("already_ready");
+    expect(managed?.setWebhook).toHaveBeenCalledTimes(1);
 
     const duplicate = await handleManagedBotEvent(
       db(),
@@ -651,54 +742,67 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
     expect(attempts[0].failureCode).toBe("bot_bound_elsewhere");
   });
 
-  it("fails closed on a webhook registration failure and allows a fresh retry", async () => {
-    const failed = await provision(
+  it("keeps a retryable activation failure on the same bot and recovers on retry", async () => {
+    const prepared = await provision(
       fixture.storeAId,
       fixture.userAId,
       7301,
       6003,
       "RetryStoreBot",
-      {
-        managed: {
-          setWebhook: vi.fn(async () => ({
-            ok: false as const,
-            error: "setWebhook failed",
-          })),
-        },
-      },
     );
 
-    expect(failed.result).toMatchObject({
-      status: "failed",
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const failingApi = botApi(6003, "RetryStoreBot", {
+      setWebhook: vi.fn(async () => ({
+        ok: false as const,
+        error: "setWebhook failed",
+      })),
+    });
+
+    const failed = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => failingApi },
+    );
+
+    expect(failed).toMatchObject({
+      status: "retryable",
       reason: "webhook_registration_failed",
     });
 
-    const failedState = await readMerchantTelegramConnectionState(appDb(), {
+    const retryState = await readMerchantTelegramConnectionState(appDb(), {
       scope: await scope(fixture.storeAId),
       merchantUserId: fixture.userAId,
     });
-    expect(failedState).toEqual({
-      state: "failed",
-      reason: "webhook_registration_failed",
-    });
+    expect(retryState.state).toBe("confirm");
+    if (retryState.state === "confirm") {
+      expect(retryState.lastError).toBe("webhook_registration_failed");
+    }
 
-    const retried = await provision(
-      fixture.storeAId,
-      fixture.userAId,
-      7302,
-      6004,
-      "RetryStoreBot",
+    const [afterFailure] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(afterFailure.status).toBe("awaiting_confirmation");
+
+    const retried = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => prepared.managed! },
     );
-    expect(retried.result.status).toBe("awaiting_confirmation");
 
-    if (retried.result.status !== "awaiting_confirmation") return;
-
-    const confirmed = await confirmTelegramConnection(db(), {
-      storeId: fixture.storeAId,
-      merchantUserId: fixture.userAId,
-      connectionId: retried.result.connectionId,
-    });
-    expect(confirmed.status).toBe("ready");
+    expect(retried.status).toBe("ready");
+    expect(prepared.managed?.setWebhook).toHaveBeenCalledTimes(1);
 
     const ready = await db()
       .select()
@@ -710,6 +814,8 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
         ),
       );
     expect(ready).toHaveLength(1);
+    expect(ready[0].id).toBe(prepared.result.connectionId);
+    expect(ready[0].webhookUrl).toBe(prepared.managed!.getWebhookUrl());
   });
 
   it("revokes an unconfirmed connection when the merchant starts over, then allows one new confirmation", async () => {
@@ -747,11 +853,15 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       connections.find((row) => row.botId === 6011)?.status,
     ).toBe("awaiting_confirmation");
 
-    const confirmed = await confirmTelegramConnection(db(), {
-      storeId: fixture.storeAId,
-      merchantUserId: fixture.userAId,
-      connectionId: restarted.result.connectionId,
-    });
+    const confirmed = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: restarted.result.connectionId,
+      },
+      { createBotApi: () => restarted.managed! },
+    );
     expect(confirmed.status).toBe("ready");
 
     const after = await db()
@@ -759,6 +869,332 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       .from(telegramConnection)
       .where(eq(telegramConnection.storeId, fixture.storeAId));
     expect(after.filter((row) => row.status === "ready")).toHaveLength(1);
+  });
+
+  it("reconnects the same bot and store with one identity and replaces the active webhook only after confirmation", async () => {
+    const first = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7451,
+      6020,
+      "ReconnectStoreBot",
+    );
+
+    expect(first.result.status).toBe("awaiting_confirmation");
+    if (first.result.status !== "awaiting_confirmation") return;
+
+    const managed = first.managed as TrackedBotApi;
+
+    const firstConfirmation = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: first.result.connectionId,
+      },
+      { createBotApi: () => managed },
+    );
+    expect(firstConfirmation.status).toBe("ready");
+
+    const firstUrl = managed.getWebhookUrl();
+    const firstSecret = managed.getWebhookSecret();
+    expect(firstUrl).toContain(`/managed/${first.result.connectionId}`);
+    expect(managed.setWebhook).toHaveBeenCalledTimes(1);
+
+    const second = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7451,
+      6020,
+      "ReconnectStoreBot",
+      { managedApi: managed },
+    );
+
+    expect(second.result.status).toBe("awaiting_confirmation");
+    if (second.result.status !== "awaiting_confirmation") return;
+    expect(second.result.connectionId).toBe(first.result.connectionId);
+    expect(managed.setWebhook).toHaveBeenCalledTimes(1);
+
+    const [reconnecting] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, first.result.connectionId));
+    expect(reconnecting.status).toBe("awaiting_confirmation");
+    expect(reconnecting.webhookUrl).toBe(firstUrl);
+
+    const secondConfirmation = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: first.result.connectionId,
+      },
+      { createBotApi: () => managed },
+    );
+    expect(secondConfirmation.status).toBe("ready");
+    expect(managed.setWebhook).toHaveBeenCalledTimes(2);
+
+    const secondUrl = managed.getWebhookUrl();
+    const secondSecret = managed.getWebhookSecret();
+    expect(secondUrl).not.toBe(firstUrl);
+    expect(secondUrl).toContain(`/managed/${first.result.connectionId}`);
+    expect(secondSecret).not.toBe(firstSecret);
+
+    const [ready] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, first.result.connectionId));
+    expect(ready.status).toBe("ready");
+    expect(ready.webhookUrl).toBe(secondUrl);
+    expect(ready.webhookSecretHash).toBe(hashWebhookSecret(secondSecret));
+    expect(verifyWebhookSecret(firstSecret, ready.webhookSecretHash)).toBe(
+      false,
+    );
+    expect(verifyWebhookSecret(secondSecret, ready.webhookSecretHash)).toBe(
+      true,
+    );
+  });
+
+  it("fails closed on a foreign webhook without mutating or deleting it", async () => {
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7461,
+      6021,
+      "ForeignWebhookBot",
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const foreignUrl = "https://unrelated.example.test/hooks/foreign";
+    const foreignApi = botApi(6021, "ForeignWebhookBot", {
+      getWebhookInfo: vi.fn(async () => ({
+        ok: true as const,
+        result: { url: foreignUrl },
+      })),
+    });
+
+    const result = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => foreignApi },
+    );
+
+    expect(result.status).toBe("foreign_webhook");
+    expect(foreignApi.setWebhook).not.toHaveBeenCalled();
+    expect(foreignApi.deleteWebhook).not.toHaveBeenCalled();
+    const foreignInfo = await foreignApi.getWebhookInfo();
+    expect(foreignInfo).toMatchObject({ result: { url: foreignUrl } });
+
+    const [connection] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(connection.status).toBe("needs_review");
+    expect(connection.webhookUrl).not.toBe(foreignUrl);
+
+    const [attempt] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(
+        eq(
+          telegramLinkAttempt.id,
+          prepared.started.attemptId,
+        ),
+      );
+    expect(attempt.status).toBe("failed");
+    expect(attempt.failureCode).toBe("foreign_webhook");
+  });
+
+  it("does not persist a candidate when a token fetch returns after the attempt was superseded", async () => {
+    const token = deferred<{ ok: true; result: string }>();
+    const started = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const bound = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: started.nonce,
+      telegramUserId: 7471,
+    });
+    expect(bound.status).toBe("bound");
+
+    const manager = managerApi({
+      getManagedBotToken: vi.fn(() => token.promise),
+    });
+
+    let created: TelegramBotApiClient | null = null;
+    const pending = handleManagedBotEvent(
+      db(),
+      {
+        creatorUserId: 7471,
+        botId: 6022,
+        botUsername: "LateTokenBot",
+        botName: "LateTokenBot",
+      },
+      {
+        managerApi: manager,
+        webhookOrigin: "https://app.example.test",
+        createBotApi: () => {
+          created = botApi(6022, "LateTokenBot");
+          return created;
+        },
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(manager.getManagedBotToken).toHaveBeenCalledTimes(1);
+    });
+
+    await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+
+    token.resolve({ ok: true, result: "6022:AA-managed-token" });
+
+    const result = await pending;
+    expect(result.status).toBe("superseded");
+    expect(created?.setWebhook).not.toHaveBeenCalled();
+
+    const connections = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.storeId, fixture.storeAId));
+    expect(connections).toHaveLength(0);
+  });
+
+  it("does not activate a cancelled attempt when webhook registration returns late, and removes only its own webhook", async () => {
+    const setWebhook = deferred<{ ok: true; result: true }>();
+    let currentWebhookUrl = "";
+    const managed = botApi(6023, "LateActivationBot");
+    managed.setWebhook = vi.fn((input: { url: string }) => {
+      currentWebhookUrl = input.url;
+      return setWebhook.promise;
+    });
+    managed.getWebhookInfo = vi.fn(async () => ({
+      ok: true as const,
+      result: { url: currentWebhookUrl },
+    }));
+    managed.deleteWebhook = vi.fn(async () => {
+      currentWebhookUrl = "";
+      return { ok: true as const, result: true as const };
+    });
+
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7481,
+      6023,
+      "LateActivationBot",
+      { managedApi: managed },
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const pending = confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => managed },
+    );
+
+    await vi.waitFor(() => {
+      expect(managed.setWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+
+    // The fake stores the activation URL only after the call resolves.
+    setWebhook.resolve({ ok: true, result: true });
+
+    const result = await pending;
+    expect(result.status).toBe("superseded");
+
+    const [connection] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(connection.status).not.toBe("ready");
+    expect(currentWebhookUrl).toBe("");
+    expect(managed.deleteWebhook).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not activate an expired attempt when webhook registration returns late", async () => {
+    const setWebhook = deferred<{ ok: true; result: true }>();
+    let currentWebhookUrl = "";
+    const managed = botApi(6024, "ExpiredActivationBot");
+    managed.setWebhook = vi.fn((input: { url: string }) => {
+      currentWebhookUrl = input.url;
+      return setWebhook.promise;
+    });
+    managed.getWebhookInfo = vi.fn(async () => ({
+      ok: true as const,
+      result: { url: currentWebhookUrl },
+    }));
+    managed.deleteWebhook = vi.fn(async () => {
+      currentWebhookUrl = "";
+      return { ok: true as const, result: true as const };
+    });
+
+    const prepared = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      7491,
+      6024,
+      "ExpiredActivationBot",
+      { managedApi: managed },
+    );
+
+    expect(prepared.result.status).toBe("awaiting_confirmation");
+    if (prepared.result.status !== "awaiting_confirmation") return;
+
+    const pending = confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: prepared.result.connectionId,
+      },
+      { createBotApi: () => managed },
+    );
+
+    await vi.waitFor(() => {
+      expect(managed.setWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    await db()
+      .update(telegramLinkAttempt)
+      .set({ expiresAt: new Date(Date.now() + 10) })
+      .where(eq(telegramLinkAttempt.id, prepared.started.attemptId));
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    setWebhook.resolve({ ok: true, result: true });
+
+    const result = await pending;
+    expect(result.status).toBe("expired");
+
+    const [connection] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, prepared.result.connectionId));
+    expect(connection.status).toBe("revoked");
+    expect(currentWebhookUrl).toBe("");
+    expect(managed.deleteWebhook).toHaveBeenCalledTimes(1);
   });
 
   it("rejects missing and invalid webhook secrets before claiming an update", async () => {
@@ -1160,6 +1596,7 @@ describe.skipIf(!shouldRun)("manager bot webhook", () => {
       .where(eq(telegramConnection.storeId, fixture.storeAId));
     expect(connection.status).toBe("awaiting_confirmation");
     expect(connection.botUsername).toBe("FlowStoreBot");
+    expect(managed.setWebhook).not.toHaveBeenCalled();
 
     const duplicateEvent = await handleManagerTelegramWebhookRequest(
       managerRequest(managedBotUpdate(12, 7401, 6501, "FlowStoreBot")),
@@ -1181,6 +1618,81 @@ describe.skipIf(!shouldRun)("manager bot webhook", () => {
       .from(telegramConnection)
       .where(eq(telegramConnection.storeId, fixture.storeAId));
     expect(connections).toHaveLength(1);
+  });
+
+  it("keeps a transient token failure retryable without requiring a new bot", async () => {
+    const started = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const bound = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: started.nonce,
+      telegramUserId: 7411,
+    });
+    expect(bound.status).toBe("bound");
+
+    const failingManager = managerApi({
+      getManagedBotToken: vi.fn(async () => ({
+        ok: false as const,
+        error: "temporary Telegram failure",
+      })),
+    });
+
+    const first = await handleManagerTelegramWebhookRequest(
+      managerRequest(managedBotUpdate(13, 7411, 6511, "RetryableEventBot")),
+      {
+        db: db(),
+        transport: createFakeTelegramTransport(),
+        managerApi: failingManager,
+        managerBotId: 9001,
+        managerToken: "123:manager",
+        managerWebhookSecret: "manager-secret",
+        webhookOrigin: "https://app.example.test",
+      },
+    );
+    expect(first.status).toBe(500);
+
+    const [retryableAttempt] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, started.attemptId));
+    expect(retryableAttempt.status).toBe("pending");
+    expect(retryableAttempt.failureCode).toBe("token_fetch_failed");
+    expect(
+      await db().select().from(telegramConnection),
+    ).toHaveLength(0);
+
+    const successManager = managerApi({
+      getManagedBotToken: vi.fn(async () => ({
+        ok: true as const,
+        result: "6511:AA-managed-token",
+      })),
+    });
+    const managed = botApi(6511, "RetryableEventBot");
+
+    const second = await handleManagerTelegramWebhookRequest(
+      managerRequest(managedBotUpdate(14, 7411, 6511, "RetryableEventBot")),
+      {
+        db: db(),
+        transport: createFakeTelegramTransport(),
+        managerApi: successManager,
+        managerBotId: 9001,
+        managerToken: "123:manager",
+        managerWebhookSecret: "manager-secret",
+        webhookOrigin: "https://app.example.test",
+        createBotApi: () => managed,
+      },
+    );
+    expect(second.status).toBe(200);
+
+    const [candidate] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.storeId, fixture.storeAId));
+    expect(candidate.status).toBe("awaiting_confirmation");
+    expect(candidate.botId).toBe(6511);
+    expect(managed.setWebhook).not.toHaveBeenCalled();
   });
 
   it("does not link a managed bot event from an unbound Telegram actor", async () => {

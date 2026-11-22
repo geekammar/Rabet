@@ -24,11 +24,13 @@ import { appUser, store } from "./tenant";
  * `nonce_ciphertext` is the AES-256-GCM value used only to re-render the
  * merchant's private deep link while the attempt is live.
  *
- * A connection is created only after the manager-bot event has been correlated
- * to exactly one pending attempt and the managed bot's own token, identity and
- * webhook have been verified. It becomes `ready` only after the signed-in
- * merchant explicitly confirms the verified bot. Exactly one active connection
- * per store and one bot id per connection are enforced by the database.
+ * A candidate connection is created only after the manager-bot event has been
+ * correlated to exactly one pending attempt and the managed bot's own token
+ * and identity have been verified. It remains `awaiting_confirmation` and no
+ * webhook is registered. It becomes `ready` only after the signed-in merchant
+ * explicitly confirms the verified bot and the per-connection webhook has been
+ * registered and verified. Exactly one active connection per store and one bot
+ * id per connection are enforced by the database.
  */
 
 export type TelegramLinkAttemptStatus =

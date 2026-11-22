@@ -25,6 +25,7 @@ export type MerchantTelegramActionResult =
         | "NOT_FOUND"
         | "EXPIRED"
         | "CONFLICT"
+        | "RETRYABLE"
         | "OPERATION_FAILED";
     };
 
@@ -145,12 +146,21 @@ export async function confirmMerchantTelegramConnection(
       return { ok: true };
     }
 
+    if (result.status === "retryable") {
+      revalidatePath("/app/setup");
+      return { ok: false, error: "RETRYABLE" };
+    }
+
+    revalidatePath("/app/setup");
+
     return {
       ok: false,
       error:
-        result.status === "expired"
+        result.status === "expired" || result.status === "superseded"
           ? "EXPIRED"
-          : result.status === "conflict"
+          : result.status === "conflict" ||
+              result.status === "foreign_webhook" ||
+              result.status === "bot_bound_elsewhere"
             ? "CONFLICT"
             : "NOT_FOUND",
     };

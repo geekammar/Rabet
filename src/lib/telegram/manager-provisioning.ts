@@ -1,7 +1,7 @@
 import "server-only";
 
 import crypto from "node:crypto";
-import { and, desc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lte, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import type { TransactionDatabase } from "@/db/transaction-client";
@@ -424,7 +424,8 @@ type CorrelationOutcome =
   | { status: "unmatched" }
   | { status: "expired" }
   | { status: "ambiguous" }
-  | { status: "bot_bound_elsewhere" };
+  | { status: "bot_bound_elsewhere" }
+  | { status: "superseded" };
 
 export type ProvisionResult =
   | {
@@ -439,26 +440,66 @@ export type ProvisionResult =
   | { status: "expired" }
   | { status: "ambiguous" }
   | { status: "bot_bound_elsewhere" }
+  | { status: "superseded" }
+  | { status: "retryable"; reason: string }
   | { status: "failed"; reason: string };
 
-async function failAttempt(
+type AttemptCandidateClaim = {
+  attemptId: string;
+  storeId: string;
+  managerBotUsername: string;
+};
+
+async function failActiveAttempt(
   tx: AttemptTransaction,
   attemptId: string,
   reason: string,
+  now: Date,
 ): Promise<void> {
   await tx
     .update(telegramLinkAttempt)
     .set({ status: "failed", failureCode: reason })
-    .where(eq(telegramLinkAttempt.id, attemptId));
+    .where(
+      and(
+        eq(telegramLinkAttempt.id, attemptId),
+        inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+        gt(telegramLinkAttempt.expiresAt, now),
+      ),
+    );
+}
+
+async function retryableCandidateFailure(
+  db: TransactionDatabase,
+  attemptId: string,
+  reason: string,
+  now: Date,
+): Promise<ProvisionResult> {
+  try {
+    await db
+      .update(telegramLinkAttempt)
+      .set({ status: "pending", failureCode: reason })
+      .where(
+        and(
+          eq(telegramLinkAttempt.id, attemptId),
+          eq(telegramLinkAttempt.status, "provisioning"),
+          gt(telegramLinkAttempt.expiresAt, now),
+        ),
+      );
+  } catch {
+    // Preserve the original Telegram/database failure.
+  }
+
+  return { status: "retryable", reason };
 }
 
 /**
  * Correlates one manager-bot `managed_bot` event to at most one pending
- * attempt, then fetches the bot token and registers its webhook.
+ * attempt and prepares a candidate connection for dashboard confirmation.
  *
- * The event has no attempt id, so creator identity alone is not proof. The
- * merchant must confirm the verified bot in the authenticated dashboard before
- * the connection becomes ready.
+ * This path deliberately performs **no webhook mutation**. It fetches the
+ * managed bot token, verifies the bot identity, encrypts the token and stores
+ * an `awaiting_confirmation` candidate. The buyer webhook is registered only
+ * after the signed-in merchant confirms, in `confirmTelegramConnection`.
  */
 export async function handleManagedBotEvent(
   db: TransactionDatabase,
@@ -476,14 +517,7 @@ export async function handleManagedBotEvent(
     return { status: "unmatched" };
   }
 
-  let claimed:
-    | {
-        attemptId: string;
-        storeId: string;
-        managerBotUsername: string;
-      }
-    | CorrelationOutcome
-    | null = null;
+  let claimed: AttemptCandidateClaim | CorrelationOutcome | null = null;
 
   try {
     claimed = await db.transaction(async (tx) => {
@@ -514,8 +548,6 @@ export async function handleManagedBotEvent(
         .orderBy(desc(telegramLinkAttempt.createdAt));
 
       if (active.length === 0) {
-        // A redelivered or late event for the same creator and bot is a no-op
-        // when that exact bot is already persisted for the same store.
         const [completed] = await tx
           .select({
             id: telegramLinkAttempt.id,
@@ -556,7 +588,7 @@ export async function handleManagedBotEvent(
 
       if (active.length > 1) {
         for (const attempt of active) {
-          await failAttempt(tx, attempt.id, "ambiguous_event");
+          await failActiveAttempt(tx, attempt.id, "ambiguous_event", now);
         }
         return { status: "ambiguous" } as const;
       }
@@ -575,7 +607,12 @@ export async function handleManagedBotEvent(
         attempt.telegramBotId !== null &&
         attempt.telegramBotId !== event.botId
       ) {
-        await failAttempt(tx, attempt.id, "conflicting_bot_event");
+        await failActiveAttempt(
+          tx,
+          attempt.id,
+          "conflicting_bot_event",
+          now,
+        );
         return { status: "ambiguous" } as const;
       }
 
@@ -584,7 +621,7 @@ export async function handleManagedBotEvent(
           status: "already_provisioned",
           attemptId: attempt.id,
           connectionId: attempt.connectionId,
-        };
+        } as const;
       }
 
       const [boundElsewhere] = await tx
@@ -594,7 +631,12 @@ export async function handleManagedBotEvent(
         .limit(1);
 
       if (boundElsewhere && boundElsewhere.storeId !== attempt.storeId) {
-        await failAttempt(tx, attempt.id, "bot_bound_elsewhere");
+        await failActiveAttempt(
+          tx,
+          attempt.id,
+          "bot_bound_elsewhere",
+          now,
+        );
         return { status: "bot_bound_elsewhere" } as const;
       }
 
@@ -618,6 +660,7 @@ export async function handleManagedBotEvent(
               "pending",
               "awaiting_confirmation",
             ]),
+            gt(telegramLinkAttempt.expiresAt, now),
           ),
         )
         .returning({ id: telegramLinkAttempt.id });
@@ -640,45 +683,41 @@ export async function handleManagedBotEvent(
   if ("status" in claimed) return claimed;
 
   const { attemptId } = claimed;
-  let managedApi: TelegramBotApiClient | null = null;
-  let webhookRegistered = false;
-  let connectionId: string | null = null;
-  let webhookUrl: string | null = null;
-
-  const fail = async (reason: string): Promise<ProvisionResult> => {
-    if (webhookRegistered && managedApi && webhookUrl) {
-      try {
-        await managedApi.deleteWebhook(false);
-      } catch {
-        // Best-effort cleanup only; the failure is already recorded.
-      }
-    }
-
-    try {
-      await db
-        .update(telegramLinkAttempt)
-        .set({ status: "failed", failureCode: reason })
-        .where(eq(telegramLinkAttempt.id, attemptId));
-    } catch {
-      // Preserve the original provisioning failure.
-    }
-
-    return { status: "failed", reason };
-  };
 
   const tokenResult = await deps.managerApi.getManagedBotToken(event.botId);
   if (!tokenResult.ok) {
-    return fail("token_fetch_failed");
+    return retryableCandidateFailure(
+      db,
+      attemptId,
+      "token_fetch_failed",
+      now,
+    );
   }
 
   const token = tokenResult.result;
   if (typeof token !== "string" || token.trim().length === 0) {
-    return fail("token_fetch_failed");
+    return retryableCandidateFailure(
+      db,
+      attemptId,
+      "token_fetch_failed",
+      now,
+    );
   }
 
-  managedApi =
-    deps.createBotApi?.(token) ??
-    createTelegramBotApiClient(token);
+  let managedApi: TelegramBotApiClient;
+
+  try {
+    managedApi =
+      deps.createBotApi?.(token) ??
+      createTelegramBotApiClient(token);
+  } catch {
+    return retryableCandidateFailure(
+      db,
+      attemptId,
+      "api_unavailable",
+      now,
+    );
+  }
 
   const me = await managedApi.getMe();
   if (
@@ -688,45 +727,43 @@ export async function handleManagedBotEvent(
     typeof me.result.username !== "string" ||
     me.result.username.length === 0
   ) {
-    return fail("verification_failed");
+    return retryableCandidateFailure(
+      db,
+      attemptId,
+      "verification_failed",
+      now,
+    );
   }
 
   const verifiedUsername = me.result.username;
   const verifiedName =
     typeof me.result.first_name === "string" ? me.result.first_name : null;
 
-  connectionId = crypto.randomUUID();
-  webhookUrl = buildManagedWebhookUrl(deps.webhookOrigin, connectionId);
-  const webhookSecret = generateWebhookSecret();
-
-  const setWebhook = await managedApi.setWebhook({
-    url: webhookUrl,
-    secretToken: webhookSecret,
-    allowedUpdates: ["message", "callback_query"],
-    dropPendingUpdates: false,
-  });
-
-  if (!setWebhook.ok) {
-    return fail("webhook_registration_failed");
-  }
-
-  webhookRegistered = true;
-
-  const webhookInfo = await managedApi.getWebhookInfo();
-  if (!webhookInfo.ok || webhookInfo.result.url !== webhookUrl) {
-    return fail("webhook_verification_failed");
-  }
-
   let encryptedToken: { ciphertext: string; keyId: string };
 
   try {
     encryptedToken = encryptConnectionSecret(token);
   } catch {
-    return fail("secret_storage_failed");
+    return retryableCandidateFailure(
+      db,
+      attemptId,
+      "secret_storage_failed",
+      now,
+    );
   }
 
+  type PersistResult =
+    | {
+        status: "saved";
+        connectionId: string;
+        botUsername: string;
+      }
+    | { status: "superseded" | "expired" | "bot_bound_elsewhere" };
+
+  let persisted: PersistResult;
+
   try {
-    await db.transaction(async (tx) => {
+    persisted = await db.transaction(async (tx): Promise<PersistResult> => {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
           "telegram-connection-store",
@@ -734,90 +771,339 @@ export async function handleManagedBotEvent(
         )}))`,
       );
 
+      const [currentAttempt] = await tx
+        .select({
+          id: telegramLinkAttempt.id,
+          expiresAt: telegramLinkAttempt.expiresAt,
+        })
+        .from(telegramLinkAttempt)
+        .where(
+          and(
+            eq(telegramLinkAttempt.id, attemptId),
+            eq(telegramLinkAttempt.status, "provisioning"),
+          ),
+        )
+        .limit(1);
+
+      if (!currentAttempt) {
+        return { status: "superseded" } as const;
+      }
+
+      if (currentAttempt.expiresAt.getTime() <= now.getTime()) {
+        await tx
+          .update(telegramLinkAttempt)
+          .set({ status: "expired", failureCode: "expired" })
+          .where(eq(telegramLinkAttempt.id, attemptId));
+        return { status: "expired" } as const;
+      }
+
       const [existingForBot] = await tx
-        .select({ id: telegramConnection.id, storeId: telegramConnection.storeId })
+        .select({
+          id: telegramConnection.id,
+          storeId: telegramConnection.storeId,
+          webhookUrl: telegramConnection.webhookUrl,
+        })
         .from(telegramConnection)
         .where(eq(telegramConnection.botId, event.botId))
         .limit(1);
 
-      if (existingForBot) {
-        if (existingForBot.storeId !== claimed.storeId) {
-          throw new RabetDataError(
-            "CONFLICT",
-            "The bot is already connected to another store.",
-          );
-        }
-
-        await tx
-          .update(telegramLinkAttempt)
-          .set({
-            status: "awaiting_confirmation",
-            connectionId: existingForBot.id,
-            verifiedAt: now,
-          })
-          .where(eq(telegramLinkAttempt.id, attemptId));
-
-        connectionId = existingForBot.id;
-        return;
+      if (existingForBot && existingForBot.storeId !== claimed.storeId) {
+        await failActiveAttempt(
+          tx,
+          attemptId,
+          "bot_bound_elsewhere",
+          now,
+        );
+        return { status: "bot_bound_elsewhere" } as const;
       }
 
-      const [connection] = await tx
-        .insert(telegramConnection)
-        .values({
-          id: connectionId!,
+      let connectionId: string;
+
+      if (existingForBot) {
+        connectionId = existingForBot.id;
+
+        await tx
+          .update(telegramConnection)
+          .set({
+            botUsername: verifiedUsername,
+            botName: verifiedName,
+            tokenCiphertext: encryptedToken.ciphertext,
+            tokenKeyId: encryptedToken.keyId,
+            webhookSecretHash: hashWebhookSecret(generateWebhookSecret()),
+            status: "awaiting_confirmation",
+            verifiedAt: now,
+          })
+          .where(eq(telegramConnection.id, existingForBot.id));
+      } else {
+        connectionId = crypto.randomUUID();
+        const baseWebhookUrl = buildManagedWebhookUrl(
+          deps.webhookOrigin,
+          connectionId,
+        );
+
+        await tx.insert(telegramConnection).values({
+          id: connectionId,
           storeId: claimed.storeId,
           botId: event.botId,
           botUsername: verifiedUsername,
           botName: verifiedName,
           tokenCiphertext: encryptedToken.ciphertext,
           tokenKeyId: encryptedToken.keyId,
-          webhookSecretHash: hashWebhookSecret(webhookSecret),
-          webhookUrl: webhookUrl!,
+          webhookSecretHash: hashWebhookSecret(generateWebhookSecret()),
+          webhookUrl: baseWebhookUrl,
           status: "awaiting_confirmation",
           verifiedAt: now,
-        })
-        .returning({ id: telegramConnection.id });
+        });
+      }
 
-      await tx
+      const [updatedAttempt] = await tx
         .update(telegramLinkAttempt)
         .set({
           status: "awaiting_confirmation",
-          connectionId: connection.id,
+          connectionId,
           telegramBotUsername: verifiedUsername,
           telegramBotName: verifiedName,
+          failureCode: null,
           verifiedAt: now,
         })
-        .where(eq(telegramLinkAttempt.id, attemptId));
+        .where(
+          and(
+            eq(telegramLinkAttempt.id, attemptId),
+            eq(telegramLinkAttempt.status, "provisioning"),
+            gt(telegramLinkAttempt.expiresAt, now),
+          ),
+        )
+        .returning({ id: telegramLinkAttempt.id });
+
+      if (!updatedAttempt) {
+        throw new RabetDataError(
+          "CONFLICT",
+          "The link attempt changed while preparing the candidate.",
+        );
+      }
+
+      return {
+        status: "saved",
+        connectionId,
+        botUsername: verifiedUsername,
+      } as const;
     });
   } catch (error) {
-    return fail(
-      error instanceof RabetDataError && error.code === "CONFLICT"
-        ? "bot_bound_elsewhere"
-        : "connection_persist_failed",
+    if (
+      error instanceof RabetDataError &&
+      error.code === "CONFLICT"
+    ) {
+      return { status: "superseded" };
+    }
+
+    if (isUniqueViolation(error)) {
+      try {
+        await db
+          .update(telegramLinkAttempt)
+          .set({ status: "failed", failureCode: "connection_conflict" })
+          .where(
+            and(
+              eq(telegramLinkAttempt.id, attemptId),
+              inArray(telegramLinkAttempt.status, [
+                ...ACTIVE_ATTEMPT_STATUSES,
+              ]),
+            ),
+          );
+      } catch {
+        // Preserve the original conflict.
+      }
+
+      return { status: "failed", reason: "connection_conflict" };
+    }
+
+    return retryableCandidateFailure(
+      db,
+      attemptId,
+      "connection_persist_failed",
+      now,
     );
   }
 
-  if (webhookRegistered && connectionId && webhookUrl) {
-    // The webhook remains registered and its digest is stored with the
-    // connection. No further action is needed after confirmation.
-  }
+  if (persisted.status !== "saved") return persisted;
 
   return {
     status: "awaiting_confirmation",
     attemptId,
-    connectionId: connectionId!,
-    botUsername: verifiedUsername,
+    connectionId: persisted.connectionId,
+    botUsername: persisted.botUsername,
   };
 }
+
+export type ActivationDependencies = {
+  createBotApi?: (token: string) => TelegramBotApiClient;
+  now?: Date;
+};
 
 export type ConfirmConnectionResult =
   | { status: "ready"; connectionId: string; botUsername: string }
   | { status: "already_ready"; connectionId: string; botUsername: string }
-  | { status: "not_found" | "expired" | "conflict" };
+  | {
+      status: "retryable";
+      connectionId: string;
+      botUsername: string;
+      reason: string;
+    }
+  | {
+      status:
+        | "not_found"
+        | "expired"
+        | "superseded"
+        | "conflict"
+        | "foreign_webhook"
+        | "bot_bound_elsewhere";
+    };
+
+type ActivationClaim =
+  | {
+      status: "claimed";
+      attemptId: string;
+      connectionId: string;
+      botId: number;
+      botUsername: string;
+      tokenCiphertext: string;
+      tokenKeyId: string;
+      baseWebhookUrl: string;
+    }
+  | {
+      status:
+        | "not_found"
+        | "expired"
+        | "superseded"
+        | "conflict"
+        | "already_ready";
+      connectionId?: string;
+      botUsername?: string;
+    };
+
+function activationUrl(baseWebhookUrl: string, activationId: string): string {
+  const url = new URL(baseWebhookUrl);
+  url.searchParams.set("v", activationId);
+  return url.toString();
+}
 
 /**
- * Finalizes a provisioned connection after the signed-in merchant explicitly
- * confirms the verified bot username in the dashboard.
+ * A webhook URL belongs to this Nokmel connection when its origin and path
+ * match the persisted per-connection endpoint. Telegram's secret is not
+ * exposed by getWebhookInfo, so the activation version query is what makes
+ * cleanup target one activation and never a newer one.
+ */
+function isOwnedManagedWebhookUrl(
+  currentUrl: string,
+  baseWebhookUrl: string,
+): boolean {
+  if (currentUrl.length === 0) return true;
+
+  try {
+    const current = new URL(currentUrl);
+    const base = new URL(baseWebhookUrl);
+
+    return (
+      current.origin === base.origin &&
+      current.pathname === base.pathname &&
+      current.searchParams.has("v")
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupActivationWebhook(
+  api: TelegramBotApiClient,
+  expectedActivationUrl: string,
+): Promise<void> {
+  try {
+    const info = await api.getWebhookInfo();
+    if (info.ok && info.result.url === expectedActivationUrl) {
+      await api.deleteWebhook(false);
+    }
+  } catch {
+    // Cleanup is best-effort and must never mask the activation result.
+  }
+}
+
+async function releaseActivationClaim(
+  db: TransactionDatabase,
+  input: {
+    attemptId: string;
+    connectionId: string;
+    reason: string;
+    now: Date;
+  },
+): Promise<void> {
+  try {
+    await db.transaction(async (tx) => {
+      await tx
+        .update(telegramConnection)
+        .set({ status: "awaiting_confirmation" })
+        .where(
+          and(
+            eq(telegramConnection.id, input.connectionId),
+            eq(telegramConnection.status, "provisioning"),
+          ),
+        );
+
+      await tx
+        .update(telegramLinkAttempt)
+        .set({ failureCode: input.reason })
+        .where(
+          and(
+            eq(telegramLinkAttempt.id, input.attemptId),
+            eq(telegramLinkAttempt.status, "awaiting_confirmation"),
+            gt(telegramLinkAttempt.expiresAt, input.now),
+          ),
+        );
+    });
+  } catch {
+    // A later attempt or expiry may have won; preserve that state.
+  }
+}
+
+async function markActivationTerminal(
+  db: TransactionDatabase,
+  input: {
+    attemptId: string;
+    connectionId: string;
+    reason: string;
+    connectionStatus: "needs_review" | "revoked";
+  },
+): Promise<void> {
+  try {
+    await db.transaction(async (tx) => {
+      await tx
+        .update(telegramConnection)
+        .set({ status: input.connectionStatus })
+        .where(
+          and(
+            eq(telegramConnection.id, input.connectionId),
+            eq(telegramConnection.status, "provisioning"),
+          ),
+        );
+
+      await tx
+        .update(telegramLinkAttempt)
+        .set({ status: "failed", failureCode: input.reason })
+        .where(
+          and(
+            eq(telegramLinkAttempt.id, input.attemptId),
+            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+          ),
+        );
+    });
+  } catch {
+    // Preserve the original terminal decision.
+  }
+}
+
+/**
+ * Starts external activation only after the signed-in merchant confirms the
+ * verified bot. The claim is a short transaction; Telegram calls happen outside
+ * the transaction; the result is committed with conditional state checks and
+ * exact-URL cleanup on failure.
  */
 export async function confirmTelegramConnection(
   db: TransactionDatabase,
@@ -825,13 +1111,15 @@ export async function confirmTelegramConnection(
     storeId: string;
     merchantUserId: string;
     connectionId: string;
-    now?: Date;
   },
+  deps: ActivationDependencies = {},
 ): Promise<ConfirmConnectionResult> {
-  const now = input.now ?? new Date();
+  const now = deps.now ?? new Date();
+
+  let claim: ActivationClaim;
 
   try {
-    return await db.transaction(async (tx) => {
+    claim = await db.transaction(async (tx): Promise<ActivationClaim> => {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
           "telegram-connection-confirm",
@@ -843,9 +1131,14 @@ export async function confirmTelegramConnection(
         .select({
           connectionId: telegramConnection.id,
           connectionStatus: telegramConnection.status,
+          botId: telegramConnection.botId,
           botUsername: telegramConnection.botUsername,
+          tokenCiphertext: telegramConnection.tokenCiphertext,
+          tokenKeyId: telegramConnection.tokenKeyId,
+          webhookUrl: telegramConnection.webhookUrl,
           attemptId: telegramLinkAttempt.id,
           attemptStatus: telegramLinkAttempt.status,
+          attemptBotId: telegramLinkAttempt.telegramBotId,
           expiresAt: telegramLinkAttempt.expiresAt,
         })
         .from(telegramConnection)
@@ -861,13 +1154,21 @@ export async function confirmTelegramConnection(
             eq(telegramLinkAttempt.merchantUserId, input.merchantUserId),
           ),
         )
+        .orderBy(desc(telegramLinkAttempt.createdAt))
         .limit(1);
 
       const row = rows[0];
 
       if (!row) return { status: "not_found" } as const;
 
-      if (row.connectionStatus === "ready") {
+      if (row.attemptBotId !== null && row.attemptBotId !== row.botId) {
+        return { status: "conflict" } as const;
+      }
+
+      if (
+        row.connectionStatus === "ready" &&
+        row.attemptStatus === "completed"
+      ) {
         return {
           status: "already_ready",
           connectionId: row.connectionId,
@@ -894,27 +1195,291 @@ export async function confirmTelegramConnection(
         return { status: "expired" } as const;
       }
 
-      await tx
+      const [claimedConnection] = await tx
         .update(telegramConnection)
-        .set({ status: "ready", verifiedAt: now })
-        .where(eq(telegramConnection.id, row.connectionId));
+        .set({ status: "provisioning" })
+        .where(
+          and(
+            eq(telegramConnection.id, row.connectionId),
+            eq(telegramConnection.status, "awaiting_confirmation"),
+          ),
+        )
+        .returning({ id: telegramConnection.id });
 
-      await tx
-        .update(telegramLinkAttempt)
-        .set({ status: "completed", completedAt: now })
-        .where(eq(telegramLinkAttempt.id, row.attemptId));
+      if (!claimedConnection) {
+        return { status: "conflict" } as const;
+      }
 
       return {
-        status: "ready",
+        status: "claimed",
+        attemptId: row.attemptId,
         connectionId: row.connectionId,
+        botId: row.botId,
         botUsername: row.botUsername,
+        tokenCiphertext: row.tokenCiphertext,
+        tokenKeyId: row.tokenKeyId,
+        baseWebhookUrl: row.webhookUrl,
       } as const;
     });
   } catch (error) {
+    throw mapDatabaseError(error);
+  }
+
+  if (claim.status !== "claimed") {
+    if (claim.status === "already_ready") {
+      return {
+        status: "already_ready",
+        connectionId: claim.connectionId!,
+        botUsername: claim.botUsername!,
+      };
+    }
+
+    return { status: claim.status };
+  }
+
+  let api: TelegramBotApiClient;
+
+  try {
+    const token = decryptConnectionSecret(
+      claim.tokenCiphertext,
+      claim.tokenKeyId,
+    );
+    api =
+      deps.createBotApi?.(token) ??
+      createTelegramBotApiClient(token);
+  } catch {
+    await releaseActivationClaim(db, {
+      attemptId: claim.attemptId,
+      connectionId: claim.connectionId,
+      reason: "secret_unavailable",
+      now,
+    });
+    return {
+      status: "retryable",
+      connectionId: claim.connectionId,
+      botUsername: claim.botUsername,
+      reason: "secret_unavailable",
+    };
+  }
+
+  const currentInfo = await api.getWebhookInfo();
+
+  if (!currentInfo.ok) {
+    await releaseActivationClaim(db, {
+      attemptId: claim.attemptId,
+      connectionId: claim.connectionId,
+      reason: "webhook_inspection_failed",
+      now,
+    });
+    return {
+      status: "retryable",
+      connectionId: claim.connectionId,
+      botUsername: claim.botUsername,
+      reason: "webhook_inspection_failed",
+    };
+  }
+
+  if (
+    !isOwnedManagedWebhookUrl(
+      currentInfo.result.url,
+      claim.baseWebhookUrl,
+    )
+  ) {
+    await markActivationTerminal(db, {
+      attemptId: claim.attemptId,
+      connectionId: claim.connectionId,
+      reason: "foreign_webhook",
+      connectionStatus: "needs_review",
+    });
+    return { status: "foreign_webhook" };
+  }
+
+  const activationId = crypto.randomUUID();
+  const expectedUrl = activationUrl(claim.baseWebhookUrl, activationId);
+  const secret = generateWebhookSecret();
+
+  const setWebhook = await api.setWebhook({
+    url: expectedUrl,
+    secretToken: secret,
+    allowedUpdates: ["message", "callback_query"],
+    dropPendingUpdates: false,
+  });
+
+  if (!setWebhook.ok) {
+    await cleanupActivationWebhook(api, expectedUrl);
+    await releaseActivationClaim(db, {
+      attemptId: claim.attemptId,
+      connectionId: claim.connectionId,
+      reason: "webhook_registration_failed",
+      now,
+    });
+    return {
+      status: "retryable",
+      connectionId: claim.connectionId,
+      botUsername: claim.botUsername,
+      reason: "webhook_registration_failed",
+    };
+  }
+
+  const verifiedInfo = await api.getWebhookInfo();
+
+  if (!verifiedInfo.ok || verifiedInfo.result.url !== expectedUrl) {
+    await cleanupActivationWebhook(api, expectedUrl);
+    await releaseActivationClaim(db, {
+      attemptId: claim.attemptId,
+      connectionId: claim.connectionId,
+      reason: "webhook_verification_failed",
+      now,
+    });
+    return {
+      status: "retryable",
+      connectionId: claim.connectionId,
+      botUsername: claim.botUsername,
+      reason: "webhook_verification_failed",
+    };
+  }
+
+  const commitNow = new Date();
+
+  try {
+    const committed = await db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
+          "telegram-connection-store",
+          input.storeId,
+        )}))`,
+      );
+
+      const [currentAttempt] = await tx
+        .select({
+          id: telegramLinkAttempt.id,
+          status: telegramLinkAttempt.status,
+          expiresAt: telegramLinkAttempt.expiresAt,
+        })
+        .from(telegramLinkAttempt)
+        .where(
+          and(
+            eq(telegramLinkAttempt.id, claim.attemptId),
+            eq(telegramLinkAttempt.storeId, input.storeId),
+            eq(telegramLinkAttempt.merchantUserId, input.merchantUserId),
+          ),
+        )
+        .limit(1);
+
+      if (!currentAttempt) return { status: "not_found" } as const;
+
+      if (currentAttempt.expiresAt.getTime() <= commitNow.getTime()) {
+        await tx
+          .update(telegramLinkAttempt)
+          .set({ status: "expired", failureCode: "expired" })
+          .where(eq(telegramLinkAttempt.id, claim.attemptId));
+        await tx
+          .update(telegramConnection)
+          .set({ status: "revoked" })
+          .where(eq(telegramConnection.id, claim.connectionId));
+        return { status: "expired" } as const;
+      }
+
+      if (currentAttempt.status !== "awaiting_confirmation") {
+        return { status: "superseded" } as const;
+      }
+
+      const [connection] = await tx
+        .select({
+          id: telegramConnection.id,
+          status: telegramConnection.status,
+        })
+        .from(telegramConnection)
+        .where(
+          and(
+            eq(telegramConnection.id, claim.connectionId),
+            eq(telegramConnection.storeId, input.storeId),
+          ),
+        )
+        .limit(1);
+
+      if (
+        !connection ||
+        connection.status !== "provisioning"
+      ) {
+        return { status: "superseded" } as const;
+      }
+
+      const [updatedAttempt] = await tx
+        .update(telegramLinkAttempt)
+        .set({ status: "completed", completedAt: commitNow, failureCode: null })
+        .where(
+          and(
+            eq(telegramLinkAttempt.id, claim.attemptId),
+            eq(telegramLinkAttempt.status, "awaiting_confirmation"),
+            gt(telegramLinkAttempt.expiresAt, commitNow),
+          ),
+        )
+        .returning({ id: telegramLinkAttempt.id });
+
+      if (!updatedAttempt) {
+        throw new RabetDataError(
+          "CONFLICT",
+          "The link attempt changed during activation.",
+        );
+      }
+
+      const [activated] = await tx
+        .update(telegramConnection)
+        .set({
+          status: "ready",
+          webhookUrl: expectedUrl,
+          webhookSecretHash: hashWebhookSecret(secret),
+          verifiedAt: commitNow,
+        })
+        .where(
+          and(
+            eq(telegramConnection.id, claim.connectionId),
+            eq(telegramConnection.status, "provisioning"),
+          ),
+        )
+        .returning({ id: telegramConnection.id });
+
+      if (!activated) {
+        throw new RabetDataError(
+          "CONFLICT",
+          "The connection changed during activation.",
+        );
+      }
+
+      return { status: "ready" } as const;
+    });
+
+    if (committed.status !== "ready") {
+      await cleanupActivationWebhook(api, expectedUrl);
+      return { status: committed.status };
+    }
+
+    return {
+      status: "ready",
+      connectionId: claim.connectionId,
+      botUsername: claim.botUsername,
+    };
+  } catch (error) {
+    await cleanupActivationWebhook(api, expectedUrl);
+
     if (isUniqueViolation(error)) {
       return { status: "conflict" };
     }
-    throw mapDatabaseError(error);
+
+    await releaseActivationClaim(db, {
+      attemptId: claim.attemptId,
+      connectionId: claim.connectionId,
+      reason: "activation_commit_failed",
+      now,
+    });
+
+    return {
+      status: "retryable",
+      connectionId: claim.connectionId,
+      botUsername: claim.botUsername,
+      reason: "activation_commit_failed",
+    };
   }
 }
 
@@ -931,6 +1496,7 @@ export type MerchantTelegramConnectionState =
       connectionId: string;
       botUsername: string;
       expiresAt: string;
+      lastError: string | null;
     }
   | {
       state: "connected";
@@ -1068,6 +1634,7 @@ export async function readMerchantTelegramConnectionState(
         connectionId: attempt.connectionId,
         botUsername: attempt.botUsername,
         expiresAt: attempt.expiresAt.toISOString(),
+        lastError: attempt.failureCode,
       };
     }
   }
