@@ -32,6 +32,36 @@ export type MerchantTelegramActionResult =
 
 const connectionIdSchema = z.string().uuid();
 
+const SAFE_ERROR_CODE_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
+
+/**
+ * Logs only an allowlisted phase and error code. Raw messages, SQL parameters,
+ * keys, tokens and nonces never reach the log stream.
+ */
+function safeStartDiagnostic(
+  phase: string,
+  error: unknown,
+): { phase: string; category: string } {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string" &&
+    SAFE_ERROR_CODE_PATTERN.test((error as { code: string }).code)
+  ) {
+    return { phase, category: (error as { code: string }).code };
+  }
+
+  if (
+    error instanceof Error &&
+    SAFE_ERROR_CODE_PATTERN.test(error.name)
+  ) {
+    return { phase, category: error.name };
+  }
+
+  return { phase, category: "unknown" };
+}
+
 /**
  * Starts a new server-owned link attempt for the signed-in merchant's store.
  *
@@ -70,11 +100,19 @@ export async function startMerchantTelegramConnection(): Promise<MerchantTelegra
     ) {
       managerUsername = me.result.username;
     }
-  } catch {
+  } catch (error) {
+    console.error(
+      "[merchant-telegram] connect start failed",
+      safeStartDiagnostic("manager_config", error),
+    );
     return { ok: false, error: "UNAVAILABLE" };
   }
 
   if (!managerUsername) {
+    console.error("[merchant-telegram] connect start failed", {
+      phase: "manager_identity",
+      category: "unverified",
+    });
     return { ok: false, error: "UNAVAILABLE" };
   }
 
@@ -84,10 +122,12 @@ export async function startMerchantTelegramConnection(): Promise<MerchantTelegra
       merchantUserId: access.userId,
       managerBotUsername: managerUsername,
     });
-
-    revalidatePath("/app/setup");
-    return { ok: true };
   } catch (error) {
+    console.error(
+      "[merchant-telegram] connect start failed",
+      safeStartDiagnostic("attempt_write", error),
+    );
+
     if (
       typeof error === "object" &&
       error !== null &&
@@ -97,6 +137,17 @@ export async function startMerchantTelegramConnection(): Promise<MerchantTelegra
       return { ok: false, error: "CONFLICT" };
     }
 
+    return { ok: false, error: "OPERATION_FAILED" };
+  }
+
+  try {
+    revalidatePath("/app/setup");
+    return { ok: true };
+  } catch (error) {
+    console.error(
+      "[merchant-telegram] connect start failed",
+      safeStartDiagnostic("revalidate_path", error),
+    );
     return { ok: false, error: "OPERATION_FAILED" };
   }
 }
