@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import postgres from "postgres";
 
 import {
+  EXPECTED_TABLES,
   QUERIES,
   computeMigrationHashes,
   maskEndpoint,
@@ -163,6 +164,102 @@ async function verifyMigrationHistory(stagingUrl) {
   }
 }
 
+async function verifySchema(stagingUrl) {
+  const requiredColumns = [
+    "activation_attempt_id",
+    "webhook_operation_id",
+    "webhook_operation_attempt_id",
+    "webhook_operation_expires_at",
+  ];
+  const requiredIndexes = [
+    "telegram_connection_one_active_per_store_idx",
+    "telegram_link_attempt_one_active_per_store_idx",
+    "telegram_link_attempt_one_active_per_user_idx",
+    "telegram_managed_update_bot_update_unique",
+  ];
+  const requiredConstraint =
+    "telegram_connection_webhook_operation_consistency_check";
+
+  const sql = postgres(stagingUrl, {
+    max: 1,
+    connect_timeout: 30,
+    idle_timeout: 30,
+    ssl: "require",
+  });
+
+  try {
+    const tableRows = await sql.unsafe(QUERIES.appTables);
+    const tables = tableRows.map((row) => String(row.name));
+    const tableSet = new Set(tables);
+    const expectedSet = new Set(EXPECTED_TABLES);
+    const missingTables = EXPECTED_TABLES.filter((name) => !tableSet.has(name));
+    const unknownTables = tables.filter((name) => !expectedSet.has(name));
+
+    const columnRows = await sql`
+      select column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'telegram_connection'
+        and column_name = any(${requiredColumns})
+      order by column_name
+    `;
+    const columns = columnRows.map((row) => String(row.column_name));
+    const missingColumns = requiredColumns.filter(
+      (name) => !columns.includes(name),
+    );
+
+    const indexRows = await sql`
+      select indexname
+      from pg_indexes
+      where schemaname = 'public'
+        and indexname = any(${requiredIndexes})
+      order by indexname
+    `;
+    const indexes = indexRows.map((row) => String(row.indexname));
+    const missingIndexes = requiredIndexes.filter(
+      (name) => !indexes.includes(name),
+    );
+
+    const constraintRows = await sql`
+      select conname
+      from pg_constraint
+      where conname = ${requiredConstraint}
+    `;
+    const constraintPresent = constraintRows.length === 1;
+
+    if (
+      missingTables.length > 0 ||
+      unknownTables.length > 0 ||
+      missingColumns.length > 0 ||
+      missingIndexes.length > 0 ||
+      !constraintPresent
+    ) {
+      fail(
+        "schema verification failed: " +
+          JSON.stringify({
+            missingTables,
+            unknownTables,
+            missingColumns,
+            missingIndexes,
+            constraintPresent,
+          }),
+      );
+    }
+
+    return {
+      tableCount: tables.length,
+      expectedTableCount: EXPECTED_TABLES.length,
+      missingTables,
+      unknownTables,
+      requiredColumnsPresent: columns,
+      requiredIndexesPresent: indexes,
+      requiredConstraintPresent: constraintPresent,
+    };
+  } finally {
+    await sql.end({ timeout: 5 }).catch(() => {});
+  }
+}
+
 async function main() {
   validateContext();
 
@@ -187,6 +284,11 @@ async function main() {
 
   const history = await verifyMigrationHistory(stagingUrl);
   out(`migration history: ${history.count}/${history.tags.length} hashes match`);
+
+  const schema = await verifySchema(stagingUrl);
+  out(
+    `schema verified: ${schema.tableCount} tables, activation/lease columns, indexes and constraint present`,
+  );
 
   const seedOutputPath = "/tmp/p1-platform-admin-summary.json";
   const seeded = spawnSync(
@@ -227,6 +329,7 @@ async function main() {
       count: history.count,
       tags: history.tags,
     },
+    schema,
     platformAdmin: seedSummary,
     completedAt: new Date().toISOString(),
   };
