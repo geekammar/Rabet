@@ -6,15 +6,24 @@
 # Secret handoff (owner action, never a workflow input):
 #   1. Generate an Argon2id PHC hash locally with scripts/generate-admin-hash.mjs.
 #   2. Store it as the Production environment secret
-#      RABET_PLATFORM_ADMIN_PASSWORD_HASH.
+#      RABET_PLATFORM_ADMIN_PASSWORD_HASH (not the legacy ADMIN_PASSWORD_HASH).
 #   3. Keep the plaintext password only in the approved private credential store.
 # The hash is read from `secrets.*`; it is never an input, output, artifact or log.
+#
+# The required non-secret expected_sha input must be the full 40-character
+# commit SHA approved for this Production run and must equal GITHUB_SHA. The
+# workflow checks out that event commit and re-verifies `git rev-parse HEAD`
+# before the bootstrap connects to the database.
 
 name: Neon PROD bootstrap platform Super Admin
 
 on:
   workflow_dispatch:
     inputs:
+      expected_sha:
+        description: "Required — exact 40-character commit SHA on main; must equal the workflow event SHA."
+        type: string
+        required: true
       admin_email:
         description: "Named Production Super Admin email (non-secret)."
         type: string
@@ -34,20 +43,23 @@ permissions:
 
 jobs:
   guard:
-    name: Validate dispatch context and confirmation
+    name: Validate dispatch context, approved SHA and confirmation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Validate execution context
+      - name: Validate execution context, approved SHA and confirmation
         env:
           RABET_REF: ${{ github.ref }}
           RABET_EVENT: ${{ github.event_name }}
+          RABET_EXPECTED_SHA: ${{ inputs.expected_sha }}
           RABET_EMAIL: ${{ inputs.admin_email }}
           RABET_CONFIRM: ${{ inputs.confirm }}
         run: |
           node - <<'NODE'
             const ref = process.env.RABET_REF ?? "";
             const eventName = process.env.RABET_EVENT ?? "";
+            const expectedSha = (process.env.RABET_EXPECTED_SHA ?? "").trim().toLowerCase();
+            const workflowSha = (process.env.GITHUB_SHA ?? "").trim().toLowerCase();
             const email = (process.env.RABET_EMAIL ?? "").trim().toLowerCase();
             const confirm = process.env.RABET_CONFIRM ?? "";
             const expected = "PROVISION_RABET_SUPER_ADMIN";
@@ -58,6 +70,20 @@ jobs:
             }
             if (ref !== "refs/heads/main") {
               console.error(`Refusing to run: ref "${ref}" is not refs/heads/main.`);
+              process.exit(1);
+            }
+            if (!/^[0-9a-f]{40}$/.test(expectedSha)) {
+              console.error(
+                "Refusing to run: expected_sha must be a full 40-character " +
+                  "hexadecimal commit SHA approved for this Production run.",
+              );
+              process.exit(1);
+            }
+            if (expectedSha !== workflowSha) {
+              console.error(
+                `Refusing to run: expected_sha (${expectedSha}) does not match ` +
+                  `the workflow event commit (${workflowSha || "missing"}).`,
+              );
               process.exit(1);
             }
             if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
@@ -71,7 +97,9 @@ jobs:
               process.exit(1);
             }
 
-            console.log("Bootstrap context valid. Ref: refs/heads/main.");
+            console.log(
+              `Bootstrap context valid. Ref: refs/heads/main. Approved SHA: ${expectedSha}.`,
+            );
           NODE
 
   bootstrap:
@@ -82,8 +110,30 @@ jobs:
     timeout-minutes: 10
     environment: Production
     steps:
-      - name: Checkout
+      # Bind execution to the dispatched event commit, not the moving main tip.
+      - name: Checkout the workflow event commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Verify checked-out commit is the approved SHA
+        env:
+          RABET_EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          APPROVED_SHA="$(printf '%s' "${RABET_EXPECTED_SHA}" | tr '[:upper:]' '[:lower:]' | xargs)"
+          if ! printf '%s' "${APPROVED_SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::expected_sha must be a full 40-character hexadecimal commit SHA."
+            exit 1
+          fi
+
+          CHECKOUT_SHA="$(git rev-parse HEAD)"
+          if [ "${CHECKOUT_SHA}" != "${APPROVED_SHA}" ]; then
+            echo "::error::Checked-out HEAD (${CHECKOUT_SHA}) does not match the approved expected_sha (${APPROVED_SHA})."
+            exit 1
+          fi
+
+          echo "Checked-out HEAD ${CHECKOUT_SHA} matches the approved SHA."
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
@@ -105,8 +155,12 @@ jobs:
         run: node scripts/neon-prod-bootstrap-admin.mjs
 
       - name: Report execution summary
+        env:
+          RABET_EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
+          APPROVED_SHA="$(printf '%s' "${RABET_EXPECTED_SHA}" | tr '[:upper:]' '[:lower:]' | xargs)"
           echo "Production platform Super Admin bootstrap completed."
+          echo "  approved SHA:      ${APPROVED_SHA}"
           echo "  environment:       Production"
           echo "  target:            approved host/database from Production variables"
           echo "  credential source: RABET_PLATFORM_ADMIN_PASSWORD_HASH (Production secret)"
