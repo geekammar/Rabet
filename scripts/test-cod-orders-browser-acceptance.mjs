@@ -1,0 +1,639 @@
+#!/usr/bin/env node
+/**
+ * Real-browser acceptance for the read-only /app/orders COD view.
+ *
+ * Starts the built Next.js application against a disposable loopback
+ * PostgreSQL database, seeds one synthetic COD order, mints a merchant session,
+ * and checks the page at a 360 px viewport: the order reference, customer,
+ * quantities, totals, awaiting-collection payment state, and no horizontal
+ * overflow.
+ *
+ * The seeded data is synthetic. No Telegram, Neon, Production or buyer data is
+ * contacted.
+ */
+
+import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { encode as encodeAuthJwt } from "next-auth/jwt";
+import postgres from "postgres";
+
+import {
+  detectConflictingFixture,
+  readPgState,
+  verifyAndStopOwnedFixture,
+} from "./fixture-guard.mjs";
+
+const APP_PORT = 3446;
+const CDP_PORT = 9346;
+const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
+const SESSION_SALT = "rabet-merchant.session-token";
+
+let appServer = null;
+let chromeProcess = null;
+let pgClient = null;
+let ownedTempDir = null;
+let ownedPgFixture = null;
+let createdDbName = null;
+let isCleaningUp = false;
+
+function log(message) {
+  process.stdout.write(`[cod-orders-browser] ${message}\n`);
+}
+
+function fail(message) {
+  process.stderr.write(`[cod-orders-browser:FAIL] ${message}\n`);
+  process.exitCode = 1;
+  throw new Error(message);
+}
+
+function assert(condition, message) {
+  if (!condition) fail(message);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function cleanup() {
+  if (isCleaningUp) return;
+  isCleaningUp = true;
+
+  if (chromeProcess) {
+    try {
+      chromeProcess.kill("SIGKILL");
+    } catch {}
+    chromeProcess = null;
+  }
+
+  if (appServer && appServer.pid) {
+    try {
+      process.kill(-appServer.pid, "SIGKILL");
+    } catch {}
+    appServer = null;
+  }
+
+  if (pgClient) {
+    try {
+      await pgClient.end();
+    } catch {}
+    pgClient = null;
+  }
+
+  if (createdDbName && process.env.RABET_TEST_PG_URL) {
+    try {
+      const cleanupSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+      await cleanupSql.unsafe(`DROP DATABASE IF EXISTS ${createdDbName}`);
+      await cleanupSql.end();
+    } catch {}
+    createdDbName = null;
+  }
+
+  if (ownedTempDir) {
+    try {
+      rmSync(ownedTempDir, { recursive: true, force: true });
+    } catch {}
+    ownedTempDir = null;
+  }
+
+  if (ownedPgFixture) {
+    const stateFilePath =
+      process.env.RABET_PG_STATE_FILE ??
+      path.join(tmpdir(), "rabet-test-pg.json");
+
+    const result = verifyAndStopOwnedFixture({
+      stateFilePath,
+      ownedFixture: ownedPgFixture,
+      stopFn: (fixture) => {
+        try {
+          spawnSync(
+            "node",
+            ["scripts/db-test-postgres.mjs", "stop", fixture.datadir],
+            {
+              stdio: "ignore",
+              env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
+            },
+          );
+        } catch {}
+      },
+    });
+
+    if (!result.stopped) {
+      log(`Preserved database state (did not stop fixture: ${result.reason}).`);
+    }
+    ownedPgFixture = null;
+  }
+}
+
+async function main() {
+  const chromePath = resolveChromePath();
+  if (!chromePath) {
+    fail(
+      "Chromium executable not found. Set CHROME_BIN or CHROME_PATH environment variable.",
+    );
+  }
+
+  let pgUrl = "";
+  if (process.env.RABET_TEST_PG_URL) {
+    createdDbName = `rabet_cod_browser_${Date.now()}`;
+    const adminSql = postgres(process.env.RABET_TEST_PG_URL, { max: 1 });
+    await adminSql.unsafe(`CREATE DATABASE ${createdDbName}`);
+    await adminSql.end();
+
+    const parsed = new URL(process.env.RABET_TEST_PG_URL);
+    parsed.pathname = `/${createdDbName}`;
+    pgUrl = parsed.toString();
+    log(`Using designated PostgreSQL service with database: ${createdDbName}`);
+  } else {
+    const stateFilePath =
+      process.env.RABET_PG_STATE_FILE ??
+      path.join(tmpdir(), "rabet-test-pg.json");
+
+    const conflict = detectConflictingFixture(stateFilePath);
+    if (conflict) {
+      fail(
+        `Pre-existing disposable PostgreSQL instance detected at ${stateFilePath} ` +
+          `(port ${conflict.port}, datadir: ${conflict.datadir}). Stop it before running this suite.`,
+      );
+    }
+
+    log("Starting disposable PostgreSQL...");
+    const pgStart = spawnSync("node", ["scripts/db-test-postgres.mjs", "start"], {
+      encoding: "utf8",
+      env: { ...process.env, RABET_PG_STATE_FILE: stateFilePath },
+    });
+    if (pgStart.status !== 0) {
+      fail(`Could not start disposable PostgreSQL: ${pgStart.stderr}`);
+    }
+
+    const pgUrlMatch = pgStart.stdout.match(/postgresql:\/\/[^\s]+/);
+    if (!pgUrlMatch) fail("Could not find PostgreSQL URL in output");
+    pgUrl = pgUrlMatch[0];
+
+    const stateData = readPgState(stateFilePath);
+    ownedPgFixture = {
+      port: stateData?.port ?? new URL(pgUrl).port,
+      datadir: stateData?.datadir ?? "",
+      url: pgUrl,
+    };
+  }
+
+  const parsedPgUrl = new URL(pgUrl);
+  if (
+    parsedPgUrl.hostname !== "127.0.0.1" &&
+    parsedPgUrl.hostname !== "localhost" &&
+    !process.env.RABET_TEST_PG_URL
+  ) {
+    fail(`Refusing to run against non-loopback database host: ${parsedPgUrl.hostname}`);
+  }
+
+  log("Applying database migrations...");
+  const migrate = spawnSync("npm", ["run", "db:migrate"], {
+    env: { ...process.env, DATABASE_URL: pgUrl },
+    encoding: "utf8",
+  });
+  if (migrate.status !== 0) {
+    fail(`Migration failed: ${migrate.stderr || migrate.stdout}`);
+  }
+
+  pgClient = postgres(pgUrl, { max: 5 });
+
+  log("Seeding synthetic COD order...");
+  const [language] = await pgClient`
+    insert into "language" ("code", "label", "is_enabled")
+    values ('en', 'English', true)
+    returning id
+  `;
+  const [store] = await pgClient`
+    insert into "store" ("name", "slug", "status")
+    values ('Synthetic COD Store', 'synthetic-cod-store', 'active')
+    returning id
+  `;
+  const [user] = await pgClient`
+    insert into "app_user" ("email")
+    values ('cod-browser-owner@example.test')
+    returning id, session_version
+  `;
+  await pgClient`
+    insert into "store_membership" ("store_id", "user_id", "role", "status")
+    values (${store.id}, ${user.id}, 'owner', 'active')
+  `;
+  const [category] = await pgClient`
+    insert into "category" ("store_id", "slug", "sort_order", "is_active")
+    values (${store.id}, 'cod-browser-root', 1, true)
+    returning id
+  `;
+  await pgClient`
+    insert into "category_translation" ("category_id", "language_id", "name")
+    values (${category.id}, ${language.id}, 'Root')
+  `;
+  const [product] = await pgClient`
+    insert into "product" ("store_id", "category_id", "slug", "price", "is_active", "sort_order")
+    values (${store.id}, ${category.id}, 'cod-browser-product', 11.00, true, 1)
+    returning id
+  `;
+  await pgClient`
+    insert into "product_translation" ("product_id", "language_id", "name", "description")
+    values (${product.id}, ${language.id}, 'Synthetic COD Product', 'First slice fixture')
+  `;
+  const [connection] = await pgClient`
+    insert into "telegram_connection" (
+      "store_id", "bot_id", "bot_username", "token_ciphertext", "token_key_id",
+      "webhook_secret_hash", "webhook_url", "status", "verified_at"
+    )
+    values (
+      ${store.id}, 991001, 'SyntheticCodBot', 'synthetic-ciphertext', 'v1',
+      repeat('a', 64), 'https://app.example.test/api/telegram/webhook/managed/x',
+      'ready', now()
+    )
+    returning id
+  `;
+  await pgClient`
+    insert into "store_commerce_setting" ("store_id", "currency", "delivery_fee", "cod_enabled")
+    values (${store.id}, 'SAR', 15.00, true)
+  `;
+  await pgClient`
+    insert into "product_inventory" ("product_id", "store_id", "on_hand", "reserved")
+    values (${product.id}, ${store.id}, 5, 2)
+  `;
+  const [order] = await pgClient`
+    insert into "order" (
+      "store_id", "connection_id", "telegram_user_id", "telegram_chat_id",
+      "reference", "checkout_key", "status", "payment_method", "payment_status",
+      "fulfillment_status", "currency", "subtotal", "delivery_fee", "total",
+      "customer_name", "customer_phone", "delivery_address"
+    )
+    values (
+      ${store.id}, ${connection.id}, 93001, 93001,
+      'ORD-ABC234', ${crypto.randomUUID()}, 'placed', 'cod', 'awaiting_collection',
+      'unfulfilled', 'SAR', 22.00, 15.00, 37.00,
+      'Synthetic Buyer', '+15550000000', '123 Synthetic Browser Street'
+    )
+    returning id
+  `;
+  const [orderItem] = await pgClient`
+    insert into "order_item" (
+      "order_id", "product_id", "product_name", "unit_price", "quantity",
+      "line_total", "product_snapshot"
+    )
+    values (
+      ${order.id}, ${product.id}, 'Synthetic COD Product', 11.00, 2, 22.00,
+      ${JSON.stringify({
+        name: "Synthetic COD Product",
+        description: "First slice fixture",
+        categoryId: category.id,
+        unitPrice: "11.00",
+        currency: "SAR",
+      })}::jsonb
+    )
+    returning id
+  `;
+  await pgClient`
+    insert into "inventory_reservation" (
+      "order_id", "order_item_id", "product_id", "store_id", "quantity", "status"
+    )
+    values (${order.id}, ${orderItem.id}, ${product.id}, ${store.id}, 2, 'reserved')
+  `;
+
+  ownedTempDir = mkdtempSync(path.join(tmpdir(), "rabet-cod-browser-"));
+  chmodSync(ownedTempDir, 0o700);
+
+  const postgresModuleUrl = import.meta.resolve("postgres");
+  const bootstrapFile = path.join(ownedTempDir, "neon-proxy-bootstrap.mjs");
+  writeFileSync(
+    bootstrapFile,
+    `import postgres from "${postgresModuleUrl}";\n` +
+      `const originalFetch = globalThis.fetch;\n` +
+      `const formatVal = (v) => typeof v === "boolean" ? (v ? "t" : "f") : v;\n` +
+      `let pg = null;\n` +
+      `globalThis.fetch = async (input, init) => {\n` +
+      `  const url = typeof input === "string" ? input : (input ? input.url : "");\n` +
+      `  if (process.env.TEST_REAL_PG_URL && typeof url === "string" && url.endsWith("/sql")) {\n` +
+      `    if (!pg) pg = postgres(process.env.TEST_REAL_PG_URL);\n` +
+      `    const { query, params } = JSON.parse(init.body);\n` +
+      `    const booleanColumns = new Set(["is_active", "enabled", "ask_for_language", "is_enabled", "is_blocked", "cod_enabled"]);\n` +
+      `    const booleanIndexes = new Set();\n` +
+      `    for (const match of query.matchAll(/"([a-z_]+)"\\s*=\\s*\\$(\\d+)/g)) {\n` +
+      `      if (booleanColumns.has(match[1])) booleanIndexes.add(Number(match[2]));\n` +
+      `    }\n` +
+      `    const normalizedParams = (params || []).map((value, index) =>\n` +
+      `      typeof value === "string" && booleanIndexes.has(index + 1)\n` +
+      `        ? value === "true"\n` +
+      `        : value,\n` +
+      `    );\n` +
+      `    try {\n` +
+      `      const rows = await pg.unsafe(query, normalizedParams).values();\n` +
+      `      const cols = rows.columns || [];\n` +
+      `      const fields = cols.map((c) => ({ name: c.name, dataTypeID: c.type }));\n` +
+      `      const rowArrays = rows.map((r) => r.map((value) => formatVal(value)));\n` +
+      `      return new Response(JSON.stringify({ rows: rowArrays, fields }), {\n` +
+      `        status: 200, headers: { "content-type": "application/json" },\n` +
+      `      });\n` +
+      `    } catch (err) {\n` +
+      `      return new Response(JSON.stringify({ message: err.message }), {\n` +
+      `        status: 500, headers: { "content-type": "application/json" },\n` +
+      `      });\n` +
+      `    }\n` +
+      `  }\n` +
+      `  return originalFetch(input, init);\n` +
+      `};\n`,
+    { mode: 0o600 },
+  );
+
+  const authSecret = crypto.randomBytes(32).toString("base64");
+  const appDatabaseUrl = (() => {
+    const parsed = new URL(pgUrl);
+    if (parsed.hostname === "127.0.0.1") parsed.hostname = "localhost";
+    return parsed.toString();
+  })();
+
+  const envFile = path.join(ownedTempDir, "test.env");
+  writeFileSync(
+    envFile,
+    [
+      `export DATABASE_URL='${appDatabaseUrl}'`,
+      `export TEST_REAL_PG_URL='${pgUrl}'`,
+      `export AUTH_SECRET='${authSecret}'`,
+      `export AUTH_URL='${BASE_URL}'`,
+      `export APP_URL='${BASE_URL}'`,
+      `export AUTH_TRUST_HOST='true'`,
+      `export RABET_MERCHANT_APP_ENABLED='true'`,
+      `export NODE_OPTIONS='--import ${bootstrapFile}'`,
+    ].join("\n") + "\n",
+    { mode: 0o600 },
+  );
+
+  appServer = spawn(
+    "bash",
+    [
+      "-c",
+      `source "${envFile}" && PORT=${APP_PORT} node node_modules/next/dist/bin/next start`,
+    ],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+      env: { ...process.env },
+    },
+  );
+
+  appServer.stderr.on("data", (data) => {
+    const text = data.toString();
+    if (!text.includes("ExperimentalWarning")) {
+      process.stderr.write(`[next:stderr] ${text}`);
+    }
+  });
+
+  let serverReady = false;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    await sleep(500);
+    try {
+      const response = await fetch(`${BASE_URL}/app/login`);
+      if (response.status === 200) {
+        serverReady = true;
+        break;
+      }
+    } catch {}
+  }
+  if (!serverReady) fail("Next.js server failed to start within 20s");
+
+  const merchantCookie = await encodeAuthJwt({
+    token: {
+      merchantId: user.id,
+      role: "merchant",
+      sessionVersion: user.session_version,
+      sub: user.id,
+    },
+    secret: authSecret,
+    salt: SESSION_SALT,
+  });
+
+  chromeProcess = spawn(
+    chromePath,
+    [
+      "--headless=new",
+      `--remote-debugging-port=${CDP_PORT}`,
+      `--user-data-dir=${path.join(ownedTempDir, "chrome-data")}`,
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "about:blank",
+    ],
+    { stdio: "ignore" },
+  );
+
+  let pageTarget = null;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    await sleep(400);
+    try {
+      const targets = await (
+        await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)
+      ).json();
+      pageTarget = targets.find((target) => target.type === "page") || targets[0];
+      if (pageTarget?.webSocketDebuggerUrl) break;
+    } catch {}
+  }
+  if (!pageTarget) fail("Could not connect to the Chromium page target");
+
+  const cdp = new CDPClient(pageTarget.webSocketDebuggerUrl);
+  await cdp.connect();
+  await cdp.send("Page.enable");
+  await cdp.send("Runtime.enable");
+  await cdp.send("Network.enable");
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 360,
+    height: 800,
+    deviceScaleFactor: 2,
+    mobile: true,
+  });
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant.session-token",
+    value: merchantCookie,
+    domain: "127.0.0.1",
+    path: "/",
+    httpOnly: true,
+  });
+
+  log("Loading /app/orders at a 360 px viewport...");
+  await cdp.send("Page.navigate", { url: `${BASE_URL}/app/orders` });
+  await waitFor(
+    cdp,
+    "document.readyState === 'complete'",
+    "orders document ready",
+  );
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-orders-page\"]'))",
+    "merchant orders page",
+  );
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-card\"]'))",
+    "merchant order card",
+  );
+
+  const body = await cdp.evaluate("document.body.innerText");
+  for (const expected of [
+    "ORD-ABC234",
+    "Synthetic Buyer",
+    "+15550000000",
+    "123 Synthetic Browser Street",
+    "Synthetic COD Product × 2",
+    "37.00 SAR",
+    "awaiting collection",
+    "reserved",
+  ]) {
+    assert(
+      body.includes(expected),
+      `Orders page should include ${JSON.stringify(expected)}`,
+    );
+  }
+
+  const overflow = await cdp.evaluate(
+    "Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)",
+  );
+  assert(
+    overflow <= 361,
+    `Expected no horizontal scroll at 360 px, saw ${overflow}`,
+  );
+
+  log("ALL COD ORDERS BROWSER ACCEPTANCE CHECKS PASSED");
+  await cleanup();
+}
+
+async function waitFor(cdp, expression, label, timeoutMs = 12000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const value = await cdp.evaluate(expression);
+      if (value) return value;
+    } catch {}
+    await sleep(150);
+  }
+  let context = "";
+  try {
+    context = await cdp.evaluate(
+      "JSON.stringify({ path: window.location.pathname, text: document.body.innerText.slice(0, 500) })",
+    );
+  } catch {}
+  fail(`Timed out waiting for ${label}${context ? ` — page: ${context}` : ""}`);
+}
+
+function resolveChromePath() {
+  if (process.env.CHROME_BIN && existsSync(process.env.CHROME_BIN)) {
+    return process.env.CHROME_BIN;
+  }
+  if (process.env.CHROME_PATH && existsSync(process.env.CHROME_PATH)) {
+    return process.env.CHROME_PATH;
+  }
+
+  const playwrightDirs = [
+    "/root/.cache/ms-playwright",
+    path.join(process.env.HOME || "", ".cache/ms-playwright"),
+  ];
+  for (const directory of playwrightDirs) {
+    if (!existsSync(directory)) continue;
+    try {
+      for (const entry of readdirSync(directory)) {
+        if (!entry.startsWith("chromium-")) continue;
+        for (const relative of [
+          "chrome-linux64/chrome",
+          "chrome-linux/chrome",
+          "chrome-linux/headless_shell",
+        ]) {
+          const candidate = path.join(directory, entry, relative);
+          if (existsSync(candidate)) return candidate;
+        }
+      }
+    } catch {}
+  }
+
+  for (const candidate of [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  return null;
+}
+
+class CDPClient {
+  constructor(wsUrl) {
+    this.wsUrl = wsUrl;
+    this.ws = null;
+    this.id = 1;
+    this.callbacks = new Map();
+  }
+
+  async connect() {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(this.wsUrl);
+      this.ws.onopen = () => resolve();
+      this.ws.onerror = (error) => reject(error);
+      this.ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.id && this.callbacks.has(data.id)) {
+          const { resolve, reject } = this.callbacks.get(data.id);
+          this.callbacks.delete(data.id);
+          if (data.error) reject(new Error(JSON.stringify(data.error)));
+          else resolve(data.result);
+        }
+      };
+    });
+  }
+
+  send(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      const id = this.id++;
+      this.callbacks.set(id, { resolve, reject });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async evaluate(expression) {
+    const result = await this.send("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    if (result.exceptionDetails) {
+      throw new Error(
+        `CDP evaluate error: ${result.exceptionDetails.text} - ${
+          result.exceptionDetails.exception?.description || ""
+        }`,
+      );
+    }
+    return result.result?.value;
+  }
+}
+
+process.on("SIGINT", async () => {
+  await cleanup();
+  process.exit(130);
+});
+
+process.on("SIGTERM", async () => {
+  await cleanup();
+  process.exit(143);
+});
+
+main().catch(async (error) => {
+  process.stderr.write(
+    `[cod-orders-browser:FAIL] ${
+      error instanceof Error ? error.message : String(error)
+    }\n`,
+  );
+  await cleanup();
+  process.exit(1);
+});

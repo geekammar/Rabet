@@ -77,31 +77,38 @@ import postgres from "postgres";
 
 const WIZARD = "rabet db:setup:dev";
 
-/** The twenty-eight domain tables created by the committed chain. */
+/** The thirty-five domain tables created by the committed chain. */
 export const EXPECTED_TABLES = [
   "admin_login_throttle",
   "app_user",
   "bot_setting",
+  "cart",
+  "cart_item",
   "category",
   "category_translation",
   "customer",
   "inquiry",
   "inquiry_message",
+  "inventory_reservation",
   "language",
   "merchant_auth_throttle",
   "merchant_credential",
   "merchant_invitation",
   "message_template",
   "message_translation",
+  "order",
+  "order_item",
   "payment_method",
   "payment_method_translation",
   "product",
   "product_action",
+  "product_inventory",
   "product_action_translation",
   "product_translation",
   "seller_notification_delivery",
   "seller_notification_setting",
   "store",
+  "store_commerce_setting",
   "store_membership",
   "telegram_connection",
   "telegram_link_attempt",
@@ -124,6 +131,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0010_wonderful_siren",
   "0011_careless_hulk",
   "0012_mushy_scream",
+  "0013_cod_orders",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -137,6 +145,15 @@ const MANAGED_TELEGRAM_TABLES = new Set([
   "telegram_link_attempt",
   "telegram_managed_update",
 ]);
+const COMMERCE_TABLES = new Set([
+  "cart",
+  "cart_item",
+  "inventory_reservation",
+  "order",
+  "order_item",
+  "product_inventory",
+  "store_commerce_setting",
+]);
 
 /** The twenty-one domain tables present in the 0005 tenant-identity baseline. */
 export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
@@ -144,7 +161,8 @@ export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
     t !== "admin_login_throttle" &&
     !MERCHANT_INVITATION_TABLES.has(t) &&
     !MERCHANT_SESSION_TABLES.has(t) &&
-    !MANAGED_TELEGRAM_TABLES.has(t),
+    !MANAGED_TELEGRAM_TABLES.has(t) &&
+    !COMMERCE_TABLES.has(t),
 );
 
 /** The twenty-one tables present in the 0006 ownership baseline (no new table until 0008). */
@@ -155,7 +173,8 @@ export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
   (t) =>
     !MERCHANT_INVITATION_TABLES.has(t) &&
     !MERCHANT_SESSION_TABLES.has(t) &&
-    !MANAGED_TELEGRAM_TABLES.has(t),
+    !MANAGED_TELEGRAM_TABLES.has(t) &&
+    !COMMERCE_TABLES.has(t),
 );
 
 /**
@@ -164,19 +183,26 @@ export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
  */
 export const EXPECTED_TABLES_V7 = EXPECTED_TABLES.filter(
   (t) =>
-    !MERCHANT_SESSION_TABLES.has(t) && !MANAGED_TELEGRAM_TABLES.has(t),
+    !MERCHANT_SESSION_TABLES.has(t) &&
+    !MANAGED_TELEGRAM_TABLES.has(t) &&
+    !COMMERCE_TABLES.has(t),
 );
 
 /** The exact twenty-five-table inventory through 0009 (merchant_auth_throttle included). */
 export const EXPECTED_TABLES_V8 = EXPECTED_TABLES.filter(
-  (t) => !MANAGED_TELEGRAM_TABLES.has(t),
+  (t) => !MANAGED_TELEGRAM_TABLES.has(t) && !COMMERCE_TABLES.has(t),
 );
 
 /** The exact twenty-five-table inventory through 0010 (no new table). */
 export const EXPECTED_TABLES_V9 = [...EXPECTED_TABLES_V8];
 
 /** The twenty-eight-table inventory through 0011 (managed bot tables included). */
-export const EXPECTED_TABLES_V10 = [...EXPECTED_TABLES];
+export const EXPECTED_TABLES_V10 = EXPECTED_TABLES.filter(
+  (t) => !COMMERCE_TABLES.has(t),
+);
+
+/** The thirty-five-table inventory through 0013 (COD tables included). */
+export const EXPECTED_TABLES_V11 = [...EXPECTED_TABLES];
 
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
 export const EXPECTED_TABLES_V3 = EXPECTED_TABLES_V4.filter(
@@ -294,8 +320,31 @@ export const EXPECTED_INDEXES_V10 = [
   "telegram_managed_update_status_idx",
 ];
 
-/** Indexes the current chain requires (0012 adds no index). */
-export const EXPECTED_INDEXES = [...EXPECTED_INDEXES_V10];
+/** Indexes present through 0012 (0012 adds no index). */
+export const EXPECTED_INDEXES_V11 = [...EXPECTED_INDEXES_V10];
+
+/** Indexes the current chain requires (0013 adds the COD indexes). */
+export const EXPECTED_INDEXES = [
+  ...EXPECTED_INDEXES_V11,
+  "cart_one_active_per_store_buyer_idx",
+  "cart_store_idx",
+  "cart_connection_idx",
+  "cart_telegram_user_idx",
+  "cart_item_cart_product_unique",
+  "cart_item_cart_idx",
+  "inventory_reservation_order_item_unique",
+  "inventory_reservation_order_product_unique",
+  "inventory_reservation_order_idx",
+  "inventory_reservation_store_idx",
+  "inventory_reservation_product_idx",
+  "order_reference_unique",
+  "order_store_checkout_key_unique",
+  "order_store_placed_idx",
+  "order_telegram_user_idx",
+  "order_item_order_product_unique",
+  "order_item_order_idx",
+  "product_inventory_store_idx",
+];
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
 export const CRITICAL_CONSTRAINTS_V2 = [
@@ -416,9 +465,46 @@ export const CRITICAL_CONSTRAINTS_V10 = [
 ];
 
 /** CHECK constraints the current chain requires (0012 adds activation fencing). */
-export const CRITICAL_CONSTRAINTS = [
+export const CRITICAL_CONSTRAINTS_V11 = [
   ...CRITICAL_CONSTRAINTS_V10,
   "telegram_connection_webhook_operation_consistency_check",
+];
+
+/** CHECK constraints the current chain requires (0013 adds the COD constraints). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V11,
+  "store_commerce_setting_currency_allowlist_check",
+  "store_commerce_setting_delivery_fee_nonnegative_check",
+  "product_inventory_on_hand_nonnegative_check",
+  "product_inventory_reserved_nonnegative_check",
+  "product_inventory_reserved_within_on_hand_check",
+  "cart_status_check",
+  "cart_checkout_state_check",
+  "cart_telegram_user_positive_check",
+  "cart_telegram_chat_positive_check",
+  "cart_quote_version_nonnegative_check",
+  "cart_quote_currency_allowlist_check",
+  "cart_quote_consistency_check",
+  "cart_item_quantity_check",
+  "order_reference_format_check",
+  "order_status_check",
+  "order_payment_method_check",
+  "order_payment_status_check",
+  "order_fulfillment_status_check",
+  "order_currency_allowlist_check",
+  "order_totals_nonnegative_check",
+  "order_total_matches_parts_check",
+  "order_telegram_user_positive_check",
+  "order_telegram_chat_positive_check",
+  "order_customer_name_not_empty_check",
+  "order_customer_phone_not_empty_check",
+  "order_delivery_address_not_empty_check",
+  "order_item_quantity_check",
+  "order_item_totals_nonnegative_check",
+  "order_item_line_total_check",
+  "order_item_product_name_not_empty_check",
+  "inventory_reservation_quantity_check",
+  "inventory_reservation_status_check",
 ];
 
 /** Notification update triggers created by migration 0003. */

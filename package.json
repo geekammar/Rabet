@@ -26,7 +26,8 @@
     "db:setup:dev": "node scripts/setup-neon-dev.mjs",
     "db:dev:actions": "node scripts/neon-dev-actions.mjs",
     "db:prod:actions": "node scripts/neon-prod-actions.mjs",
-    "test:browser:merchant": "node scripts/test-merchant-browser-acceptance.mjs"
+    "test:browser:merchant": "node scripts/test-merchant-browser-acceptance.mjs",
+    "test:browser:cod-orders": "node scripts/test-cod-orders-browser-acceptance.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",

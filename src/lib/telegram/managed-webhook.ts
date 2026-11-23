@@ -3,12 +3,32 @@ import "server-only";
 import type { Database } from "@/db/client";
 import { getDb } from "@/db/client";
 import {
+  getTransactionDb,
+  type TransactionDatabase,
+} from "@/db/transaction-client";
+import {
   listManagedCategories,
   listManagedProducts,
   listManagedProductsInCategory,
   readManagedCategory,
   readManagedProduct,
 } from "@/lib/catalog/managed-storefront";
+import {
+  addToCart,
+  backToCart,
+  changeCartQuantity,
+  confirmCodOrder,
+  isCodAvailable,
+  readCartForBuyer,
+  readInventoryAvailability,
+  removeCartItem,
+  saveAddressAndPrepareReview,
+  savePhone,
+  startCheckout,
+  type CartView,
+  type CheckoutReview,
+  type CommerceSetting,
+} from "@/lib/commerce/orders";
 import {
   createStoreScopeForExistingStore,
   type StoreScope,
@@ -56,6 +76,12 @@ const PAGE_SIZE = 8;
 
 export interface ManagedWebhookOptions {
   db?: Database;
+  /**
+   * Transaction-capable commerce client. Production uses the shared
+   * postgres-js client; tests pass the disposable PostgreSQL client. The
+   * browsing reads keep using the HTTP client above.
+   */
+  commerceDb?: TransactionDatabase;
   transport?: TelegramTransport;
   executionBudgetMs?: number;
   deadline?: ExecutionDeadline;
@@ -79,13 +105,243 @@ const UI = {
   home: "Home",
   products: "Products",
   browseCategories: "Browse categories",
+  cart: "Cart",
   back: "Back",
   previous: "Previous",
   next: "Next",
   unavailable: "This item is not available in this store.",
   empty: "No products are available in this store yet.",
   noCategories: "No categories are available in this store yet.",
+  cartEmpty: "Your cart is empty.",
+  cod: "Cash on delivery",
+  outOfStock: "This item is out of stock.",
+  notOrderable: "This item cannot be ordered online.",
+  genericUnavailable: "This cart is not available.",
 };
+
+type CodContext = {
+  enabled: boolean;
+  setting: CommerceSetting | null;
+};
+
+function money(value: string, currency: string): string {
+  return currency ? `${value} ${currency}` : value;
+}
+
+function cartLinesText(cart: CartView): string {
+  return cart.lines
+    .map(
+      (line) =>
+        `${line.name} × ${line.quantity} — ${money(line.lineTotal, cart.currency)}`,
+    )
+    .join("\n");
+}
+
+function cartText(cart: CartView): string {
+  const lines = [UI.cart, "", cartLinesText(cart), ""];
+
+  if (cart.unavailableCount > 0) {
+    lines.push("Some items are unavailable or exceed current stock.", "");
+  }
+
+  lines.push(`Subtotal: ${money(cart.subtotal, cart.currency)}`);
+  lines.push(`Delivery fee: ${money(cart.deliveryFee, cart.currency)}`);
+  lines.push(`Total: ${money(cart.total, cart.currency)}`);
+  lines.push(UI.cod);
+
+  return lines.join("\n");
+}
+
+function reviewText(review: CheckoutReview): string {
+  const lines = [
+    "Review your order",
+    "",
+    ...review.lines.map(
+      (line) =>
+        `${line.name} × ${line.quantity} — ${line.unitPrice} × ${line.quantity} = ${money(line.lineTotal, review.currency)}`,
+    ),
+    "",
+    `Subtotal: ${money(review.subtotal, review.currency)}`,
+    `Delivery fee: ${money(review.deliveryFee, review.currency)}`,
+    `Total: ${money(review.total, review.currency)}`,
+    "Payment: Cash on delivery",
+    "",
+    `Name: ${review.customerName}`,
+    `Phone: ${review.customerPhone}`,
+    `Address: ${review.deliveryAddress}`,
+    "",
+    "Confirm only if these details, prices and the delivery fee are correct.",
+  ];
+
+  return lines.join("\n");
+}
+
+function reviewKeyboard(review: CheckoutReview) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "Confirm order — cash on delivery",
+          callback_data: tokens.confirmCod(review.cartId, review.quoteVersion),
+        },
+      ],
+      [
+        {
+          text: "Back to cart",
+          callback_data: tokens.backToCart(review.cartId),
+        },
+        { text: UI.home, callback_data: tokens.home() },
+      ],
+    ],
+  };
+}
+
+function cartKeyboard(cart: CartView) {
+  const keyboard: TelegramInlineKeyboardButton[][] = cart.lines.map((line) => [
+    { text: "−", callback_data: tokens.cartDecrease(line.productId) },
+    { text: "+", callback_data: tokens.cartIncrease(line.productId) },
+    { text: "Remove", callback_data: tokens.cartRemove(line.productId) },
+  ]);
+
+  keyboard.push([
+    { text: "Checkout", callback_data: tokens.checkout(cart.id) },
+  ]);
+  keyboard.push([{ text: UI.home, callback_data: tokens.home() }]);
+
+  return { inline_keyboard: keyboard };
+}
+
+async function renderCartView(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number | undefined,
+  cart: CartView | null,
+): Promise<void> {
+  if (!cart || cart.lines.length === 0) {
+    const params = {
+      chatId,
+      text: `${UI.cartEmpty}\n\nSend /start to browse the store.`,
+      replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+    };
+
+    if (messageId) {
+      await editOrThrow(transport, { ...params, messageId });
+    } else {
+      await sendOrThrow(transport, params);
+    }
+    return;
+  }
+
+  const params = {
+    chatId,
+    text: cartText(cart),
+    replyMarkup: cartKeyboard(cart),
+  };
+
+  if (messageId) {
+    await editOrThrow(transport, { ...params, messageId });
+  } else {
+    await sendOrThrow(transport, params);
+  }
+}
+
+async function renderReviewView(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number | undefined,
+  review: CheckoutReview,
+): Promise<void> {
+  const params = {
+    chatId,
+    text: reviewText(review),
+    replyMarkup: reviewKeyboard(review),
+  };
+
+  if (messageId) {
+    await editOrThrow(transport, { ...params, messageId });
+  } else {
+    await sendOrThrow(transport, params);
+  }
+}
+
+async function sendPhonePrompt(
+  transport: TelegramTransport,
+  chatId: number,
+  cart: CartView,
+): Promise<void> {
+  await sendOrThrow(transport, {
+    chatId,
+    text: [
+      "Checkout",
+      "",
+      `Subtotal: ${money(cart.subtotal, cart.currency)}`,
+      `Delivery fee: ${money(cart.deliveryFee, cart.currency)}`,
+      `Total: ${money(cart.total, cart.currency)}`,
+      UI.cod,
+      "",
+      "Send your phone number or tap Share phone.",
+    ].join("\n"),
+    replyMarkup: {
+      keyboard: [[{ text: "Share phone", request_contact: true }]],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    },
+  });
+}
+
+async function sendAddressPrompt(
+  transport: TelegramTransport,
+  chatId: number,
+  text = "Send the delivery address as one text message.",
+): Promise<void> {
+  await sendOrThrow(transport, {
+    chatId,
+    text,
+    replyMarkup: { remove_keyboard: true },
+  });
+}
+
+async function renderPlacedOrder(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number | undefined,
+  result: {
+    reference: string;
+    subtotal: string;
+    deliveryFee: string;
+    total: string;
+    currency: string;
+  },
+): Promise<void> {
+  const text = [
+    `Order ${result.reference} placed.`,
+    "",
+    `Subtotal: ${money(result.subtotal, result.currency)}`,
+    `Delivery fee: ${money(result.deliveryFee, result.currency)}`,
+    `Total: ${money(result.total, result.currency)}`,
+    "Payment: cash on delivery — awaiting collection.",
+    "",
+    "The store has reserved the items for this order.",
+  ].join("\n");
+
+  const params = {
+    chatId,
+    text,
+    replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+  };
+
+  if (messageId) {
+    await editOrThrow(transport, { ...params, messageId });
+  } else {
+    await sendOrThrow(transport, params);
+  }
+}
+
+function cartAvailabilityMessage(cart: CartView | null): string {
+  return cart && cart.lines.length > 0
+    ? "One or more items are no longer available in the requested quantity. Review the cart and try again."
+    : UI.cartEmpty;
+}
 
 async function sendOrThrow(
   transport: TelegramTransport,
@@ -123,6 +379,7 @@ async function renderHome(
   db: Database,
   scope: StoreScope,
   storeName: string,
+  cod: CodContext,
   transport: TelegramTransport,
   chatId: number,
   messageId?: number,
@@ -139,6 +396,10 @@ async function renderHome(
   keyboard.push([
     { text: UI.browseCategories, callback_data: tokens.storefrontCategories() },
   ]);
+
+  if (cod.enabled) {
+    keyboard.push([{ text: UI.cart, callback_data: tokens.cart() }]);
+  }
 
   if (page.totalPages > 1) {
     keyboard.push([
@@ -341,6 +602,7 @@ async function renderCategory(
 async function renderProduct(
   db: Database,
   scope: StoreScope,
+  cod: CodContext,
   transport: TelegramTransport,
   chatId: number,
   messageId: number,
@@ -366,21 +628,46 @@ async function renderProduct(
 
   lines.push(productRow.price);
 
+  const keyboard: TelegramInlineKeyboardButton[][] = [];
+  let stock = 0;
+
+  if (cod.enabled) {
+    const availability = await readInventoryAvailability(db, scope, [
+      productId,
+    ]);
+    stock = availability.get(productId) ?? 0;
+
+    if (stock <= 0) {
+      lines.push(UI.outOfStock);
+    } else {
+      const maxQuantity = Math.min(5, stock);
+      const quantityButtons: TelegramInlineKeyboardButton[] = [];
+
+      for (let quantity = 1; quantity <= maxQuantity; quantity += 1) {
+        quantityButtons.push({
+          text: `Add ${quantity}`,
+          callback_data: tokens.cartAdd(productId, quantity),
+        });
+      }
+
+      keyboard.push(quantityButtons);
+      keyboard.push([{ text: UI.cart, callback_data: tokens.cart() }]);
+    }
+  }
+
+  keyboard.push([
+    {
+      text: UI.back,
+      callback_data: tokens.storefrontCategory(productRow.categoryId),
+    },
+    { text: UI.home, callback_data: tokens.home() },
+  ]);
+
   await editOrThrow(transport, {
     chatId,
     messageId,
     text: lines.join("\n\n"),
-    replyMarkup: {
-      inline_keyboard: [
-        [
-          {
-            text: UI.back,
-            callback_data: tokens.storefrontCategory(productRow.categoryId),
-          },
-          { text: UI.home, callback_data: tokens.home() },
-        ],
-      ],
-    },
+    replyMarkup: { inline_keyboard: keyboard },
   });
 }
 
@@ -388,36 +675,164 @@ async function dispatchMessage(
   db: Database,
   scope: StoreScope,
   storeName: string,
+  connectionId: string,
+  cod: CodContext,
+  commerceDb: TransactionDatabase | null,
   transport: TelegramTransport,
   message: TelegramMessage,
 ): Promise<void> {
   const text = typeof message.text === "string" ? message.text.trim() : "";
+  const buyerId = message.from?.id;
 
   if (text === "/start" || text.startsWith("/start ")) {
     await renderHome(
       db,
       scope,
       storeName,
+      cod,
       transport,
       message.chat.id,
     );
     return;
   }
 
-  // The managed pilot has no inquiry or order path. Any other text returns the
-  // scoped storefront rather than leaking a global or legacy journey.
-  await renderHome(db, scope, storeName, transport, message.chat.id);
+  if (!buyerId) {
+    await renderHome(
+      db,
+      scope,
+      storeName,
+      cod,
+      transport,
+      message.chat.id,
+    );
+    return;
+  }
+
+  if (cod.enabled && commerceDb) {
+    const activeCart = await readCartForBuyer(db, scope, {
+      connectionId,
+      telegramUserId: buyerId,
+    });
+
+    if (activeCart?.status === "checkout") {
+      if (activeCart.checkoutState === "awaiting_phone") {
+        const contact = message.contact;
+
+        if (
+          contact &&
+          contact.user_id !== undefined &&
+          contact.user_id !== buyerId
+        ) {
+          await sendOrThrow(transport, {
+            chatId: message.chat.id,
+            text: "Share your own phone number or type it as text.",
+            replyMarkup: {
+              keyboard: [[{ text: "Share phone", request_contact: true }]],
+              resize_keyboard: true,
+              one_time_keyboard: true,
+            },
+          });
+          return;
+        }
+
+        const result = await savePhone(commerceDb, scope, {
+          cartId: activeCart.id,
+          connectionId,
+          telegramUserId: buyerId,
+          phone: contact ? contact.phone_number : text,
+        });
+
+        if (result.status === "saved") {
+          await sendAddressPrompt(transport, message.chat.id);
+          return;
+        }
+
+        if (result.status === "invalid") {
+          await sendOrThrow(transport, {
+            chatId: message.chat.id,
+            text: "That phone number is invalid. Send 7–15 digits or tap Share phone.",
+            replyMarkup: {
+              keyboard: [[{ text: "Share phone", request_contact: true }]],
+              resize_keyboard: true,
+              one_time_keyboard: true,
+            },
+          });
+          return;
+        }
+      }
+
+      if (activeCart.checkoutState === "awaiting_address") {
+        const result = await saveAddressAndPrepareReview(commerceDb, scope, {
+          cartId: activeCart.id,
+          connectionId,
+          telegramUserId: buyerId,
+          address: text,
+        });
+
+        if (result.status === "review") {
+          await renderReviewView(
+            transport,
+            message.chat.id,
+            undefined,
+            result.review,
+          );
+          return;
+        }
+
+        if (result.status === "invalid") {
+          await sendAddressPrompt(
+            transport,
+            message.chat.id,
+            "That address is invalid. Send the delivery address as 5–300 characters.",
+          );
+          return;
+        }
+
+        if (result.status === "empty") {
+          await renderCartView(transport, message.chat.id, undefined, null);
+          return;
+        }
+
+        await sendOrThrow(transport, {
+          chatId: message.chat.id,
+          text: "One or more items are unavailable or exceed current stock. Review your cart and try again.",
+          replyMarkup: {
+            inline_keyboard: [
+              [{ text: UI.cart, callback_data: tokens.cart() }],
+              ...homeKeyboard(UI),
+            ],
+          },
+        });
+        return;
+      }
+    }
+  }
+
+  // Any other text returns the scoped storefront rather than leaking a global
+  // or legacy journey. Address and phone text are handled only in their
+  // checkout states above.
+  await renderHome(
+    db,
+    scope,
+    storeName,
+    cod,
+    transport,
+    message.chat.id,
+  );
 }
 
 async function dispatchCallback(
   db: Database,
   scope: StoreScope,
   storeName: string,
+  connectionId: string,
+  cod: CodContext,
+  commerceDb: TransactionDatabase | null,
   transport: TelegramTransport,
   callbackQuery: {
     id: string;
     message?: TelegramMessage;
-    from: { id: number };
+    from: { id: number; first_name?: string };
   },
   parsedToken: ParsedToken,
 ): Promise<void> {
@@ -434,9 +849,239 @@ async function dispatchCallback(
 
   const chatId = message.chat.id;
   const messageId = message.message_id;
+  const buyerId = callbackQuery.from.id;
+
+  if (cod.enabled && commerceDb) {
+    if (parsedToken.type === "cart") {
+      await renderCartView(
+        transport,
+        chatId,
+        messageId,
+        await readCartForBuyer(db, scope, {
+          connectionId,
+          telegramUserId: buyerId,
+        }),
+      );
+      return;
+    }
+
+    if (parsedToken.type === "cartAdd") {
+      const result = await addToCart(commerceDb, scope, {
+        connectionId,
+        telegramUserId: buyerId,
+        telegramChatId: chatId,
+        productId: parsedToken.productId,
+        quantity: parsedToken.quantity,
+      });
+
+      if (result.status === "added") {
+        await renderCartView(transport, chatId, messageId, result.cart);
+        return;
+      }
+
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text:
+          result.status === "out_of_stock"
+            ? UI.outOfStock
+            : result.status === "cod_unavailable"
+              ? UI.notOrderable
+              : UI.unavailable,
+        replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+      });
+      return;
+    }
+
+    if (parsedToken.type === "cartIncrease") {
+      const result = await changeCartQuantity(commerceDb, scope, {
+        connectionId,
+        telegramUserId: buyerId,
+        productId: parsedToken.productId,
+        delta: 1,
+      });
+
+      if (result.status === "updated") {
+        await renderCartView(transport, chatId, messageId, result.cart);
+        return;
+      }
+
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text:
+          result.status === "empty"
+            ? UI.cartEmpty
+            : result.status === "invalid_quantity"
+              ? "Maximum quantity is 99."
+              : UI.genericUnavailable,
+        replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+      });
+      return;
+    }
+
+    if (parsedToken.type === "cartDecrease") {
+      const result = await changeCartQuantity(commerceDb, scope, {
+        connectionId,
+        telegramUserId: buyerId,
+        productId: parsedToken.productId,
+        delta: -1,
+      });
+
+      if (result.status === "updated") {
+        await renderCartView(transport, chatId, messageId, result.cart);
+        return;
+      }
+
+      await renderCartView(transport, chatId, messageId, null);
+      return;
+    }
+
+    if (parsedToken.type === "cartRemove") {
+      const result = await removeCartItem(commerceDb, scope, {
+        connectionId,
+        telegramUserId: buyerId,
+        productId: parsedToken.productId,
+      });
+
+      if (result.status === "updated") {
+        await renderCartView(transport, chatId, messageId, result.cart);
+        return;
+      }
+
+      await renderCartView(transport, chatId, messageId, null);
+      return;
+    }
+
+    if (parsedToken.type === "checkout") {
+      const result = await startCheckout(commerceDb, scope, {
+        cartId: parsedToken.cartId,
+        connectionId,
+        telegramUserId: buyerId,
+        profileName: callbackQuery.from.first_name,
+      });
+
+      if (result.status === "ready") {
+        await renderCartView(transport, chatId, messageId, result.cart);
+        await sendPhonePrompt(transport, chatId, result.cart);
+        return;
+      }
+
+      if (result.status === "empty") {
+        await renderCartView(transport, chatId, messageId, null);
+        return;
+      }
+
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text:
+          result.status === "not_found"
+            ? UI.genericUnavailable
+            : result.status === "cod_unavailable"
+              ? UI.notOrderable
+              : "One or more items are unavailable or exceed current stock. Review your cart and try again.",
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: UI.cart, callback_data: tokens.cart() }],
+            ...homeKeyboard(UI),
+          ],
+        },
+      });
+      return;
+    }
+
+    if (parsedToken.type === "confirmCod") {
+      const result = await confirmCodOrder(commerceDb, scope, {
+        cartId: parsedToken.cartId,
+        connectionId,
+        telegramUserId: buyerId,
+        telegramChatId: chatId,
+        expectedQuoteVersion: parsedToken.quoteVersion,
+      });
+
+      if (result.status === "placed" || result.status === "already_placed") {
+        await renderPlacedOrder(transport, chatId, messageId, result);
+        return;
+      }
+
+      if (result.status === "stale_quote") {
+        await renderReviewView(transport, chatId, messageId, result.review);
+        return;
+      }
+
+      if (result.status === "missing_details") {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: "Checkout needs your phone number and delivery address before confirmation.",
+          replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+        });
+
+        const cart = await readCartForBuyer(db, scope, {
+          connectionId,
+          telegramUserId: buyerId,
+          cartId: parsedToken.cartId,
+        });
+
+        if (cart && result.missing === "phone") {
+          await sendPhonePrompt(transport, chatId, cart);
+        } else if (cart) {
+          await sendAddressPrompt(transport, chatId);
+        }
+        return;
+      }
+
+      if (
+        result.status === "insufficient_stock" ||
+        result.status === "item_unavailable"
+      ) {
+        const cart = await readCartForBuyer(db, scope, {
+          connectionId,
+          telegramUserId: buyerId,
+          cartId: parsedToken.cartId,
+        });
+
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: cartAvailabilityMessage(cart),
+          replyMarkup: {
+            inline_keyboard: [
+              [{ text: UI.cart, callback_data: tokens.cart() }],
+              ...homeKeyboard(UI),
+            ],
+          },
+        });
+        return;
+      }
+
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text:
+          result.status === "cod_unavailable"
+            ? UI.notOrderable
+            : UI.genericUnavailable,
+        replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+      });
+      return;
+    }
+
+    if (parsedToken.type === "backToCart") {
+      const cart = await backToCart(commerceDb, scope, {
+        cartId: parsedToken.cartId,
+        connectionId,
+        telegramUserId: buyerId,
+      });
+
+      await renderCartView(transport, chatId, messageId, cart);
+      return;
+    }
+  }
 
   if (parsedToken.type === "home") {
-    await renderHome(db, scope, storeName, transport, chatId, messageId);
+    await renderHome(db, scope, storeName, cod, transport, chatId, messageId);
     return;
   }
 
@@ -481,6 +1126,7 @@ async function dispatchCallback(
     await renderProduct(
       db,
       scope,
+      cod,
       transport,
       chatId,
       messageId,
@@ -491,7 +1137,7 @@ async function dispatchCallback(
 
   // Every other legacy callback belongs to a different journey. Fail closed to
   // the scoped home instead of running an unscoped path.
-  await renderHome(db, scope, storeName, transport, chatId, messageId);
+  await renderHome(db, scope, storeName, cod, transport, chatId, messageId);
 }
 
 export async function handleManagedTelegramWebhookRequest(
@@ -593,6 +1239,19 @@ export async function handleManagedTelegramWebhookRequest(
       connection.storeId,
     );
 
+    let cod = await isCodAvailable(db, scope);
+    let commerceDb: TransactionDatabase | null = null;
+
+    if (cod.enabled) {
+      try {
+        commerceDb = options?.commerceDb ?? getTransactionDb();
+      } catch {
+        // A deployment without the transaction client keeps browsing intact
+        // and simply does not offer cart/checkout.
+        cod = { enabled: false, setting: cod.setting };
+      }
+    }
+
     const transport =
       options?.transport ??
       createFetchTelegramTransport(
@@ -612,6 +1271,9 @@ export async function handleManagedTelegramWebhookRequest(
         db,
         scope,
         connection.storeName,
+        connection.id,
+        cod,
+        commerceDb,
         transport,
         validation.data.message,
       );
@@ -620,6 +1282,9 @@ export async function handleManagedTelegramWebhookRequest(
         db,
         scope,
         connection.storeName,
+        connection.id,
+        cod,
+        commerceDb,
         transport,
         validation.data.callbackQuery,
         validation.data.parsedToken,
