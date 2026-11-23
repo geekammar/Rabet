@@ -7,11 +7,10 @@ import { CheckCircle2, ExternalLink, RefreshCw, Send } from "lucide-react";
 import type { MerchantLocale } from "@/components/merchant/language-toggle";
 import { MERCHANT_TELEGRAM_COPY } from "@/components/merchant/merchant-telegram-copy";
 import {
+  buildOfficialTelegramIntent,
   buildTelegramLaunchFallbackUrl,
-  buildTelegramLaunchLinks,
-  type TelegramLaunchLinks,
-  type TelegramLaunchTarget,
-} from "@/components/merchant/telegram-launch";
+  isAndroidRuntime,
+} from "@/components/merchant/telegram-official-launch";
 import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 import {
   confirmMerchantTelegramConnection,
@@ -25,24 +24,12 @@ function subscribeNever() {
   return () => {};
 }
 
-function getAndroidSnapshot(): boolean {
-  return /Android/i.test(navigator.userAgent);
+function getLaunchFailureSnapshot(): boolean {
+  return /telegram-launch-failed=telegram/.test(window.location.hash);
 }
 
-function getLaunchFailureSnapshot(): TelegramLaunchTarget | null {
-  const match = /telegram-launch-failed=(telegram|telegram-x)/.exec(
-    window.location.hash,
-  );
-
-  return match ? (match[1] as TelegramLaunchTarget) : null;
-}
-
-function getServerFalse(): boolean {
+function getServerLaunchFailure(): boolean {
   return false;
-}
-
-function getServerNull(): TelegramLaunchTarget | null {
-  return null;
 }
 
 export function MerchantTelegramConnection({
@@ -60,35 +47,11 @@ export function MerchantTelegramConnection({
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [actionError, setActionError] = useState<string | null>(null);
-  const isAndroid = useSyncExternalStore(
-    subscribeNever,
-    getAndroidSnapshot,
-    getServerFalse,
-  );
   const launchFailure = useSyncExternalStore(
     subscribeNever,
     getLaunchFailureSnapshot,
-    getServerNull,
+    getServerLaunchFailure,
   );
-
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
-
-  function androidLinks(
-    httpsUrl: string,
-  ): { telegram: TelegramLaunchLinks; telegramX: TelegramLaunchLinks } | null {
-    if (!isAndroid || !origin) return null;
-
-    const telegram = buildTelegramLaunchLinks(
-      httpsUrl,
-      buildTelegramLaunchFallbackUrl(origin, "telegram"),
-    );
-    const telegramX = buildTelegramLaunchLinks(
-      httpsUrl,
-      buildTelegramLaunchFallbackUrl(origin, "telegram-x"),
-    );
-
-    return telegram && telegramX ? { telegram, telegramX } : null;
-  }
 
   const failureReason = state.state === "failed" ? state.reason : null;
   const failureMessage = failureReason
@@ -118,9 +81,21 @@ export function MerchantTelegramConnection({
   function handleResult(result: MerchantTelegramActionResult) {
     if (result.ok) {
       setActionError(null);
-      // The waiting state shows explicit Telegram / Telegram X choices. Do not
-      // auto-open an app here: that would bypass the user's app selection.
       router.refresh();
+
+      if (result.deepLink) {
+        if (isAndroidRuntime()) {
+          const fallback = buildTelegramLaunchFallbackUrl(window.location.origin);
+          const intent = buildOfficialTelegramIntent(result.deepLink, fallback);
+
+          // One tap: official Telegram only. If it is missing or Chrome blocks
+          // the intent, the browser returns to the same pending attempt page.
+          window.location.assign(intent ?? fallback);
+        } else {
+          window.location.assign(result.deepLink);
+        }
+      }
+
       return;
     }
 
@@ -197,81 +172,40 @@ export function MerchantTelegramConnection({
               ? copy.waitingProvisioning
               : copy.waitingOpen}
           </p>
-          {(() => {
-            const links = androidLinks(state.deepLink);
-
-            return links ? (
-              <div className="space-y-2">
-                <p className="text-sm text-muted-foreground">
-                  {copy.launchChoiceTitle}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Button asChild className="min-h-11">
-                    <a
-                      href={links.telegram.telegramIntent}
-                      data-testid="merchant-telegram-open"
-                    >
-                      <ExternalLink className="size-4" aria-hidden="true" />
-                      {copy.openTelegram}
-                    </a>
-                  </Button>
-                  <Button asChild variant="outline" className="min-h-11">
-                    <a
-                      href={links.telegramX.telegramXIntent}
-                      data-testid="merchant-telegram-open-x"
-                    >
-                      <ExternalLink className="size-4" aria-hidden="true" />
-                      {copy.openTelegramX}
-                    </a>
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <Button asChild className="min-h-11">
-                <a
-                  href={state.deepLink}
-                  target="_blank"
-                  rel="noreferrer"
-                  data-testid="merchant-telegram-open"
-                >
-                  <ExternalLink className="size-4" aria-hidden="true" />
-                  {copy.openTelegram}
-                </a>
-              </Button>
-            );
-          })()}
           {launchFailure ? (
             <div
               role="status"
-              className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+              className="space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
               data-testid="merchant-telegram-launch-failure"
             >
               <p className="font-medium">{copy.launchFailedTitle}</p>
               <p>{copy.launchFailedBody}</p>
-              <Button asChild variant="outline" className="min-h-11">
-                <a
-                  href={state.deepLink}
-                  target="_blank"
-                  rel="noreferrer"
-                  data-testid="merchant-telegram-open-web-fallback"
-                >
-                  <ExternalLink className="size-4" aria-hidden="true" />
-                  {copy.openWebFallback}
-                </a>
-              </Button>
             </div>
           ) : null}
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11"
-            onClick={() => router.refresh()}
-            disabled={isPending}
-            data-testid="merchant-telegram-refresh"
-          >
-            <RefreshCw className="size-4" aria-hidden="true" />
-            {copy.refresh}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild className="min-h-11">
+              <a
+                href={state.deepLink}
+                target="_blank"
+                rel="noreferrer"
+                data-testid="merchant-telegram-open"
+              >
+                <ExternalLink className="size-4" aria-hidden="true" />
+                {copy.openTelegram}
+              </a>
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              onClick={() => router.refresh()}
+              disabled={isPending}
+              data-testid="merchant-telegram-refresh"
+            >
+              <RefreshCw className="size-4" aria-hidden="true" />
+              {copy.refresh}
+            </Button>
+          </div>
         </div>
       ) : null}
 
@@ -345,70 +279,17 @@ export function MerchantTelegramConnection({
             </Button>
           ) : null}
           {storeStatus === "active" ? (
-            (() => {
-              const links = androidLinks(state.openUrl);
-
-              return links ? (
-                <div className="space-y-2">
-                  <p className="text-sm text-muted-foreground">
-                    {copy.launchChoiceTitle}
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    <Button asChild className="min-h-11">
-                      <a
-                        href={links.telegram.telegramIntent}
-                        data-testid="merchant-telegram-open-bot"
-                      >
-                        <ExternalLink className="size-4" aria-hidden="true" />
-                        {copy.openBot}
-                      </a>
-                    </Button>
-                    <Button asChild variant="outline" className="min-h-11">
-                      <a
-                        href={links.telegramX.telegramXIntent}
-                        data-testid="merchant-telegram-open-bot-x"
-                      >
-                        <ExternalLink className="size-4" aria-hidden="true" />
-                        {copy.openBotX}
-                      </a>
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <Button asChild className="min-h-11">
-                  <a
-                    href={state.openUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    data-testid="merchant-telegram-open-bot"
-                  >
-                    <ExternalLink className="size-4" aria-hidden="true" />
-                    {copy.openBot}
-                  </a>
-                </Button>
-              );
-            })()
-          ) : null}
-          {launchFailure ? (
-            <div
-              role="status"
-              className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-              data-testid="merchant-telegram-launch-failure"
-            >
-              <p className="font-medium">{copy.launchFailedTitle}</p>
-              <p>{copy.launchFailedBody}</p>
-              <Button asChild variant="outline" className="min-h-11">
-                <a
-                  href={state.openUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  data-testid="merchant-telegram-open-web-fallback"
-                >
-                  <ExternalLink className="size-4" aria-hidden="true" />
-                  {copy.openWebFallback}
-                </a>
-              </Button>
-            </div>
+            <Button asChild className="min-h-11">
+              <a
+                href={state.openUrl}
+                target="_blank"
+                rel="noreferrer"
+                data-testid="merchant-telegram-open-bot"
+              >
+                <ExternalLink className="size-4" aria-hidden="true" />
+                {copy.openBot}
+              </a>
+            </Button>
           ) : null}
         </div>
       ) : null}
