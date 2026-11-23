@@ -50,6 +50,30 @@ describe("merchant Telegram start route", () => {
     expect(startMerchantTelegramConnection).toHaveBeenCalledTimes(1);
   });
 
+  it("accepts Chrome's null origin for a no-referrer same-origin form post", async () => {
+    vi.stubEnv("APP_URL", ORIGIN);
+    startMerchantTelegramConnection.mockResolvedValue({
+      ok: true,
+      deepLink: DEEP_LINK,
+    });
+
+    const response = await POST(
+      new Request(`${ORIGIN}/app/setup/telegram/start`, {
+        method: "POST",
+        headers: {
+          Origin: "null",
+          "Sec-Fetch-Site": "same-origin",
+          "User-Agent": ANDROID_UA,
+        },
+      }),
+    );
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("Location")).toContain(
+      "package=org.telegram.messenger",
+    );
+  });
+
   it("keeps the original HTTPS link on desktop", async () => {
     vi.stubEnv("APP_URL", ORIGIN);
     startMerchantTelegramConnection.mockResolvedValue({

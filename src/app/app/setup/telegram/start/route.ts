@@ -5,7 +5,7 @@ import {
   isAndroidUserAgent,
 } from "@/components/merchant/telegram-official-launch";
 import {
-  isSameOriginRequest,
+  isSameOriginNavigationPost,
   trustedApplicationOrigin,
 } from "@/lib/http/request-origin";
 
@@ -35,7 +35,7 @@ function redirectTo(location: string): Response {
  * generic t.me link is never used on Android.
  */
 export async function POST(request: Request): Promise<Response> {
-  if (!isSameOriginRequest(request)) {
+  if (!isSameOriginNavigationPost(request)) {
     return new Response("Forbidden", {
       status: 403,
       headers: NO_STORE_HEADERS,
