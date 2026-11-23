@@ -100,7 +100,7 @@ describe("official Telegram Android launch", () => {
     expect(component).not.toContain("merchant-telegram-open-x");
     expect(component).not.toContain("openTelegramX");
 
-    expect(route).toContain("isSameOriginRequest");
+    expect(route).toContain("isSameOriginNavigationPost");
     expect(route).toContain("status: 303");
     expect(route).toContain("buildAndroidTelegramLaunchTarget");
     expect(route).toContain("isAndroidUserAgent");

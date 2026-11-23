@@ -60,3 +60,25 @@ export function isSameOriginRequest(
     return false;
   }
 }
+
+/**
+ * Verifies a browser form post that navigates to the same application.
+ *
+ * Authenticated pages set `Referrer-Policy: no-referrer`, and Chrome then sends
+ * `Origin: null` for an ordinary same-origin form post. In that case Fetch
+ * Metadata still proves the request came from this same origin. A cross-site
+ * poster cannot set `Sec-Fetch-Site: same-origin`, and SameSite session cookies
+ * are not sent on a cross-site POST anyway.
+ */
+export function isSameOriginNavigationPost(
+  request: Request,
+  trustedOrigin: string | null = trustedApplicationOrigin(),
+): boolean {
+  if (!trustedOrigin) return false;
+
+  if (request.headers.get("origin") === "null") {
+    return request.headers.get("sec-fetch-site") === "same-origin";
+  }
+
+  return isSameOriginRequest(request, trustedOrigin);
+}
