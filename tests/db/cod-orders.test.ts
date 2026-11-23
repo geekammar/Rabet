@@ -20,8 +20,11 @@ import {
   telegramConnection,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
+import { lockConnectionStore } from "@/lib/telegram/connection-locks";
+import { readReadyManagedConnection } from "@/lib/telegram/manager-provisioning";
 import {
   addToCart,
+  changeCartQuantity,
   confirmCodOrder,
   isCodAvailable,
   listMerchantOrders,
@@ -341,27 +344,31 @@ async function replaceConnection(input: {
   botId: number;
   botUsername: string;
 }): Promise<string> {
-  await db()
-    .update(telegramConnection)
-    .set({ status: "revoked" })
-    .where(eq(telegramConnection.id, input.oldConnectionId));
+  return db().transaction(async (tx) => {
+    await lockConnectionStore(tx, input.storeId);
 
-  const [connection] = await db()
-    .insert(telegramConnection)
-    .values({
-      storeId: input.storeId,
-      botId: input.botId,
-      botUsername: input.botUsername,
-      tokenCiphertext: "synthetic-ciphertext",
-      tokenKeyId: "v1",
-      webhookSecretHash: "c".repeat(64),
-      webhookUrl: `https://app.example.test/api/telegram/webhook/managed/${input.botId}`,
-      status: "ready",
-      verifiedAt: new Date(),
-    })
-    .returning();
+    await tx
+      .update(telegramConnection)
+      .set({ status: "revoked" })
+      .where(eq(telegramConnection.id, input.oldConnectionId));
 
-  return connection.id;
+    const [connection] = await tx
+      .insert(telegramConnection)
+      .values({
+        storeId: input.storeId,
+        botId: input.botId,
+        botUsername: input.botUsername,
+        tokenCiphertext: "synthetic-ciphertext",
+        tokenKeyId: "v1",
+        webhookSecretHash: "c".repeat(64),
+        webhookUrl: `https://app.example.test/api/telegram/webhook/managed/${input.botId}`,
+        status: "ready",
+        verifiedAt: new Date(),
+      })
+      .returning();
+
+    return connection.id;
+  });
 }
 
 async function prepareReviewedOrder(input: {
@@ -866,7 +873,7 @@ describe.skipIf(!shouldRun)("COD orders on the managed store scope", () => {
         telegramChatId: BUYER_A,
         expectedQuoteVersion: review.quoteVersion,
       }),
-    ).toEqual({ status: "not_found" });
+    ).toEqual({ status: "connection_stale" });
 
     expect(
       await addToCart(tx(), scopeB, {
@@ -1075,7 +1082,208 @@ describe.skipIf(!shouldRun)("COD orders on the managed store scope", () => {
         telegramChatId: BUYER_A,
         expectedQuoteVersion: 1,
       }),
+    ).toEqual({ status: "connection_stale" });
+  });
+
+  it("rejects a stale Add after ingress and a replacement active cart exist", async () => {
+    const { scope: scopeA, cartId: oldCartId } = await prepareReviewedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      buyerId: BUYER_A,
+      productId: fixture.productA1Id,
+    });
+
+    // The X request passed ingress before X was replaced.
+    expect(
+      await readReadyManagedConnection(asAppDb(db()), fixture.connectionAId),
+    ).not.toBeNull();
+
+    const replacementId = await replaceConnection({
+      storeId: fixture.storeAId,
+      oldConnectionId: fixture.connectionAId,
+      botId: 880111,
+      botUsername: "CodStaleAddReplacementBot",
+    });
+
+    const replacementCart = await addToCart(tx(), scopeA, {
+      connectionId: replacementId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      productId: fixture.productA2Id,
+      quantity: 1,
+    });
+    expect(replacementCart.status).toBe("added");
+    if (replacementCart.status !== "added") return;
+
+    // X resumes after Y has its active cart. The stale request must not touch
+    // Y's cart, abandon it, or create another active cart.
+    expect(
+      await addToCart(tx(), scopeA, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        productId: fixture.productA1Id,
+        quantity: 1,
+      }),
+    ).toEqual({ status: "connection_stale" });
+
+    const activeCarts = await db()
+      .select()
+      .from(cart)
+      .where(
+        and(
+          eq(cart.storeId, fixture.storeAId),
+          eq(cart.telegramUserId, BUYER_A),
+          inArray(cart.status, ["open", "checkout"]),
+        ),
+      );
+    expect(activeCarts).toHaveLength(1);
+    expect(activeCarts[0].id).toBe(replacementCart.cart.id);
+    expect(activeCarts[0].connectionId).toBe(replacementId);
+
+    const replacementItems = await db()
+      .select()
+      .from(cartItem)
+      .where(eq(cartItem.cartId, replacementCart.cart.id));
+    expect(replacementItems).toHaveLength(1);
+    expect(replacementItems[0].productId).toBe(fixture.productA2Id);
+    expect(replacementItems[0].quantity).toBe(1);
+
+    const [oldCart] = await db()
+      .select()
+      .from(cart)
+      .where(eq(cart.id, oldCartId));
+    expect(oldCart.status).toBe("abandoned");
+    expect(await db().select().from(order)).toHaveLength(0);
+    expect(await db().select().from(inventoryReservation)).toHaveLength(0);
+
+    // Other stale writes are fenced too.
+    expect(
+      await changeCartQuantity(tx(), scopeA, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        productId: fixture.productA2Id,
+        delta: 1,
+      }),
     ).toEqual({ status: "not_found" });
+    expect(
+      await startCheckout(tx(), scopeA, {
+        cartId: replacementCart.cart.id,
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+      }),
+    ).toEqual({ status: "not_found" });
+  });
+
+  it("rejects a stale confirmation after ingress and a replacement active cart exist", async () => {
+    const { scope: scopeA, cartId: oldCartId, review } = await prepareReviewedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      buyerId: BUYER_A,
+      productId: fixture.productA1Id,
+    });
+
+    expect(
+      await readReadyManagedConnection(asAppDb(db()), fixture.connectionAId),
+    ).not.toBeNull();
+
+    const replacementId = await replaceConnection({
+      storeId: fixture.storeAId,
+      oldConnectionId: fixture.connectionAId,
+      botId: 880112,
+      botUsername: "CodStaleConfirmReplacementBot",
+    });
+
+    const replacementCart = await addToCart(tx(), scopeA, {
+      connectionId: replacementId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      productId: fixture.productA2Id,
+      quantity: 1,
+    });
+    expect(replacementCart.status).toBe("added");
+    if (replacementCart.status !== "added") return;
+
+    // X resumes with a reviewed cart and attempts confirmation. It must not
+    // place an order or reserve stock, even though its old cart and quote
+    // identifiers are still valid-looking.
+    expect(
+      await confirmCodOrder(tx(), scopeA, {
+        cartId: oldCartId,
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        expectedQuoteVersion: review.quoteVersion,
+      }),
+    ).toEqual({ status: "connection_stale" });
+
+    expect(await db().select().from(order)).toHaveLength(0);
+    expect(await db().select().from(inventoryReservation)).toHaveLength(0);
+
+    const [inventory] = await db()
+      .select()
+      .from(productInventory)
+      .where(eq(productInventory.productId, fixture.productA1Id));
+    expect(inventory.reserved).toBe(0);
+
+    const activeCarts = await db()
+      .select()
+      .from(cart)
+      .where(
+        and(
+          eq(cart.storeId, fixture.storeAId),
+          eq(cart.telegramUserId, BUYER_A),
+          inArray(cart.status, ["open", "checkout"]),
+        ),
+      );
+    expect(activeCarts).toHaveLength(1);
+    expect(activeCarts[0].id).toBe(replacementCart.cart.id);
+    expect(activeCarts[0].connectionId).toBe(replacementId);
+
+    const replacementItems = await db()
+      .select()
+      .from(cartItem)
+      .where(eq(cartItem.cartId, replacementCart.cart.id));
+    expect(replacementItems).toHaveLength(1);
+    expect(replacementItems[0].productId).toBe(fixture.productA2Id);
+  });
+
+  it("rejects a stale confirmation even before the replacement cart exists", async () => {
+    const { scope: scopeA, cartId: oldCartId, review } = await prepareReviewedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      buyerId: BUYER_A,
+      productId: fixture.productA1Id,
+    });
+
+    expect(
+      await readReadyManagedConnection(asAppDb(db()), fixture.connectionAId),
+    ).not.toBeNull();
+
+    await replaceConnection({
+      storeId: fixture.storeAId,
+      oldConnectionId: fixture.connectionAId,
+      botId: 880113,
+      botUsername: "CodStaleConfirmNoCartBot",
+    });
+
+    expect(
+      await confirmCodOrder(tx(), scopeA, {
+        cartId: oldCartId,
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        expectedQuoteVersion: review.quoteVersion,
+      }),
+    ).toEqual({ status: "connection_stale" });
+
+    expect(await db().select().from(order)).toHaveLength(0);
+    expect(await db().select().from(inventoryReservation)).toHaveLength(0);
+    const [inventory] = await db()
+      .select()
+      .from(productInventory)
+      .where(eq(productInventory.productId, fixture.productA1Id));
+    expect(inventory.reserved).toBe(0);
   });
 
   it("serializes concurrent Add to cart retries during connection recovery", async () => {
@@ -1200,7 +1408,7 @@ describe.skipIf(!shouldRun)("COD orders on the managed store scope", () => {
         telegramChatId: BUYER_A,
         expectedQuoteVersion: 1,
       }),
-    ).toEqual({ status: "not_found" });
+    ).toEqual({ status: "connection_stale" });
   });
 
   it("enforces immutable order snapshots and stock invariants in the database", async () => {

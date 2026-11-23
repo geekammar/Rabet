@@ -36,6 +36,7 @@ import {
   hashLinkNonce,
   hashWebhookSecret,
 } from "./connection-secrets";
+import { lockConnectionStore } from "./connection-locks";
 import {
   buildManagedWebhookUrl,
   suggestedBotUsername,
@@ -1307,12 +1308,7 @@ export async function handleManagedBotEvent(
 
   try {
     persisted = await db.transaction(async (tx): Promise<PersistResult> => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
-          "telegram-connection-store",
-          claimed.storeId,
-        )}))`,
-      );
+      await lockConnectionStore(tx, claimed.storeId);
 
       const [currentAttempt] = await tx
         .select({
@@ -2657,12 +2653,7 @@ export async function confirmTelegramConnection(
 
   try {
     const committed = await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
-          "telegram-connection-store",
-          input.storeId,
-        )}))`,
-      );
+      await lockConnectionStore(tx, input.storeId);
 
       const [currentAttempt] = await tx
         .select({

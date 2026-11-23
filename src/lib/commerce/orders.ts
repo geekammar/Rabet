@@ -11,7 +11,9 @@ import {
   order as orderTable,
   orderItem,
   productInventory,
+  store,
   storeCommerceSetting,
+  telegramConnection,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
 import { readManagedProduct } from "@/lib/catalog/managed-storefront";
@@ -19,6 +21,7 @@ import {
   assertStoreScope,
   type StoreScope,
 } from "@/lib/data/store-scope";
+import { lockConnectionStoreShared } from "@/lib/telegram/connection-locks";
 import { isCodOrdersDeploymentEnabled } from "./feature";
 
 /**
@@ -105,6 +108,7 @@ type OrderReceipt = {
 export type ConfirmOrderResult =
   | ({ status: "placed" } & OrderReceipt)
   | ({ status: "already_placed" } & OrderReceipt)
+  | { status: "connection_stale" }
   | { status: "stale_quote"; review: CheckoutReview }
   | { status: "insufficient_stock"; productId: string }
   | { status: "item_unavailable"; productId: string }
@@ -143,6 +147,37 @@ export type MerchantOrder = {
 
 function queryBuilder(db: CommerceQueryDatabase): Database {
   return db as unknown as Database;
+}
+
+/**
+ * Verifies the connection again at the transaction boundary and acquires the
+ * same per-store lock used when a replacement connection is made ready.
+ * Ingress verification alone is insufficient: the connection may have been
+ * revoked while this request was in flight.
+ */
+async function connectionIsCurrent(
+  db: CommerceTransaction,
+  scope: StoreScope,
+  connectionId: string,
+): Promise<boolean> {
+  assertStoreScope(scope);
+  await lockConnectionStoreShared(db, scope.storeId);
+
+  const [row] = await db
+    .select({ id: telegramConnection.id })
+    .from(telegramConnection)
+    .innerJoin(store, eq(store.id, telegramConnection.storeId))
+    .where(
+      and(
+        eq(telegramConnection.id, connectionId),
+        eq(telegramConnection.storeId, scope.storeId),
+        eq(telegramConnection.status, "ready"),
+        eq(store.status, "active"),
+      ),
+    )
+    .limit(1);
+
+  return Boolean(row);
 }
 
 function centsFromMoney(value: string): number {
@@ -676,6 +711,7 @@ export class CartQuoteError extends Error {
 
 export type AddToCartResult =
   | { status: "added"; cart: CartView }
+  | { status: "connection_stale" }
   | { status: "unavailable" }
   | { status: "out_of_stock" }
   | { status: "invalid_quantity" }
@@ -703,6 +739,10 @@ export async function addToCart(
   }
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "connection_stale" };
+    }
+
     const setting = await readCommerceSetting(tx, scope);
     if (!setting?.codEnabled || !isCodOrdersDeploymentEnabled()) {
       return { status: "cod_unavailable" };
@@ -796,6 +836,10 @@ export async function changeCartQuantity(
   assertStoreScope(scope);
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "not_found" };
+    }
+
     const activeCart = await findActiveCart(tx, scope, {
       ...input,
       forUpdate: true,
@@ -859,6 +903,10 @@ export async function removeCartItem(
   assertStoreScope(scope);
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "not_found" };
+    }
+
     const activeCart = await findActiveCart(tx, scope, {
       ...input,
       forUpdate: true,
@@ -933,6 +981,10 @@ export async function startCheckout(
   assertStoreScope(scope);
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "not_found" };
+    }
+
     const cartRow = await findActiveCart(tx, scope, {
       connectionId: input.connectionId,
       telegramUserId: input.telegramUserId,
@@ -1011,6 +1063,10 @@ export async function savePhone(
   if (!phone) return { status: "invalid" };
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "not_found" };
+    }
+
     const cartRow = await findActiveCart(tx, scope, {
       connectionId: input.connectionId,
       telegramUserId: input.telegramUserId,
@@ -1065,6 +1121,10 @@ export async function saveAddressAndPrepareReview(
   if (!address) return { status: "invalid" };
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "not_found" };
+    }
+
     const cartRow = await findActiveCart(tx, scope, {
       connectionId: input.connectionId,
       telegramUserId: input.telegramUserId,
@@ -1144,6 +1204,10 @@ export async function refreshReview(
   assertStoreScope(scope);
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "not_found" };
+    }
+
     const cartRow = await findActiveCart(tx, scope, {
       ...input,
       forUpdate: true,
@@ -1199,6 +1263,10 @@ export async function confirmCodOrder(
   assertStoreScope(scope);
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "connection_stale" };
+    }
+
     const [cartRow] = await tx
       .select()
       .from(cart)
@@ -1531,6 +1599,10 @@ export async function backToCart(
   assertStoreScope(scope);
 
   return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return null;
+    }
+
     const cartRow = await findActiveCart(tx, scope, {
       ...input,
       forUpdate: true,
