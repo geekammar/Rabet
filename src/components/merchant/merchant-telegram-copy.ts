@@ -11,6 +11,11 @@ type Copy = {
   waitingTelegram: string;
   waitingProvisioning: string;
   openTelegram: string;
+  openTelegramX: string;
+  launchChoiceTitle: string;
+  launchFailedTitle: string;
+  launchFailedBody: string;
+  openWebFallback: string;
   refresh: string;
   confirmTitle: string;
   confirmBody: string;
@@ -21,6 +26,7 @@ type Copy = {
   unpublishedBody: string;
   publish: string;
   openBot: string;
+  openBotX: string;
   expiredTitle: string;
   failedTitle: string;
   readOnly: string;
@@ -41,7 +47,13 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       "أكمل إنشاء البوت في تيليجرام، ثم ارجع لتأكيد الربط.",
     waitingProvisioning:
       "بانتظار اكتمال إنشاء البوت في تيليجرام…",
-    openTelegram: "فتح تيليجرام",
+    openTelegram: "فتح في Telegram",
+    openTelegramX: "فتح في Telegram X",
+    launchChoiceTitle: "اختر تطبيق تيليجرام الذي تريد فتح الرابط فيه.",
+    launchFailedTitle: "تعذر فتح التطبيق المختار.",
+    launchFailedBody:
+      "قد لا يكون التطبيق مثبتًا أو منع المتصفح فتحه. الرابط العام متاح أدناه صراحةً.",
+    openWebFallback: "فتح الرابط العام",
     refresh: "تحديث الحالة",
     confirmTitle: "تأكيد بوت المتجر",
     confirmBody:
@@ -52,7 +64,8 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     connectedBody: "هذا البوت متصل بمتجرك وهو جاهز لاستقبال العملاء.",
     unpublishedBody: "البوت متصل. انشر متجرك عشان يبدأ يستقبل العملاء.",
     publish: "انشر متجري",
-    openBot: "فتح البوت في تيليجرام",
+    openBot: "فتح البوت في Telegram",
+    openBotX: "فتح البوت في Telegram X",
     expiredTitle: "انتهت صلاحية رابط الربط.",
     failedTitle: "لم يكتمل ربط البوت.",
     readOnly: "المتجر موقوف مؤقتًا، ولا يمكن تغيير اتصال تيليجرام الآن.",
@@ -102,7 +115,13 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       "The link is open. Finish creating the bot in Telegram, then return and refresh the status.",
     waitingProvisioning:
       "The bot was received. Verifying its identity and registering the webhook…",
-    openTelegram: "Open Telegram",
+    openTelegram: "Open in Telegram",
+    openTelegramX: "Open in Telegram X",
+    launchChoiceTitle: "Choose which Telegram app should open the link.",
+    launchFailedTitle: "The selected app could not be opened.",
+    launchFailedBody:
+      "The app may not be installed, or the browser blocked the intent. The generic web link is available below explicitly.",
+    openWebFallback: "Open the web link",
     refresh: "Refresh status",
     confirmTitle: "Confirm the store bot",
     confirmBody:
@@ -114,6 +133,7 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     unpublishedBody: "Your bot is connected. Publish your store to start welcoming customers.",
     publish: "Publish my store",
     openBot: "Open the bot in Telegram",
+    openBotX: "Open the bot in Telegram X",
     expiredTitle: "The connection link expired.",
     failedTitle: "The bot connection was not completed.",
     readOnly:

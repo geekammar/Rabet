@@ -1439,7 +1439,6 @@ async function runJourney(cdp, fixture, authSecret) {
   );
   assert((await evaluate("document.querySelector('[data-testid=\"invite-store\"]').value")) === b.storeName, "Invite should show store B name");
   await setValue('[data-testid="invite-password"]', fixture.password);
-  await setValue('[data-testid="invite-confirmation"]', fixture.password);
   await click('[data-testid="invite-submit"]');
   await waitForUrl("/app/setup", "merchant B setup page");
   await waitFor(
@@ -1698,7 +1697,6 @@ async function runJourney(cdp, fixture, authSecret) {
   );
   assert((await evaluate("document.querySelector('[data-testid=\"invite-store\"]').value")) === empty.storeName, "Invite should show empty store name");
   await setValue('[data-testid="invite-password"]', fixture.password);
-  await setValue('[data-testid="invite-confirmation"]', fixture.password);
   await click('[data-testid="invite-submit"]');
   await waitForUrl("/app/setup", "empty merchant setup page");
 
