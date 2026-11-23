@@ -1573,9 +1573,8 @@ async function sendManagedBotConfirmation(
 ): Promise<void> {
   if (!transport) return;
 
-  const copy = managedBotConfirmationCopy(input);
-
   try {
+    const copy = managedBotConfirmationCopy(input);
     const result = await transport.sendMessage({
       chatId: input.chatId,
       text: copy.text,
