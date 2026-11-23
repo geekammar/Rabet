@@ -28,6 +28,17 @@ describe("merchant Telegram connection copy", () => {
     }
   });
 
+  it("names the fresh and pending primary actions", () => {
+    expect(MERCHANT_TELEGRAM_COPY.ar.connect).toBe("إنشاء بوت متجري");
+    expect(MERCHANT_TELEGRAM_COPY.en.connect).toBe("Create my store bot");
+    expect(MERCHANT_TELEGRAM_COPY.ar.openTelegram).toBe(
+      "متابعة إنشاء البوت",
+    );
+    expect(MERCHANT_TELEGRAM_COPY.en.openTelegram).toBe(
+      "Continue creating the bot",
+    );
+  });
+
   it("provides distinct Arabic and English text for the visible states", () => {
     expect(MERCHANT_TELEGRAM_COPY.ar.waitingTitle).not.toBe(
       MERCHANT_TELEGRAM_COPY.en.waitingTitle,
