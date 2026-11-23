@@ -1,0 +1,76 @@
+name: COD Staging Telegram Setup
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type CONFIGURE_COD_TELEGRAM to authorize isolated Manager webhook configuration.'
+        type: string
+        default: ""
+        required: true
+  push:
+    branches:
+      - ops/cod-staging-acceptance
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-staging-telegram
+  cancel-in-progress: false
+
+jobs:
+  telegram:
+    name: Configure isolated COD Manager Bot
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[configure-cod-telegram]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 40
+
+    steps:
+      - name: Validate confirmation
+        env:
+          RABET_CONFIRM: ${{ inputs.confirm }}
+          RABET_REF: ${{ github.ref }}
+          RABET_EVENT: ${{ github.event_name }}
+        run: |
+          if [ "${RABET_EVENT}" = "workflow_dispatch" ]; then
+            if [ "${RABET_CONFIRM}" != "CONFIGURE_COD_TELEGRAM" ]; then
+              echo "Confirmation must equal CONFIGURE_COD_TELEGRAM." >&2
+              exit 1
+            fi
+          else
+            if [ "${RABET_REF}" != "refs/heads/ops/cod-staging-acceptance" ]; then
+              echo "Push trigger is restricted to ops/cod-staging-acceptance." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure Manager Bot, secrets, webhook and verify
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 83ac0c7166644bd71ab43cd86c8f404e00595514
+        run: node scripts/cod-staging-telegram.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-telegram-summary
+          path: /tmp/cod-staging-telegram-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
