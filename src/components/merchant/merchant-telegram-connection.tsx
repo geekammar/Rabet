@@ -29,8 +29,14 @@ import {
 } from "@/app/actions/merchant-telegram";
 import { Button } from "@/components/ui/button";
 
-function subscribeNever() {
-  return () => {};
+function subscribeToLocation(onStoreChange: () => void) {
+  window.addEventListener("hashchange", onStoreChange);
+  window.addEventListener("popstate", onStoreChange);
+
+  return () => {
+    window.removeEventListener("hashchange", onStoreChange);
+    window.removeEventListener("popstate", onStoreChange);
+  };
 }
 
 function getLaunchFailureSnapshot(): boolean {
@@ -124,12 +130,12 @@ export function MerchantTelegramConnection({
   const [isPending, startTransition] = useTransition();
   const [actionError, setActionError] = useState<string | null>(null);
   const launchFailure = useSyncExternalStore(
-    subscribeNever,
+    subscribeToLocation,
     getLaunchFailureSnapshot,
     getServerLaunchFailure,
   );
   const startError = useSyncExternalStore(
-    subscribeNever,
+    subscribeToLocation,
     getStartErrorSnapshot,
     getServerStartError,
   );
