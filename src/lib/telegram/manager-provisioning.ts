@@ -1,7 +1,19 @@
 import "server-only";
 
 import crypto from "node:crypto";
-import { and, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import type { TransactionDatabase } from "@/db/transaction-client";
@@ -44,6 +56,9 @@ export const TELEGRAM_LINK_ATTEMPT_TTL_MS = 15 * 60 * 1000;
  * ownership before it can mutate again.
  */
 export const WEBHOOK_OPERATION_LEASE_MS = 5 * 60 * 1000;
+
+/** A provisioning claim older than this is abandoned and can be reclaimed. */
+export const MANAGED_BOT_PROVISIONING_LEASE_MS = 2 * 60 * 1000;
 
 type AttemptTransaction = Parameters<
   Parameters<TransactionDatabase["transaction"]>[0]
@@ -202,6 +217,362 @@ export async function createTelegramLinkAttempt(
 
     throw mapDatabaseError(error);
   }
+}
+
+/**
+ * How long stored Telegram evidence remains eligible for automatic recovery.
+ * A verified candidate older than this still needs operator support rather
+ * than silently replacing a merchant's current intention.
+ */
+export const MANAGED_BOT_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export type EnsuredLinkAttempt =
+  | {
+      status: "created" | "reused";
+      attemptId: string;
+      nonce: string;
+      expiresAt: Date;
+    }
+  | {
+      status: "candidate";
+      attemptId: string;
+      connectionId: string;
+      botUsername: string;
+      botName: string | null;
+      expiresAt: Date;
+    }
+  | { status: "preparing"; attemptId: string; expiresAt: Date }
+  | {
+      status: "recoverable";
+      attemptId: string;
+      connectionId: string | null;
+      botUsername: string;
+      botName: string | null;
+    }
+  | { status: "connected"; botUsername: string; botName: string | null }
+  | { status: "conflict" };
+
+/**
+ * Returns the existing live attempt for a store instead of creating a second
+ * one. A verified bot candidate is never revoked by a repeated Create tap, a
+ * stale restored page, or a retry after Telegram has already confirmed the
+ * bot. Only an empty/expired store creates a fresh deep link.
+ */
+export async function ensureTelegramLinkAttempt(
+  db: TransactionDatabase,
+  input: {
+    storeId: string;
+    merchantUserId: string;
+    managerBotUsername: string;
+    now?: Date;
+  },
+): Promise<EnsuredLinkAttempt> {
+  const now = input.now ?? new Date();
+  const expiresAt = new Date(now.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS);
+  const nonce = generateLinkNonce();
+  const nonceDigest = hashLinkNonce(nonce);
+  let encryptedNonce: { ciphertext: string; keyId: string };
+
+  try {
+    encryptedNonce = encryptConnectionSecret(nonce);
+  } catch {
+    return { status: "conflict" };
+  }
+
+  try {
+    return await db.transaction(async (tx): Promise<EnsuredLinkAttempt> => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
+          "telegram-link-attempt",
+          input.storeId,
+        )}))`,
+      );
+
+      await tx
+        .update(telegramLinkAttempt)
+        .set({ status: "expired", failureCode: "expired" })
+        .where(
+          and(
+            eq(telegramLinkAttempt.storeId, input.storeId),
+            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+            lte(telegramLinkAttempt.expiresAt, now),
+          ),
+        );
+
+      const [ready] = await tx
+        .select({
+          botUsername: telegramConnection.botUsername,
+          botName: telegramConnection.botName,
+        })
+        .from(telegramConnection)
+        .where(
+          and(
+            eq(telegramConnection.storeId, input.storeId),
+            eq(telegramConnection.status, "ready"),
+          ),
+        )
+        .orderBy(desc(telegramConnection.verifiedAt))
+        .limit(1);
+
+      if (ready) {
+        return {
+          status: "connected",
+          botUsername: ready.botUsername,
+          botName: ready.botName,
+        } as const;
+      }
+
+      const active = await tx
+        .select({
+          id: telegramLinkAttempt.id,
+          status: telegramLinkAttempt.status,
+          connectionId: telegramLinkAttempt.connectionId,
+          nonceCiphertext: telegramLinkAttempt.nonceCiphertext,
+          nonceKeyId: telegramLinkAttempt.nonceKeyId,
+          telegramBotUsername: telegramLinkAttempt.telegramBotUsername,
+          telegramBotName: telegramLinkAttempt.telegramBotName,
+          expiresAt: telegramLinkAttempt.expiresAt,
+        })
+        .from(telegramLinkAttempt)
+        .where(
+          and(
+            eq(telegramLinkAttempt.storeId, input.storeId),
+            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+          ),
+        )
+        .orderBy(desc(telegramLinkAttempt.createdAt));
+
+      if (active.length > 1) {
+        return { status: "conflict" } as const;
+      }
+
+      const current = active[0];
+
+      if (
+        current?.status === "awaiting_confirmation" &&
+        current.connectionId &&
+        current.telegramBotUsername
+      ) {
+        return {
+          status: "candidate",
+          attemptId: current.id,
+          connectionId: current.connectionId,
+          botUsername: current.telegramBotUsername,
+          botName: current.telegramBotName,
+          expiresAt: current.expiresAt,
+        } as const;
+      }
+
+      if (current?.status === "provisioning") {
+        return {
+          status: "preparing",
+          attemptId: current.id,
+          expiresAt: current.expiresAt,
+        } as const;
+      }
+
+      // A verified candidate whose attempt expired or was superseded must be
+      // recovered by ownership re-verification, never replaced by a new bot.
+      const recoverable = await findRecoverableCandidateEvidence(tx, {
+        storeId: input.storeId,
+        merchantUserId: input.merchantUserId,
+        now,
+      });
+
+      if (recoverable) {
+        return {
+          status: "recoverable",
+          attemptId: recoverable.attemptId,
+          connectionId: recoverable.connectionId,
+          botUsername: recoverable.botUsername,
+          botName: recoverable.botName,
+        } as const;
+      }
+
+      if (current?.status === "pending") {
+        try {
+          return {
+            status: "reused",
+            attemptId: current.id,
+            nonce: decryptConnectionSecret(
+              current.nonceCiphertext,
+              current.nonceKeyId,
+            ),
+            expiresAt: current.expiresAt,
+          } as const;
+        } catch {
+          return { status: "conflict" } as const;
+        }
+      }
+
+      const [attempt] = await tx
+        .insert(telegramLinkAttempt)
+        .values({
+          storeId: input.storeId,
+          merchantUserId: input.merchantUserId,
+          managerBotUsername: input.managerBotUsername,
+          nonceDigest,
+          nonceCiphertext: encryptedNonce.ciphertext,
+          nonceKeyId: encryptedNonce.keyId,
+          status: "pending",
+          expiresAt,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: telegramLinkAttempt.id });
+
+      return {
+        status: "created",
+        attemptId: attempt.id,
+        nonce,
+        expiresAt,
+      } as const;
+    });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return { status: "conflict" };
+    }
+
+    throw mapDatabaseError(error);
+  }
+}
+
+type RecoverableCandidateEvidence = {
+  attemptId: string;
+  connectionId: string | null;
+  managerBotUsername: string;
+  telegramUserId: number;
+  botId: number;
+  botUsername: string;
+  botName: string | null;
+};
+
+/**
+ * Finds stored Telegram evidence that a bot was already created for this
+ * store. Only the store's own verified connection or its bound attempt is
+ * considered; a username alone is never proof.
+ */
+async function findRecoverableCandidateEvidence(
+  tx: AttemptTransaction,
+  input: {
+    storeId: string;
+    merchantUserId: string;
+    now: Date;
+  },
+): Promise<RecoverableCandidateEvidence | null> {
+  const cutoff = new Date(input.now.getTime() - MANAGED_BOT_RECOVERY_WINDOW_MS);
+
+  const connections = await tx
+    .select({
+      connectionId: telegramConnection.id,
+      botId: telegramConnection.botId,
+      botUsername: telegramConnection.botUsername,
+      botName: telegramConnection.botName,
+    })
+    .from(telegramConnection)
+    .where(
+      and(
+        eq(telegramConnection.storeId, input.storeId),
+        inArray(telegramConnection.status, [
+          "awaiting_confirmation",
+          "revoked",
+        ]),
+        isNotNull(telegramConnection.verifiedAt),
+        gt(telegramConnection.verifiedAt, cutoff),
+      ),
+    )
+    .orderBy(desc(telegramConnection.verifiedAt))
+    .limit(2);
+
+  if (connections.length > 1) return null;
+
+  const connection = connections[0];
+
+  if (connection) {
+    const [attempt] = await tx
+      .select({
+        attemptId: telegramLinkAttempt.id,
+        managerBotUsername: telegramLinkAttempt.managerBotUsername,
+        telegramUserId: telegramLinkAttempt.telegramUserId,
+        telegramBotId: telegramLinkAttempt.telegramBotId,
+      })
+      .from(telegramLinkAttempt)
+      .where(
+        and(
+          eq(telegramLinkAttempt.storeId, input.storeId),
+          eq(telegramLinkAttempt.merchantUserId, input.merchantUserId),
+          eq(telegramLinkAttempt.connectionId, connection.connectionId),
+          isNotNull(telegramLinkAttempt.telegramUserId),
+          isNotNull(telegramLinkAttempt.telegramBotId),
+        ),
+      )
+      .orderBy(desc(telegramLinkAttempt.createdAt))
+      .limit(1);
+
+    if (
+      attempt &&
+      attempt.telegramUserId !== null &&
+      attempt.telegramBotId === connection.botId
+    ) {
+      return {
+        attemptId: attempt.attemptId,
+        connectionId: connection.connectionId,
+        managerBotUsername: attempt.managerBotUsername,
+        telegramUserId: attempt.telegramUserId,
+        botId: connection.botId,
+        botUsername: connection.botUsername,
+        botName: connection.botName,
+      };
+    }
+  }
+
+  const attempts = await tx
+    .select({
+      attemptId: telegramLinkAttempt.id,
+      managerBotUsername: telegramLinkAttempt.managerBotUsername,
+      telegramUserId: telegramLinkAttempt.telegramUserId,
+      botId: telegramLinkAttempt.telegramBotId,
+      botUsername: telegramLinkAttempt.telegramBotUsername,
+      botName: telegramLinkAttempt.telegramBotName,
+    })
+    .from(telegramLinkAttempt)
+    .where(
+      and(
+        eq(telegramLinkAttempt.storeId, input.storeId),
+        eq(telegramLinkAttempt.merchantUserId, input.merchantUserId),
+        inArray(telegramLinkAttempt.status, ["expired", "cancelled", "failed"]),
+        isNull(telegramLinkAttempt.connectionId),
+        isNotNull(telegramLinkAttempt.telegramUserId),
+        isNotNull(telegramLinkAttempt.telegramBotId),
+        isNotNull(telegramLinkAttempt.telegramBotUsername),
+        gt(telegramLinkAttempt.updatedAt, cutoff),
+      ),
+    )
+    .orderBy(desc(telegramLinkAttempt.createdAt))
+    .limit(2);
+
+  if (attempts.length > 1) return null;
+
+  const attempt = attempts[0];
+
+  if (
+    !attempt ||
+    attempt.telegramUserId === null ||
+    attempt.botId === null ||
+    !attempt.botUsername
+  ) {
+    return null;
+  }
+
+  return {
+    attemptId: attempt.attemptId,
+    connectionId: null,
+    managerBotUsername: attempt.managerBotUsername,
+    telegramUserId: attempt.telegramUserId,
+    botId: attempt.botId,
+    botUsername: attempt.botUsername,
+    botName: attempt.botName,
+  };
 }
 
 export type LinkAttemptLookup = {
@@ -453,6 +824,7 @@ export type ManagedBotEventInput = {
 export type ProvisioningDependencies = {
   managerApi: TelegramBotApiClient;
   createBotApi?: (token: string) => TelegramBotApiClient;
+  transport?: TelegramTransport;
   webhookOrigin: string;
   now?: Date;
 };
@@ -578,6 +950,7 @@ export async function handleManagedBotEvent(
           telegramBotId: telegramLinkAttempt.telegramBotId,
           connectionId: telegramLinkAttempt.connectionId,
           expiresAt: telegramLinkAttempt.expiresAt,
+          updatedAt: telegramLinkAttempt.updatedAt,
         })
         .from(telegramLinkAttempt)
         .where(
@@ -632,6 +1005,46 @@ export async function handleManagedBotEvent(
           }
         }
 
+        const recent = await tx
+          .select({
+            id: telegramLinkAttempt.id,
+            connectionId: telegramLinkAttempt.connectionId,
+          })
+          .from(telegramLinkAttempt)
+          .where(
+            and(
+              eq(telegramLinkAttempt.telegramUserId, event.creatorUserId),
+              inArray(telegramLinkAttempt.status, [
+                "expired",
+                "cancelled",
+                "failed",
+              ]),
+              gt(
+                telegramLinkAttempt.createdAt,
+                new Date(
+                  now.getTime() - TELEGRAM_LINK_ATTEMPT_TTL_MS,
+                ),
+              ),
+            ),
+          )
+          .orderBy(desc(telegramLinkAttempt.createdAt))
+          .limit(2);
+
+        if (recent.length === 1) {
+          await tx
+            .update(telegramLinkAttempt)
+            .set({
+              telegramBotId: event.botId,
+              telegramBotUsername: event.botUsername,
+              telegramBotName: event.botName,
+              failureCode: "created_after_supersede",
+              updatedAt: now,
+            })
+            .where(eq(telegramLinkAttempt.id, recent[0].id));
+
+          return { status: "superseded" } as const;
+        }
+
         return { status: "unmatched" } as const;
       }
 
@@ -644,10 +1057,45 @@ export async function handleManagedBotEvent(
 
       const attempt = active[0];
 
+      // A late creation event from another store that used the same Telegram
+      // account is not proof for this store. Fail closed instead of attaching
+      // the bot across stores; the active attempt stays usable.
+      const [otherStoreAttempt] = await tx
+        .select({ id: telegramLinkAttempt.id })
+        .from(telegramLinkAttempt)
+        .where(
+          and(
+            eq(telegramLinkAttempt.telegramUserId, event.creatorUserId),
+            ne(telegramLinkAttempt.storeId, attempt.storeId),
+            inArray(telegramLinkAttempt.status, [
+              "completed",
+              "expired",
+              "cancelled",
+              "failed",
+            ]),
+            gt(
+              telegramLinkAttempt.createdAt,
+              new Date(now.getTime() - TELEGRAM_LINK_ATTEMPT_TTL_MS),
+            ),
+          ),
+        )
+        .limit(1);
+
+      if (otherStoreAttempt) {
+        return { status: "ambiguous" } as const;
+      }
+
       if (attempt.expiresAt.getTime() <= now.getTime()) {
         await tx
           .update(telegramLinkAttempt)
-          .set({ status: "expired", failureCode: "expired" })
+          .set({
+            status: "expired",
+            failureCode: "created_after_expiry",
+            telegramBotId: event.botId,
+            telegramBotUsername: event.botUsername,
+            telegramBotName: event.botName,
+            updatedAt: now,
+          })
           .where(eq(telegramLinkAttempt.id, attempt.id));
         return { status: "expired" } as const;
       }
@@ -704,7 +1152,33 @@ export async function handleManagedBotEvent(
       }
 
       if (attempt.status === "provisioning") {
-        return { status: "in_progress" } as const;
+        const staleCutoff = new Date(
+          now.getTime() - MANAGED_BOT_PROVISIONING_LEASE_MS,
+        );
+
+        if (attempt.updatedAt.getTime() > staleCutoff.getTime()) {
+          return { status: "in_progress" } as const;
+        }
+
+        const [reclaimed] = await tx
+          .update(telegramLinkAttempt)
+          .set({
+            status: "pending",
+            failureCode: "provisioning_stale",
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(telegramLinkAttempt.id, attempt.id),
+              eq(telegramLinkAttempt.status, "provisioning"),
+              lte(telegramLinkAttempt.updatedAt, staleCutoff),
+            ),
+          )
+          .returning({ id: telegramLinkAttempt.id });
+
+        if (!reclaimed) {
+          return { status: "in_progress" } as const;
+        }
       }
 
       const [claimedAttempt] = await tx
@@ -1005,7 +1479,46 @@ export async function handleManagedBotEvent(
     );
   }
 
-  if (persisted.status !== "saved") return persisted;
+  if (persisted.status !== "saved") {
+    if (persisted.status === "superseded" || persisted.status === "expired") {
+      try {
+        await db
+          .update(telegramLinkAttempt)
+          .set({
+            telegramBotId: event.botId,
+            telegramBotUsername: event.botUsername,
+            telegramBotName: event.botName,
+            failureCode:
+              persisted.status === "expired"
+                ? "created_after_expiry"
+                : "created_after_supersede",
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(telegramLinkAttempt.id, attemptId),
+              eq(telegramLinkAttempt.storeId, claimed.storeId),
+              inArray(telegramLinkAttempt.status, [
+                "expired",
+                "cancelled",
+                "failed",
+              ]),
+            ),
+          );
+      } catch {
+        // The non-link outcome remains persisted; evidence is best-effort.
+      }
+    }
+
+    return persisted;
+  }
+
+  await sendManagedBotConfirmation(deps.transport, {
+    chatId: event.creatorUserId,
+    botName: verifiedName,
+    botUsername: persisted.botUsername,
+    origin: deps.webhookOrigin,
+  });
 
   return {
     status: "awaiting_confirmation",
@@ -1013,6 +1526,488 @@ export async function handleManagedBotEvent(
     connectionId: persisted.connectionId,
     botUsername: persisted.botUsername,
   };
+}
+
+export const MANAGED_BOT_RETURN_BUTTON_TEXT = "العودة إلى نكمل";
+
+export function managedBotSetupReturnUrl(origin: string): string {
+  const url = new URL("/app/setup", origin);
+  url.searchParams.set("telegram", "created");
+  return url.toString();
+}
+
+export function managedBotConfirmationCopy(input: {
+  botName: string | null;
+  botUsername: string;
+  origin: string;
+}): { text: string; replyMarkup: { inline_keyboard: { text: string; url: string }[][] } } {
+  const displayName = input.botName?.trim() || input.botUsername;
+
+  return {
+    text:
+      `تم إنشاء بوت متجرك بنجاح:\n` +
+      `${displayName}\n` +
+      `@${input.botUsername}\n\n` +
+      "ارجع إلى نكمل لتأكيد ربط البوت.",
+    replyMarkup: {
+      inline_keyboard: [
+        [
+          {
+            text: MANAGED_BOT_RETURN_BUTTON_TEXT,
+            url: managedBotSetupReturnUrl(input.origin),
+          },
+        ],
+      ],
+    },
+  };
+}
+
+async function sendManagedBotConfirmation(
+  transport: TelegramTransport | undefined,
+  input: {
+    chatId: number;
+    botName: string | null;
+    botUsername: string;
+    origin: string;
+  },
+): Promise<void> {
+  if (!transport) return;
+
+  const copy = managedBotConfirmationCopy(input);
+
+  try {
+    const result = await transport.sendMessage({
+      chatId: input.chatId,
+      text: copy.text,
+      replyMarkup: copy.replyMarkup,
+    });
+
+    if (!result.ok) {
+      console.error("[manager-bot] candidate notification failed", {
+        category: result.errorKind ?? "unknown",
+      });
+    }
+  } catch {
+    console.error("[manager-bot] candidate notification failed", {
+      category: "exception",
+    });
+  }
+}
+
+export type RecoveryDependencies = {
+  managerApi: TelegramBotApiClient;
+  createBotApi?: (token: string) => TelegramBotApiClient;
+  transport?: TelegramTransport;
+  webhookOrigin: string;
+  now?: Date;
+};
+
+export type RecoverCandidateResult =
+  | {
+      status: "recovered" | "already_candidate";
+      attemptId: string;
+      connectionId: string;
+      botUsername: string;
+      botName: string | null;
+    }
+  | { status: "not_found" | "conflict" | "bot_bound_elsewhere" }
+  | { status: "retryable"; reason: string };
+
+/**
+ * Re-opens an already-created bot for merchant confirmation.
+ *
+ * The bot id and creator come only from a stored `managed_bot` correlation for
+ * this exact store. Before anything is changed, the manager bot re-fetches the
+ * bot token and the bot's own `getMe`; the old username or display name is
+ * never used as the ownership proof. The connection is not activated here.
+ */
+export async function recoverManagedTelegramCandidate(
+  db: TransactionDatabase,
+  input: {
+    storeId: string;
+    merchantUserId: string;
+    connectionId?: string | null;
+    attemptId?: string | null;
+  },
+  deps: RecoveryDependencies,
+): Promise<RecoverCandidateResult> {
+  const now = deps.now ?? new Date();
+  const expiresAt = new Date(now.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS);
+  const nonce = generateLinkNonce();
+  const nonceDigest = hashLinkNonce(nonce);
+  let encryptedNonce: { ciphertext: string; keyId: string };
+
+  try {
+    encryptedNonce = encryptConnectionSecret(nonce);
+  } catch {
+    return { status: "retryable", reason: "secret_storage_failed" };
+  }
+
+  let evidence: RecoverableCandidateEvidence | null = null;
+  let already: RecoverCandidateResult | null = null;
+
+  try {
+    const found = await db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
+          "telegram-link-attempt",
+          input.storeId,
+        )}))`,
+      );
+
+      await tx
+        .update(telegramLinkAttempt)
+        .set({ status: "expired", failureCode: "expired" })
+        .where(
+          and(
+            eq(telegramLinkAttempt.storeId, input.storeId),
+            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+            lte(telegramLinkAttempt.expiresAt, now),
+          ),
+        );
+
+      const [ready] = await tx
+        .select({ id: telegramConnection.id })
+        .from(telegramConnection)
+        .where(
+          and(
+            eq(telegramConnection.storeId, input.storeId),
+            eq(telegramConnection.status, "ready"),
+          ),
+        )
+        .limit(1);
+
+      if (ready) return { status: "conflict" } as const;
+
+      const active = await tx
+        .select({
+          id: telegramLinkAttempt.id,
+          status: telegramLinkAttempt.status,
+          connectionId: telegramLinkAttempt.connectionId,
+          telegramBotUsername: telegramLinkAttempt.telegramBotUsername,
+          telegramBotName: telegramLinkAttempt.telegramBotName,
+          expiresAt: telegramLinkAttempt.expiresAt,
+        })
+        .from(telegramLinkAttempt)
+        .where(
+          and(
+            eq(telegramLinkAttempt.storeId, input.storeId),
+            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+          ),
+        )
+        .orderBy(desc(telegramLinkAttempt.createdAt));
+
+      if (active.length > 1) return { status: "conflict" } as const;
+
+      const current = active[0];
+
+      if (current) {
+        if (
+          current.status === "awaiting_confirmation" &&
+          current.connectionId &&
+          current.telegramBotUsername
+        ) {
+          if (
+            (input.connectionId &&
+              input.connectionId !== current.connectionId) ||
+            (input.attemptId && input.attemptId !== current.id)
+          ) {
+            return { status: "not_found" } as const;
+          }
+
+          return {
+            status: "already_candidate",
+            attemptId: current.id,
+            connectionId: current.connectionId,
+            botUsername: current.telegramBotUsername,
+            botName: current.telegramBotName,
+          } as const;
+        }
+
+        if (current.status !== "pending") {
+          return { status: "conflict" } as const;
+        }
+      }
+
+      const candidate = await findRecoverableCandidateEvidence(tx, {
+        ...input,
+        now,
+      });
+
+      if (!candidate) return { status: "not_found" } as const;
+
+      if (
+        (input.connectionId &&
+          candidate.connectionId !== input.connectionId) ||
+        (input.attemptId && candidate.attemptId !== input.attemptId)
+      ) {
+        return { status: "not_found" } as const;
+      }
+
+      return candidate;
+    });
+
+    if ("status" in found) {
+      if (found.status === "already_candidate") already = found;
+      else return found;
+    } else {
+      evidence = found;
+    }
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+
+  if (already) return already;
+  if (!evidence) return { status: "not_found" };
+
+  const tokenResult = await deps.managerApi.getManagedBotToken(evidence.botId);
+
+  if (!tokenResult.ok || typeof tokenResult.result !== "string") {
+    return { status: "retryable", reason: "token_fetch_failed" };
+  }
+
+  const token = tokenResult.result.trim();
+
+  if (token.length === 0) {
+    return { status: "retryable", reason: "token_fetch_failed" };
+  }
+
+  let managedApi: TelegramBotApiClient;
+
+  try {
+    managedApi =
+      deps.createBotApi?.(token) ?? createTelegramBotApiClient(token);
+  } catch {
+    return { status: "retryable", reason: "api_unavailable" };
+  }
+
+  const me = await managedApi.getMe();
+
+  if (
+    !me.ok ||
+    me.result.id !== evidence.botId ||
+    me.result.is_bot !== true ||
+    typeof me.result.username !== "string" ||
+    me.result.username.length === 0
+  ) {
+    return { status: "retryable", reason: "verification_failed" };
+  }
+
+  const verifiedUsername = me.result.username;
+  const verifiedName =
+    typeof me.result.first_name === "string" ? me.result.first_name : null;
+
+  let encryptedToken: { ciphertext: string; keyId: string };
+
+  try {
+    encryptedToken = encryptConnectionSecret(token);
+  } catch {
+    return { status: "retryable", reason: "secret_storage_failed" };
+  }
+
+  let recovered: RecoverCandidateResult;
+
+  try {
+    recovered = await db.transaction(
+      async (tx): Promise<RecoverCandidateResult> => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
+            "telegram-link-attempt",
+            input.storeId,
+          )}))`,
+        );
+
+        await tx
+          .update(telegramLinkAttempt)
+          .set({ status: "expired", failureCode: "expired" })
+          .where(
+            and(
+              eq(telegramLinkAttempt.storeId, input.storeId),
+              inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+              lte(telegramLinkAttempt.expiresAt, now),
+            ),
+          );
+
+        const [ready] = await tx
+          .select({ id: telegramConnection.id })
+          .from(telegramConnection)
+          .where(
+            and(
+              eq(telegramConnection.storeId, input.storeId),
+              eq(telegramConnection.status, "ready"),
+            ),
+          )
+          .limit(1);
+
+        if (ready) return { status: "conflict" };
+
+        const active = await tx
+          .select({
+            id: telegramLinkAttempt.id,
+            status: telegramLinkAttempt.status,
+          })
+          .from(telegramLinkAttempt)
+          .where(
+            and(
+              eq(telegramLinkAttempt.storeId, input.storeId),
+              inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+            ),
+          );
+
+        if (active.some((attempt) => attempt.status !== "pending")) {
+          return { status: "conflict" };
+        }
+
+        // A stale Create tap may have left a non-candidate pending attempt.
+        // A verified bot is stronger evidence; retire the pending nonce so a
+        // late creation from it cannot compete with the recovered bot.
+        if (active.length > 0) {
+          await tx
+            .update(telegramLinkAttempt)
+            .set({
+              status: "cancelled",
+              failureCode: "recovered_existing_bot",
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(telegramLinkAttempt.storeId, input.storeId),
+                eq(telegramLinkAttempt.merchantUserId, input.merchantUserId),
+                eq(telegramLinkAttempt.status, "pending"),
+              ),
+            );
+        }
+
+        const current = await findRecoverableCandidateEvidence(tx, {
+          ...input,
+          now,
+        });
+
+        if (
+          !current ||
+          current.attemptId !== evidence.attemptId ||
+          current.botId !== evidence.botId
+        ) {
+          return { status: "conflict" };
+        }
+
+        const [boundElsewhere] = await tx
+          .select({
+            id: telegramConnection.id,
+            storeId: telegramConnection.storeId,
+          })
+          .from(telegramConnection)
+          .where(eq(telegramConnection.botId, evidence.botId))
+          .limit(1);
+
+        if (boundElsewhere && boundElsewhere.storeId !== input.storeId) {
+          return { status: "bot_bound_elsewhere" };
+        }
+
+        let connectionId = evidence.connectionId;
+
+        if (connectionId) {
+          const [updated] = await tx
+            .update(telegramConnection)
+            .set({
+              botUsername: verifiedUsername,
+              botName: verifiedName,
+              tokenCiphertext: encryptedToken.ciphertext,
+              tokenKeyId: encryptedToken.keyId,
+              status: "awaiting_confirmation",
+              activationAttemptId: null,
+              webhookOperationId: null,
+              webhookOperationAttemptId: null,
+              webhookOperationExpiresAt: null,
+              verifiedAt: now,
+            })
+            .where(
+              and(
+                eq(telegramConnection.id, connectionId),
+                eq(telegramConnection.storeId, input.storeId),
+                eq(telegramConnection.botId, evidence.botId),
+                inArray(telegramConnection.status, [
+                  "awaiting_confirmation",
+                  "revoked",
+                ]),
+              ),
+            )
+            .returning({ id: telegramConnection.id });
+
+          if (!updated) return { status: "conflict" };
+        } else {
+          connectionId = crypto.randomUUID();
+
+          await tx.insert(telegramConnection).values({
+            id: connectionId,
+            storeId: input.storeId,
+            botId: evidence.botId,
+            botUsername: verifiedUsername,
+            botName: verifiedName,
+            tokenCiphertext: encryptedToken.ciphertext,
+            tokenKeyId: encryptedToken.keyId,
+            webhookSecretHash: hashWebhookSecret(generateWebhookSecret()),
+            webhookUrl: buildManagedWebhookUrl(
+              deps.webhookOrigin,
+              connectionId,
+            ),
+            status: "awaiting_confirmation",
+            verifiedAt: now,
+          });
+        }
+
+        const [attempt] = await tx
+          .insert(telegramLinkAttempt)
+          .values({
+            storeId: input.storeId,
+            merchantUserId: input.merchantUserId,
+            managerBotUsername: evidence.managerBotUsername,
+            nonceDigest,
+            nonceCiphertext: encryptedNonce.ciphertext,
+            nonceKeyId: encryptedNonce.keyId,
+            status: "awaiting_confirmation",
+            telegramUserId: evidence.telegramUserId,
+            telegramBotId: evidence.botId,
+            telegramBotUsername: verifiedUsername,
+            telegramBotName: verifiedName,
+            connectionId,
+            verifiedAt: now,
+            expiresAt,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning({ id: telegramLinkAttempt.id });
+
+        return {
+          status: "recovered",
+          attemptId: attempt.id,
+          connectionId,
+          botUsername: verifiedUsername,
+          botName: verifiedName,
+        };
+      },
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return { status: "conflict" };
+    }
+
+    return {
+      status: "retryable",
+      reason: "connection_persist_failed",
+    };
+  }
+
+  if (recovered.status === "recovered") {
+    await sendManagedBotConfirmation(deps.transport, {
+      chatId: evidence.telegramUserId,
+      botName: recovered.botName,
+      botUsername: recovered.botUsername,
+      origin: deps.webhookOrigin,
+    });
+  }
+
+  return recovered;
 }
 
 export type ActivationDependencies = {
@@ -1833,11 +2828,27 @@ export type MerchantTelegramConnectionState =
       deepLink: string;
       expiresAt: string;
       telegramBound: boolean;
+      lastError: string | null;
+    }
+  | {
+      state: "preparing";
+      attemptId: string;
+      botUsername: string | null;
+      botName: string | null;
+      expiresAt: string;
+    }
+  | {
+      state: "recoverable";
+      attemptId: string;
+      connectionId: string | null;
+      botUsername: string;
+      botName: string | null;
     }
   | {
       state: "confirm";
       connectionId: string;
       botUsername: string;
+      botName: string | null;
       expiresAt: string;
       lastError: string | null;
     }
@@ -1898,6 +2909,7 @@ function stateFromAttempt(
     deepLink: merchantManagerDeepLink(attempt.managerBotUsername, nonce),
     expiresAt: attempt.expiresAt.toISOString(),
     telegramBound: attempt.telegramUserId !== null,
+    lastError: attempt.failureCode,
   };
 }
 
@@ -1905,6 +2917,10 @@ function stateFromAttempt(
  * Reads the merchant-visible state. Only a connection the merchant explicitly
  * confirmed is reported as connected. No token, key or webhook digest is
  * returned.
+ *
+ * The read deliberately prefers verified Telegram evidence over a newer
+ * failure: if this store already has a recently created bot, the merchant is
+ * offered recovery/confirmation instead of another creation attempt.
  */
 export async function readMerchantTelegramConnectionState(
   db: Database,
@@ -1964,6 +2980,7 @@ export async function readMerchantTelegramConnectionState(
 
   const [attempt] = await db
     .select({
+      id: telegramLinkAttempt.id,
       status: telegramLinkAttempt.status,
       managerBotUsername: telegramLinkAttempt.managerBotUsername,
       nonceCiphertext: telegramLinkAttempt.nonceCiphertext,
@@ -1973,6 +2990,7 @@ export async function readMerchantTelegramConnectionState(
       failureCode: telegramLinkAttempt.failureCode,
       connectionId: telegramLinkAttempt.connectionId,
       botUsername: telegramLinkAttempt.telegramBotUsername,
+      botName: telegramLinkAttempt.telegramBotName,
     })
     .from(telegramLinkAttempt)
     .where(
@@ -1984,15 +3002,44 @@ export async function readMerchantTelegramConnectionState(
     .orderBy(desc(telegramLinkAttempt.createdAt))
     .limit(1);
 
-  if (!attempt) return { state: "not_connected" };
+  const recoverable = await findRecoverableCandidateEvidence(
+    db as unknown as AttemptTransaction,
+    {
+      storeId: input.scope.storeId,
+      merchantUserId: input.merchantUserId,
+      now,
+    },
+  );
 
-  if (attempt.status === "completed" || attempt.status === "cancelled") {
-    return { state: "not_connected" };
+  const recoverableState: MerchantTelegramConnectionState | null = recoverable
+    ? {
+        state: "recoverable",
+        attemptId: recoverable.attemptId,
+        connectionId: recoverable.connectionId,
+        botUsername: recoverable.botUsername,
+        botName: recoverable.botName,
+      }
+    : null;
+
+  if (!attempt) return recoverableState ?? { state: "not_connected" };
+
+  if (attempt.status === "provisioning") {
+    return {
+      state: "preparing",
+      attemptId: attempt.id,
+      botUsername: attempt.botUsername,
+      botName: attempt.botName,
+      expiresAt: attempt.expiresAt.toISOString(),
+    };
   }
 
   if (attempt.status === "awaiting_confirmation" && attempt.connectionId) {
     if (attempt.expiresAt.getTime() <= now.getTime()) {
-      return { state: "failed", reason: "expired", retryable: true };
+      return recoverableState ?? {
+        state: "failed",
+        reason: "expired",
+        retryable: true,
+      };
     }
 
     if (attempt.botUsername) {
@@ -2000,13 +3047,28 @@ export async function readMerchantTelegramConnectionState(
         state: "confirm",
         connectionId: attempt.connectionId,
         botUsername: attempt.botUsername,
+        botName: attempt.botName,
         expiresAt: attempt.expiresAt.toISOString(),
         lastError: attempt.failureCode,
       };
     }
   }
 
-  return stateFromAttempt(attempt, now);
+  if (attempt.status === "pending") {
+    if (recoverableState) return recoverableState;
+
+    return stateFromAttempt(attempt, now);
+  }
+
+  if (attempt.status === "completed") {
+    return { state: "not_connected" };
+  }
+
+  if (attempt.status === "cancelled") {
+    return recoverableState ?? { state: "not_connected" };
+  }
+
+  return recoverableState ?? stateFromAttempt(attempt, now);
 }
 
 export type ReadyManagedConnection = {

@@ -87,6 +87,16 @@ describe("merchant Telegram start route", () => {
     expect(response.headers.get("Location")).toBe(DEEP_LINK);
   });
 
+  it("stays on the setup page when the store already has a live candidate", async () => {
+    vi.stubEnv("APP_URL", ORIGIN);
+    startMerchantTelegramConnection.mockResolvedValue({ ok: true });
+
+    const response = await POST(request());
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("Location")).toBe(`${ORIGIN}/app/setup`);
+  });
+
   it("returns the same setup attempt with an error code when starting fails", async () => {
     vi.stubEnv("APP_URL", ORIGIN);
     startMerchantTelegramConnection.mockResolvedValue({

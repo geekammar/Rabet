@@ -10,6 +10,12 @@ type Copy = {
   waitingOpen: string;
   waitingTelegram: string;
   waitingProvisioning: string;
+  preparingTitle: string;
+  preparingBody: string;
+  recoverTitle: string;
+  recoverBody: string;
+  recover: string;
+  recovering: string;
   openTelegram: string;
   launchFailedTitle: string;
   launchFailedBody: string;
@@ -42,7 +48,15 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     waitingTelegram:
       "أكمل إنشاء البوت في تيليجرام، ثم ارجع لتأكيد الربط.",
     waitingProvisioning:
-      "بانتظار اكتمال إنشاء البوت في تيليجرام…",
+      "وصلنا إشعار بدء الإنشاء. أكمل إنشاء البوت في تيليجرام ثم ارجع؛ ستظهر حالته هنا تلقائيًا.",
+    preparingTitle: "تم إنشاء البوت، جارٍ تجهيز الاتصال…",
+    preparingBody:
+      "استلمنا البوت من تيليجرام ونتحقق من هويته الآن. لا تنشئ بوتًا آخر.",
+    recoverTitle: "وجدنا البوت الذي أنشأته",
+    recoverBody:
+      "لدينا بيانات بوت متجرك التي أكدها تيليجرام. سنتحقق منها ثم نعرضها لتأكيد الربط.",
+    recover: "استعادة البوت",
+    recovering: "جارٍ التحقق من البوت…",
     openTelegram: "متابعة إنشاء البوت",
     launchFailedTitle: "تعذر فتح تيليجرام الرسمي.",
     launchFailedBody:
@@ -87,6 +101,12 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       foreign_webhook: "هذا البوت مرتبط بويبهوك آخر لا يملكه هذا المتجر.",
       webhook_outcome_unknown:
         "لم نتمكن من تأكيد نتيجة تسجيل ويبهوك البوت. البوت قيد المراجعة ولا يمكن إعادة المحاولة أو إنشاء بوت آخر الآن. تواصل مع الدعم.",
+      RECOVERY_FAILED:
+        "تعذر التحقق من البوت الذي أنشأته. أعد المحاولة دون إنشاء بوت جديد.",
+      created_after_expiry:
+        "انتهت صلاحية المحاولة بعد إنشاء البوت. استعد البوت بدل إنشاء بوت جديد.",
+      created_after_supersede:
+        "تم استبدال المحاولة بعد إنشاء البوت. استعد البوت بدل إنشاء بوت جديد.",
       RETRYABLE: "لم يكتمل تفعيل تيليجرام. أعد المحاولة.",
       REVIEW:
         "البوت قيد المراجعة الأمنية. لا تبدأ من جديد أو تنشئ بوتًا آخر. تواصل مع الدعم.",
@@ -106,7 +126,15 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     waitingTelegram:
       "The link is open. Finish creating the bot in Telegram, then return and refresh the status.",
     waitingProvisioning:
-      "The bot was received. Verifying its identity and registering the webhook…",
+      "Telegram confirmed creation started. Finish creating the bot there, then return; its state will appear here automatically.",
+    preparingTitle: "Bot created — preparing the connection…",
+    preparingBody:
+      "Telegram returned the new bot and we are verifying its identity now. Do not create another bot.",
+    recoverTitle: "We found the bot you created",
+    recoverBody:
+      "Nokmel stored the Telegram evidence for your store bot. We will re-verify it and show it for your confirmation.",
+    recover: "Recover the bot",
+    recovering: "Verifying the bot…",
     openTelegram: "Continue creating the bot",
     launchFailedTitle: "Official Telegram could not be opened.",
     launchFailedBody:
@@ -152,6 +180,12 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       foreign_webhook: "This bot already has a webhook that is not owned by this store.",
       webhook_outcome_unknown:
         "We could not confirm whether the bot webhook was registered. The bot is under review; do not retry or create another bot. Contact support.",
+      RECOVERY_FAILED:
+        "The bot you created could not be verified. Try again without creating a new bot.",
+      created_after_expiry:
+        "The attempt expired after the bot was created. Recover the bot instead of creating a new one.",
+      created_after_supersede:
+        "The attempt was replaced after the bot was created. Recover the bot instead of creating a new one.",
       RETRYABLE: "Telegram activation did not complete. Try again.",
       REVIEW:
         "This bot is under security review. Do not start over or create another bot. Contact support.",
