@@ -4,7 +4,10 @@ import { connection } from "next/server";
 import { PlatformStoreDirectory } from "@/components/platform/platform-store-directory";
 import { getTransactionDb } from "@/db/transaction-client";
 import { requirePlatformAdmin } from "@/lib/auth/platform-session";
-import { listPlatformStores } from "@/lib/merchant-invitation/platform-admin";
+import {
+  listPlatformStores,
+  parsePlatformStorePageParam,
+} from "@/lib/merchant-invitation/platform-admin";
 
 export const metadata: Metadata = {
   title: "Platform stores",
@@ -14,16 +17,24 @@ export const metadata: Metadata = {
 
 export const instant = false;
 
-export default async function PlatformStoresPage() {
+type PlatformStoresPageProps = {
+  searchParams?: Promise<{ page?: string | string[] }>;
+};
+
+export default async function PlatformStoresPage({
+  searchParams,
+}: PlatformStoresPageProps) {
   await connection();
 
   const admin = await requirePlatformAdmin();
-  const stores = await listPlatformStores(getTransactionDb());
+  const params = searchParams ? await searchParams : {};
+  const page = parsePlatformStorePageParam(params.page);
+  const directory = await listPlatformStores(getTransactionDb(), { page });
 
   return (
     <PlatformStoreDirectory
       adminEmail={admin.email}
-      stores={stores.map((store) => ({
+      stores={directory.stores.map((store) => ({
         id: store.id,
         name: store.name,
         slug: store.slug,
@@ -43,6 +54,14 @@ export default async function PlatformStoresPage() {
             }
           : null,
       }))}
+      pagination={{
+        page: directory.page,
+        pageSize: directory.pageSize,
+        totalStores: directory.totalStores,
+        totalPages: directory.totalPages,
+        hasPreviousPage: directory.hasPreviousPage,
+        hasNextPage: directory.hasNextPage,
+      }}
     />
   );
 }

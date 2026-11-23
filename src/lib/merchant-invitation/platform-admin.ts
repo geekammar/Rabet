@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import type { StoreStatus } from "@/db/schema/tenant";
@@ -118,8 +118,8 @@ export async function listPlatformInvitations(
 }
 
 
-export const PLATFORM_STORE_LIST_LIMIT = 200;
-export const PLATFORM_STORE_INVITATION_SCAN_LIMIT = 2000;
+export const PLATFORM_STORE_PAGE_SIZE = 25;
+export const PLATFORM_STORE_MAX_PAGE_SIZE = 100;
 
 export type PlatformStoreInvitationSummary = {
   id: string;
@@ -140,21 +140,66 @@ export type PlatformStoreDirectoryRecord = {
   latestInvitation: PlatformStoreInvitationSummary | null;
 };
 
+export type PlatformStoreDirectoryPage = {
+  stores: PlatformStoreDirectoryRecord[];
+  page: number;
+  pageSize: number;
+  totalStores: number;
+  totalPages: number;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
+};
+
 /**
- * Read-only store directory for platform administration.
+ * Parses an untrusted `page` query value. Any malformed, negative, zero or
+ * overflowing value falls back to page 1. The loader clamps an otherwise valid
+ * page to the last available page, so every store remains reachable.
+ */
+export function parsePlatformStorePageParam(
+  raw: string | string[] | undefined,
+): number {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return 1;
+
+  const page = Number(value);
+
+  return Number.isSafeInteger(page) && page >= 1 ? page : 1;
+}
+
+function normalizePageSize(raw: number | undefined): number {
+  if (raw === undefined) return PLATFORM_STORE_PAGE_SIZE;
+  if (!Number.isInteger(raw)) return PLATFORM_STORE_PAGE_SIZE;
+
+  return Math.min(Math.max(raw, 1), PLATFORM_STORE_MAX_PAGE_SIZE);
+}
+
+/**
+ * Read-only, server-paginated store directory for platform administration.
  *
- * The query starts from `store` and merges owners and invitations in memory so
- * multiple memberships or invitations can never duplicate a store row. No
- * credential, token digest or password material is selected.
+ * The page starts from `store` with a stable `(created_at, id)` order. Owners
+ * and the latest invitation are resolved only for the stores on the current
+ * page, so no shared invitation scan cap can hide an invitation. Multiple
+ * memberships or invitations can never duplicate a store row. No credential,
+ * token digest or password material is selected.
  */
 export async function listPlatformStores(
   db: MerchantInvitationDb,
-  options: { limit?: number } = {},
-): Promise<PlatformStoreDirectoryRecord[]> {
-  const requestedLimit = options.limit ?? PLATFORM_STORE_LIST_LIMIT;
-  const limit = Number.isInteger(requestedLimit)
-    ? Math.min(Math.max(requestedLimit, 1), PLATFORM_STORE_LIST_LIMIT)
-    : PLATFORM_STORE_LIST_LIMIT;
+  options: { page?: number; pageSize?: number } = {},
+): Promise<PlatformStoreDirectoryPage> {
+  const pageSize = normalizePageSize(options.pageSize);
+  const requestedPage =
+    Number.isInteger(options.page) && (options.page ?? 0) >= 1
+      ? (options.page as number)
+      : 1;
+
+  const [totalRow] = await db
+    .select({ total: count() })
+    .from(store);
+  const totalStores = Number(totalRow?.total ?? 0);
+  const totalPages = Math.max(1, Math.ceil(totalStores / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const offset = (page - 1) * pageSize;
 
   const storeRows = await db
     .select({
@@ -164,10 +209,22 @@ export async function listPlatformStores(
       status: store.status,
     })
     .from(store)
-    .orderBy(asc(store.createdAt), asc(store.name))
-    .limit(limit);
+    .orderBy(asc(store.createdAt), asc(store.id))
+    .limit(pageSize)
+    .offset(offset);
 
-  if (storeRows.length === 0) return [];
+  const pagination = {
+    page,
+    pageSize,
+    totalStores,
+    totalPages,
+    hasPreviousPage: page > 1,
+    hasNextPage: page < totalPages,
+  };
+
+  if (storeRows.length === 0) {
+    return { stores: [], ...pagination };
+  }
 
   const storeIds = storeRows.map((row) => row.id);
 
@@ -184,10 +241,12 @@ export async function listPlatformStores(
         eq(storeMembership.status, "active"),
       ),
     )
-    .orderBy(asc(storeMembership.createdAt));
+    .orderBy(asc(storeMembership.createdAt), asc(storeMembership.userId));
 
+  // Postgres DISTINCT ON is scoped to this page's stores, so every store gets
+  // its own latest invitation. The id tie-breaker makes equal timestamps stable.
   const invitationRows = await db
-    .select({
+    .selectDistinctOn([merchantInvitation.storeId], {
       id: merchantInvitation.id,
       storeId: merchantInvitation.storeId,
       invitedEmail: merchantInvitation.invitedEmail,
@@ -198,8 +257,11 @@ export async function listPlatformStores(
     })
     .from(merchantInvitation)
     .where(inArray(merchantInvitation.storeId, storeIds))
-    .orderBy(desc(merchantInvitation.createdAt))
-    .limit(PLATFORM_STORE_INVITATION_SCAN_LIMIT);
+    .orderBy(
+      asc(merchantInvitation.storeId),
+      desc(merchantInvitation.createdAt),
+      desc(merchantInvitation.id),
+    );
 
   const ownersByStore = new Map<string, string[]>();
   const seenOwner = new Set<string>();
@@ -219,7 +281,6 @@ export async function listPlatformStores(
   >();
 
   for (const invitation of invitationRows) {
-    if (latestInvitationByStore.has(invitation.storeId)) continue;
     latestInvitationByStore.set(invitation.storeId, {
       id: invitation.id,
       invitedEmail: invitation.invitedEmail,
@@ -231,12 +292,15 @@ export async function listPlatformStores(
     });
   }
 
-  return storeRows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    slug: row.slug,
-    status: row.status as StoreStatus,
-    ownerEmails: ownersByStore.get(row.id) ?? [],
-    latestInvitation: latestInvitationByStore.get(row.id) ?? null,
-  }));
+  return {
+    stores: storeRows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      status: row.status as StoreStatus,
+      ownerEmails: ownersByStore.get(row.id) ?? [],
+      latestInvitation: latestInvitationByStore.get(row.id) ?? null,
+    })),
+    ...pagination,
+  };
 }

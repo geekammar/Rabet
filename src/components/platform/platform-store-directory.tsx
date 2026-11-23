@@ -1,4 +1,7 @@
+import Link from "next/link";
+
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { PlatformHeader } from "@/components/platform/platform-header";
 import { PlatformNav } from "@/components/platform/platform-nav";
 
@@ -80,12 +83,23 @@ function invitationDetail(
   return `Expires ${formatUtc(invitation.expiresAt)}`;
 }
 
+export type PlatformStorePagination = {
+  page: number;
+  pageSize: number;
+  totalStores: number;
+  totalPages: number;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
+};
+
 export function PlatformStoreDirectory({
   adminEmail,
   stores,
+  pagination,
 }: {
   adminEmail: string;
   stores: PlatformStoreDirectoryView[];
+  pagination: PlatformStorePagination;
 }) {
   const withOwner = stores.filter((store) => store.ownerEmails.length > 0).length;
   const withoutInvitation = stores.filter(
@@ -116,13 +130,14 @@ export function PlatformStoreDirectory({
           </div>
           <div className="flex flex-wrap gap-2">
             <Badge variant="outline" className="h-7 px-3 text-sm">
-              {stores.length} store{stores.length === 1 ? "" : "s"}
+              {pagination.totalStores} store
+              {pagination.totalStores === 1 ? "" : "s"}
             </Badge>
             <Badge variant="secondary" className="h-7 px-3 text-sm">
-              {withOwner} with account
+              {withOwner} with account on this page
             </Badge>
             <Badge variant="outline" className="h-7 px-3 text-sm">
-              {withoutInvitation} without invitation
+              {withoutInvitation} without invitation on this page
             </Badge>
           </div>
         </div>
@@ -226,6 +241,66 @@ export function PlatformStoreDirectory({
             </table>
           </div>
         )}
+
+        <nav
+          aria-label="Store directory pages"
+          data-testid="platform-store-pagination"
+          className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4"
+        >
+          <div>
+            {pagination.hasPreviousPage ? (
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  href={`/platform/stores?page=${pagination.page - 1}`}
+                  rel="prev"
+                  data-testid="platform-store-previous"
+                >
+                  Previous
+                </Link>
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled
+                data-testid="platform-store-previous"
+              >
+                Previous
+              </Button>
+            )}
+          </div>
+          <p
+            className="text-sm text-muted-foreground"
+            aria-live="polite"
+            data-testid="platform-store-page-indicator"
+          >
+            Page {pagination.page} of {pagination.totalPages}
+          </p>
+          <div>
+            {pagination.hasNextPage ? (
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  href={`/platform/stores?page=${pagination.page + 1}`}
+                  rel="next"
+                  data-testid="platform-store-next"
+                >
+                  Next
+                </Link>
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled
+                data-testid="platform-store-next"
+              >
+                Next
+              </Button>
+            )}
+          </div>
+        </nav>
       </main>
     </div>
   );

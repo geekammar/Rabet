@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { parsePlatformStorePageParam } from "@/lib/merchant-invitation/platform-admin";
+
 const sourceRoot = path.resolve(import.meta.dirname, "../src");
 
 function read(relative: string): string {
@@ -15,6 +17,8 @@ describe("platform store directory", () => {
 
     expect(page).toContain("requirePlatformAdmin");
     expect(page).toContain("listPlatformStores");
+    expect(page).toContain("parsePlatformStorePageParam");
+    expect(page).toContain("searchParams");
     expect(page).toContain("await connection()");
     expect(page).not.toMatch(/merchant_credential|password_hash|token_digest/);
   });
@@ -43,6 +47,23 @@ describe("platform store directory", () => {
     expect(component).toContain("Invitation accepted");
     expect(component).toContain("Invitation revoked");
     expect(component).toContain("Invitation expired");
+    expect(component).toContain("platform-store-pagination");
+    expect(component).toContain("platform-store-previous");
+    expect(component).toContain("platform-store-next");
+    expect(component).toContain("Page {pagination.page} of {pagination.totalPages}");
+    expect(component).toContain("/platform/stores?page=");
     expect(component).not.toMatch(/merchant_credential|password_hash|token_digest/);
+  });
+
+  it("validates page query input", () => {
+    expect(parsePlatformStorePageParam("1")).toBe(1);
+    expect(parsePlatformStorePageParam("2")).toBe(2);
+    expect(parsePlatformStorePageParam(["3", "4"])).toBe(3);
+    expect(parsePlatformStorePageParam("0")).toBe(1);
+    expect(parsePlatformStorePageParam("-2")).toBe(1);
+    expect(parsePlatformStorePageParam("abc")).toBe(1);
+    expect(parsePlatformStorePageParam("2.5")).toBe(1);
+    expect(parsePlatformStorePageParam("999999999999999999999")).toBe(1);
+    expect(parsePlatformStorePageParam(undefined)).toBe(1);
   });
 });
