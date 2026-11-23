@@ -15,9 +15,9 @@ import {
   revokePlatformInvitation,
   type PlatformIssueState,
 } from "@/app/actions/platform-invitations";
-import { platformLogout } from "@/app/actions/platform-auth";
-import { Logo } from "@/components/brand/logo";
 import { Badge } from "@/components/ui/badge";
+import { PlatformHeader } from "@/components/platform/platform-header";
+import { PlatformNav } from "@/components/platform/platform-nav";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -459,28 +459,11 @@ export function PlatformInvitations({
       className="flex min-h-dvh w-full flex-col bg-background"
       data-testid="platform-invitations-page"
     >
-      <header className="border-b border-border">
-        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6 lg:px-8">
-          <div className="flex items-center gap-3">
-            <Logo className="text-lg" />
-            <span className="hidden text-sm text-muted-foreground sm:inline">
-              Platform administration
-            </span>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="hidden max-w-64 truncate text-sm text-muted-foreground sm:inline">
-              {adminEmail}
-            </span>
-            <form action={platformLogout}>
-              <Button type="submit" variant="outline" size="sm" className="min-h-9">
-                Sign out
-              </Button>
-            </form>
-          </div>
-        </div>
-      </header>
+      <PlatformHeader adminEmail={adminEmail} />
 
       <main className="mx-auto w-full max-w-6xl flex-1 space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+        <PlatformNav active="invitations" />
+
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
             <h1 className="font-heading text-2xl font-semibold tracking-tight">

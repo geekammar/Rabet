@@ -72,7 +72,9 @@ const trash: string[] = [];
 const SIBLING_SUITE_PREFIXES = [
   "rabet_test_",
   "rabet_actions_",
+  "rabet_actions_prod_",
   "rabet_upgrade_",
+  "rabet_prod_upgrade_",
 ];
 
 afterAll(() => {

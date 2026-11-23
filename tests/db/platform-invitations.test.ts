@@ -8,6 +8,7 @@ import {
   appUser,
   merchantCredential,
   merchantInvitation,
+  store,
   storeMembership,
 } from "@/db/schema";
 import { verifyPlatformAdminCredentials } from "@/lib/auth/platform-credentials";
@@ -19,7 +20,10 @@ import {
   issueMerchantInvitation,
   revokeMerchantInvitation,
 } from "@/lib/merchant-invitation/service";
-import { listPlatformInvitations } from "@/lib/merchant-invitation/platform-admin";
+import {
+  listPlatformInvitations,
+  listPlatformStores,
+} from "@/lib/merchant-invitation/platform-admin";
 import {
   createTestDatabase,
   hasTestCluster,
@@ -435,5 +439,243 @@ describe.skipIf(!shouldRun)("platform invitation issue, revoke and redeem", () =
       .where(eq(merchantInvitation.id, issued.invitationId));
 
     expect(row[0]).toEqual({ revokedAt: null, revokedByUserId: null });
+  });
+});
+
+
+describe.skipIf(!shouldRun)("platform store directory", () => {
+  it("lists each store once with owner emails and latest invitation state", async () => {
+    const admin = await insertPlatformAdmin();
+
+    const [noInvitation] = await db()
+      .insert(store)
+      .values({
+        name: "No Invitation Store",
+        slug: `no-invitation-${crypto.randomUUID()}`,
+        status: "onboarding",
+      })
+      .returning();
+
+    const pending = await issueMerchantInvitation(db(), {
+      actorUserId: admin.id,
+      storeName: "Unclaimed Store",
+      storeSlug: `unclaimed-${crypto.randomUUID()}`,
+      invitedEmail: "unclaimed.store@example.test",
+    });
+
+    const accepted = await issueMerchantInvitation(db(), {
+      actorUserId: admin.id,
+      storeName: "Accepted Store",
+      storeSlug: `accepted-${crypto.randomUUID()}`,
+      invitedEmail: "accepted.store@example.test",
+    });
+
+    await acceptMerchantInvitation(db(), {
+      token: accepted.token,
+      password: MERCHANT_PASSWORD,
+    });
+
+    // A second active membership and an older revoked invitation must not
+    // duplicate the store row.
+    const [secondOwner] = await db()
+      .insert(appUser)
+      .values({ email: `second-owner-${crypto.randomUUID()}@example.test` })
+      .returning();
+
+    await db().insert(storeMembership).values({
+      storeId: accepted.storeId,
+      userId: secondOwner.id,
+      role: "owner",
+      status: "active",
+    });
+
+    const [olderInvitation] = await db()
+      .insert(merchantInvitation)
+      .values({
+        storeId: accepted.storeId,
+        invitedEmail: "older.revoked@example.test",
+        tokenDigest: crypto.randomBytes(32).toString("hex"),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        invitedByUserId: admin.id,
+        revokedAt: new Date(),
+        revokedByUserId: admin.id,
+        createdAt: new Date(Date.now() - 60_000),
+      })
+      .returning();
+
+    expect(olderInvitation.storeId).toBe(accepted.storeId);
+
+    const listed = await listPlatformStores(db());
+    const rows = listed.stores.filter(
+      (entry) =>
+        entry.id === noInvitation.id ||
+        entry.id === pending.storeId ||
+        entry.id === accepted.storeId,
+    );
+
+    expect(rows).toHaveLength(3);
+
+    const noInvitationRow = rows.find((entry) => entry.id === noInvitation.id);
+    expect(noInvitationRow).toMatchObject({
+      status: "onboarding",
+      ownerEmails: [],
+      latestInvitation: null,
+    });
+
+    const pendingRow = rows.find((entry) => entry.id === pending.storeId);
+    expect(pendingRow?.ownerEmails).toEqual([]);
+    expect(pendingRow?.latestInvitation).toMatchObject({
+      invitedEmail: "unclaimed.store@example.test",
+      status: "pending",
+    });
+
+    const acceptedRows = rows.filter((entry) => entry.id === accepted.storeId);
+    expect(acceptedRows).toHaveLength(1);
+    expect(acceptedRows[0].latestInvitation).toMatchObject({
+      invitedEmail: "accepted.store@example.test",
+      status: "accepted",
+    });
+    expect(acceptedRows[0].ownerEmails).toHaveLength(2);
+    expect(acceptedRows[0].ownerEmails).toEqual(
+      expect.arrayContaining([
+        "accepted.store@example.test",
+        secondOwner.email,
+      ]),
+    );
+  });
+
+  it("paginates every store with a deterministic order and clamps invalid pages", async () => {
+    const base = Date.now() - 60_000;
+    const stores = [];
+
+    for (let index = 0; index < 5; index += 1) {
+      const [row] = await db()
+        .insert(store)
+        .values({
+          name: `Paged Store ${index + 1}`,
+          slug: `paged-store-${index + 1}-${crypto.randomUUID()}`,
+          status: "onboarding",
+          createdAt: new Date(base + index * 1000),
+        })
+        .returning();
+      stores.push(row);
+    }
+
+    const pageOne = await listPlatformStores(db(), { page: 1, pageSize: 2 });
+    expect(pageOne.stores.map((row) => row.id)).toEqual([
+      stores[0].id,
+      stores[1].id,
+    ]);
+    expect(pageOne.totalStores).toBe(5);
+    expect(pageOne.totalPages).toBe(3);
+    expect(pageOne.hasPreviousPage).toBe(false);
+    expect(pageOne.hasNextPage).toBe(true);
+
+    const lastPage = await listPlatformStores(db(), { page: 3, pageSize: 2 });
+    expect(lastPage.stores.map((row) => row.id)).toEqual([stores[4].id]);
+    expect(lastPage.hasPreviousPage).toBe(true);
+    expect(lastPage.hasNextPage).toBe(false);
+
+    const clamped = await listPlatformStores(db(), { page: 99, pageSize: 2 });
+    expect(clamped.page).toBe(3);
+    expect(clamped.stores.map((row) => row.id)).toEqual([stores[4].id]);
+  });
+
+  it("loads each store's latest invitation independently beyond the old shared scan cap", async () => {
+    const admin = await insertPlatformAdmin();
+    const base = Date.now() - 60 * 60 * 1000;
+
+    const [coldStore] = await db()
+      .insert(store)
+      .values({
+        name: "Cold Store",
+        slug: `cold-store-${crypto.randomUUID()}`,
+        status: "onboarding",
+        createdAt: new Date(base),
+      })
+      .returning();
+    const [hotStore] = await db()
+      .insert(store)
+      .values({
+        name: "Hot Store",
+        slug: `hot-store-${crypto.randomUUID()}`,
+        status: "onboarding",
+        createdAt: new Date(base + 1000),
+      })
+      .returning();
+
+    await db().insert(merchantInvitation).values({
+      storeId: coldStore.id,
+      invitedEmail: "cold.latest@example.test",
+      tokenDigest: crypto.randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      invitedByUserId: admin.id,
+      createdAt: new Date(base - 1000),
+    });
+
+    const hotInvitations = Array.from({ length: 2001 }, (_, index) => ({
+      storeId: hotStore.id,
+      invitedEmail: `hot-${index}@example.test`,
+      tokenDigest: crypto.randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      invitedByUserId: admin.id,
+      createdAt: new Date(base + 1000 + index * 1000),
+    }));
+
+    for (let offset = 0; offset < hotInvitations.length; offset += 500) {
+      await db()
+        .insert(merchantInvitation)
+        .values(hotInvitations.slice(offset, offset + 500));
+    }
+
+    const page = await listPlatformStores(db(), { page: 1, pageSize: 2 });
+    const cold = page.stores.find((row) => row.id === coldStore.id);
+    const hot = page.stores.find((row) => row.id === hotStore.id);
+
+    expect(cold?.latestInvitation).toMatchObject({
+      invitedEmail: "cold.latest@example.test",
+    });
+    expect(hot?.latestInvitation).toMatchObject({
+      invitedEmail: "hot-2000@example.test",
+    });
+  });
+
+  it("uses the invitation id as a deterministic tie-breaker", async () => {
+    const admin = await insertPlatformAdmin();
+    const [target] = await db()
+      .insert(store)
+      .values({
+        name: "Tie Break Store",
+        slug: `tie-break-${crypto.randomUUID()}`,
+        status: "onboarding",
+      })
+      .returning();
+    const createdAt = new Date();
+    const lowerId = "00000000-0000-4000-8000-000000000001";
+    const higherId = "ffffffff-ffff-4fff-bfff-ffffffffffff";
+
+    await db().insert(merchantInvitation).values([
+      {
+        id: higherId,
+        storeId: target.id,
+        invitedEmail: "higher.id@example.test",
+        tokenDigest: crypto.randomBytes(32).toString("hex"),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        invitedByUserId: admin.id,
+        createdAt,
+      },
+      {
+        id: lowerId,
+        storeId: target.id,
+        invitedEmail: "lower.id@example.test",
+        tokenDigest: crypto.randomBytes(32).toString("hex"),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        invitedByUserId: admin.id,
+        createdAt,
+      },
+    ]);
+
+    const page = await listPlatformStores(db(), { page: 1, pageSize: 10 });
+    expect(page.stores[0]?.latestInvitation?.id).toBe(higherId);
   });
 });
