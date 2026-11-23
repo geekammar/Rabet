@@ -282,15 +282,26 @@ export async function handleManagerTelegramWebhookRequest(
         {
           managerApi,
           createBotApi: options?.createBotApi,
+          transport,
           webhookOrigin: origin,
           now: options?.now,
         },
       );
 
-      if (result.status === "retryable") {
-        // The attempt stays active; a later Telegram redelivery or the
-        // merchant's retry action can recover without a fresh bot.
-        throw new Error(`Retryable managed bot preparation failure: ${result.reason}`);
+      if (
+        result.status === "retryable" ||
+        result.status === "in_progress" ||
+        result.status === "unmatched"
+      ) {
+        // Do not acknowledge an update that cannot yet be correlated or whose
+        // preparation is owned by another delivery. The durable update row is
+        // marked failed and can be reclaimed by Telegram's redelivery or a
+        // later delivery once the binding/attempt evidence is visible.
+        throw new Error(
+          `Retryable managed bot outcome: ${result.status}${
+            result.status === "retryable" ? `:${result.reason}` : ""
+          }`,
+        );
       }
     }
 

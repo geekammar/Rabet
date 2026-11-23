@@ -54,10 +54,15 @@ export async function POST(request: Request): Promise<Response> {
   const result = await startMerchantTelegramConnection();
   const setupUrl = new URL("/app/setup", origin);
 
-  if (!result.ok || !result.deepLink) {
-    setupUrl.hash = `telegram-start-error=${
-      result.ok ? "OPERATION_FAILED" : result.error
-    }`;
+  if (!result.ok) {
+    setupUrl.hash = `telegram-start-error=${result.error}`;
+    return redirectTo(setupUrl.toString());
+  }
+
+  if (!result.deepLink) {
+    // The store already has a live attempt or a verified bot candidate. Stay
+    // on Nokmel so the server-rendered state can show confirmation/recovery
+    // instead of opening a second creation flow.
     return redirectTo(setupUrl.toString());
   }
 

@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
   useTransition,
@@ -22,6 +24,7 @@ import {
   confirmMerchantTelegramConnection,
   startMerchantTelegramConnection,
   publishMerchantTelegramStore,
+  recoverMerchantTelegramConnection,
   type MerchantTelegramActionResult,
 } from "@/app/actions/merchant-telegram";
 import { Button } from "@/components/ui/button";
@@ -139,25 +142,74 @@ export function MerchantTelegramConnection({
     ? copy.errors[failureReason] ?? copy.errors.failed
     : null;
 
-  const waiting = state.state === "waiting";
+  const recoverKey =
+    state.state === "recoverable"
+      ? `${state.connectionId ?? "attempt"}:${state.attemptId}`
+      : null;
+  const recoveryStarted = useRef<string | null>(null);
+
+  const recoverCandidate = useCallback(
+    (connectionId: string | null, attemptId: string) => {
+      setActionError(null);
+      startTransition(async () => {
+        const result = await recoverMerchantTelegramConnection(
+          connectionId ? { connectionId } : { attemptId },
+        );
+
+        if (result.ok) {
+          router.refresh();
+        } else {
+          setActionError(
+            copy.errors[result.error] ?? copy.errors.OPERATION_FAILED,
+          );
+        }
+      });
+    },
+    [copy.errors, router, startTransition],
+  );
 
   useEffect(() => {
-    if (!waiting || readOnly) return;
+    if (!recoverKey || readOnly) return;
+    if (recoveryStarted.current === recoverKey) return;
+
+    recoveryStarted.current = recoverKey;
+
+    if (state.state !== "recoverable") return;
+
+    const connectionId = state.connectionId;
+    const attemptId = state.attemptId;
+    const timer = window.setTimeout(() => {
+      recoverCandidate(connectionId, attemptId);
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [recoverKey, readOnly, recoverCandidate, state]);
+
+  useEffect(() => {
+    if (readOnly) return;
+
+    function refresh() {
+      router.refresh();
+    }
 
     function refreshWhenVisible() {
-      if (document.visibilityState === "visible") router.refresh();
+      if (document.visibilityState === "visible") refresh();
     }
 
     document.addEventListener("visibilitychange", refreshWhenVisible);
-    window.addEventListener("focus", refreshWhenVisible);
-    const interval = window.setInterval(refreshWhenVisible, 5_000);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("pageshow", refresh);
+
+    const shouldPoll = state.state === "waiting" || state.state === "preparing";
+    const interval = shouldPoll ? window.setInterval(refresh, 5_000) : null;
 
     return () => {
       document.removeEventListener("visibilitychange", refreshWhenVisible);
-      window.removeEventListener("focus", refreshWhenVisible);
-      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("pageshow", refresh);
+      if (interval) window.clearInterval(interval);
     };
-  }, [waiting, readOnly, router]);
+  }, [readOnly, router, state.state]);
 
   function handleResult(result: MerchantTelegramActionResult) {
     if (result.ok) {
@@ -243,6 +295,15 @@ export function MerchantTelegramConnection({
               ? copy.waitingProvisioning
               : copy.waitingOpen}
           </p>
+          {state.lastError ? (
+            <p
+              role="status"
+              className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+              data-testid="merchant-telegram-waiting-error"
+            >
+              {copy.errors[state.lastError] ?? copy.errors.failed}
+            </p>
+          ) : null}
           {launchFailure ? (
             <div
               role="status"
@@ -286,16 +347,102 @@ export function MerchantTelegramConnection({
         </div>
       ) : null}
 
+      {state.state === "preparing" ? (
+        <div className="space-y-3" data-testid="merchant-telegram-preparing">
+          <p className="font-medium">{copy.preparingTitle}</p>
+          <p className="text-sm text-muted-foreground">
+            {copy.preparingBody}
+          </p>
+          {state.botName || state.botUsername ? (
+            <div className="rounded-lg border border-border bg-muted/30 p-3">
+              {state.botName ? (
+                <p
+                  className="break-words font-medium"
+                  data-testid="merchant-telegram-bot-name"
+                >
+                  {state.botName}
+                </p>
+              ) : null}
+              {state.botUsername ? (
+                <p
+                  className="break-all font-mono text-sm"
+                  data-testid="merchant-telegram-bot-username"
+                >
+                  @{state.botUsername}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            className="min-h-11"
+            onClick={() => router.refresh()}
+            disabled={isPending}
+            data-testid="merchant-telegram-refresh"
+          >
+            <RefreshCw className="size-4" aria-hidden="true" />
+            {copy.refresh}
+          </Button>
+        </div>
+      ) : null}
+
+      {state.state === "recoverable" ? (
+        <div className="space-y-3" data-testid="merchant-telegram-recoverable">
+          <p className="font-medium">{copy.recoverTitle}</p>
+          <p className="text-sm text-muted-foreground">{copy.recoverBody}</p>
+          <div className="rounded-lg border border-border bg-muted/30 p-3">
+            {state.botName ? (
+              <p
+                className="break-words font-medium"
+                data-testid="merchant-telegram-bot-name"
+              >
+                {state.botName}
+              </p>
+            ) : null}
+            <p
+              className="break-all font-mono text-sm"
+              data-testid="merchant-telegram-bot-username"
+            >
+              @{state.botUsername}
+            </p>
+          </div>
+          <Button
+            type="button"
+            className="min-h-11"
+            disabled={readOnly || isPending}
+            onClick={() => {
+              recoveryStarted.current = null;
+              recoverCandidate(state.connectionId, state.attemptId);
+            }}
+            data-testid="merchant-telegram-recover"
+          >
+            <RefreshCw className="size-4" aria-hidden="true" />
+            {isPending ? copy.recovering : copy.recover}
+          </Button>
+        </div>
+      ) : null}
+
       {state.state === "confirm" ? (
         <div className="space-y-3" data-testid="merchant-telegram-confirm">
           <p className="font-medium">{copy.confirmTitle}</p>
           <p className="text-sm text-muted-foreground">{copy.confirmBody}</p>
-          <p
-            className="break-all rounded-lg border border-border bg-muted/30 p-3 font-mono text-sm"
-            data-testid="merchant-telegram-bot-username"
-          >
-            @{state.botUsername}
-          </p>
+          <div className="rounded-lg border border-border bg-muted/30 p-3">
+            {state.botName ? (
+              <p
+                className="break-words font-medium"
+                data-testid="merchant-telegram-bot-name"
+              >
+                {state.botName}
+              </p>
+            ) : null}
+            <p
+              className="break-all font-mono text-sm"
+              data-testid="merchant-telegram-bot-username"
+            >
+              @{state.botUsername}
+            </p>
+          </div>
           {state.lastError ? (
             <p
               role="status"
@@ -316,16 +463,6 @@ export function MerchantTelegramConnection({
               <CheckCircle2 className="size-4" aria-hidden="true" />
               {copy.confirm}
             </Button>
-            <StartAttemptControl
-              isAndroid={isAndroidTelegramLaunch}
-              readOnly={readOnly}
-              isPending={isPending}
-              onStart={startConnection}
-              label={copy.startOver}
-              testId="merchant-telegram-start-over"
-              variant="outline"
-              icon={null}
-            />
           </div>
         </div>
       ) : null}
