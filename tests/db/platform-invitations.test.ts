@@ -8,6 +8,7 @@ import {
   appUser,
   merchantCredential,
   merchantInvitation,
+  store,
   storeMembership,
 } from "@/db/schema";
 import { verifyPlatformAdminCredentials } from "@/lib/auth/platform-credentials";
@@ -19,7 +20,10 @@ import {
   issueMerchantInvitation,
   revokeMerchantInvitation,
 } from "@/lib/merchant-invitation/service";
-import { listPlatformInvitations } from "@/lib/merchant-invitation/platform-admin";
+import {
+  listPlatformInvitations,
+  listPlatformStores,
+} from "@/lib/merchant-invitation/platform-admin";
 import {
   createTestDatabase,
   hasTestCluster,
@@ -435,5 +439,108 @@ describe.skipIf(!shouldRun)("platform invitation issue, revoke and redeem", () =
       .where(eq(merchantInvitation.id, issued.invitationId));
 
     expect(row[0]).toEqual({ revokedAt: null, revokedByUserId: null });
+  });
+});
+
+
+describe.skipIf(!shouldRun)("platform store directory", () => {
+  it("lists each store once with owner emails and latest invitation state", async () => {
+    const admin = await insertPlatformAdmin();
+
+    const [noInvitation] = await db()
+      .insert(store)
+      .values({
+        name: "No Invitation Store",
+        slug: `no-invitation-${crypto.randomUUID()}`,
+        status: "onboarding",
+      })
+      .returning();
+
+    const pending = await issueMerchantInvitation(db(), {
+      actorUserId: admin.id,
+      storeName: "Unclaimed Store",
+      storeSlug: `unclaimed-${crypto.randomUUID()}`,
+      invitedEmail: "unclaimed.store@example.test",
+    });
+
+    const accepted = await issueMerchantInvitation(db(), {
+      actorUserId: admin.id,
+      storeName: "Accepted Store",
+      storeSlug: `accepted-${crypto.randomUUID()}`,
+      invitedEmail: "accepted.store@example.test",
+    });
+
+    await acceptMerchantInvitation(db(), {
+      token: accepted.token,
+      password: MERCHANT_PASSWORD,
+    });
+
+    // A second active membership and an older revoked invitation must not
+    // duplicate the store row.
+    const [secondOwner] = await db()
+      .insert(appUser)
+      .values({ email: `second-owner-${crypto.randomUUID()}@example.test` })
+      .returning();
+
+    await db().insert(storeMembership).values({
+      storeId: accepted.storeId,
+      userId: secondOwner.id,
+      role: "owner",
+      status: "active",
+    });
+
+    const [olderInvitation] = await db()
+      .insert(merchantInvitation)
+      .values({
+        storeId: accepted.storeId,
+        invitedEmail: "older.revoked@example.test",
+        tokenDigest: crypto.randomBytes(32).toString("hex"),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        invitedByUserId: admin.id,
+        revokedAt: new Date(),
+        revokedByUserId: admin.id,
+        createdAt: new Date(Date.now() - 60_000),
+      })
+      .returning();
+
+    expect(olderInvitation.storeId).toBe(accepted.storeId);
+
+    const listed = await listPlatformStores(db());
+    const rows = listed.filter(
+      (entry) =>
+        entry.id === noInvitation.id ||
+        entry.id === pending.storeId ||
+        entry.id === accepted.storeId,
+    );
+
+    expect(rows).toHaveLength(3);
+
+    const noInvitationRow = rows.find((entry) => entry.id === noInvitation.id);
+    expect(noInvitationRow).toMatchObject({
+      status: "onboarding",
+      ownerEmails: [],
+      latestInvitation: null,
+    });
+
+    const pendingRow = rows.find((entry) => entry.id === pending.storeId);
+    expect(pendingRow?.ownerEmails).toEqual([]);
+    expect(pendingRow?.latestInvitation).toMatchObject({
+      invitedEmail: "unclaimed.store@example.test",
+      status: "pending",
+    });
+
+    const acceptedRows = rows.filter((entry) => entry.id === accepted.storeId);
+    expect(acceptedRows).toHaveLength(1);
+    expect(acceptedRows[0].latestInvitation).toMatchObject({
+      invitedEmail: "accepted.store@example.test",
+      status: "accepted",
+    });
+    expect(acceptedRows[0].ownerEmails).toHaveLength(2);
+    expect(acceptedRows[0].ownerEmails).toEqual(
+      expect.arrayContaining([
+        "accepted.store@example.test",
+        secondOwner.email,
+      ]),
+    );
   });
 });
