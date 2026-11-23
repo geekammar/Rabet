@@ -1,0 +1,93 @@
+name: COD Staging Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type PROVISION_COD_STAGING to authorize the isolated test DB, seed, env update and deploy.'
+        type: string
+        default: ""
+        required: true
+  push:
+    branches:
+      - ops/cod-staging-acceptance
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-staging-acceptance
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    name: Provision isolated COD Staging target
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[provision-cod-staging]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 60
+
+    steps:
+      - name: Validate confirmation
+        env:
+          RABET_CONFIRM: ${{ inputs.confirm }}
+          RABET_REF: ${{ github.ref }}
+          RABET_EVENT: ${{ github.event_name }}
+        run: |
+          if [ "${RABET_EVENT}" = "workflow_dispatch" ]; then
+            if [ "${RABET_CONFIRM}" != "PROVISION_COD_STAGING" ]; then
+              echo "Confirmation must equal PROVISION_COD_STAGING." >&2
+              exit 1
+            fi
+          else
+            if [ "${RABET_REF}" != "refs/heads/ops/cod-staging-acceptance" ]; then
+              echo "Push trigger is restricted to ops/cod-staging-acceptance." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install orchestration dependencies
+        run: npm ci
+
+      - name: Create exact candidate worktree
+        run: |
+          set -euo pipefail
+          CANDIDATE_SHA="83ac0c7166644bd71ab43cd86c8f404e00595514"
+          git worktree add --detach /tmp/rabet-candidate "${CANDIDATE_SHA}"
+          test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${CANDIDATE_SHA}"
+
+      - name: Install candidate dependencies
+        working-directory: /tmp/rabet-candidate
+        run: npm ci
+
+      - name: Provision DB, migrate, seed, configure and deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          NEON_DEV_DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 83ac0c7166644bd71ab43cd86c8f404e00595514
+          RABET_CODE_ROOT: /tmp/rabet-candidate
+          SEED_MERCHANT_A_PASSWORD_HASH: \${{ secrets.COD_STAGING_MERCHANT_HASH_A }}
+          SEED_MERCHANT_B_PASSWORD_HASH: \${{ secrets.COD_STAGING_MERCHANT_HASH_B }}
+        run: node scripts/cod-staging-acceptance.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-summary
+          path: /tmp/cod-staging-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
