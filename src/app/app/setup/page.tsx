@@ -8,7 +8,7 @@ import { isAndroidUserAgent } from "@/components/merchant/telegram-official-laun
 import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
-import { trustedApplicationOrigin } from "@/lib/merchant-invitation/http";
+import { trustedApplicationOrigin } from "@/lib/http/request-origin";
 import {
   readMerchantLocale,
   merchantPageMetadata,

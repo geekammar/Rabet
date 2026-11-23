@@ -18,13 +18,6 @@ const NO_STORE_HEADERS = {
 
 export const INVITATION_BODY_MAX_BYTES = 8 * 1024;
 
-/** Server-side application origin variables, in priority order. */
-export const TRUSTED_APP_ORIGIN_ENV_KEYS = [
-  "APP_URL",
-  "NEXT_PUBLIC_APP_URL",
-  "AUTH_URL",
-] as const;
-
 export function merchantJson(
   body: unknown,
   status = 200,
@@ -44,59 +37,11 @@ export function merchantNotFoundResponse(): Response {
   return merchantJson({ ok: false, code: "NOT_FOUND" }, 404);
 }
 
-/**
- * Returns the trusted application origin from server configuration, including
- * scheme and port. A missing or malformed value fails closed.
- */
-export function trustedApplicationOrigin(): string | null {
-  for (const key of TRUSTED_APP_ORIGIN_ENV_KEYS) {
-    const raw = process.env[key];
-    if (typeof raw !== "string" || raw.trim() === "") continue;
-
-    try {
-      const parsed = new URL(raw.trim());
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        return null;
-      }
-      return parsed.origin;
-    } catch {
-      return null;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Rejects cross-origin and missing-origin POSTs by comparing the complete
- * browser `Origin` to the trusted server-side application origin.
- *
- * Request `Host` and forwarded host headers are deliberately ignored: an
- * attacker-controlled forwarded header must never turn a mismatched Origin
- * into an accepted one.
- */
-export function isSameOriginRequest(
-  request: Request,
-  trustedOrigin: string | null = trustedApplicationOrigin(),
-): boolean {
-  if (!trustedOrigin) return false;
-
-  const origin = request.headers.get("origin");
-
-  if (!origin) return false;
-
-  try {
-    const parsed = new URL(origin);
-
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return false;
-    }
-
-    return parsed.origin === trustedOrigin;
-  } catch {
-    return false;
-  }
-}
+export {
+  isSameOriginRequest,
+  TRUSTED_APP_ORIGIN_ENV_KEYS,
+  trustedApplicationOrigin,
+} from "@/lib/http/request-origin";
 
 function hasValidJsonContentType(value: string): boolean {
   const [mediaType, ...parameters] = value.split(";").map((part) => part.trim());

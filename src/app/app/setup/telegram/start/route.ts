@@ -7,7 +7,7 @@ import {
 import {
   isSameOriginRequest,
   trustedApplicationOrigin,
-} from "@/lib/merchant-invitation/http";
+} from "@/lib/http/request-origin";
 
 const NO_STORE_HEADERS = {
   "Cache-Control": "no-store, max-age=0, must-revalidate",
