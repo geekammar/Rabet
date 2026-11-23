@@ -1,15 +1,21 @@
 "use client";
 
-import { useEffect, useState, useSyncExternalStore, useTransition } from "react";
+import {
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  useTransition,
+  type ReactNode,
+} from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, ExternalLink, RefreshCw, Send } from "lucide-react";
 
 import type { MerchantLocale } from "@/components/merchant/language-toggle";
 import { MERCHANT_TELEGRAM_COPY } from "@/components/merchant/merchant-telegram-copy";
 import {
-  buildOfficialTelegramIntent,
+  buildAndroidTelegramLaunchTarget,
   buildTelegramLaunchFallbackUrl,
-  isAndroidRuntime,
+  MERCHANT_TELEGRAM_START_PATH,
 } from "@/components/merchant/telegram-official-launch";
 import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 import {
@@ -32,16 +38,83 @@ function getServerLaunchFailure(): boolean {
   return false;
 }
 
+function getStartErrorSnapshot(): string | null {
+  const match = window.location.hash.match(/^#telegram-start-error=([A-Z_]+)$/);
+  return match?.[1] ?? null;
+}
+
+function getServerStartError(): string | null {
+  return null;
+}
+
+function StartAttemptControl({
+  isAndroid,
+  readOnly,
+  isPending,
+  onStart,
+  label,
+  testId,
+  variant = "default",
+  icon,
+}: {
+  isAndroid: boolean;
+  readOnly: boolean;
+  isPending: boolean;
+  onStart: () => void;
+  label: string;
+  testId: string;
+  variant?: "default" | "outline";
+  icon: ReactNode;
+}) {
+  // On Android the create/retry action is a real form post. The server creates
+  // the attempt and answers with a 303 to a package-targeted intent, so the
+  // handoff keeps the tap's user gesture instead of waiting on async JS.
+  if (isAndroid) {
+    return (
+      <form method="post" action={MERCHANT_TELEGRAM_START_PATH}>
+        <Button
+          type="submit"
+          variant={variant}
+          className="min-h-11"
+          disabled={readOnly || isPending}
+          data-testid={testId}
+        >
+          {icon}
+          {label}
+        </Button>
+      </form>
+    );
+  }
+
+  return (
+    <Button
+      type="button"
+      variant={variant}
+      className="min-h-11"
+      disabled={readOnly || isPending}
+      onClick={onStart}
+      data-testid={testId}
+    >
+      {icon}
+      {label}
+    </Button>
+  );
+}
+
 export function MerchantTelegramConnection({
   state,
   storeStatus,
   locale,
   readOnly,
+  isAndroidTelegramLaunch,
+  telegramLaunchOrigin,
 }: {
   state: MerchantTelegramConnectionState;
   storeStatus: "onboarding" | "active" | "suspended";
   locale: MerchantLocale;
   readOnly: boolean;
+  isAndroidTelegramLaunch: boolean;
+  telegramLaunchOrigin: string | null;
 }) {
   const copy = MERCHANT_TELEGRAM_COPY[locale];
   const router = useRouter();
@@ -52,6 +125,14 @@ export function MerchantTelegramConnection({
     getLaunchFailureSnapshot,
     getServerLaunchFailure,
   );
+  const startError = useSyncExternalStore(
+    subscribeNever,
+    getStartErrorSnapshot,
+    getServerStartError,
+  );
+  const startErrorMessage = startError
+    ? copy.errors[startError] ?? copy.errors.OPERATION_FAILED
+    : null;
 
   const failureReason = state.state === "failed" ? state.reason : null;
   const failureMessage = failureReason
@@ -83,18 +164,9 @@ export function MerchantTelegramConnection({
       setActionError(null);
       router.refresh();
 
-      if (result.deepLink) {
-        if (isAndroidRuntime()) {
-          const fallback = buildTelegramLaunchFallbackUrl(window.location.origin);
-          const intent = buildOfficialTelegramIntent(result.deepLink, fallback);
-
-          // One tap: official Telegram only. If it is missing or Chrome blocks
-          // the intent, the browser returns to the same pending attempt page.
-          window.location.assign(intent ?? fallback);
-        } else {
-          window.location.assign(result.deepLink);
-        }
-      }
+      // Android starts through the POST route instead, so this JS navigation
+      // is only reached on iOS/desktop where the original HTTPS link is kept.
+      if (result.deepLink) window.location.assign(result.deepLink);
 
       return;
     }
@@ -151,16 +223,15 @@ export function MerchantTelegramConnection({
       {state.state === "not_connected" ? (
         <div className="space-y-3">
           <p className="text-sm text-muted-foreground">{copy.notConnected}</p>
-          <Button
-            type="button"
-            className="min-h-11"
-            disabled={readOnly || isPending}
-            onClick={startConnection}
-            data-testid="merchant-telegram-connect"
-          >
-            <Send className="size-4" aria-hidden="true" />
-            {copy.connect}
-          </Button>
+          <StartAttemptControl
+            isAndroid={isAndroidTelegramLaunch}
+            readOnly={readOnly}
+            isPending={isPending}
+            onStart={startConnection}
+            label={copy.connect}
+            testId="merchant-telegram-connect"
+            icon={<Send className="size-4" aria-hidden="true" />}
+          />
         </div>
       ) : null}
 
@@ -185,8 +256,14 @@ export function MerchantTelegramConnection({
           <div className="flex flex-wrap gap-2">
             <Button asChild className="min-h-11">
               <a
-                href={state.deepLink}
-                target="_blank"
+                href={
+                  isAndroidTelegramLaunch && telegramLaunchOrigin
+                    ? buildAndroidTelegramLaunchTarget(
+                        state.deepLink,
+                        buildTelegramLaunchFallbackUrl(telegramLaunchOrigin),
+                      )
+                    : state.deepLink
+                }
                 rel="noreferrer"
                 data-testid="merchant-telegram-open"
               >
@@ -239,15 +316,16 @@ export function MerchantTelegramConnection({
               <CheckCircle2 className="size-4" aria-hidden="true" />
               {copy.confirm}
             </Button>
-            <Button
-              type="button"
+            <StartAttemptControl
+              isAndroid={isAndroidTelegramLaunch}
+              readOnly={readOnly}
+              isPending={isPending}
+              onStart={startConnection}
+              label={copy.startOver}
+              testId="merchant-telegram-start-over"
               variant="outline"
-              className="min-h-11"
-              disabled={readOnly || isPending}
-              onClick={startConnection}
-            >
-              {copy.startOver}
-            </Button>
+              icon={null}
+            />
           </div>
         </div>
       ) : null}
@@ -303,27 +381,26 @@ export function MerchantTelegramConnection({
           </p>
           <p className="text-sm text-muted-foreground">{failureMessage}</p>
           {state.retryable ? (
-            <Button
-              type="button"
-              className="min-h-11"
-              disabled={readOnly || isPending}
-              onClick={startConnection}
-              data-testid="merchant-telegram-retry"
-            >
-              <RefreshCw className="size-4" aria-hidden="true" />
-              {copy.retry}
-            </Button>
+            <StartAttemptControl
+              isAndroid={isAndroidTelegramLaunch}
+              readOnly={readOnly}
+              isPending={isPending}
+              onStart={startConnection}
+              label={copy.retry}
+              testId="merchant-telegram-retry"
+              icon={<RefreshCw className="size-4" aria-hidden="true" />}
+            />
           ) : null}
         </div>
       ) : null}
 
-      {actionError ? (
+      {actionError ?? startErrorMessage ? (
         <p
           role="status"
           className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
           data-testid="merchant-telegram-error"
         >
-          {actionError}
+          {actionError ?? startErrorMessage}
         </p>
       ) : null}
     </section>

@@ -9,6 +9,8 @@
 
 export const OFFICIAL_TELEGRAM_ANDROID_PACKAGE = "org.telegram.messenger";
 
+export const MERCHANT_TELEGRAM_START_PATH = "/app/setup/telegram/start";
+
 const TELEGRAM_HOSTS = new Set(["t.me", "telegram.me", "telegram.dog"]);
 
 export function parseTelegramDeepLink(
@@ -57,12 +59,26 @@ export function buildOfficialTelegramIntent(
   return `intent://resolve?${params.toString()}#Intent;scheme=tg;package=${OFFICIAL_TELEGRAM_ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(fallbackUrl)};end`;
 }
 
+/**
+ * The Android-only launch target. A malformed deep link falls back to Nokmel
+ * instead of the generic t.me URL so Android can never silently open Telegram
+ * X through the OS default handler.
+ */
+export function buildAndroidTelegramLaunchTarget(
+  httpsUrl: string,
+  fallbackUrl: string,
+): string {
+  return buildOfficialTelegramIntent(httpsUrl, fallbackUrl) ?? fallbackUrl;
+}
+
 export function buildTelegramLaunchFallbackUrl(origin: string): string {
   const url = new URL("/app/setup", origin);
   url.hash = "telegram-launch-failed=telegram";
   return url.toString();
 }
 
-export function isAndroidRuntime(): boolean {
-  return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+export function isAndroidUserAgent(
+  userAgent: string | null | undefined,
+): boolean {
+  return typeof userAgent === "string" && /Android/i.test(userAgent);
 }

@@ -35,7 +35,7 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     intro:
       "اربط بوتًا واحدًا لخدمة عملاء متجرك. يتم إنشاء البوت عبر تيليجرام ثم تؤكد ارتباطه هنا.",
     notConnected: "لم يتم ربط بوت المتجر بعد.",
-    connect: "إنشاء بوت متجري على تيليجرام",
+    connect: "إنشاء بوت متجري",
     retry: "إعادة المحاولة",
     waitingTitle: "بانتظار تأكيد تيليجرام…",
     waitingOpen: "افتح تيليجرام وأنشئ بوت متجرك من الرسالة.",
@@ -43,10 +43,10 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       "أكمل إنشاء البوت في تيليجرام، ثم ارجع لتأكيد الربط.",
     waitingProvisioning:
       "بانتظار اكتمال إنشاء البوت في تيليجرام…",
-    openTelegram: "فتح تيليجرام",
+    openTelegram: "متابعة إنشاء البوت",
     launchFailedTitle: "تعذر فتح تيليجرام الرسمي.",
     launchFailedBody:
-      "قد لا يكون Telegram الرسمي مثبتًا أو منع المتصفح فتحه. ثبّت Telegram الرسمي ثم استخدم زر فتح تيليجرام أدناه؛ لم تُفقد محاولة الربط الحالية.",
+      "قد لا يكون Telegram الرسمي مثبتًا أو منع المتصفح فتحه. ثبّت Telegram الرسمي ثم اضغط «متابعة إنشاء البوت»؛ لم تُفقد محاولة الربط الحالية.",
     refresh: "تحديث الحالة",
     confirmTitle: "تأكيد بوت المتجر",
     confirmBody:
@@ -99,7 +99,7 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     intro:
       "Connect one bot to serve your store customers. Telegram creates the bot, then you confirm the connection here.",
     notConnected: "No store bot is connected yet.",
-    connect: "Create my Telegram store bot",
+    connect: "Create my store bot",
     retry: "Try again",
     waitingTitle: "Waiting for Telegram…",
     waitingOpen: "Open Telegram and create your store bot from the message.",
@@ -107,10 +107,10 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       "The link is open. Finish creating the bot in Telegram, then return and refresh the status.",
     waitingProvisioning:
       "The bot was received. Verifying its identity and registering the webhook…",
-    openTelegram: "Open Telegram",
+    openTelegram: "Continue creating the bot",
     launchFailedTitle: "Official Telegram could not be opened.",
     launchFailedBody:
-      "Official Telegram may not be installed, or the browser blocked it. Install official Telegram, then use the Open Telegram button below; the current connection attempt is preserved.",
+      "Official Telegram may not be installed, or the browser blocked it. Install official Telegram, then tap Continue creating the bot; the current connection attempt is preserved.",
     refresh: "Refresh status",
     confirmTitle: "Confirm the store bot",
     confirmBody:

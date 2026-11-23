@@ -97,6 +97,8 @@ export function MerchantSetup({
   readOnly,
   initialLocale,
   telegramConnection,
+  isAndroidTelegramLaunch,
+  telegramLaunchOrigin,
 }: {
   storeName: string;
   email: string;
@@ -104,6 +106,8 @@ export function MerchantSetup({
   readOnly: boolean;
   initialLocale: MerchantLocale;
   telegramConnection: MerchantTelegramConnectionState;
+  isAndroidTelegramLaunch: boolean;
+  telegramLaunchOrigin: string | null;
 }) {
   const [locale, setLocale] = useMerchantLocale(initialLocale, "setup");
   const copy = COPY[locale];
@@ -185,6 +189,8 @@ export function MerchantSetup({
           storeStatus={status}
           locale={locale}
           readOnly={readOnly}
+          isAndroidTelegramLaunch={isAndroidTelegramLaunch}
+          telegramLaunchOrigin={telegramLaunchOrigin}
         />
 
         <section className="rounded-xl border border-border bg-card p-5 shadow-sm">

@@ -1,11 +1,14 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { connection } from "next/server";
 import { notFound } from "next/navigation";
 
 import { MerchantSetup } from "@/components/merchant/merchant-setup";
+import { isAndroidUserAgent } from "@/components/merchant/telegram-official-launch";
 import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
+import { trustedApplicationOrigin } from "@/lib/merchant-invitation/http";
 import {
   readMerchantLocale,
   merchantPageMetadata,
@@ -25,6 +28,11 @@ export default async function MerchantSetupPage() {
 
   const access = await requireMerchantAccess();
   const initialLocale = await readMerchantLocale();
+  const requestHeaders = await headers();
+  const telegramLaunchOrigin = trustedApplicationOrigin();
+  const isAndroidTelegramLaunch = isAndroidUserAgent(
+    requestHeaders.get("user-agent"),
+  );
   const telegramConnection = await readMerchantTelegramConnectionState(
     getDb(),
     {
@@ -41,6 +49,8 @@ export default async function MerchantSetupPage() {
       readOnly={access.readOnly}
       initialLocale={initialLocale}
       telegramConnection={telegramConnection}
+      isAndroidTelegramLaunch={isAndroidTelegramLaunch}
+      telegramLaunchOrigin={telegramLaunchOrigin}
     />
   );
 }
