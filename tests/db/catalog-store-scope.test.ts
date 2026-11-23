@@ -1175,6 +1175,11 @@ describe("scoped-operation production surface", () => {
     const merchantResolver = path.join("lib", "auth", "merchant-session.ts");
     const merchantCatalog = path.join("lib", "merchant", "catalog.ts");
     const merchantCategory = path.join("lib", "merchant", "category.ts");
+    const managedWebhook = path.join(
+      "lib",
+      "telegram",
+      "managed-webhook.ts",
+    );
     const productsPage = path.join("app", "app", "products", "page.tsx");
     const categoriesPage = path.join(
       "app",
@@ -1189,6 +1194,7 @@ describe("scoped-operation production surface", () => {
       merchantResolver,
       merchantCatalog,
       merchantCategory,
+      managedWebhook,
       productsPage,
       categoriesPage,
     ]);
@@ -1253,6 +1259,15 @@ describe("scoped-operation production surface", () => {
     expect(merchantCategoryWriteOffenders).toEqual([]);
     expect(merchantCategoryReadOffenders).toEqual([]);
     expect(scopeIssuerOffenders).toEqual([]);
+
+    const managedWebhookSource = readFileSync(
+      path.join(srcRoot, managedWebhook),
+      "utf8",
+    );
+    expect(managedWebhookSource).toContain("readReadyManagedConnection");
+    expect(managedWebhookSource).toContain("verifyWebhookSecret");
+    expect(managedWebhookSource).toContain("connection.storeId");
+    expect(managedWebhookSource).not.toContain("searchParams");
 
     const page = readFileSync(path.join(srcRoot, productsPage), "utf8");
     expect(page).toContain("requireMerchantAccess");

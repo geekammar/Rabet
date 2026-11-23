@@ -4,7 +4,10 @@ const flow = vi.hoisted(() => ({
   preview: vi.fn(),
   accept: vi.fn(),
   consume: vi.fn(),
+  signIn: vi.fn(),
 }));
+
+vi.mock("@/auth-merchant", () => ({ signIn: flow.signIn }));
 
 vi.mock("@/db/transaction-client", () => ({
   getTransactionDb: () => ({ execute: vi.fn() }),
@@ -55,6 +58,7 @@ beforeEach(() => {
   vi.stubEnv("APP_URL", "https://app.example.test");
   flow.preview.mockReset();
   flow.accept.mockReset();
+  flow.signIn.mockReset().mockResolvedValue("https://app.example.test/app/setup");
   flow.consume.mockReset().mockResolvedValue({
     allowed: true,
     retryAfterSeconds: 0,
@@ -66,6 +70,36 @@ afterEach(() => {
 });
 
 describe("invitation acceptance route", () => {
+  it("accepts a named store and signs in with the invited identity", async () => {
+    flow.preview.mockResolvedValueOnce({ invitedEmail: "merchant@example.test" });
+    flow.accept.mockResolvedValueOnce({ email: "merchant@example.test" });
+
+    const response = await POST(request({ storeName: "My shop", email: "other@example.test" }));
+
+    await expect(response.json()).resolves.toEqual({ ok: true, redirectTo: "/app/setup" });
+    expect(flow.accept).toHaveBeenCalledWith(expect.anything(), {
+      token: TOKEN,
+      password: PASSWORD,
+      storeName: "My shop",
+    });
+    expect(flow.signIn).toHaveBeenCalledWith("credentials", {
+      email: "merchant@example.test",
+      password: PASSWORD,
+      redirect: false,
+      redirectTo: "/app/setup",
+    });
+  });
+
+  it("offers ordinary sign-in when session creation fails after acceptance", async () => {
+    flow.preview.mockResolvedValueOnce({ invitedEmail: "merchant@example.test" });
+    flow.accept.mockResolvedValueOnce({ email: "merchant@example.test" });
+    flow.signIn.mockRejectedValueOnce(new Error("sign-in unavailable"));
+
+    const response = await POST(request());
+
+    await expect(response.json()).resolves.toEqual({ ok: true, redirectTo: "/app/login" });
+  });
+
   it("rejects an unrecognized token after only the coarse budget", async () => {
     flow.preview.mockResolvedValueOnce(null);
 

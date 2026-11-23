@@ -33,6 +33,7 @@ const MAX_PASSWORD_LENGTH = 1024;
 type FieldErrors = {
   password?: "PASSWORD_LENGTH";
   passwordConfirmation?: "PASSWORD_MISMATCH";
+  storeName?: "STORE_NAME_INVALID";
 };
 
 export async function POST(request: Request): Promise<Response> {
@@ -50,10 +51,8 @@ export async function POST(request: Request): Promise<Response> {
 
   const rawToken = typeof body.token === "string" ? body.token : "";
   const password = typeof body.password === "string" ? body.password : "";
-  const confirmation =
-    typeof body.passwordConfirmation === "string"
-      ? body.passwordConfirmation
-      : "";
+  const confirmation = body.passwordConfirmation;
+  const storeName = body.storeName;
 
   const fieldErrors: FieldErrors = {};
 
@@ -64,8 +63,15 @@ export async function POST(request: Request): Promise<Response> {
     fieldErrors.password = "PASSWORD_LENGTH";
   }
 
-  if (password !== confirmation) {
+  if (confirmation !== undefined && password !== confirmation) {
     fieldErrors.passwordConfirmation = "PASSWORD_MISMATCH";
+  }
+
+  if (
+    storeName !== undefined &&
+    (typeof storeName !== "string" || !storeName.trim() || storeName.trim().length > 255)
+  ) {
+    fieldErrors.storeName = "STORE_NAME_INVALID";
   }
 
   if (Object.keys(fieldErrors).length > 0) {
@@ -99,11 +105,14 @@ export async function POST(request: Request): Promise<Response> {
     return merchantJson({ ok: false, code: "UNAVAILABLE" }, 503);
   }
 
+  let email: string;
   try {
-    await acceptMerchantInvitation(getTransactionDb(), {
+    const accepted = await acceptMerchantInvitation(getTransactionDb(), {
       token: rawToken,
       password,
+      ...(storeName === undefined ? {} : { storeName }),
     });
+    email = accepted.email;
   } catch (error) {
     if (error instanceof MerchantInvitationError) {
       return merchantJson(REJECTED, 400);
@@ -113,6 +122,22 @@ export async function POST(request: Request): Promise<Response> {
       "Invitation acceptance failed unexpectedly; returning a generic failure.",
     );
     return merchantJson({ ok: false, code: "UNAVAILABLE" }, 503);
+  }
+
+  // The invitation is already consumed. If sign-in fails, the new account
+  // remains usable through the ordinary login screen.
+  if (email) {
+    try {
+      const { signIn } = await import("@/auth-merchant");
+      const destination: unknown = await signIn("credentials", {
+        email, password, redirect: false, redirectTo: "/app/setup",
+      });
+      if (typeof destination === "string" && new URL(destination, request.url).pathname === "/app/setup") {
+        return merchantJson({ ok: true, redirectTo: "/app/setup" });
+      }
+    } catch {
+      console.warn("Merchant invitation accepted; automatic sign-in unavailable.");
+    }
   }
 
   return merchantJson({ ok: true, redirectTo: "/app/login" });

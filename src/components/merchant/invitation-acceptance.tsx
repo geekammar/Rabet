@@ -28,7 +28,7 @@ type Phase =
 
 type FieldErrors = {
   password?: "length";
-  passwordConfirmation?: "mismatch";
+  storeName?: "invalid";
 };
 
 type Copy = {
@@ -38,7 +38,6 @@ type Copy = {
   emailLabel: string;
   storeLabel: string;
   passwordLabel: string;
-  confirmationLabel: string;
   passwordHint: string;
   submit: string;
   submitting: string;
@@ -46,7 +45,7 @@ type Copy = {
   invalid: string;
   unavailable: string;
   passwordLength: string;
-  passwordMismatch: string;
+  storeNameInvalid: string;
   rateLimited: string;
   successTitle: string;
   successBody: string;
@@ -60,18 +59,17 @@ export const INVITATION_COPY: Record<MerchantLocale, Copy> = {
     title: INVITATION_PAGE_TITLE.ar,
     subtitle: "أنشئ حسابك للبدء في إعداد متجرك.",
     emailLabel: "البريد الإلكتروني المدعو",
-    storeLabel: "المتجر",
+    storeLabel: "اسم المتجر",
     passwordLabel: "كلمة المرور",
-    confirmationLabel: "تأكيد كلمة المرور",
     passwordHint: "12 حرفًا على الأقل.",
-    submit: "قبول الدعوة وإنشاء الحساب",
+    submit: "افتح متجري",
     submitting: "جارٍ التحقق…",
     previewing: "جارٍ التحقق من الدعوة…",
     invalid:
       "هذه الدعوة غير صالحة أو منتهية. اطلب دعوة جديدة من مسؤول المنصة.",
     unavailable: "تعذر التحقق من الدعوة الآن. حاول مرة أخرى بعد قليل.",
     passwordLength: "يجب أن تكون كلمة المرور بين 12 و1024 حرفًا.",
-    passwordMismatch: "كلمتا المرور غير متطابقتين.",
+    storeNameInvalid: "أدخل اسمًا للمتجر لا يتجاوز 255 حرفًا.",
     rateLimited: "محاولات كثيرة. انتظر قليلًا ثم حاول مرة أخرى.",
     successTitle: "تم إنشاء حسابك",
     successBody: "يمكنك الآن تسجيل الدخول إلى متجرك.",
@@ -83,18 +81,17 @@ export const INVITATION_COPY: Record<MerchantLocale, Copy> = {
     title: INVITATION_PAGE_TITLE.en,
     subtitle: "Create your account to start setting up your store.",
     emailLabel: "Invited email",
-    storeLabel: "Store",
+    storeLabel: "Store name",
     passwordLabel: "Password",
-    confirmationLabel: "Confirm password",
     passwordHint: "At least 12 characters.",
-    submit: "Accept invitation and create account",
+    submit: "Open my store",
     submitting: "Verifying…",
     previewing: "Checking the invitation…",
     invalid:
       "This invitation is not valid or can no longer be used. Ask the platform administrator for a new invitation.",
     unavailable: "The invitation could not be checked right now. Try again shortly.",
     passwordLength: "The password must be between 12 and 1024 characters.",
-    passwordMismatch: "The passwords do not match.",
+    storeNameInvalid: "Enter a store name of up to 255 characters.",
     rateLimited: "Too many attempts. Wait a moment and try again.",
     successTitle: "Your account is ready",
     successBody: "You can now sign in to your store.",
@@ -130,7 +127,7 @@ export function InvitationAcceptance({
   const [formError, setFormError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const passwordRef = useRef<HTMLInputElement>(null);
-  const confirmationRef = useRef<HTMLInputElement>(null);
+  const storeNameRef = useRef<HTMLInputElement>(null);
   const copy = INVITATION_COPY[locale];
 
   useEffect(() => {
@@ -200,15 +197,15 @@ export function InvitationAcceptance({
 
     const form = new FormData(event.currentTarget);
     const password = String(form.get("password") ?? "");
-    const confirmation = String(form.get("passwordConfirmation") ?? "");
+    const storeName = String(form.get("storeName") ?? "").trim();
     const nextErrors: FieldErrors = {};
 
     if (password.length < 12 || password.length > 1024) {
       nextErrors.password = "length";
     }
 
-    if (password !== confirmation) {
-      nextErrors.passwordConfirmation = "mismatch";
+    if (!storeName || storeName.length > 255) {
+      nextErrors.storeName = "invalid";
     }
 
     setFieldErrors(nextErrors);
@@ -216,7 +213,7 @@ export function InvitationAcceptance({
 
     if (Object.keys(nextErrors).length > 0) {
       if (nextErrors.password) passwordRef.current?.focus();
-      else confirmationRef.current?.focus();
+      else storeNameRef.current?.focus();
       return;
     }
 
@@ -226,7 +223,7 @@ export function InvitationAcceptance({
       const response = await fetch("/api/merchant-invitations/accept", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, password, passwordConfirmation: confirmation }),
+        body: JSON.stringify({ token, password, storeName }),
         cache: "no-store",
         credentials: "same-origin",
         referrerPolicy: "no-referrer",
@@ -244,6 +241,9 @@ export function InvitationAcceptance({
         setPreview(null);
         setPhase("success");
         window.history.replaceState(null, "", "/invite");
+        if ((data as { redirectTo?: unknown }).redirectTo === "/app/setup") {
+          window.location.replace("/app/setup");
+        }
         return;
       }
 
@@ -267,8 +267,8 @@ export function InvitationAcceptance({
           mapped.password = "length";
         }
 
-        if (serverErrors?.passwordConfirmation === "PASSWORD_MISMATCH") {
-          mapped.passwordConfirmation = "mismatch";
+        if (serverErrors?.storeName === "STORE_NAME_INVALID") {
+          mapped.storeName = "invalid";
         }
 
         setFieldErrors(mapped);
@@ -385,18 +385,31 @@ export function InvitationAcceptance({
                     {preview.email}
                   </dd>
                 </div>
-                <div className="space-y-0.5">
-                  <dt className="text-muted-foreground">{copy.storeLabel}</dt>
-                  <dd
-                    className="font-medium text-foreground"
-                    data-testid="invite-store"
-                  >
-                    {preview.storeName}
-                  </dd>
-                </div>
               </dl>
 
               <form onSubmit={submit} noValidate className="space-y-4">
+                <div className="space-y-2">
+                  <label htmlFor="invite-store-name" className="text-sm font-medium">
+                    {copy.storeLabel}
+                  </label>
+                  <input
+                    ref={storeNameRef}
+                    id="invite-store-name"
+                    name="storeName"
+                    defaultValue={preview.storeName}
+                    maxLength={255}
+                    required
+                    aria-invalid={fieldErrors.storeName ? true : undefined}
+                    aria-describedby={fieldErrors.storeName ? "invite-store-error" : undefined}
+                    data-testid="invite-store"
+                    className="min-h-11 w-full rounded-lg border border-input bg-background px-3 text-base"
+                  />
+                  {fieldErrors.storeName ? (
+                    <p id="invite-store-error" className="text-sm text-destructive">
+                      {copy.storeNameInvalid}
+                    </p>
+                  ) : null}
+                </div>
                 <div className="space-y-2">
                   <label
                     htmlFor="invite-password"
@@ -436,44 +449,6 @@ export function InvitationAcceptance({
                       {copy.passwordHint}
                     </p>
                   )}
-                </div>
-
-                <div className="space-y-2">
-                  <label
-                    htmlFor="invite-confirmation"
-                    className="text-sm font-medium text-foreground"
-                  >
-                    {copy.confirmationLabel}
-                  </label>
-                  <input
-                    ref={confirmationRef}
-                    id="invite-confirmation"
-                    name="passwordConfirmation"
-                    type={showPassword ? "text" : "password"}
-                    autoComplete="new-password"
-                    minLength={12}
-                    maxLength={1024}
-                    required
-                    aria-required="true"
-                    aria-invalid={
-                      fieldErrors.passwordConfirmation ? "true" : undefined
-                    }
-                    aria-describedby={
-                      fieldErrors.passwordConfirmation
-                        ? "invite-confirmation-error"
-                        : undefined
-                    }
-                    data-testid="invite-confirmation"
-                    className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
-                  />
-                  {fieldErrors.passwordConfirmation ? (
-                    <p
-                      id="invite-confirmation-error"
-                      className="text-sm font-medium text-destructive"
-                    >
-                      {copy.passwordMismatch}
-                    </p>
-                  ) : null}
                 </div>
 
                 <label className="flex min-h-11 items-center gap-2 text-sm text-muted-foreground">

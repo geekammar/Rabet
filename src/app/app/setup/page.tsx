@@ -1,14 +1,19 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { connection } from "next/server";
 import { notFound } from "next/navigation";
 
 import { MerchantSetup } from "@/components/merchant/merchant-setup";
+import { isAndroidUserAgent } from "@/components/merchant/telegram-official-launch";
+import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
+import { trustedApplicationOrigin } from "@/lib/http/request-origin";
 import {
   readMerchantLocale,
   merchantPageMetadata,
 } from "@/lib/merchant/locale-server";
+import { readMerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 
 export async function generateMetadata(): Promise<Metadata> {
   return merchantPageMetadata("setup", "Set up your Rabet store.");
@@ -23,6 +28,18 @@ export default async function MerchantSetupPage() {
 
   const access = await requireMerchantAccess();
   const initialLocale = await readMerchantLocale();
+  const requestHeaders = await headers();
+  const telegramLaunchOrigin = trustedApplicationOrigin();
+  const isAndroidTelegramLaunch = isAndroidUserAgent(
+    requestHeaders.get("user-agent"),
+  );
+  const telegramConnection = await readMerchantTelegramConnectionState(
+    getDb(),
+    {
+      scope: access.scope,
+      merchantUserId: access.userId,
+    },
+  );
 
   return (
     <MerchantSetup
@@ -31,6 +48,9 @@ export default async function MerchantSetupPage() {
       status={access.store.status}
       readOnly={access.readOnly}
       initialLocale={initialLocale}
+      telegramConnection={telegramConnection}
+      isAndroidTelegramLaunch={isAndroidTelegramLaunch}
+      telegramLaunchOrigin={telegramLaunchOrigin}
     />
   );
 }
