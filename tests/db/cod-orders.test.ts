@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import {
   appUser,
   cart,
+  cartItem,
   category,
   categoryTranslation,
   inventoryReservation,
@@ -265,6 +266,21 @@ beforeEach(async () => {
   `);
 
   await db
+    .delete(telegramConnection)
+    .where(
+      sql`${telegramConnection.id} NOT IN (${fixture.connectionAId}, ${fixture.connectionBId})`,
+    );
+  await db
+    .update(telegramConnection)
+    .set({ status: "ready" })
+    .where(
+      inArray(telegramConnection.id, [
+        fixture.connectionAId,
+        fixture.connectionBId,
+      ]),
+    );
+
+  await db
     .update(product)
     .set({ price: "11.00", isActive: true, deletedAt: null })
     .where(eq(product.id, fixture.productA1Id));
@@ -317,6 +333,35 @@ function tx(): TransactionDatabase {
 
 async function scope(storeId: string) {
   return readStoreScopeForFixture(db(), storeId);
+}
+
+async function replaceConnection(input: {
+  storeId: string;
+  oldConnectionId: string;
+  botId: number;
+  botUsername: string;
+}): Promise<string> {
+  await db()
+    .update(telegramConnection)
+    .set({ status: "revoked" })
+    .where(eq(telegramConnection.id, input.oldConnectionId));
+
+  const [connection] = await db()
+    .insert(telegramConnection)
+    .values({
+      storeId: input.storeId,
+      botId: input.botId,
+      botUsername: input.botUsername,
+      tokenCiphertext: "synthetic-ciphertext",
+      tokenKeyId: "v1",
+      webhookSecretHash: "c".repeat(64),
+      webhookUrl: `https://app.example.test/api/telegram/webhook/managed/${input.botId}`,
+      status: "ready",
+      verifiedAt: new Date(),
+    })
+    .returning();
+
+  return connection.id;
 }
 
 async function prepareReviewedOrder(input: {
@@ -940,6 +985,222 @@ describe.skipIf(!shouldRun)("COD orders on the managed store scope", () => {
 
     expect((await isCodAvailable(asAppDb(db()), scopeA)).enabled).toBe(false);
     expect(await db().select().from(cart)).toHaveLength(0);
+  });
+
+  it("recovers a stale active cart after a verified managed bot reconnection", async () => {
+    const { scope: scopeA, cartId: oldCartId } = await prepareReviewedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      buyerId: BUYER_A,
+      productId: fixture.productA1Id,
+    });
+
+    const replacementId = await replaceConnection({
+      storeId: fixture.storeAId,
+      oldConnectionId: fixture.connectionAId,
+      botId: 880101,
+      botUsername: "CodStoreAReplacementBot",
+    });
+
+    const added = await addToCart(tx(), scopeA, {
+      connectionId: replacementId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      productId: fixture.productA2Id,
+      quantity: 1,
+    });
+
+    expect(added.status).toBe("added");
+    if (added.status !== "added") return;
+
+    expect(added.cart.id).not.toBe(oldCartId);
+    expect(added.cart.customerName).toBeNull();
+    expect(added.cart.customerPhone).toBeNull();
+    expect(added.cart.deliveryAddress).toBeNull();
+
+    const [oldCart] = await db()
+      .select()
+      .from(cart)
+      .where(eq(cart.id, oldCartId));
+    expect(oldCart.status).toBe("abandoned");
+    expect(oldCart.customerName).toBeNull();
+    expect(oldCart.customerPhone).toBeNull();
+    expect(oldCart.deliveryAddress).toBeNull();
+    expect(oldCart.checkoutKey).toBeNull();
+    expect(oldCart.quoteSubtotal).toBeNull();
+    expect(oldCart.quoteDeliveryFee).toBeNull();
+    expect(oldCart.quoteTotal).toBeNull();
+    expect(oldCart.quoteCurrency).toBeNull();
+    expect(oldCart.quoteSnapshot).toBeNull();
+    expect(oldCart.quotedAt).toBeNull();
+
+    const [newCart] = await db()
+      .select()
+      .from(cart)
+      .where(eq(cart.id, added.cart.id));
+    expect(newCart.connectionId).toBe(replacementId);
+    expect(newCart.status).toBe("open");
+
+    const activeCarts = await db()
+      .select()
+      .from(cart)
+      .where(
+        and(
+          eq(cart.storeId, fixture.storeAId),
+          eq(cart.telegramUserId, BUYER_A),
+          inArray(cart.status, ["open", "checkout"]),
+        ),
+      );
+    expect(activeCarts).toHaveLength(1);
+    expect(activeCarts[0].id).toBe(added.cart.id);
+
+    // The old connection and another buyer cannot read or reuse the new cart.
+    expect(
+      await readCartForBuyer(asAppDb(db()), scopeA, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+      }),
+    ).toBeNull();
+    expect(
+      await readCartForBuyer(asAppDb(db()), scopeA, {
+        connectionId: replacementId,
+        telegramUserId: BUYER_B,
+      }),
+    ).toBeNull();
+    expect(
+      await confirmCodOrder(tx(), scopeA, {
+        cartId: added.cart.id,
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        expectedQuoteVersion: 1,
+      }),
+    ).toEqual({ status: "not_found" });
+  });
+
+  it("serializes concurrent Add to cart retries during connection recovery", async () => {
+    const scopeA = await scope(fixture.storeAId);
+    const first = await addToCart(tx(), scopeA, {
+      connectionId: fixture.connectionAId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      productId: fixture.productA1Id,
+      quantity: 1,
+    });
+    expect(first.status).toBe("added");
+
+    const replacementId = await replaceConnection({
+      storeId: fixture.storeAId,
+      oldConnectionId: fixture.connectionAId,
+      botId: 880102,
+      botUsername: "CodStoreAConcurrentBot",
+    });
+
+    const results = await Promise.all([
+      addToCart(tx(), scopeA, {
+        connectionId: replacementId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        productId: fixture.productA2Id,
+        quantity: 1,
+      }),
+      addToCart(tx(), scopeA, {
+        connectionId: replacementId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        productId: fixture.productA2Id,
+        quantity: 1,
+      }),
+    ]);
+
+    expect(results.map((result) => result.status)).toEqual(["added", "added"]);
+
+    const activeCarts = await db()
+      .select()
+      .from(cart)
+      .where(
+        and(
+          eq(cart.storeId, fixture.storeAId),
+          eq(cart.telegramUserId, BUYER_A),
+          inArray(cart.status, ["open", "checkout"]),
+        ),
+      );
+    expect(activeCarts).toHaveLength(1);
+    expect(activeCarts[0].connectionId).toBe(replacementId);
+
+    const items = await db()
+      .select()
+      .from(cartItem)
+      .where(eq(cartItem.cartId, activeCarts[0].id));
+    expect(items).toHaveLength(1);
+    expect(items[0].quantity).toBe(2);
+  });
+
+  it("keeps converted carts, orders and reservations when a replacement cart is created", async () => {
+    const { scope: scopeA, cartId: oldCartId, review } = await prepareReviewedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      buyerId: BUYER_A,
+      productId: fixture.productA1Id,
+    });
+    const placed = await confirmCodOrder(tx(), scopeA, {
+      cartId: oldCartId,
+      connectionId: fixture.connectionAId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      expectedQuoteVersion: review.quoteVersion,
+    });
+    if (placed.status !== "placed") throw new Error("order failed");
+
+    const replacementId = await replaceConnection({
+      storeId: fixture.storeAId,
+      oldConnectionId: fixture.connectionAId,
+      botId: 880103,
+      botUsername: "CodStoreAConvertedBot",
+    });
+
+    const added = await addToCart(tx(), scopeA, {
+      connectionId: replacementId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      productId: fixture.productA2Id,
+      quantity: 1,
+    });
+    expect(added.status).toBe("added");
+    if (added.status !== "added") return;
+
+    const [oldCart] = await db()
+      .select()
+      .from(cart)
+      .where(eq(cart.id, oldCartId));
+    expect(oldCart.status).toBe("converted");
+    expect(oldCart.checkoutKey).not.toBeNull();
+
+    expect(await db().select().from(order)).toHaveLength(1);
+    expect(await db().select().from(inventoryReservation)).toHaveLength(1);
+    const [inventory] = await db()
+      .select()
+      .from(productInventory)
+      .where(eq(productInventory.productId, fixture.productA1Id));
+    expect(inventory.reserved).toBe(1);
+    expect(placed.reference).toMatch(/^ORD-/);
+
+    const [newCart] = await db()
+      .select()
+      .from(cart)
+      .where(eq(cart.id, added.cart.id));
+    expect(newCart.connectionId).toBe(replacementId);
+    expect(newCart.status).toBe("open");
+
+    expect(
+      await confirmCodOrder(tx(), scopeA, {
+        cartId: added.cart.id,
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        expectedQuoteVersion: 1,
+      }),
+    ).toEqual({ status: "not_found" });
   });
 
   it("enforces immutable order snapshots and stock invariants in the database", async () => {

@@ -278,12 +278,18 @@ function messageUpdate(
   buyerId: number,
   text: string,
   extra: Record<string, unknown> = {},
+  languageCode?: string,
 ) {
   return {
     update_id: nextUpdateId(),
     message: {
       message_id: nextUpdateId(),
-      from: { id: buyerId, is_bot: false, first_name: "Buyer" },
+      from: {
+        id: buyerId,
+        is_bot: false,
+        first_name: "Buyer",
+        ...(languageCode ? { language_code: languageCode } : {}),
+      },
       chat: { id: buyerId, type: "private" },
       date: 1,
       text,
@@ -292,12 +298,21 @@ function messageUpdate(
   };
 }
 
-function contactUpdate(buyerId: number, phoneNumber: string) {
+function contactUpdate(
+  buyerId: number,
+  phoneNumber: string,
+  languageCode?: string,
+) {
   return {
     update_id: nextUpdateId(),
     message: {
       message_id: nextUpdateId(),
-      from: { id: buyerId, is_bot: false, first_name: "Buyer" },
+      from: {
+        id: buyerId,
+        is_bot: false,
+        first_name: "Buyer",
+        ...(languageCode ? { language_code: languageCode } : {}),
+      },
       chat: { id: buyerId, type: "private" },
       date: 1,
       contact: {
@@ -309,12 +324,21 @@ function contactUpdate(buyerId: number, phoneNumber: string) {
   };
 }
 
-function callbackUpdate(buyerId: number, data: string) {
+function callbackUpdate(
+  buyerId: number,
+  data: string,
+  languageCode?: string,
+) {
   return {
     update_id: nextUpdateId(),
     callback_query: {
       id: `callback-${nextUpdateId()}`,
-      from: { id: buyerId, is_bot: false, first_name: "Buyer" },
+      from: {
+        id: buyerId,
+        is_bot: false,
+        first_name: "Buyer",
+        ...(languageCode ? { language_code: languageCode } : {}),
+      },
       message: {
         message_id: 7000 + updateId,
         chat: { id: buyerId, type: "private" },
@@ -666,6 +690,96 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     expect(own.status).toBe(200);
     expect(lastText(own.transport)).toContain("placed");
     expect(await db().select().from(order)).toHaveLength(1);
+  });
+
+  it("localizes the Arabic COD flow and normalizes Arabic-Indic phone digits", async () => {
+    const start = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "/start", {}, "ar"),
+    );
+    expect(start.status).toBe(200);
+    expect(
+      inlineButtons(start.transport.sentMessages.at(-1)!).some(
+        (button) => button.text === "السلة",
+      ),
+    ).toBe(true);
+
+    const product = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, `p:${fixture.productAId}`, "ar"),
+    );
+    expect(product.status).toBe(200);
+    expect(
+      inlineButtons(product.transport.editedMessages.at(-1)!).some(
+        (button) => button.text === "أضف 1",
+      ),
+    ).toBe(true);
+
+    const added = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, `ca:${fixture.productAId}:2`, "ar"),
+    );
+    expect(added.status).toBe(200);
+    expect(lastText(added.transport)).toContain("السلة");
+    expect(lastText(added.transport)).toContain("المجموع الفرعي: 22.00 SAR");
+    expect(lastText(added.transport)).toContain("رسوم التوصيل: 15.00 SAR");
+    expect(lastText(added.transport)).toContain("الإجمالي: 37.00 SAR");
+    expect(lastText(added.transport)).toContain("الدفع عند الاستلام");
+    const checkoutButton = lastButton(added.transport, "co:");
+    expect(checkoutButton?.text).toBe("إتمام الطلب");
+
+    const checkout = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, checkoutButton!.callback_data!, "ar"),
+    );
+    expect(checkout.status).toBe(200);
+    const phonePrompt = checkout.transport.sentMessages.at(-1)!;
+    expect(phonePrompt.text).toContain("إتمام الطلب");
+    expect(phonePrompt.text).toContain("مشاركة الهاتف");
+    expect(
+      (phonePrompt.replyMarkup as { keyboard?: Array<Array<{ text: string }>> })
+        ?.keyboard?.[0]?.[0]?.text,
+    ).toBe("مشاركة الهاتف");
+
+    // Typed fallback with Arabic-Indic digits. The stored value is normalized.
+    const phone = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "+٩٦٦ ٥٥٥ ١٢٣ ٤٥٦", {}, "ar"),
+    );
+    expect(phone.status).toBe(200);
+    expect(
+      phone.transport.sentMessages.some((message) =>
+        message.text.includes("عنوان التوصيل"),
+      ),
+    ).toBe(true);
+
+    const reviewed = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "١٢٣ شارع الاختبار الاصطناعي", {}, "ar"),
+    );
+    expect(reviewed.status).toBe(200);
+    const reviewMessage = reviewed.transport.sentMessages.at(-1);
+    expect(reviewMessage?.text).toContain("راجع طلبك");
+    expect(reviewMessage?.text).toContain("المجموع الفرعي: 22.00 SAR");
+    expect(reviewMessage?.text).toContain("الدفع عند الاستلام");
+    expect(reviewMessage?.text).toContain("+966555123456");
+    const confirm = inlineButtons(reviewMessage!).find((button) =>
+      button.callback_data?.startsWith("cc:"),
+    );
+    expect(confirm?.text).toBe("تأكيد الطلب — الدفع عند الاستلام");
+
+    const confirmed = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, confirm!.callback_data!, "ar"),
+    );
+    expect(confirmed.status).toBe(200);
+    expect(lastText(confirmed.transport)).toContain("تم تسجيل الطلب");
+    expect(lastText(confirmed.transport)).toContain("بانتظار التحصيل");
+
+    const [orderRow] = await db().select().from(order);
+    expect(orderRow.customerPhone).toBe("+966555123456");
+    expect(orderRow.deliveryAddress).toBe("١٢٣ شارع الاختبار الاصطناعي");
+    expect(orderRow.paymentStatus).toBe("awaiting_collection");
   });
 
   it("re-asks for a valid address and refuses confirmation before checkout is complete", async () => {

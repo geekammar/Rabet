@@ -43,6 +43,11 @@ import {
   markManagedTelegramUpdateProcessed,
 } from "./managed-updates";
 import { readReadyManagedConnection } from "./manager-provisioning";
+import {
+  managedCommerceCopy,
+  managedCommerceLocaleFromLanguageCode,
+  type ManagedCommerceLocale,
+} from "./managed-commerce-copy";
 import { tokens, type ParsedToken } from "./tokens";
 import {
   classifyErrorToSafeDiagnostic,
@@ -105,24 +110,24 @@ const UI = {
   home: "Home",
   products: "Products",
   browseCategories: "Browse categories",
-  cart: "Cart",
   back: "Back",
   previous: "Previous",
   next: "Next",
   unavailable: "This item is not available in this store.",
   empty: "No products are available in this store yet.",
   noCategories: "No categories are available in this store yet.",
-  cartEmpty: "Your cart is empty.",
-  cod: "Cash on delivery",
-  outOfStock: "This item is out of stock.",
-  notOrderable: "This item cannot be ordered online.",
-  genericUnavailable: "This cart is not available.",
 };
 
 type CodContext = {
   enabled: boolean;
   setting: CommerceSetting | null;
 };
+
+type CommerceCopy = ReturnType<typeof managedCommerceCopy>;
+
+function copyForLocale(locale: ManagedCommerceLocale): CommerceCopy {
+  return managedCommerceCopy(locale);
+}
 
 function money(value: string, currency: string): string {
   return currency ? `${value} ${currency}` : value;
@@ -137,57 +142,57 @@ function cartLinesText(cart: CartView): string {
     .join("\n");
 }
 
-function cartText(cart: CartView): string {
-  const lines = [UI.cart, "", cartLinesText(cart), ""];
+function cartText(cart: CartView, copy: CommerceCopy): string {
+  const lines = [copy.cart, "", cartLinesText(cart), ""];
 
   if (cart.unavailableCount > 0) {
-    lines.push("Some items are unavailable or exceed current stock.", "");
+    lines.push(copy.cartUnavailableNote, "");
   }
 
-  lines.push(`Subtotal: ${money(cart.subtotal, cart.currency)}`);
-  lines.push(`Delivery fee: ${money(cart.deliveryFee, cart.currency)}`);
-  lines.push(`Total: ${money(cart.total, cart.currency)}`);
-  lines.push(UI.cod);
+  lines.push(`${copy.subtotal}: ${money(cart.subtotal, cart.currency)}`);
+  lines.push(`${copy.deliveryFee}: ${money(cart.deliveryFee, cart.currency)}`);
+  lines.push(`${copy.total}: ${money(cart.total, cart.currency)}`);
+  lines.push(copy.cashOnDelivery);
 
   return lines.join("\n");
 }
 
-function reviewText(review: CheckoutReview): string {
+function reviewText(review: CheckoutReview, copy: CommerceCopy): string {
   const lines = [
-    "Review your order",
+    copy.reviewTitle,
     "",
     ...review.lines.map(
       (line) =>
         `${line.name} × ${line.quantity} — ${line.unitPrice} × ${line.quantity} = ${money(line.lineTotal, review.currency)}`,
     ),
     "",
-    `Subtotal: ${money(review.subtotal, review.currency)}`,
-    `Delivery fee: ${money(review.deliveryFee, review.currency)}`,
-    `Total: ${money(review.total, review.currency)}`,
-    "Payment: Cash on delivery",
+    `${copy.subtotal}: ${money(review.subtotal, review.currency)}`,
+    `${copy.deliveryFee}: ${money(review.deliveryFee, review.currency)}`,
+    `${copy.total}: ${money(review.total, review.currency)}`,
+    `${copy.paymentLabel}: ${copy.cashOnDelivery}`,
     "",
-    `Name: ${review.customerName}`,
-    `Phone: ${review.customerPhone}`,
-    `Address: ${review.deliveryAddress}`,
+    `${copy.nameLabel}: ${review.customerName}`,
+    `${copy.phoneLabel}: ${review.customerPhone}`,
+    `${copy.addressLabel}: ${review.deliveryAddress}`,
     "",
-    "Confirm only if these details, prices and the delivery fee are correct.",
+    copy.reviewInstruction,
   ];
 
   return lines.join("\n");
 }
 
-function reviewKeyboard(review: CheckoutReview) {
+function reviewKeyboard(review: CheckoutReview, copy: CommerceCopy) {
   return {
     inline_keyboard: [
       [
         {
-          text: "Confirm order — cash on delivery",
+          text: copy.confirmButton,
           callback_data: tokens.confirmCod(review.cartId, review.quoteVersion),
         },
       ],
       [
         {
-          text: "Back to cart",
+          text: copy.backToCart,
           callback_data: tokens.backToCart(review.cartId),
         },
         { text: UI.home, callback_data: tokens.home() },
@@ -196,15 +201,15 @@ function reviewKeyboard(review: CheckoutReview) {
   };
 }
 
-function cartKeyboard(cart: CartView) {
+function cartKeyboard(cart: CartView, copy: CommerceCopy) {
   const keyboard: TelegramInlineKeyboardButton[][] = cart.lines.map((line) => [
     { text: "−", callback_data: tokens.cartDecrease(line.productId) },
     { text: "+", callback_data: tokens.cartIncrease(line.productId) },
-    { text: "Remove", callback_data: tokens.cartRemove(line.productId) },
+    { text: copy.remove, callback_data: tokens.cartRemove(line.productId) },
   ]);
 
   keyboard.push([
-    { text: "Checkout", callback_data: tokens.checkout(cart.id) },
+    { text: copy.checkout, callback_data: tokens.checkout(cart.id) },
   ]);
   keyboard.push([{ text: UI.home, callback_data: tokens.home() }]);
 
@@ -216,11 +221,12 @@ async function renderCartView(
   chatId: number,
   messageId: number | undefined,
   cart: CartView | null,
+  copy: CommerceCopy,
 ): Promise<void> {
   if (!cart || cart.lines.length === 0) {
     const params = {
       chatId,
-      text: `${UI.cartEmpty}\n\nSend /start to browse the store.`,
+      text: `${copy.cartEmpty}\n\n${copy.cartHint}`,
       replyMarkup: { inline_keyboard: homeKeyboard(UI) },
     };
 
@@ -234,8 +240,8 @@ async function renderCartView(
 
   const params = {
     chatId,
-    text: cartText(cart),
-    replyMarkup: cartKeyboard(cart),
+    text: cartText(cart, copy),
+    replyMarkup: cartKeyboard(cart, copy),
   };
 
   if (messageId) {
@@ -250,11 +256,12 @@ async function renderReviewView(
   chatId: number,
   messageId: number | undefined,
   review: CheckoutReview,
+  copy: CommerceCopy,
 ): Promise<void> {
   const params = {
     chatId,
-    text: reviewText(review),
-    replyMarkup: reviewKeyboard(review),
+    text: reviewText(review, copy),
+    replyMarkup: reviewKeyboard(review, copy),
   };
 
   if (messageId) {
@@ -268,21 +275,22 @@ async function sendPhonePrompt(
   transport: TelegramTransport,
   chatId: number,
   cart: CartView,
+  copy: CommerceCopy,
 ): Promise<void> {
   await sendOrThrow(transport, {
     chatId,
     text: [
-      "Checkout",
+      copy.checkout,
       "",
-      `Subtotal: ${money(cart.subtotal, cart.currency)}`,
-      `Delivery fee: ${money(cart.deliveryFee, cart.currency)}`,
-      `Total: ${money(cart.total, cart.currency)}`,
-      UI.cod,
+      `${copy.subtotal}: ${money(cart.subtotal, cart.currency)}`,
+      `${copy.deliveryFee}: ${money(cart.deliveryFee, cart.currency)}`,
+      `${copy.total}: ${money(cart.total, cart.currency)}`,
+      copy.cashOnDelivery,
       "",
-      "Send your phone number or tap Share phone.",
+      copy.phonePrompt,
     ].join("\n"),
     replyMarkup: {
-      keyboard: [[{ text: "Share phone", request_contact: true }]],
+      keyboard: [[{ text: copy.sharePhone, request_contact: true }]],
       resize_keyboard: true,
       one_time_keyboard: true,
     },
@@ -292,7 +300,8 @@ async function sendPhonePrompt(
 async function sendAddressPrompt(
   transport: TelegramTransport,
   chatId: number,
-  text = "Send the delivery address as one text message.",
+  copy: CommerceCopy,
+  text = copy.addressPrompt,
 ): Promise<void> {
   await sendOrThrow(transport, {
     chatId,
@@ -312,16 +321,17 @@ async function renderPlacedOrder(
     total: string;
     currency: string;
   },
+  copy: CommerceCopy,
 ): Promise<void> {
   const text = [
-    `Order ${result.reference} placed.`,
+    copy.orderPlaced(result.reference),
     "",
-    `Subtotal: ${money(result.subtotal, result.currency)}`,
-    `Delivery fee: ${money(result.deliveryFee, result.currency)}`,
-    `Total: ${money(result.total, result.currency)}`,
-    "Payment: cash on delivery — awaiting collection.",
+    `${copy.subtotal}: ${money(result.subtotal, result.currency)}`,
+    `${copy.deliveryFee}: ${money(result.deliveryFee, result.currency)}`,
+    `${copy.total}: ${money(result.total, result.currency)}`,
+    copy.awaitingCollection,
     "",
-    "The store has reserved the items for this order.",
+    copy.reservedNote,
   ].join("\n");
 
   const params = {
@@ -337,10 +347,11 @@ async function renderPlacedOrder(
   }
 }
 
-function cartAvailabilityMessage(cart: CartView | null): string {
-  return cart && cart.lines.length > 0
-    ? "One or more items are no longer available in the requested quantity. Review the cart and try again."
-    : UI.cartEmpty;
+function cartAvailabilityMessage(
+  cart: CartView | null,
+  copy: CommerceCopy,
+): string {
+  return cart && cart.lines.length > 0 ? copy.stockIssue : copy.cartEmpty;
 }
 
 async function sendOrThrow(
@@ -380,6 +391,7 @@ async function renderHome(
   scope: StoreScope,
   storeName: string,
   cod: CodContext,
+  copy: CommerceCopy,
   transport: TelegramTransport,
   chatId: number,
   messageId?: number,
@@ -398,7 +410,7 @@ async function renderHome(
   ]);
 
   if (cod.enabled) {
-    keyboard.push([{ text: UI.cart, callback_data: tokens.cart() }]);
+    keyboard.push([{ text: copy.cart, callback_data: tokens.cart() }]);
   }
 
   if (page.totalPages > 1) {
@@ -603,6 +615,7 @@ async function renderProduct(
   db: Database,
   scope: StoreScope,
   cod: CodContext,
+  copy: CommerceCopy,
   transport: TelegramTransport,
   chatId: number,
   messageId: number,
@@ -638,20 +651,20 @@ async function renderProduct(
     stock = availability.get(productId) ?? 0;
 
     if (stock <= 0) {
-      lines.push(UI.outOfStock);
+      lines.push(copy.outOfStock);
     } else {
       const maxQuantity = Math.min(5, stock);
       const quantityButtons: TelegramInlineKeyboardButton[] = [];
 
       for (let quantity = 1; quantity <= maxQuantity; quantity += 1) {
         quantityButtons.push({
-          text: `Add ${quantity}`,
+          text: copy.addQuantity(quantity),
           callback_data: tokens.cartAdd(productId, quantity),
         });
       }
 
       keyboard.push(quantityButtons);
-      keyboard.push([{ text: UI.cart, callback_data: tokens.cart() }]);
+      keyboard.push([{ text: copy.cart, callback_data: tokens.cart() }]);
     }
   }
 
@@ -683,6 +696,10 @@ async function dispatchMessage(
 ): Promise<void> {
   const text = typeof message.text === "string" ? message.text.trim() : "";
   const buyerId = message.from?.id;
+  const locale = managedCommerceLocaleFromLanguageCode(
+    message.from?.language_code,
+  );
+  const copy = copyForLocale(locale);
 
   if (text === "/start" || text.startsWith("/start ")) {
     await renderHome(
@@ -690,6 +707,7 @@ async function dispatchMessage(
       scope,
       storeName,
       cod,
+      copy,
       transport,
       message.chat.id,
     );
@@ -702,6 +720,7 @@ async function dispatchMessage(
       scope,
       storeName,
       cod,
+      copy,
       transport,
       message.chat.id,
     );
@@ -725,9 +744,9 @@ async function dispatchMessage(
         ) {
           await sendOrThrow(transport, {
             chatId: message.chat.id,
-            text: "Share your own phone number or type it as text.",
+            text: copy.phoneOwn,
             replyMarkup: {
-              keyboard: [[{ text: "Share phone", request_contact: true }]],
+              keyboard: [[{ text: copy.sharePhone, request_contact: true }]],
               resize_keyboard: true,
               one_time_keyboard: true,
             },
@@ -743,16 +762,16 @@ async function dispatchMessage(
         });
 
         if (result.status === "saved") {
-          await sendAddressPrompt(transport, message.chat.id);
+          await sendAddressPrompt(transport, message.chat.id, copy);
           return;
         }
 
         if (result.status === "invalid") {
           await sendOrThrow(transport, {
             chatId: message.chat.id,
-            text: "That phone number is invalid. Send 7–15 digits or tap Share phone.",
+            text: copy.invalidPhone,
             replyMarkup: {
-              keyboard: [[{ text: "Share phone", request_contact: true }]],
+              keyboard: [[{ text: copy.sharePhone, request_contact: true }]],
               resize_keyboard: true,
               one_time_keyboard: true,
             },
@@ -775,6 +794,7 @@ async function dispatchMessage(
             message.chat.id,
             undefined,
             result.review,
+            copy,
           );
           return;
         }
@@ -783,22 +803,29 @@ async function dispatchMessage(
           await sendAddressPrompt(
             transport,
             message.chat.id,
-            "That address is invalid. Send the delivery address as 5–300 characters.",
+            copy,
+            copy.invalidAddress,
           );
           return;
         }
 
         if (result.status === "empty") {
-          await renderCartView(transport, message.chat.id, undefined, null);
+          await renderCartView(
+            transport,
+            message.chat.id,
+            undefined,
+            null,
+            copy,
+          );
           return;
         }
 
         await sendOrThrow(transport, {
           chatId: message.chat.id,
-          text: "One or more items are unavailable or exceed current stock. Review your cart and try again.",
+          text: copy.stockIssue,
           replyMarkup: {
             inline_keyboard: [
-              [{ text: UI.cart, callback_data: tokens.cart() }],
+              [{ text: copy.cart, callback_data: tokens.cart() }],
               ...homeKeyboard(UI),
             ],
           },
@@ -816,6 +843,7 @@ async function dispatchMessage(
     scope,
     storeName,
     cod,
+    copy,
     transport,
     message.chat.id,
   );
@@ -832,7 +860,7 @@ async function dispatchCallback(
   callbackQuery: {
     id: string;
     message?: TelegramMessage;
-    from: { id: number; first_name?: string };
+    from: { id: number; first_name?: string; language_code?: string };
   },
   parsedToken: ParsedToken,
 ): Promise<void> {
@@ -850,6 +878,10 @@ async function dispatchCallback(
   const chatId = message.chat.id;
   const messageId = message.message_id;
   const buyerId = callbackQuery.from.id;
+  const locale = managedCommerceLocaleFromLanguageCode(
+    callbackQuery.from.language_code,
+  );
+  const copy = copyForLocale(locale);
 
   if (cod.enabled && commerceDb) {
     if (parsedToken.type === "cart") {
@@ -861,6 +893,7 @@ async function dispatchCallback(
           connectionId,
           telegramUserId: buyerId,
         }),
+        copy,
       );
       return;
     }
@@ -875,7 +908,7 @@ async function dispatchCallback(
       });
 
       if (result.status === "added") {
-        await renderCartView(transport, chatId, messageId, result.cart);
+        await renderCartView(transport, chatId, messageId, result.cart, copy);
         return;
       }
 
@@ -884,10 +917,10 @@ async function dispatchCallback(
         messageId,
         text:
           result.status === "out_of_stock"
-            ? UI.outOfStock
+            ? copy.outOfStock
             : result.status === "cod_unavailable"
-              ? UI.notOrderable
-              : UI.unavailable,
+              ? copy.notOrderable
+              : copy.unavailable,
         replyMarkup: { inline_keyboard: homeKeyboard(UI) },
       });
       return;
@@ -902,7 +935,7 @@ async function dispatchCallback(
       });
 
       if (result.status === "updated") {
-        await renderCartView(transport, chatId, messageId, result.cart);
+        await renderCartView(transport, chatId, messageId, result.cart, copy);
         return;
       }
 
@@ -911,10 +944,10 @@ async function dispatchCallback(
         messageId,
         text:
           result.status === "empty"
-            ? UI.cartEmpty
+            ? copy.cartEmpty
             : result.status === "invalid_quantity"
-              ? "Maximum quantity is 99."
-              : UI.genericUnavailable,
+              ? copy.maxQuantity
+              : copy.genericUnavailable,
         replyMarkup: { inline_keyboard: homeKeyboard(UI) },
       });
       return;
@@ -929,11 +962,11 @@ async function dispatchCallback(
       });
 
       if (result.status === "updated") {
-        await renderCartView(transport, chatId, messageId, result.cart);
+        await renderCartView(transport, chatId, messageId, result.cart, copy);
         return;
       }
 
-      await renderCartView(transport, chatId, messageId, null);
+      await renderCartView(transport, chatId, messageId, null, copy);
       return;
     }
 
@@ -945,11 +978,11 @@ async function dispatchCallback(
       });
 
       if (result.status === "updated") {
-        await renderCartView(transport, chatId, messageId, result.cart);
+        await renderCartView(transport, chatId, messageId, result.cart, copy);
         return;
       }
 
-      await renderCartView(transport, chatId, messageId, null);
+      await renderCartView(transport, chatId, messageId, null, copy);
       return;
     }
 
@@ -962,13 +995,13 @@ async function dispatchCallback(
       });
 
       if (result.status === "ready") {
-        await renderCartView(transport, chatId, messageId, result.cart);
-        await sendPhonePrompt(transport, chatId, result.cart);
+        await renderCartView(transport, chatId, messageId, result.cart, copy);
+        await sendPhonePrompt(transport, chatId, result.cart, copy);
         return;
       }
 
       if (result.status === "empty") {
-        await renderCartView(transport, chatId, messageId, null);
+        await renderCartView(transport, chatId, messageId, null, copy);
         return;
       }
 
@@ -977,13 +1010,13 @@ async function dispatchCallback(
         messageId,
         text:
           result.status === "not_found"
-            ? UI.genericUnavailable
+            ? copy.genericUnavailable
             : result.status === "cod_unavailable"
-              ? UI.notOrderable
-              : "One or more items are unavailable or exceed current stock. Review your cart and try again.",
+              ? copy.notOrderable
+              : copy.stockIssue,
         replyMarkup: {
           inline_keyboard: [
-            [{ text: UI.cart, callback_data: tokens.cart() }],
+            [{ text: copy.cart, callback_data: tokens.cart() }],
             ...homeKeyboard(UI),
           ],
         },
@@ -1001,12 +1034,18 @@ async function dispatchCallback(
       });
 
       if (result.status === "placed" || result.status === "already_placed") {
-        await renderPlacedOrder(transport, chatId, messageId, result);
+        await renderPlacedOrder(transport, chatId, messageId, result, copy);
         return;
       }
 
       if (result.status === "stale_quote") {
-        await renderReviewView(transport, chatId, messageId, result.review);
+        await renderReviewView(
+          transport,
+          chatId,
+          messageId,
+          result.review,
+          copy,
+        );
         return;
       }
 
@@ -1014,7 +1053,7 @@ async function dispatchCallback(
         await editOrThrow(transport, {
           chatId,
           messageId,
-          text: "Checkout needs your phone number and delivery address before confirmation.",
+          text: copy.checkoutNeedsDetails,
           replyMarkup: { inline_keyboard: homeKeyboard(UI) },
         });
 
@@ -1025,9 +1064,9 @@ async function dispatchCallback(
         });
 
         if (cart && result.missing === "phone") {
-          await sendPhonePrompt(transport, chatId, cart);
+          await sendPhonePrompt(transport, chatId, cart, copy);
         } else if (cart) {
-          await sendAddressPrompt(transport, chatId);
+          await sendAddressPrompt(transport, chatId, copy);
         }
         return;
       }
@@ -1045,10 +1084,10 @@ async function dispatchCallback(
         await editOrThrow(transport, {
           chatId,
           messageId,
-          text: cartAvailabilityMessage(cart),
+          text: cartAvailabilityMessage(cart, copy),
           replyMarkup: {
             inline_keyboard: [
-              [{ text: UI.cart, callback_data: tokens.cart() }],
+              [{ text: copy.cart, callback_data: tokens.cart() }],
               ...homeKeyboard(UI),
             ],
           },
@@ -1061,8 +1100,8 @@ async function dispatchCallback(
         messageId,
         text:
           result.status === "cod_unavailable"
-            ? UI.notOrderable
-            : UI.genericUnavailable,
+            ? copy.notOrderable
+            : copy.genericUnavailable,
         replyMarkup: { inline_keyboard: homeKeyboard(UI) },
       });
       return;
@@ -1075,13 +1114,22 @@ async function dispatchCallback(
         telegramUserId: buyerId,
       });
 
-      await renderCartView(transport, chatId, messageId, cart);
+      await renderCartView(transport, chatId, messageId, cart, copy);
       return;
     }
   }
 
   if (parsedToken.type === "home") {
-    await renderHome(db, scope, storeName, cod, transport, chatId, messageId);
+    await renderHome(
+      db,
+      scope,
+      storeName,
+      cod,
+      copy,
+      transport,
+      chatId,
+      messageId,
+    );
     return;
   }
 
@@ -1127,6 +1175,7 @@ async function dispatchCallback(
       db,
       scope,
       cod,
+      copy,
       transport,
       chatId,
       messageId,
@@ -1137,7 +1186,16 @@ async function dispatchCallback(
 
   // Every other legacy callback belongs to a different journey. Fail closed to
   // the scoped home instead of running an unscoped path.
-  await renderHome(db, scope, storeName, cod, transport, chatId, messageId);
+  await renderHome(
+    db,
+    scope,
+    storeName,
+    cod,
+    copy,
+    transport,
+    chatId,
+    messageId,
+  );
 }
 
 export async function handleManagedTelegramWebhookRequest(

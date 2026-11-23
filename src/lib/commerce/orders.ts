@@ -191,10 +191,35 @@ function quoteSnapshotMatches(saved: unknown, lines: CartLine[]): boolean {
   });
 }
 
+const ARABIC_INDIC_DIGITS = "٠١٢٣٤٥٦٧٨٩";
+const EASTERN_ARABIC_INDIC_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
+
+function normalizeDigits(value: string): string {
+  let normalized = "";
+
+  for (const character of value) {
+    const arabicIndex = ARABIC_INDIC_DIGITS.indexOf(character);
+    if (arabicIndex !== -1) {
+      normalized += String(arabicIndex);
+      continue;
+    }
+
+    const easternIndex = EASTERN_ARABIC_INDIC_DIGITS.indexOf(character);
+    if (easternIndex !== -1) {
+      normalized += String(easternIndex);
+      continue;
+    }
+
+    normalized += character;
+  }
+
+  return normalized;
+}
+
 export function normalizePhone(value: unknown): string | null {
   if (typeof value !== "string") return null;
 
-  const trimmed = value.trim();
+  const trimmed = normalizeDigits(value.trim());
   if (!/^\+?[0-9][0-9 ()\-]{5,24}$/.test(trimmed)) return null;
 
   const digits = trimmed.replace(/\D/g, "");
@@ -316,6 +341,58 @@ async function findActiveCart(
   return rows[0] ?? null;
 }
 
+/**
+ * Finds the single active cart for a buyer inside the verified store scope,
+ * independent of which verified managed connection created it.
+ */
+async function findActiveCartForBuyer(
+  db: CommerceQueryDatabase,
+  scope: StoreScope,
+  input: {
+    telegramUserId: number;
+    cartId?: string;
+    forUpdate?: boolean;
+  },
+): Promise<CartRow | null> {
+  assertStoreScope(scope);
+
+  const conditions = [
+    eq(cart.storeId, scope.storeId),
+    eq(cart.telegramUserId, input.telegramUserId),
+    inArray(cart.status, [...ACTIVE_CART_STATUSES]),
+  ];
+
+  if (input.cartId) {
+    conditions.push(eq(cart.id, input.cartId));
+  }
+
+  const base = queryBuilder(db)
+    .select()
+    .from(cart)
+    .where(and(...conditions))
+    .orderBy(desc(cart.createdAt))
+    .limit(1);
+
+  const rows = input.forUpdate ? await base.for("update") : await base;
+  return rows[0] ?? null;
+}
+
+/**
+ * Serializes cart recovery per store + buyer inside the caller's transaction.
+ * The advisory lock is released on commit/rollback, so a concurrent add/retry
+ * cannot race the abandonment and re-creation of the active cart.
+ */
+async function lockCartScope(
+  db: CommerceQueryDatabase,
+  scope: StoreScope,
+  telegramUserId: number,
+): Promise<void> {
+  const key = `${scope.storeId}:${telegramUserId}`;
+  await queryBuilder(db).execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`,
+  );
+}
+
 async function getOrCreateActiveCart(
   db: CommerceQueryDatabase,
   scope: StoreScope,
@@ -327,19 +404,56 @@ async function getOrCreateActiveCart(
 ): Promise<CartRow> {
   assertStoreScope(scope);
 
-  await queryBuilder(db)
-    .insert(cart)
-    .values({
-      storeId: scope.storeId,
-      connectionId: input.connectionId,
-      telegramUserId: input.telegramUserId,
-      telegramChatId: input.telegramChatId,
-    })
-    .onConflictDoNothing();
+  await lockCartScope(db, scope, input.telegramUserId);
 
-  const existing = await findActiveCart(db, scope, input);
+  let existing = await findActiveCartForBuyer(db, scope, {
+    telegramUserId: input.telegramUserId,
+    forUpdate: true,
+  });
+
+  if (existing && existing.connectionId !== input.connectionId) {
+    // A verified replacement managed connection is now serving this buyer.
+    // Abandon the unconfirmed cart from the old connection without carrying
+    // personal details, checkout keys or quotes into the new cart.
+    await queryBuilder(db)
+      .update(cart)
+      .set({
+        status: "abandoned",
+        checkoutState: "cart",
+        checkoutKey: null,
+        customerName: null,
+        customerPhone: null,
+        deliveryAddress: null,
+        quoteSubtotal: null,
+        quoteDeliveryFee: null,
+        quoteTotal: null,
+        quoteCurrency: null,
+        quoteSnapshot: null,
+        quotedAt: null,
+      })
+      .where(eq(cart.id, existing.id));
+
+    existing = null;
+  }
 
   if (!existing) {
+    await queryBuilder(db)
+      .insert(cart)
+      .values({
+        storeId: scope.storeId,
+        connectionId: input.connectionId,
+        telegramUserId: input.telegramUserId,
+        telegramChatId: input.telegramChatId,
+      })
+      .onConflictDoNothing();
+
+    existing = await findActiveCartForBuyer(db, scope, {
+      telegramUserId: input.telegramUserId,
+      forUpdate: true,
+    });
+  }
+
+  if (!existing || existing.connectionId !== input.connectionId) {
     throw new Error("Active cart could not be created");
   }
 

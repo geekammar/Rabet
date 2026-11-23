@@ -6,6 +6,7 @@ import { getDb } from "@/db/client";
 import { MerchantProducts } from "@/components/merchant/merchant-products";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
+import { isCodAvailable } from "@/lib/commerce/orders";
 import { listCatalogProductsForStore } from "@/lib/data/catalog";
 import {
   readMerchantLocale,
@@ -28,9 +29,11 @@ export default async function MerchantProductsPage() {
   if (!isMerchantAppEnabled()) notFound();
 
   const access = await requireMerchantAccess();
-  const [products, initialLocale] = await Promise.all([
-    listCatalogProductsForStore(getDb(), access.scope),
+  const db = getDb();
+  const [products, initialLocale, codAvailability] = await Promise.all([
+    listCatalogProductsForStore(db, access.scope),
     readMerchantLocale(),
+    isCodAvailable(db, access.scope),
   ]);
 
   return (
@@ -38,6 +41,7 @@ export default async function MerchantProductsPage() {
       storeName={access.store.name}
       readOnly={access.readOnly}
       initialLocale={initialLocale}
+      codOrdersEnabled={codAvailability.enabled}
       products={products.map((product) => ({
         id: product.id,
         name: resolveMerchantProductName(product.translations, product.slug),

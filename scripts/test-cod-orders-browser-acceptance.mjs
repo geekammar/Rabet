@@ -367,6 +367,7 @@ async function main() {
       `export APP_URL='${BASE_URL}'`,
       `export AUTH_TRUST_HOST='true'`,
       `export RABET_MERCHANT_APP_ENABLED='true'`,
+      `export RABET_COD_ORDERS_ENABLED='true'`,
       `export NODE_OPTIONS='--import ${bootstrapFile}'`,
     ].join("\n") + "\n",
     { mode: 0o600 },
@@ -462,12 +463,46 @@ async function main() {
     httpOnly: true,
   });
 
-  log("Loading /app/orders at a 360 px viewport...");
-  await cdp.send("Page.navigate", { url: `${BASE_URL}/app/orders` });
+  const navigate = async (url, label) => {
+    await cdp.send("Page.navigate", { url });
+    await waitFor(
+      cdp,
+      "document.readyState === 'complete'",
+      `${label} document ready`,
+    );
+  };
+
+  log("Checking the merchant COD Orders entry and click-through...");
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant-locale",
+    value: "en",
+    domain: "127.0.0.1",
+    path: "/",
+  });
+  await navigate(`${BASE_URL}/app/setup`, "merchant setup");
   await waitFor(
     cdp,
-    "document.readyState === 'complete'",
-    "orders document ready",
+    "Boolean(document.querySelector('[data-testid=\"merchant-orders-link\"]'))",
+    "COD Orders navigation entry",
+  );
+  const ordersLinkText = await cdp.evaluate(
+    "document.querySelector('[data-testid=\"merchant-orders-link\"]')?.textContent?.trim()",
+  );
+  assert(
+    ordersLinkText === "View orders",
+    `Expected English Orders link, saw ${JSON.stringify(ordersLinkText)}`,
+  );
+  const clicked = await cdp.evaluate(`(() => {
+    const link = document.querySelector('[data-testid="merchant-orders-link"]');
+    if (!link) return false;
+    link.click();
+    return true;
+  })()`);
+  assert(clicked, "COD Orders link should be clickable");
+  await waitFor(
+    cdp,
+    "window.location.pathname === '/app/orders'",
+    "COD Orders click-through",
   );
   await waitFor(
     cdp,
@@ -504,6 +539,92 @@ async function main() {
     overflow <= 361,
     `Expected no horizontal scroll at 360 px, saw ${overflow}`,
   );
+
+  log("Checking Arabic RTL merchant Orders copy...");
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant-locale",
+    value: "ar",
+    domain: "127.0.0.1",
+    path: "/",
+  });
+  await navigate(`${BASE_URL}/app/orders`, "Arabic orders");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-orders-page\"]')?.getAttribute('dir') === 'rtl'",
+    "Arabic RTL orders page",
+  );
+  const arabicBody = await cdp.evaluate("document.body.innerText");
+  for (const expected of [
+    "طلبات الدفع عند الاستلام",
+    "بانتظار التحصيل",
+    "محجوز",
+    "الدفع عند الاستلام",
+  ]) {
+    assert(
+      arabicBody.includes(expected),
+      `Arabic orders page should include ${JSON.stringify(expected)}`,
+    );
+  }
+  const arabicOverflow = await cdp.evaluate(
+    "Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)",
+  );
+  assert(
+    arabicOverflow <= 361,
+    `Expected no horizontal scroll in Arabic at 360 px, saw ${arabicOverflow}`,
+  );
+
+  log("Checking that the Orders entry is hidden when COD is off...");
+  const probePort = 3447;
+  const probeUrl = `http://127.0.0.1:${probePort}`;
+  const probeServer = spawn(
+    "bash",
+    [
+      "-c",
+      `source "${envFile}" && export RABET_COD_ORDERS_ENABLED='false' && export AUTH_URL='${probeUrl}' && PORT=${probePort} node node_modules/next/dist/bin/next start`,
+    ],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+      env: { ...process.env },
+    },
+  );
+
+  try {
+    let probeReady = false;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      await sleep(500);
+      try {
+        const response = await fetch(`${probeUrl}/app/login`);
+        if (response.status === 200) {
+          probeReady = true;
+          break;
+        }
+      } catch {}
+    }
+    assert(probeReady, "COD-off probe server failed to start within 20s");
+
+    const setupResponse = await fetch(
+      `${probeUrl}/app/setup?codProbe=${Date.now()}`,
+      {
+        headers: {
+          Cookie: `rabet-merchant.session-token=${merchantCookie}`,
+          "Cache-Control": "no-store",
+        },
+      },
+    );
+    assert(setupResponse.status === 200, "COD-off setup page should render");
+    const setupBody = await setupResponse.text();
+    assert(
+      !setupBody.includes('data-testid="merchant-orders-link"'),
+      "Orders entry must be hidden when the COD deployment gate is off",
+    );
+  } finally {
+    if (probeServer.pid) {
+      try {
+        process.kill(-probeServer.pid, "SIGKILL");
+      } catch {}
+    }
+  }
 
   log("ALL COD ORDERS BROWSER ACCEPTANCE CHECKS PASSED");
   await cleanup();
