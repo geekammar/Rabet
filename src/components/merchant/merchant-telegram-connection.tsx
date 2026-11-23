@@ -142,6 +142,18 @@ export function MerchantTelegramConnection({
     ? copy.errors[failureReason] ?? copy.errors.failed
     : null;
 
+  const connectedOpenBotHref =
+    state.state === "connected"
+      ? isAndroidTelegramLaunch
+        ? telegramLaunchOrigin
+          ? buildAndroidTelegramLaunchTarget(
+              state.openUrl,
+              buildTelegramLaunchFallbackUrl(telegramLaunchOrigin),
+            )
+          : null
+        : state.openUrl
+      : null;
+
   const recoverKey =
     state.state === "recoverable"
       ? `${state.connectionId ?? "attempt"}:${state.attemptId}`
@@ -493,18 +505,43 @@ export function MerchantTelegramConnection({
               {copy.publish}
             </Button>
           ) : null}
+          {launchFailure ||
+          (isAndroidTelegramLaunch && connectedOpenBotHref === null) ? (
+            <div
+              role="status"
+              className="space-y-1 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+              data-testid="merchant-telegram-open-bot-launch-failure"
+            >
+              <p className="font-medium">{copy.launchFailedTitle}</p>
+              <p>{copy.openBotLaunchFailedBody}</p>
+            </div>
+          ) : null}
           {storeStatus === "active" ? (
-            <Button asChild className="min-h-11">
-              <a
-                href={state.openUrl}
-                target="_blank"
-                rel="noreferrer"
+            connectedOpenBotHref ? (
+              <Button asChild className="min-h-11">
+                <a
+                  href={connectedOpenBotHref}
+                  {...(isAndroidTelegramLaunch
+                    ? {}
+                    : { target: "_blank" })}
+                  rel="noreferrer"
+                  data-testid="merchant-telegram-open-bot"
+                >
+                  <ExternalLink className="size-4" aria-hidden="true" />
+                  {copy.openBot}
+                </a>
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                className="min-h-11"
+                disabled
                 data-testid="merchant-telegram-open-bot"
               >
                 <ExternalLink className="size-4" aria-hidden="true" />
                 {copy.openBot}
-              </a>
-            </Button>
+              </Button>
+            )
           ) : null}
         </div>
       ) : null}
