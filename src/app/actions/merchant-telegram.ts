@@ -15,10 +15,11 @@ import { readManagerBotConfig } from "@/lib/telegram/manager-config";
 import {
   confirmTelegramConnection,
   createTelegramLinkAttempt,
+  merchantManagerDeepLink,
 } from "@/lib/telegram/manager-provisioning";
 
 export type MerchantTelegramActionResult =
-  | { ok: true }
+  | { ok: true; deepLink?: string }
   | {
       ok: false;
       error:
@@ -119,12 +120,13 @@ export async function startMerchantTelegramConnection(): Promise<MerchantTelegra
     return { ok: false, error: "UNAVAILABLE" };
   }
 
+  let nonce: string;
   try {
-    await createTelegramLinkAttempt(getTransactionDb(), {
+    ({ nonce } = await createTelegramLinkAttempt(getTransactionDb(), {
       storeId: access.store.id,
       merchantUserId: access.userId,
       managerBotUsername: managerUsername,
-    });
+    }));
   } catch (error) {
     console.error(
       "[merchant-telegram] connect start failed",
@@ -145,7 +147,7 @@ export async function startMerchantTelegramConnection(): Promise<MerchantTelegra
 
   try {
     revalidatePath("/app/setup");
-    return { ok: true };
+    return { ok: true, deepLink: merchantManagerDeepLink(managerUsername, nonce) };
   } catch (error) {
     console.error(
       "[merchant-telegram] connect start failed",

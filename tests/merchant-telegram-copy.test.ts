@@ -23,11 +23,8 @@ describe("merchant Telegram connection copy", () => {
       expect(copy.errors.activation_superseded.length).toBeGreaterThan(0);
       expect(copy.errors.REVIEW.length).toBeGreaterThan(0);
       expect(copy.errors.webhook_outcome_unknown.length).toBeGreaterThan(0);
-      expect(copy.openTelegramX.length).toBeGreaterThan(0);
-      expect(copy.openBotX.length).toBeGreaterThan(0);
-      expect(copy.launchChoiceTitle.length).toBeGreaterThan(0);
       expect(copy.launchFailedTitle.length).toBeGreaterThan(0);
-      expect(copy.openWebFallback.length).toBeGreaterThan(0);
+      expect(copy.launchFailedBody.length).toBeGreaterThan(0);
     }
   });
 
