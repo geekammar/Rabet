@@ -79,8 +79,8 @@ jobs:
           APP_URL: https://nokmel-cod-staging.onrender.com
           CANDIDATE_SHA: 83ac0c7166644bd71ab43cd86c8f404e00595514
           RABET_CODE_ROOT: /tmp/rabet-candidate
-          SEED_MERCHANT_A_PASSWORD_HASH: \${{ secrets.COD_STAGING_MERCHANT_HASH_A }}
-          SEED_MERCHANT_B_PASSWORD_HASH: \${{ secrets.COD_STAGING_MERCHANT_HASH_B }}
+          SEED_MERCHANT_A_PASSWORD_HASH: ${{ secrets.COD_STAGING_MERCHANT_HASH_A }}
+          SEED_MERCHANT_B_PASSWORD_HASH: ${{ secrets.COD_STAGING_MERCHANT_HASH_B }}
         run: node scripts/cod-staging-acceptance.mjs
 
       - name: Upload sanitized summary
