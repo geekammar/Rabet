@@ -19,6 +19,7 @@ type Copy = {
   openTelegram: string;
   launchFailedTitle: string;
   launchFailedBody: string;
+  openBotLaunchFailedBody: string;
   refresh: string;
   confirmTitle: string;
   confirmBody: string;
@@ -61,6 +62,8 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     launchFailedTitle: "تعذر فتح تيليجرام الرسمي.",
     launchFailedBody:
       "قد لا يكون Telegram الرسمي مثبتًا أو منع المتصفح فتحه. ثبّت Telegram الرسمي ثم اضغط «متابعة إنشاء البوت»؛ لم تُفقد محاولة الربط الحالية.",
+    openBotLaunchFailedBody:
+      "البوت ما زال مرتبطًا بمتجرك. ثبّت Telegram الرسمي ثم اضغط «فتح البوت في تيليجرام»؛ لن نفتح Telegram X.",
     refresh: "تحديث الحالة",
     confirmTitle: "تأكيد بوت المتجر",
     confirmBody:
@@ -139,6 +142,8 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     launchFailedTitle: "Official Telegram could not be opened.",
     launchFailedBody:
       "Official Telegram may not be installed, or the browser blocked it. Install official Telegram, then tap Continue creating the bot; the current connection attempt is preserved.",
+    openBotLaunchFailedBody:
+      "Your bot is still linked. Install official Telegram, then tap Open the bot in Telegram; Telegram X is never opened.",
     refresh: "Refresh status",
     confirmTitle: "Confirm the store bot",
     confirmBody:

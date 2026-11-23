@@ -14,6 +14,7 @@ import {
 
 const START = "abcDEF_123-xyz";
 const LINK = `https://t.me/Nokmelpre_bot?start=${START}`;
+const BOT_LINK = "https://t.me/rabet_3501f6ea_merchant_a_st_bot";
 
 describe("official Telegram Android launch", () => {
   it("preserves the original manager deep link and start payload", () => {
@@ -21,6 +22,31 @@ describe("official Telegram Android launch", () => {
       username: "Nokmelpre_bot",
       start: START,
     });
+  });
+
+  it("opens a linked store bot chat with no setup payload", () => {
+    const parts = parseTelegramDeepLink(BOT_LINK);
+
+    expect(parts).toEqual({
+      username: "rabet_3501f6ea_merchant_a_st_bot",
+      start: null,
+    });
+
+    const fallback = buildTelegramLaunchFallbackUrl(
+      "https://rabet-pr48-staging.onrender.com",
+    );
+    const intent = buildAndroidTelegramLaunchTarget(BOT_LINK, fallback);
+
+    expect(intent).toContain(
+      "domain=rabet_3501f6ea_merchant_a_st_bot",
+    );
+    expect(intent).toContain(
+      `package=${OFFICIAL_TELEGRAM_ANDROID_PACKAGE}`,
+    );
+    expect(intent).not.toContain("start=");
+    expect(intent).not.toContain("Nokmelpre_bot");
+    expect(intent).not.toContain("org.thunderdog.challegram");
+    expect(intent).toContain(encodeURIComponent(fallback));
   });
 
   it("targets only official Telegram with the same start value", () => {
@@ -99,6 +125,11 @@ describe("official Telegram Android launch", () => {
     expect(component).not.toContain("org.thunderdog.challegram");
     expect(component).not.toContain("merchant-telegram-open-x");
     expect(component).not.toContain("openTelegramX");
+    expect(component).toContain("merchant-telegram-open-bot");
+    expect(component).toMatch(
+      /buildAndroidTelegramLaunchTarget\(\s*state\.openUrl,/,
+    );
+    expect(component).not.toContain("href={state.openUrl}");
 
     expect(route).toContain("isSameOriginNavigationPost");
     expect(route).toContain("status: 303");
