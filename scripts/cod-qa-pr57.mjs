@@ -487,7 +487,14 @@ async function main() {
   );
   runPostgresTool(
     "pg_restore",
-    ["--no-owner", "--no-privileges", "--no-comments", "/work/baseline.dump"],
+    [
+      "--no-owner",
+      "--no-privileges",
+      "--no-comments",
+      "--dbname",
+      targetDb.database,
+      "/work/baseline.dump",
+    ],
     targetUrl.toString(),
   );
 
