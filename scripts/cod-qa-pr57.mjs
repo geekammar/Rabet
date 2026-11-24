@@ -267,11 +267,11 @@ async function snapshot(sql, label) {
   `;
   const [targetOrder] = await sql`
     select reference, status, payment_status, fulfillment_status, subtotal,
-      delivery_fee, total, currency, cancellation_reason, cancelled_at
+      delivery_fee, total, currency
     from "order" where reference = 'ORD-X2EZD9'
   `;
   const cancelled = await sql`
-    select reference, status, cancellation_reason, cancelled_at, updated_at
+    select reference, status, updated_at
     from "order" where status = 'cancelled' order by reference
   `;
   const [dbIdentity] = await sql`
@@ -317,8 +317,6 @@ async function snapshot(sql, label) {
             deliveryFee: targetOrder.delivery_fee,
             total: targetOrder.total,
             currency: targetOrder.currency,
-            cancellationReason: targetOrder.cancellation_reason,
-            cancelledAt: targetOrder.cancelled_at,
           }
         : null,
       cancelled,
@@ -404,9 +402,33 @@ async function main() {
     if (!ownerRole) fail("Neon owner role could not be identified");
     if (!identity?.can_create_db) fail("NEON_DEV_DATABASE_URL role cannot create a dedicated test database");
     const existingDb = await owner`select datname from pg_database where datname = ${QA_DB_NAME}`;
-    if (existingDb.length > 0) fail(`Database ${QA_DB_NAME} already exists; refusing to overwrite it`);
     const existingRole = await owner`select rolname from pg_roles where rolname = ${QA_DB_ROLE}`;
-    if (existingRole.length > 0) fail(`Role ${QA_DB_ROLE} already exists; refusing to overwrite it`);
+    if (existingDb.length > 0) {
+      const ownerTargetUrl = buildTargetUrl(ownerUrl, ownerRole, decodeURIComponent(ownerUrl.password), QA_DB_NAME);
+      const probe = postgres(ownerTargetUrl, { max: 1, connect_timeout: 30, ssl: "require" });
+      let probeTables = null;
+      try {
+        const rows = await probe`
+          select count(*)::int as count from information_schema.tables
+          where table_schema in ('public', 'drizzle')
+        `;
+        probeTables = rows[0]?.count ?? null;
+      } catch {
+        probeTables = null;
+      } finally {
+        await probe.end({ timeout: 5 }).catch(() => {});
+      }
+      if (probeTables !== 0) {
+        fail(`Database ${QA_DB_NAME} already exists with tables; refusing to overwrite it`);
+      }
+      log(`Removing empty failed-attempt database ${QA_DB_NAME}`);
+      await owner.unsafe(`select pg_terminate_backend(pid) from pg_stat_activity where datname = '${QA_DB_NAME}' and pid <> pg_backend_pid()`).catch(() => {});
+      await owner.unsafe(`drop database "${QA_DB_NAME}" with (force)`);
+    }
+    if (existingRole.length > 0) {
+      if (existingDb.length === 0) fail(`Role ${QA_DB_ROLE} already exists without the QA database; refusing to overwrite it`);
+      await owner.unsafe(`drop role if exists "${QA_DB_ROLE}"`);
+    }
     await owner.unsafe(
       `create role "${QA_DB_ROLE}" with login password '${rolePassword.replace(/'/g, "''")}' nosuperuser nocreatedb nocreaterole noreplication`,
     );
@@ -534,6 +556,15 @@ async function main() {
       order by column_name
     `;
     if (newColumns.length !== 4) fail("Expected four new order columns after migration");
+    const legacyCancellation = await promotedSql`
+      select reference, status, cancellation_reason, cancelled_at, updated_at
+      from "order" where status = 'cancelled' order by reference
+    `;
+    for (const row of legacyCancellation) {
+      if (!row.cancellation_reason || !row.cancelled_at) {
+        fail(`Legacy cancelled order ${row.reference} was not backfilled`);
+      }
+    }
     const ledger = await promotedSql`
       select id, hash, created_at from drizzle.__drizzle_migrations order by created_at, id
     `;
@@ -556,6 +587,7 @@ async function main() {
       hashes: promotedSnapshot.hashes,
       targetOrder: promotedSnapshot.data.targetOrder,
       cancelled: promotedSnapshot.data.cancelled,
+      legacyCancellation,
       dbIdentity: promotedSnapshot.dbIdentity,
     };
     log("Migration 0014 verified: 15/15 ledger, four constraints, baseline rows preserved");
