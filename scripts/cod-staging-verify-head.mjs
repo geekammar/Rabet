@@ -115,6 +115,16 @@ async function main() {
   const authSecret = envMap.get("AUTH_SECRET");
   if (!databaseUrl || !authSecret) fail("Expected isolated DATABASE_URL/AUTH_SECRET are missing");
 
+  if (envMap.get("RABET_BUILD_SHA") !== CANDIDATE_SHA) {
+    envMap.set("RABET_BUILD_SHA", CANDIDATE_SHA);
+    await renderApi(
+      "PUT",
+      `/services/${SERVICE_ID}/env-vars`,
+      [...envMap.entries()].map(([key, value]) => ({ key, value })),
+    );
+    log("Updated RABET_BUILD_SHA for the reviewed candidate");
+  }
+
   await deployExactCommit();
   const health = await waitForHealth();
   log(`Health matched ${health.sha}`);
