@@ -218,12 +218,13 @@ describe.skipIf(!shouldRun)("real production runner 0008 to 0010 upgrade", () =>
         "0011_careless_hulk",
         "0012_mushy_scream",
         "0013_cod_orders",
+        "0014_sparkling_captain_stacy",
       ]);
       expect(output()).toContain(
         "Verified healthy prior release (0008_merchant_invitations_and_credentials)",
       );
       expect(output()).toContain(
-        "Proceeding with migration to 0013_cod_orders",
+        "Proceeding with migration to 0014_sparkling_captain_stacy",
       );
 
       const after = await setupPool!`
@@ -263,7 +264,7 @@ describe.skipIf(!shouldRun)("real production runner 0008 to 0010 upgrade", () =>
       const ledger = await setupPool!`
         select count(*)::int as count from drizzle.__drizzle_migrations
       `;
-      expect(ledger[0].count).toBe(14);
+      expect(ledger[0].count).toBe(15);
     },
     120_000,
   );

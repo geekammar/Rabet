@@ -324,6 +324,7 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
       "0011_careless_hulk",
       "0012_mushy_scream",
       "0013_cod_orders",
+      "0014_sparkling_captain_stacy",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(await snapshot(baseline)).toEqual(beforeSnapshot);
@@ -357,6 +358,7 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
       "0011_careless_hulk",
       "0012_mushy_scream",
       "0013_cod_orders",
+      "0014_sparkling_captain_stacy",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -365,11 +367,11 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
       "Verified healthy prior release (0009_merchant_auth_throttle)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0013_cod_orders",
+      "Proceeding with migration to 0014_sparkling_captain_stacy",
     );
 
     const afterLedger = await ledger(baseline);
-    expect(afterLedger).toHaveLength(14);
+    expect(afterLedger).toHaveLength(15);
     expect(afterLedger.slice(0, beforeLedger.length)).toEqual(beforeLedger);
     expect(afterLedger[10].hash).toBe(
       committed.find((entry) => entry.tag === "0010_wonderful_siren")?.hash,
@@ -382,6 +384,10 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
     );
     expect(afterLedger[13].hash).toBe(
       committed.find((entry) => entry.tag === "0013_cod_orders")?.hash,
+    );
+    expect(afterLedger[14].hash).toBe(
+      committed.find((entry) => entry.tag === "0014_sparkling_captain_stacy")
+        ?.hash,
     );
 
     const afterSchema = await schemaState(baseline);

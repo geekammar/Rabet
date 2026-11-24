@@ -3,6 +3,7 @@ import Link from "next/link";
 import { connection } from "next/server";
 import { notFound } from "next/navigation";
 
+import { MerchantOrderActions } from "@/components/dashboard/orders/order-actions";
 import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
@@ -19,7 +20,7 @@ import {
 export async function generateMetadata(): Promise<Metadata> {
   return merchantPageMetadata(
     "orders",
-    "Read-only cash-on-delivery orders for the signed-in store.",
+    "Accept, prepare or cancel cash-on-delivery orders for the signed-in store.",
   );
 }
 
@@ -50,7 +51,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     dir: "rtl",
     title: "طلبات الدفع عند الاستلام",
     subtitle:
-      "عرض للقراءة فقط. يُحصّل الدفع عند التسليم، وتظهر حالة الطلب والدفع والتجهيز بشكل منفصل.",
+      "اقبل الطلب وجهّزه أو ألغِه قبل الشحن. يُحصّل الدفع عند التسليم، وتظهر حالة الطلب والدفع والتجهيز بشكل منفصل.",
     backToStore: "العودة إلى المتجر",
     empty: "لا توجد طلبات دفع عند الاستلام بعد.",
     order: "الطلب",
@@ -70,7 +71,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     dir: "ltr",
     title: "COD orders",
     subtitle:
-      "Read-only. Cash is collected on delivery; order, payment and fulfillment states are shown separately.",
+      "Accept and prepare the order, or cancel before shipping. Cash is collected on delivery; order, payment and fulfillment states are shown separately.",
     backToStore: "Back to store",
     empty: "No cash-on-delivery orders yet.",
     order: "Order",
@@ -94,6 +95,8 @@ const STATUS_COPY: Record<
 > = {
   ar: {
     placed: "تم الطلب",
+    accepted: "مقبول",
+    preparing: "قيد التجهيز",
     cancelled: "ملغي",
     awaiting_collection: "بانتظار التحصيل",
     collected: "تم التحصيل",
@@ -108,6 +111,8 @@ const STATUS_COPY: Record<
   },
   en: {
     placed: "placed",
+    accepted: "accepted",
+    preparing: "preparing",
     cancelled: "cancelled",
     awaiting_collection: "awaiting collection",
     collected: "collected",
@@ -202,6 +207,14 @@ function OrderCard({
           />
         ))}
       </div>
+
+      <MerchantOrderActions
+        orderId={order.id}
+        status={order.status}
+        fulfillmentStatus={order.fulfillmentStatus}
+        cancellationReason={order.cancellationReason}
+        locale={locale}
+      />
 
       <ul className="space-y-2 border-y border-border py-3 text-sm">
         {order.items.map((item) => (

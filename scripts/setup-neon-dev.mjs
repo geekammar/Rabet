@@ -132,6 +132,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0011_careless_hulk",
   "0012_mushy_scream",
   "0013_cod_orders",
+  "0014_sparkling_captain_stacy",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -470,8 +471,8 @@ export const CRITICAL_CONSTRAINTS_V11 = [
   "telegram_connection_webhook_operation_consistency_check",
 ];
 
-/** CHECK constraints the current chain requires (0013 adds the COD constraints). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK constraints present through 0013 (the COD constraints). */
+export const CRITICAL_CONSTRAINTS_V12 = [
   ...CRITICAL_CONSTRAINTS_V11,
   "store_commerce_setting_currency_allowlist_check",
   "store_commerce_setting_delivery_fee_nonnegative_check",
@@ -505,6 +506,14 @@ export const CRITICAL_CONSTRAINTS = [
   "order_item_product_name_not_empty_check",
   "inventory_reservation_quantity_check",
   "inventory_reservation_status_check",
+];
+
+/** CHECK constraints the current chain requires (0014 adds merchant operations). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V12,
+  "order_merchant_progress_check",
+  "order_cancellation_state_check",
+  "order_cancellation_reason_length_check",
 ];
 
 /** Notification update triggers created by migration 0003. */

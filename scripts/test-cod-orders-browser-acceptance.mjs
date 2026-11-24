@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -37,6 +38,9 @@ const APP_PORT = 3446;
 const CDP_PORT = 9346;
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const SESSION_SALT = "rabet-merchant.session-token";
+const REVIEW_DIR =
+  process.env.RABET_COD_SCREENSHOT_DIR ??
+  path.resolve(process.cwd(), "docs/review/cod-order-operations");
 
 let appServer = null;
 let chromeProcess = null;
@@ -540,6 +544,160 @@ async function main() {
     `Expected no horizontal scroll at 360 px, saw ${overflow}`,
   );
 
+  const capturePhoneScreenshot = async (filename) => {
+    const metrics = await cdp.send("Page.getLayoutMetrics");
+    const contentSize = metrics.cssContentSize ?? metrics.contentSize;
+    const height = Math.max(800, Math.ceil(contentSize?.height ?? 800));
+    const screenshot = await cdp.send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width: 360, height, scale: 1 },
+    });
+
+    mkdirSync(REVIEW_DIR, { recursive: true });
+    const filePath = path.join(REVIEW_DIR, filename);
+    writeFileSync(filePath, Buffer.from(screenshot.data, "base64"));
+    log(`Saved phone-width screenshot: ${filePath}`);
+  };
+
+  const clickTestId = async (testId) => {
+    const clicked = await cdp.evaluate(`(() => {
+      const element = document.querySelector('[data-testid="${testId}"]');
+      if (!element) return false;
+      element.click();
+      return true;
+    })()`);
+    assert(clicked, `Expected ${testId} to be clickable`);
+  };
+
+  log("Running the phone-first accept and prepare flow...");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-accept\"]'))",
+    "Accept order action",
+  );
+  await capturePhoneScreenshot("01-order-placed-360.png");
+
+  await clickTestId("merchant-order-action-accept");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-prepare\"]'))",
+    "Start preparing action after acceptance",
+  );
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('Order accepted.')",
+    "acceptance feedback",
+  );
+  await capturePhoneScreenshot("02-order-accepted-360.png");
+
+  await clickTestId("merchant-order-action-prepare");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-cancel\"]'))",
+    "cancellation action while preparing",
+  );
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('Order marked as preparing.')",
+    "preparing feedback",
+  );
+  await capturePhoneScreenshot("03-order-preparing-360.png");
+
+  log("Running the phone-first pre-shipment cancellation flow...");
+  await clickTestId("merchant-order-action-cancel");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-cancel-reason\"]'))",
+    "cancellation reason field",
+  );
+
+  const cancellationReason = "Customer requested cancellation";
+  const typedReason = await cdp.evaluate(`(() => {
+    const element = document.querySelector('[data-testid="merchant-order-cancel-reason"]');
+    if (!element) return null;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    ).set;
+    setter.call(element, ${JSON.stringify(cancellationReason)});
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return element.value;
+  })()`);
+  assert(
+    typedReason === cancellationReason,
+    `Expected cancellation reason to be entered, saw ${JSON.stringify(typedReason)}`,
+  );
+  await capturePhoneScreenshot("04-order-cancel-reason-360.png");
+
+  await clickTestId("merchant-order-cancel-submit");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-feedback\"]'))",
+    "cancellation feedback",
+  );
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('This order is cancelled and its stock reservation was released.')",
+    "cancelled state",
+  );
+  await waitFor(
+    cdp,
+    `document.body.innerText.includes(${JSON.stringify(cancellationReason)})`,
+    "saved cancellation reason",
+  );
+
+  const cancelledBody = await cdp.evaluate("document.body.innerText");
+  for (const expected of [
+    "cancelled",
+    "released",
+    "Order cancelled and the reservation released once.",
+  ]) {
+    assert(
+      cancelledBody.includes(expected),
+      `Cancelled Orders page should include ${JSON.stringify(expected)}`,
+    );
+  }
+
+  await capturePhoneScreenshot("05-order-cancelled-360.png");
+
+  const [cancelledInventory] = await pgClient`
+    select on_hand, reserved
+    from product_inventory
+    where product_id = ${product.id}
+  `;
+  assert(
+    cancelledInventory.on_hand === 5,
+    `Cancellation must preserve on-hand stock, saw ${cancelledInventory.on_hand}`,
+  );
+  assert(
+    cancelledInventory.reserved === 0,
+    `Cancellation must release the full hold, saw ${cancelledInventory.reserved}`,
+  );
+
+  const cancelledReservations = await pgClient`
+    select status, release_reason, released_at
+    from inventory_reservation
+    where order_id = ${order.id}
+  `;
+  assert(
+    cancelledReservations.length === 1,
+    `Expected one reservation, saw ${cancelledReservations.length}`,
+  );
+  assert(
+    cancelledReservations[0].status === "released",
+    `Expected released reservation, saw ${cancelledReservations[0].status}`,
+  );
+  assert(
+    cancelledReservations[0].release_reason === cancellationReason,
+    "Cancellation reason must be stored on the released reservation",
+  );
+  assert(
+    Boolean(cancelledReservations[0].released_at),
+    "Released reservation must record its release timestamp",
+  );
+
   log("Checking Arabic RTL merchant Orders copy...");
   await cdp.send("Network.setCookie", {
     name: "rabet-merchant-locale",
@@ -557,7 +715,8 @@ async function main() {
   for (const expected of [
     "طلبات الدفع عند الاستلام",
     "بانتظار التحصيل",
-    "محجوز",
+    "ملغي",
+    "محرر",
     "الدفع عند الاستلام",
   ]) {
     assert(
@@ -572,6 +731,7 @@ async function main() {
     arabicOverflow <= 361,
     `Expected no horizontal scroll in Arabic at 360 px, saw ${arabicOverflow}`,
   );
+  await capturePhoneScreenshot("06-order-cancelled-ar-360.png");
 
   log("Checking that the Orders entry is hidden when COD is off...");
   const probePort = 3447;

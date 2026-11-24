@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Stacked COD work targets feat/cod-order-first-slice (PR #56), not main.
+    branches: [main, feat/cod-order-first-slice]
 
 # Two jobs, both required:
 #
@@ -419,11 +420,19 @@ jobs:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
         run: npm run test:browser:merchant
 
-      - name: Run COD orders read-only browser acceptance suite
+      - name: Run COD orders merchant operations browser acceptance suite
         env:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
           AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
         run: npm run test:browser:cod-orders
+
+      - name: Upload COD phone-width evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-order-operations-phone-screenshots
+          path: docs/review/cod-order-operations/*.png
+          if-no-files-found: ignore
 
       - name: Run Android Mobile Touch Scrolling browser acceptance suite
         env:
