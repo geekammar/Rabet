@@ -1,0 +1,76 @@
+name: COD Staging Verify Head
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type VERIFY_COD_STAGING_HEAD to authorize exact-SHA deploy and read-only baseline checks.'
+        type: string
+        default: ""
+        required: true
+  push:
+    branches:
+      - ops/cod-staging-acceptance
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-staging-verify-head
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Deploy exact SHA and verify baseline
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[verify-cod-staging-head]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 45
+
+    steps:
+      - name: Validate confirmation
+        env:
+          RABET_CONFIRM: ${{ inputs.confirm }}
+          RABET_REF: ${{ github.ref }}
+          RABET_EVENT: ${{ github.event_name }}
+        run: |
+          if [ "${RABET_EVENT}" = "workflow_dispatch" ]; then
+            if [ "${RABET_CONFIRM}" != "VERIFY_COD_STAGING_HEAD" ]; then
+              echo "Confirmation must equal VERIFY_COD_STAGING_HEAD." >&2
+              exit 1
+            fi
+          else
+            if [ "${RABET_REF}" != "refs/heads/ops/cod-staging-acceptance" ]; then
+              echo "Push trigger is restricted to ops/cod-staging-acceptance." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy reviewed head and verify baseline
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 8149f7dd98b90354e11e4ec2d811ae53419b7eb1
+        run: node scripts/cod-staging-verify-head.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-verify-head-summary
+          path: /tmp/cod-staging-verify-head-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
