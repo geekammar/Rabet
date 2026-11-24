@@ -8,7 +8,7 @@ const SERVICE_ID = (process.env.RENDER_SERVICE_ID ?? "").trim();
 const APP_URL = (process.env.APP_URL ?? "").trim().replace(/\/$/, "");
 const RENDER_API_KEY = process.env.RENDER_API_KEY ?? "";
 const SUMMARY_PATH = "/tmp/cod-staging-verify-head-summary.json";
-const ORDER_REFERENCE = "ORD-RZNNAN";
+const ORDER_REFERENCE = "ORD-X2EZD9";
 
 function log(message) {
   process.stdout.write(`[cod-verify] ${String(message)}\n`);
@@ -140,12 +140,13 @@ async function main() {
   try {
     const stores = await db`
       select id, slug, name from "store"
-      where slug in ('cod-pr56-store-a', 'cod-pr56-store-b')
+      where slug in ('cod-pr56-store-a', 'cod-pr56-store-b', 'cod-pr56-store-c')
       order by slug
     `;
     const storeA = stores.find((row) => row.slug === "cod-pr56-store-a");
     const storeB = stores.find((row) => row.slug === "cod-pr56-store-b");
-    if (!storeA || !storeB) fail("Expected synthetic stores are missing");
+    const storeC = stores.find((row) => row.slug === "cod-pr56-store-c");
+    if (!storeA || !storeB || !storeC) fail("Expected synthetic stores are missing");
 
     const [product] = await db`
       select p.id, p.slug, p.price, p.is_active, c.is_active as category_active,
@@ -160,6 +161,10 @@ async function main() {
     const [connectionA] = await db`
       select bot_id, bot_username, status from "telegram_connection"
       where store_id = ${storeA.id} order by verified_at desc limit 1
+    `;
+    const [connectionC] = await db`
+      select bot_id, bot_username, status from "telegram_connection"
+      where store_id = ${storeC.id} order by verified_at desc limit 1
     `;
     const [inventory] = await db`
       select on_hand, reserved from "product_inventory"
@@ -177,6 +182,12 @@ async function main() {
     `;
     const [ordersB] = await db`
       select count(*)::int as count from "order" where store_id = ${storeB.id}
+    `;
+    const [connectionsB] = await db`
+      select count(*)::int as count from "telegram_connection" where store_id = ${storeB.id}
+    `;
+    const [ordersC] = await db`
+      select count(*)::int as count from "order" where store_id = ${storeC.id}
     `;
     const [merchantA] = await db`
       select u.id, u.session_version
@@ -200,6 +211,7 @@ async function main() {
     dbEvidence = {
       storeA: storeA.slug,
       storeB: storeB.slug,
+      storeC: storeC.slug,
       productA: product
         ? {
             slug: product.slug,
@@ -214,6 +226,13 @@ async function main() {
             botId: connectionA.bot_id,
             botUsername: connectionA.bot_username,
             status: connectionA.status,
+          }
+        : null,
+      connectionC: connectionC
+        ? {
+            botId: connectionC.bot_id,
+            botUsername: connectionC.bot_username,
+            status: connectionC.status,
           }
         : null,
       inventory: inventory
@@ -232,23 +251,29 @@ async function main() {
           }
         : null,
       ordersB: ordersB.count,
+      connectionsB: connectionsB.count,
+      ordersC: ordersC.count,
     };
 
     if (!product || product.is_active !== true || product.category_active !== true) {
       fail("Store A catalog fixture is not active");
     }
     if (connectionA?.status !== "ready") fail("Store A managed connection is not ready");
-    if (inventory?.on_hand !== 5 || inventory?.reserved !== 4) {
+    if (connectionC?.status !== "ready") fail("Store C managed connection is not ready");
+    if (inventory?.on_hand !== 5 || inventory?.reserved !== 5) {
       fail("Order/inventory baseline changed");
     }
-    if (ordersA.count !== 2 || reservationsA.count !== 2) {
+    if (ordersA.count !== 3 || reservationsA.count !== 3) {
       fail("Order/reservation baseline changed");
     }
-    if (targetOrder?.reference !== ORDER_REFERENCE) fail("ORD-RZNNAN is missing");
+    if (targetOrder?.reference !== ORDER_REFERENCE) fail("ORD-X2EZD9 is missing");
+    if (Number(targetOrder.total) !== 26) fail("ORD-X2EZD9 total changed");
     if (targetOrder.payment_status !== "awaiting_collection") {
-      fail("ORD-RZNNAN is not awaiting collection");
+      fail("ORD-X2EZD9 is not awaiting collection");
     }
     if (ordersB.count !== 0) fail("Store B unexpectedly has orders");
+    if (connectionsB.count !== 0) fail("Store B unexpectedly has a connection");
+    if (ordersC.count !== 0) fail("Store C unexpectedly has orders");
   } finally {
     await db.end({ timeout: 5 }).catch(() => {});
   }
@@ -278,8 +303,8 @@ async function main() {
   const ordersResponse = await merchantFetch(`/app/orders?verify=${Date.now()}`);
   const ordersHtml = await ordersResponse.text();
   if (ordersResponse.status !== 200) fail(`Merchant orders page returned HTTP ${ordersResponse.status}`);
-  if (!ordersHtml.includes(ORDER_REFERENCE)) fail("ORD-RZNNAN is not served on merchant A orders");
-  if (!ordersHtml.includes("بانتظار التحصيل")) fail("ORD-RZNNAN is not awaiting collection in the UI");
+  if (!ordersHtml.includes(ORDER_REFERENCE)) fail("ORD-X2EZD9 is not served on merchant A orders");
+  if (!ordersHtml.includes("بانتظار التحصيل")) fail("ORD-X2EZD9 is not awaiting collection in the UI");
 
   const summary = {
     serviceId: SERVICE_ID,
@@ -292,7 +317,9 @@ async function main() {
       merchantOrdersServesTargetOrder: true,
       targetOrderAwaitingCollection: true,
       storeAConnectionReady: true,
+      storeCConnectionReady: true,
       storeBOrderCount: dbEvidence.ordersB,
+      storeBConnectionCount: dbEvidence.connectionsB,
     },
     generatedAt: new Date().toISOString(),
   };

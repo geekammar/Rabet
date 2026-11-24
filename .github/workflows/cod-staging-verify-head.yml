@@ -63,7 +63,7 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
           APP_URL: https://nokmel-cod-staging.onrender.com
-          CANDIDATE_SHA: 8149f7dd98b90354e11e4ec2d811ae53419b7eb1
+          CANDIDATE_SHA: e213189a19f4dce32ec3a139955bbece51489aba
         run: node scripts/cod-staging-verify-head.mjs
 
       - name: Upload sanitized summary
