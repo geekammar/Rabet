@@ -1567,7 +1567,7 @@ export async function verifyManagedBotStart(
   },
   deps: ManagedBotStartVerificationDependencies,
 ): Promise<VerifyManagedBotStartResult> {
-  const now = deps.now ?? new Date();
+  const lookupNow = deps.now ?? new Date();
 
   let lookup:
     | { kind: "proposal"; proposal: ManagedBotProposal }
@@ -1650,7 +1650,7 @@ export async function verifyManagedBotStart(
           return { kind: "result", result: { status: "not_found" } };
         }
 
-        if (attempt.expiresAt.getTime() <= now.getTime()) {
+        if (attempt.expiresAt.getTime() <= lookupNow.getTime()) {
           await tx
             .update(telegramLinkAttempt)
             .set({ status: "expired", failureCode: "expired" })
@@ -1824,6 +1824,11 @@ export async function verifyManagedBotStart(
     persisted = await db.transaction(async (tx): Promise<PersistResult> => {
       await lockConnectionStore(tx, input.storeId);
 
+      // External Telegram calls and lock acquisition can take long enough for
+      // the attempt to expire. Re-read the effective time inside the final
+      // transaction and use it for every persistence decision.
+      const effectiveNow = deps.now ?? new Date();
+
       const [current] = await tx
         .select({
           id: telegramLinkAttempt.id,
@@ -1875,7 +1880,7 @@ export async function verifyManagedBotStart(
         return { status: "conflict" };
       }
 
-      if (current.expiresAt.getTime() <= now.getTime()) {
+      if (current.expiresAt.getTime() <= effectiveNow.getTime()) {
         await tx
           .update(telegramLinkAttempt)
           .set({ status: "expired", failureCode: "expired" })
@@ -1903,7 +1908,7 @@ export async function verifyManagedBotStart(
           tx,
           current.id,
           "bot_bound_elsewhere",
-          now,
+          effectiveNow,
         );
         return { status: "bot_bound_elsewhere" };
       }
@@ -1913,7 +1918,7 @@ export async function verifyManagedBotStart(
           tx,
           current.id,
           "webhook_outcome_unknown",
-          now,
+          effectiveNow,
         );
         return { status: "bot_review" };
       }
@@ -1933,7 +1938,7 @@ export async function verifyManagedBotStart(
             webhookSecretHash: hashWebhookSecret(generateWebhookSecret()),
             status: "awaiting_confirmation",
             activationAttemptId: null,
-            verifiedAt: now,
+            verifiedAt: effectiveNow,
           })
           .where(eq(telegramConnection.id, existingForBot.id));
       } else {
@@ -1954,7 +1959,7 @@ export async function verifyManagedBotStart(
           webhookSecretHash: hashWebhookSecret(generateWebhookSecret()),
           webhookUrl: baseWebhookUrl,
           status: "awaiting_confirmation",
-          verifiedAt: now,
+          verifiedAt: effectiveNow,
         });
       }
 
@@ -1966,7 +1971,7 @@ export async function verifyManagedBotStart(
           telegramBotUsername: verifiedUsername,
           telegramBotName: verifiedName,
           failureCode: null,
-          verifiedAt: now,
+          verifiedAt: effectiveNow,
         })
         .where(
           and(
@@ -1977,7 +1982,7 @@ export async function verifyManagedBotStart(
               MANAGED_BOT_START_FAILURE_CODE,
             ),
             isNull(telegramLinkAttempt.connectionId),
-            gt(telegramLinkAttempt.expiresAt, now),
+            gt(telegramLinkAttempt.expiresAt, effectiveNow),
           ),
         )
         .returning({ id: telegramLinkAttempt.id });

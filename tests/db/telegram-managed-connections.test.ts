@@ -3066,6 +3066,146 @@ describe.skipIf(!shouldRun)("managed bot start and recovery", () => {
     expect(manager.getManagedBotToken).not.toHaveBeenCalled();
   });
 
+  it("rejects a bot-start proof that arrives after the attempt expires during verification", async () => {
+    const base = new Date("2026-11-24T12:00:00.000Z");
+    const beforeExpiry = new Date(base.getTime() + 60_000);
+    const afterExpiry = new Date(base.getTime() + 16 * 60_000);
+
+    const started = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+      now: base,
+    });
+    const bound = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: started.nonce,
+      telegramUserId: 7561,
+      now: beforeExpiry,
+    });
+    expect(bound.status).toBe("bound");
+
+    const proposal = await handleManagedBotEvent(
+      db(),
+      {
+        creatorUserId: 7561,
+        botId: 6161,
+        botUsername: "ExpiryRaceBot",
+        botName: "ExpiryRaceBot",
+      },
+      {
+        managerApi: managerApi(),
+        webhookOrigin: "https://app.example.test",
+        now: beforeExpiry,
+      },
+    );
+    expect(proposal.status).toBe("awaiting_bot_start");
+    if (proposal.status !== "awaiting_bot_start") return;
+
+    const updates =
+      deferred<Awaited<ReturnType<TelegramBotApiClient["getUpdates"]>>>();
+    const managed = botApi(6161, "ExpiryRaceBot", {
+      getWebhookInfo: vi.fn(async () => ({
+        ok: true as const,
+        result: { url: "" },
+      })),
+      getUpdates: vi.fn(() => updates.promise),
+    });
+    const manager = managerApi({
+      getManagedBotToken: vi.fn(async () => ({
+        ok: true as const,
+        result: "6161:AA-expiry-token",
+      })),
+    });
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    try {
+      vi.setSystemTime(beforeExpiry);
+
+      const pending = verifyManagedBotStart(
+        db(),
+        {
+          storeId: fixture.storeAId,
+          merchantUserId: fixture.userAId,
+          attemptId: proposal.attemptId,
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => managed,
+          webhookOrigin: "https://app.example.test",
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(managed.getUpdates).toHaveBeenCalledTimes(1);
+      });
+
+      // Telegram is still holding the proof while the attempt expires.
+      vi.setSystemTime(afterExpiry);
+
+      updates.resolve({
+        ok: true,
+        result: [
+          {
+            update_id: 1,
+            message: {
+              message_id: 1,
+              from: { id: 7561, is_bot: false, first_name: "Merchant" },
+              chat: { id: 7561, type: "private" },
+              date: 1,
+              text: `/start ${started.nonce}`,
+            },
+          },
+        ],
+      });
+
+      const result = await pending;
+      expect(result.status).toBe("expired");
+
+      const [expiredAttempt] = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(eq(telegramLinkAttempt.id, started.attemptId));
+      expect(expiredAttempt.status).toBe("expired");
+      expect(expiredAttempt.failureCode).toBe("expired");
+      expect(expiredAttempt.connectionId).toBeNull();
+      expect(expiredAttempt.verifiedAt).toBeNull();
+
+      const connections = await db()
+        .select()
+        .from(telegramConnection)
+        .where(eq(telegramConnection.storeId, fixture.storeAId));
+      expect(connections).toHaveLength(0);
+      expect(managed.setWebhook).not.toHaveBeenCalled();
+
+      const recovered = await recoverManagedTelegramCandidate(
+        db(),
+        {
+          storeId: fixture.storeAId,
+          merchantUserId: fixture.userAId,
+          attemptId: started.attemptId,
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => managed,
+          webhookOrigin: "https://app.example.test",
+        },
+      );
+      expect(recovered.status).toBe("not_found");
+
+      const state = await readMerchantTelegramConnectionState(appDb(), {
+        scope: await scope(fixture.storeAId),
+        merchantUserId: fixture.userAId,
+      });
+      expect(state.state).toBe("failed");
+      if (state.state === "failed") {
+        expect(state.reason).toBe("expired");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("expires an unverified proposal and retries with one verified connection", async () => {
     const started = await createTelegramLinkAttempt(db(), {
       storeId: fixture.storeAId,
