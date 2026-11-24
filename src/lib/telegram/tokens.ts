@@ -47,6 +47,55 @@ export const tokens = {
       page && page > 1 ? `sc:${categoryId}:${page}` : `sc:${categoryId}`,
     );
   },
+  cart: (): string => assertValidCallbackData("cart"),
+  cartAdd: (productId: string, quantity: number): string => {
+    if (!UUID_REGEX.test(productId)) {
+      throw new Error(`Invalid product UUID: "${productId}"`);
+    }
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+      throw new Error(`Invalid quantity: ${quantity}`);
+    }
+    return assertValidCallbackData(`ca:${productId}:${quantity}`);
+  },
+  cartIncrease: (productId: string): string => {
+    if (!UUID_REGEX.test(productId)) {
+      throw new Error(`Invalid product UUID: "${productId}"`);
+    }
+    return assertValidCallbackData(`ci:${productId}`);
+  },
+  cartDecrease: (productId: string): string => {
+    if (!UUID_REGEX.test(productId)) {
+      throw new Error(`Invalid product UUID: "${productId}"`);
+    }
+    return assertValidCallbackData(`cd:${productId}`);
+  },
+  cartRemove: (productId: string): string => {
+    if (!UUID_REGEX.test(productId)) {
+      throw new Error(`Invalid product UUID: "${productId}"`);
+    }
+    return assertValidCallbackData(`cr:${productId}`);
+  },
+  checkout: (cartId: string): string => {
+    if (!UUID_REGEX.test(cartId)) {
+      throw new Error(`Invalid cart UUID: "${cartId}"`);
+    }
+    return assertValidCallbackData(`co:${cartId}`);
+  },
+  confirmCod: (cartId: string, quoteVersion: number): string => {
+    if (!UUID_REGEX.test(cartId)) {
+      throw new Error(`Invalid cart UUID: "${cartId}"`);
+    }
+    if (!Number.isInteger(quoteVersion) || quoteVersion < 1 || quoteVersion > 99999) {
+      throw new Error(`Invalid quote version: ${quoteVersion}`);
+    }
+    return assertValidCallbackData(`cc:${cartId}:${quoteVersion}`);
+  },
+  backToCart: (cartId: string): string => {
+    if (!UUID_REGEX.test(cartId)) {
+      throw new Error(`Invalid cart UUID: "${cartId}"`);
+    }
+    return assertValidCallbackData(`cb:${cartId}`);
+  },
   products: (page?: number): string => {
     if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
       throw new Error(`Invalid page number: ${page}`);
@@ -132,6 +181,14 @@ export type ParsedToken =
   | { type: "root"; page: number }
   | { type: "storefrontCategories"; page: number }
   | { type: "storefrontCategory"; categoryId: string; page: number }
+  | { type: "cart" }
+  | { type: "cartAdd"; productId: string; quantity: number }
+  | { type: "cartIncrease"; productId: string }
+  | { type: "cartDecrease"; productId: string }
+  | { type: "cartRemove"; productId: string }
+  | { type: "checkout"; cartId: string }
+  | { type: "confirmCod"; cartId: string; quoteVersion: number }
+  | { type: "backToCart"; cartId: string }
   | { type: "products"; page: number }
   | { type: "languages" }
   | { type: "support" }
@@ -159,6 +216,77 @@ export function parseToken(data?: string): ParsedToken {
 
   if (data === "home") {
     return { type: "home" };
+  }
+
+  if (data === "cart") {
+    return { type: "cart" };
+  }
+
+  if (data.startsWith("ca:")) {
+    const parts = data.slice(3).split(":");
+    if (
+      parts.length === 2 &&
+      UUID_REGEX.test(parts[0]) &&
+      /^[1-9][0-9]?$/.test(parts[1])
+    ) {
+      return {
+        type: "cartAdd",
+        productId: parts[0],
+        quantity: parseInt(parts[1], 10),
+      };
+    }
+    return { type: "unknown", raw: data };
+  }
+
+  if (data.startsWith("ci:")) {
+    const productId = data.slice(3);
+    return UUID_REGEX.test(productId)
+      ? { type: "cartIncrease", productId }
+      : { type: "unknown", raw: data };
+  }
+
+  if (data.startsWith("cd:")) {
+    const productId = data.slice(3);
+    return UUID_REGEX.test(productId)
+      ? { type: "cartDecrease", productId }
+      : { type: "unknown", raw: data };
+  }
+
+  if (data.startsWith("cr:")) {
+    const productId = data.slice(3);
+    return UUID_REGEX.test(productId)
+      ? { type: "cartRemove", productId }
+      : { type: "unknown", raw: data };
+  }
+
+  if (data.startsWith("co:")) {
+    const cartId = data.slice(3);
+    return UUID_REGEX.test(cartId)
+      ? { type: "checkout", cartId }
+      : { type: "unknown", raw: data };
+  }
+
+  if (data.startsWith("cc:")) {
+    const parts = data.slice(3).split(":");
+    if (
+      parts.length === 2 &&
+      UUID_REGEX.test(parts[0]) &&
+      PAGE_REGEX.test(parts[1])
+    ) {
+      return {
+        type: "confirmCod",
+        cartId: parts[0],
+        quoteVersion: parseInt(parts[1], 10),
+      };
+    }
+    return { type: "unknown", raw: data };
+  }
+
+  if (data.startsWith("cb:")) {
+    const cartId = data.slice(3);
+    return UUID_REGEX.test(cartId)
+      ? { type: "backToCart", cartId }
+      : { type: "unknown", raw: data };
   }
 
   if (data === "langs") {

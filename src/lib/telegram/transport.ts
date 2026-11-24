@@ -4,6 +4,7 @@ import type {
   TelegramAnswerResult,
   TelegramErrorKind,
   TelegramInlineKeyboardMarkup,
+  TelegramReplyMarkup,
   TelegramSendResult,
   TelegramTransport,
 } from "./types";
@@ -369,7 +370,7 @@ export function createFetchTelegramTransport(
 export interface FakeSentMessage {
   chatId: number | string;
   text: string;
-  replyMarkup?: TelegramInlineKeyboardMarkup;
+  replyMarkup?: TelegramReplyMarkup;
 }
 
 export interface FakeEditedMessage {
@@ -406,7 +407,7 @@ export interface FakeTelegramTransport extends TelegramTransport {
 
 export function validatePayloadLimits(
   text: string,
-  replyMarkup?: TelegramInlineKeyboardMarkup,
+  replyMarkup?: TelegramReplyMarkup,
 ): { ok: true } | { ok: false; error: string; errorKind: TelegramErrorKind } {
   if (text.length > TELEGRAM_MAX_MESSAGE_CHARS) {
     return {
@@ -416,7 +417,7 @@ export function validatePayloadLimits(
     };
   }
 
-  if (replyMarkup?.inline_keyboard) {
+  if (replyMarkup && "inline_keyboard" in replyMarkup) {
     for (const row of replyMarkup.inline_keyboard) {
       for (const btn of row) {
         if (btn.url && btn.callback_data) {

@@ -58,6 +58,14 @@ describe("telegram tokens", () => {
     expect(tokens.back(uuid)).toBe(`b:${uuid}`);
     expect(tokens.inquiries()).toBe("inq");
     expect(tokens.inquiries(2)).toBe("inq:2");
+    expect(tokens.cart()).toBe("cart");
+    expect(tokens.cartAdd(uuid, 2)).toBe(`ca:${uuid}:2`);
+    expect(tokens.cartIncrease(uuid)).toBe(`ci:${uuid}`);
+    expect(tokens.cartDecrease(uuid)).toBe(`cd:${uuid}`);
+    expect(tokens.cartRemove(uuid)).toBe(`cr:${uuid}`);
+    expect(tokens.checkout(uuid)).toBe(`co:${uuid}`);
+    expect(tokens.confirmCod(uuid, 7)).toBe(`cc:${uuid}:7`);
+    expect(tokens.backToCart(uuid)).toBe(`cb:${uuid}`);
 
     // All must be well below 64 bytes
     for (const token of [
@@ -79,6 +87,14 @@ describe("telegram tokens", () => {
       tokens.back(uuid),
       tokens.inquiries(),
       tokens.inquiries(99),
+      tokens.cart(),
+      tokens.cartAdd(uuid, 99),
+      tokens.cartIncrease(uuid),
+      tokens.cartDecrease(uuid),
+      tokens.cartRemove(uuid),
+      tokens.checkout(uuid),
+      tokens.confirmCod(uuid, 99999),
+      tokens.backToCart(uuid),
     ]) {
       expect(Buffer.byteLength(token, "utf8")).toBeLessThanOrEqual(
         TELEGRAM_MAX_CALLBACK_DATA_BYTES,
@@ -110,6 +126,13 @@ describe("telegram tokens", () => {
     expect(() => tokens.products(1.5)).toThrow(/Invalid page number/);
     expect(() => tokens.myInquiries(0)).toThrow(/Invalid page number/);
     expect(() => tokens.myInquiries(-1)).toThrow(/Invalid page number/);
+    expect(() => tokens.cartAdd("bad-id", 1)).toThrow(/Invalid product UUID/);
+    expect(() => tokens.cartAdd(uuid, 0)).toThrow(/Invalid quantity/);
+    expect(() => tokens.cartAdd(uuid, 100)).toThrow(/Invalid quantity/);
+    expect(() => tokens.checkout("bad-id")).toThrow(/Invalid cart UUID/);
+    expect(() => tokens.confirmCod("bad-id", 1)).toThrow(/Invalid cart UUID/);
+    expect(() => tokens.confirmCod(uuid, 0)).toThrow(/Invalid quote version/);
+    expect(() => tokens.backToCart("bad-id")).toThrow(/Invalid cart UUID/);
   });
 
   it("parses tokens deterministically", () => {
@@ -177,6 +200,37 @@ describe("telegram tokens", () => {
       type: "back",
       actionId: uuid,
     });
+    expect(parseToken("cart")).toEqual({ type: "cart" });
+    expect(parseToken(`ca:${uuid}:3`)).toEqual({
+      type: "cartAdd",
+      productId: uuid,
+      quantity: 3,
+    });
+    expect(parseToken(`ci:${uuid}`)).toEqual({
+      type: "cartIncrease",
+      productId: uuid,
+    });
+    expect(parseToken(`cd:${uuid}`)).toEqual({
+      type: "cartDecrease",
+      productId: uuid,
+    });
+    expect(parseToken(`cr:${uuid}`)).toEqual({
+      type: "cartRemove",
+      productId: uuid,
+    });
+    expect(parseToken(`co:${uuid}`)).toEqual({
+      type: "checkout",
+      cartId: uuid,
+    });
+    expect(parseToken(`cc:${uuid}:4`)).toEqual({
+      type: "confirmCod",
+      cartId: uuid,
+      quoteVersion: 4,
+    });
+    expect(parseToken(`cb:${uuid}`)).toEqual({
+      type: "backToCart",
+      cartId: uuid,
+    });
     expect(parseToken("unknown:token")).toEqual({
       type: "unknown",
       raw: "unknown:token",
@@ -233,6 +287,22 @@ describe("telegram tokens", () => {
     expect(parseToken("lang:invalid!code")).toEqual({
       type: "unknown",
       raw: "lang:invalid!code",
+    });
+    expect(parseToken("ca:not-a-uuid:1")).toEqual({
+      type: "unknown",
+      raw: "ca:not-a-uuid:1",
+    });
+    expect(parseToken(`ca:${uuid}:0`)).toEqual({
+      type: "unknown",
+      raw: `ca:${uuid}:0`,
+    });
+    expect(parseToken(`cc:${uuid}:0`)).toEqual({
+      type: "unknown",
+      raw: `cc:${uuid}:0`,
+    });
+    expect(parseToken("co:not-a-uuid")).toEqual({
+      type: "unknown",
+      raw: "co:not-a-uuid",
     });
 
     // Overlength payload (>64 bytes)

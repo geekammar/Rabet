@@ -26,6 +26,9 @@ type Copy = {
   productsTitle: string;
   productsBody: string;
   manageProducts: string;
+  ordersTitle: string;
+  ordersBody: string;
+  viewOrders: string;
   logout: string;
   languageLabel: string;
   suspendedTitle: string;
@@ -49,6 +52,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     productsTitle: "المنتجات",
     productsBody: "راجع منتجات متجرك وحدّث سعر كل منتج.",
     manageProducts: "إدارة المنتجات",
+    ordersTitle: "طلبات الدفع عند الاستلام",
+    ordersBody: "راجع طلبات الدفع عند الاستلام الخاصة بمتجرك.",
+    viewOrders: "عرض الطلبات",
     logout: "تسجيل الخروج",
     languageLabel: "لغة الصفحة",
     suspendedTitle: "المتجر موقوف مؤقتًا.",
@@ -72,6 +78,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     productsTitle: "Products",
     productsBody: "Review your store products and update each product price.",
     manageProducts: "Manage products",
+    ordersTitle: "COD orders",
+    ordersBody: "Review cash-on-delivery orders for your store.",
+    viewOrders: "View orders",
     logout: "Sign out",
     languageLabel: "Page language",
     suspendedTitle: "This store is suspended.",
@@ -99,6 +108,7 @@ export function MerchantSetup({
   telegramConnection,
   isAndroidTelegramLaunch,
   telegramLaunchOrigin,
+  codOrdersEnabled,
 }: {
   storeName: string;
   email: string;
@@ -108,6 +118,7 @@ export function MerchantSetup({
   telegramConnection: MerchantTelegramConnectionState;
   isAndroidTelegramLaunch: boolean;
   telegramLaunchOrigin: string | null;
+  codOrdersEnabled: boolean;
 }) {
   const [locale, setLocale] = useMerchantLocale(initialLocale, "setup");
   const copy = COPY[locale];
@@ -211,6 +222,29 @@ export function MerchantSetup({
             </Button>
           </div>
         </section>
+
+        {codOrdersEnabled ? (
+          <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-1">
+                <h2 className="font-heading text-lg font-semibold">
+                  {copy.ordersTitle}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {copy.ordersBody}
+                </p>
+              </div>
+              <Button asChild variant="outline" className="min-h-11">
+                <Link
+                  href="/app/orders"
+                  data-testid="merchant-orders-link"
+                >
+                  {copy.viewOrders}
+                </Link>
+              </Button>
+            </div>
+          </section>
+        ) : null}
 
         {readOnly ? (
           <div

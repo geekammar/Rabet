@@ -20,6 +20,7 @@ import {
   ensureTelegramLinkAttempt,
   merchantManagerDeepLink,
   recoverManagedTelegramCandidate,
+  verifyManagedBotStart,
 } from "@/lib/telegram/manager-provisioning";
 import { createFetchTelegramTransport } from "@/lib/telegram/transport";
 
@@ -35,6 +36,7 @@ export type MerchantTelegramActionResult =
         | "CONFLICT"
         | "RETRYABLE"
         | "REVIEW"
+        | "BOT_START_PENDING"
         | "BOT_REQUIRED"
         | "RECOVERY_FAILED"
         | "OPERATION_FAILED";
@@ -265,6 +267,105 @@ export async function recoverMerchantTelegramConnection(
       safeStartDiagnostic("recovery_write", error),
     );
     return { ok: false, error: "RECOVERY_FAILED" };
+  }
+}
+
+const attemptIdSchema = z.string().uuid();
+
+/**
+ * Verifies that the proposed managed bot received the attempt nonce from the
+ * bound Telegram account. No candidate is offered until this succeeds.
+ */
+export async function verifyMerchantTelegramBotStart(
+  input: unknown,
+): Promise<MerchantTelegramActionResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  if (access.readOnly) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+  const attemptId = attemptIdSchema.safeParse(submitted.attemptId);
+
+  if (!attemptId.success) {
+    return { ok: false, error: "NOT_FOUND" };
+  }
+
+  let config;
+  let origin: string;
+
+  try {
+    config = readManagerBotConfig();
+    origin = resolveTrustedAppOrigin();
+  } catch (error) {
+    console.error(
+      "[merchant-telegram] bot start verification failed",
+      safeStartDiagnostic("manager_config", error),
+    );
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  try {
+    const result = await verifyManagedBotStart(
+      getTransactionDb(),
+      {
+        storeId: access.store.id,
+        merchantUserId: access.userId,
+        attemptId: attemptId.data,
+      },
+      {
+        managerApi: createTelegramBotApiClient(config.token),
+        transport: createFetchTelegramTransport(config.token),
+        webhookOrigin: origin,
+      },
+    );
+
+    revalidatePath("/app/setup");
+
+    if (result.status === "verified" || result.status === "already_verified") {
+      return { ok: true };
+    }
+
+    if (result.status === "pending") {
+      return { ok: false, error: "BOT_START_PENDING" };
+    }
+
+    if (result.status === "retryable") {
+      return { ok: false, error: "RETRYABLE" };
+    }
+
+    if (result.status === "bot_review") {
+      return { ok: false, error: "REVIEW" };
+    }
+
+    return {
+      ok: false,
+      error:
+        result.status === "expired"
+          ? "EXPIRED"
+          : result.status === "bot_bound_elsewhere" ||
+              result.status === "conflict"
+            ? "CONFLICT"
+            : "NOT_FOUND",
+    };
+  } catch (error) {
+    console.error(
+      "[merchant-telegram] bot start verification failed",
+      safeStartDiagnostic("bot_start_write", error),
+    );
+    return { ok: false, error: "OPERATION_FAILED" };
   }
 }
 

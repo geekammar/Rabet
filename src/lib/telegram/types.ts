@@ -20,12 +20,21 @@ export interface TelegramChat {
   last_name?: string;
 }
 
+export interface TelegramContact {
+  phone_number: string;
+  first_name?: string;
+  last_name?: string;
+  user_id?: number;
+  vcard?: string;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
   chat: TelegramChat;
   date: number;
   text?: string;
+  contact?: TelegramContact;
   reply_markup?: TelegramInlineKeyboardMarkup;
 }
 
@@ -54,6 +63,23 @@ export interface TelegramInlineKeyboardButton {
 export interface TelegramInlineKeyboardMarkup {
   inline_keyboard: TelegramInlineKeyboardButton[][];
 }
+
+export interface TelegramReplyKeyboardButton {
+  text: string;
+  request_contact?: boolean;
+}
+
+export interface TelegramReplyKeyboardMarkup {
+  keyboard: TelegramReplyKeyboardButton[][];
+  resize_keyboard?: boolean;
+  one_time_keyboard?: boolean;
+  input_field_placeholder?: string;
+}
+
+export type TelegramReplyMarkup =
+  | TelegramInlineKeyboardMarkup
+  | TelegramReplyKeyboardMarkup
+  | { remove_keyboard: true };
 
 export type TelegramErrorKind =
   | "not_modified"
@@ -86,7 +112,7 @@ export interface TelegramTransport {
   sendMessage(params: {
     chatId: number | string;
     text: string;
-    replyMarkup?: TelegramInlineKeyboardMarkup;
+    replyMarkup?: TelegramReplyMarkup;
   }): Promise<TelegramSendResult>;
 
   editMessageText(params: {

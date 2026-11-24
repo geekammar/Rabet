@@ -209,6 +209,42 @@ export function validateIncomingUpdate(
       return { valid: false, error: "Malformed text field" };
     }
 
+    // optional shared contact — only the phone number is used by checkout
+    if (msg.contact !== undefined) {
+      if (
+        typeof msg.contact !== "object" ||
+        msg.contact === null ||
+        Array.isArray(msg.contact)
+      ) {
+        return { valid: false, error: "Malformed contact field" };
+      }
+
+      const contact = msg.contact as Record<string, unknown>;
+
+      if (
+        typeof contact.phone_number !== "string" ||
+        contact.phone_number.trim().length === 0
+      ) {
+        return { valid: false, error: "Malformed contact phone number" };
+      }
+
+      if (
+        contact.user_id !== undefined &&
+        (typeof contact.user_id !== "number" ||
+          !Number.isInteger(contact.user_id) ||
+          contact.user_id < 1 ||
+          contact.user_id > Number.MAX_SAFE_INTEGER)
+      ) {
+        return { valid: false, error: "Malformed contact user id" };
+      }
+
+      for (const key of ["first_name", "last_name", "vcard"] as const) {
+        if (contact[key] !== undefined && typeof contact[key] !== "string") {
+          return { valid: false, error: `Malformed contact ${key}` };
+        }
+      }
+    }
+
     return {
       valid: true,
       ignored: false,

@@ -116,6 +116,7 @@ type Copy = {
   setupLink: string;
   categoriesLink: string;
   manageCategories: string;
+  ordersLink: string;
   addProduct: string;
   addFirstProduct: string;
   createdNotice: string;
@@ -166,6 +167,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     setupLink: "إعداد المتجر",
     categoriesLink: "الأقسام",
     manageCategories: "إدارة الأقسام",
+    ordersLink: "طلبات الدفع عند الاستلام",
     addProduct: "إضافة منتج",
     addFirstProduct: "إضافة أول منتج",
     createdNotice: "تمت إضافة المنتج.",
@@ -217,6 +219,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     setupLink: "Store setup",
     categoriesLink: "Categories",
     manageCategories: "Manage categories",
+    ordersLink: "COD orders",
     addProduct: "Add product",
     addFirstProduct: "Add first product",
     createdNotice: "Product added.",
@@ -286,11 +289,13 @@ export function MerchantProducts({
   readOnly,
   products,
   initialLocale,
+  codOrdersEnabled,
 }: {
   storeName: string;
   readOnly: boolean;
   products: MerchantProductItem[];
   initialLocale: MerchantLocale;
+  codOrdersEnabled: boolean;
 }) {
   const [locale, setLocale] = useMerchantLocale(initialLocale, "products");
   const [drafts, setDrafts] = useState<Record<string, PriceDraft>>({});
@@ -562,6 +567,13 @@ export function MerchantProducts({
                 {copy.categoriesLink}
               </Link>
             </Button>
+            {codOrdersEnabled ? (
+              <Button asChild variant="outline" className="min-h-11">
+                <Link href="/app/orders" data-testid="merchant-orders-link">
+                  {copy.ordersLink}
+                </Link>
+              </Button>
+            ) : null}
             <Button asChild variant="outline" className="min-h-11">
               <Link href="/app/setup" data-testid="merchant-setup-link">
                 {copy.setupLink}

@@ -26,7 +26,8 @@ export type MerchantLocalePage =
   | "setup"
   | "products"
   | "productCreate"
-  | "categories";
+  | "categories"
+  | "orders";
 
 export const MERCHANT_PAGE_TITLES: Record<
   MerchantLocalePage,
@@ -52,6 +53,10 @@ export const MERCHANT_PAGE_TITLES: Record<
   categories: {
     ar: "أقسام المتجر",
     en: "Store categories",
+  },
+  orders: {
+    ar: "طلبات الدفع عند الاستلام",
+    en: "COD orders",
   },
 };
 

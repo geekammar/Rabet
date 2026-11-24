@@ -419,6 +419,12 @@ jobs:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
         run: npm run test:browser:merchant
 
+      - name: Run COD orders read-only browser acceptance suite
+        env:
+          RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
+          AUTH_SECRET: ${{ steps.auth-secret.outputs.value }}
+        run: npm run test:browser:cod-orders
+
       - name: Run Android Mobile Touch Scrolling browser acceptance suite
         env:
           RABET_TEST_PG_URL: postgresql://rabet:rabet@localhost:5432/postgres
