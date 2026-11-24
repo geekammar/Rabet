@@ -288,6 +288,10 @@ export async function handleManagerTelegramWebhookRequest(
         },
       );
 
+      // Redacted audit outcome: distinguishes ambiguous correlation from a
+      // provisioned candidate without logging bot tokens, user ids or names.
+      console.info(`[manager-bot] correlation outcome: ${result.status}`);
+
       if (
         result.status === "retryable" ||
         result.status === "in_progress" ||

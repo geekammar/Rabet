@@ -1059,10 +1059,16 @@ export async function handleManagedBotEvent(
       const attempt = active[0];
 
       // A late creation event from another store that used the same Telegram
-      // account is not proof for this store. Fail closed instead of attaching
-      // the bot across stores; the active attempt stays usable.
-      const [otherStoreAttempt] = await tx
-        .select({ id: telegramLinkAttempt.id })
+      // account is not proof for this store. Fail closed when another recent
+      // attempt could own this exact bot (same recorded bot id), or when an
+      // attempt has no recorded bot id and could be the source of a delayed
+      // event. A recent other-store attempt with a different known bot id
+      // cannot own this event, so sequential distinct bots remain linkable.
+      const otherStoreAttempts = await tx
+        .select({
+          id: telegramLinkAttempt.id,
+          telegramBotId: telegramLinkAttempt.telegramBotId,
+        })
         .from(telegramLinkAttempt)
         .where(
           and(
@@ -1079,10 +1085,15 @@ export async function handleManagedBotEvent(
               new Date(now.getTime() - TELEGRAM_LINK_ATTEMPT_TTL_MS),
             ),
           ),
-        )
-        .limit(1);
+        );
 
-      if (otherStoreAttempt) {
+      const hasConflictingOtherStoreEvidence = otherStoreAttempts.some(
+        (other) =>
+          other.telegramBotId === null ||
+          other.telegramBotId === event.botId,
+      );
+
+      if (hasConflictingOtherStoreEvidence) {
         return { status: "ambiguous" } as const;
       }
 

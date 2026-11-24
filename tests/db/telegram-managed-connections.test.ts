@@ -745,6 +745,229 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
     expect(attempts[0].failureCode).toBe("bot_bound_elsewhere");
   });
 
+  it("links sequential distinct bots created by the same Telegram account for two stores", async () => {
+    const creatorUserId = 7701;
+    const preparedA = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      creatorUserId,
+      6101,
+      "SequentialAStoreBot",
+    );
+    expect(preparedA.result.status).toBe("awaiting_confirmation");
+    if (preparedA.result.status !== "awaiting_confirmation") return;
+
+    const confirmedA = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: preparedA.result.connectionId,
+      },
+      { createBotApi: () => preparedA.managed! },
+    );
+    expect(confirmedA.status).toBe("ready");
+
+    // The same Telegram account now creates a distinct bot for store B.
+    const preparedB = await provision(
+      fixture.storeBId,
+      fixture.userBId,
+      creatorUserId,
+      6102,
+      "SequentialBStoreBot",
+    );
+
+    // The regression: this must be a Store B candidate, not ambiguous.
+    expect(preparedB.result.status).toBe("awaiting_confirmation");
+    if (preparedB.result.status !== "awaiting_confirmation") return;
+
+    const [pendingB] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, preparedB.result.connectionId));
+    expect(pendingB.storeId).toBe(fixture.storeBId);
+    expect(pendingB.status).toBe("awaiting_confirmation");
+    expect(pendingB.botId).toBe(6102);
+
+    const [stillA] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.id, preparedA.result.connectionId));
+    expect(stillA.storeId).toBe(fixture.storeAId);
+    expect(stillA.status).toBe("ready");
+    expect(stillA.botId).toBe(6101);
+
+    const confirmedB = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeBId,
+        merchantUserId: fixture.userBId,
+        connectionId: preparedB.result.connectionId,
+      },
+      { createBotApi: () => preparedB.managed! },
+    );
+    expect(confirmedB.status).toBe("ready");
+
+    const connections = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.storeId, fixture.storeBId));
+    expect(connections).toHaveLength(1);
+    expect(connections[0]).toMatchObject({
+      botId: 6102,
+      botUsername: "SequentialBStoreBot",
+      status: "ready",
+    });
+
+    const attempts = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.storeId, fixture.storeBId));
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0].status).toBe("completed");
+    expect(attempts[0].telegramBotId).toBe(6102);
+  });
+
+  it("keeps a delayed replay of Store A's bot ambiguous while Store B is active", async () => {
+    const creatorUserId = 7711;
+    const preparedA = await provision(
+      fixture.storeAId,
+      fixture.userAId,
+      creatorUserId,
+      6111,
+      "ReplayAStoreBot",
+    );
+    expect(preparedA.result.status).toBe("awaiting_confirmation");
+    if (preparedA.result.status !== "awaiting_confirmation") return;
+
+    const confirmedA = await confirmTelegramConnection(
+      db(),
+      {
+        storeId: fixture.storeAId,
+        merchantUserId: fixture.userAId,
+        connectionId: preparedA.result.connectionId,
+      },
+      { createBotApi: () => preparedA.managed! },
+    );
+    expect(confirmedA.status).toBe("ready");
+
+    const startedB = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeBId,
+      merchantUserId: fixture.userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const boundB = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: startedB.nonce,
+      telegramUserId: creatorUserId,
+    });
+    expect(boundB.status).toBe("bound");
+
+    const manager = managerApi({
+      getManagedBotToken: vi.fn(async () => ({
+        ok: true as const,
+        result: "6111:AA-replayed-token",
+      })),
+    });
+    const replay = await handleManagedBotEvent(
+      db(),
+      {
+        creatorUserId,
+        botId: 6111,
+        botUsername: "ReplayAStoreBot",
+        botName: "ReplayAStoreBot",
+      },
+      {
+        managerApi: manager,
+        webhookOrigin: "https://app.example.test",
+        createBotApi: () => preparedA.managed!,
+      },
+    );
+
+    expect(replay.status).toBe("ambiguous");
+    expect(manager.getManagedBotToken).not.toHaveBeenCalled();
+
+    const [bAttempt] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.storeId, fixture.storeBId));
+    expect(bAttempt.status).toBe("pending");
+    expect(bAttempt.connectionId).toBeNull();
+    expect(bAttempt.telegramBotId).toBeNull();
+
+    const bConnections = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.storeId, fixture.storeBId));
+    expect(bConnections).toHaveLength(0);
+
+    const [aConnection] = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.storeId, fixture.storeAId));
+    expect(aConnection.status).toBe("ready");
+    expect(aConnection.botId).toBe(6111);
+  });
+
+  it("keeps Store B ambiguous when another recent attempt has no recorded bot id", async () => {
+    const creatorUserId = 7721;
+    const startedA = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const boundA = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: startedA.nonce,
+      telegramUserId: creatorUserId,
+    });
+    expect(boundA.status).toBe("bound");
+
+    await db()
+      .update(telegramLinkAttempt)
+      .set({ status: "failed", failureCode: "synthetic_unknown_evidence" })
+      .where(eq(telegramLinkAttempt.id, startedA.attemptId));
+
+    const startedB = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeBId,
+      merchantUserId: fixture.userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const boundB = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: startedB.nonce,
+      telegramUserId: creatorUserId,
+    });
+    expect(boundB.status).toBe("bound");
+
+    const manager = managerApi({
+      getManagedBotToken: vi.fn(async () => ({
+        ok: true as const,
+        result: "6121:AA-ambiguous-token",
+      })),
+    });
+    const result = await handleManagedBotEvent(
+      db(),
+      {
+        creatorUserId,
+        botId: 6121,
+        botUsername: "AmbiguousEvidenceBot",
+        botName: "AmbiguousEvidenceBot",
+      },
+      {
+        managerApi: manager,
+        webhookOrigin: "https://app.example.test",
+        createBotApi: () => botApi(6121, "AmbiguousEvidenceBot"),
+      },
+    );
+
+    expect(result.status).toBe("ambiguous");
+    expect(manager.getManagedBotToken).not.toHaveBeenCalled();
+
+    const bConnections = await db()
+      .select()
+      .from(telegramConnection)
+      .where(eq(telegramConnection.storeId, fixture.storeBId));
+    expect(bConnections).toHaveLength(0);
+  });
+
   it("keeps a retryable activation failure on the same bot and recovers on retry", async () => {
     const prepared = await provision(
       fixture.storeAId,
