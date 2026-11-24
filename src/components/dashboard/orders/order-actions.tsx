@@ -41,6 +41,7 @@ type Copy = {
   confirmCancel: string;
   keepOrder: string;
   reasonRequired: string;
+  readOnlyNote: string;
   localisation: Record<MerchantOrderActionCode | "NETWORK", string>;
 };
 
@@ -61,6 +62,8 @@ const COPY: Record<MerchantLocale, Copy> = {
     confirmCancel: "تأكيد الإلغاء",
     keepOrder: "الاحتفاظ بالطلب",
     reasonRequired: "اكتب سببًا من ٣ إلى ٣٠٠ حرف.",
+    readOnlyNote:
+      "يمكنك مراجعة الطلب فقط. القبول والتجهيز والإلغاء غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
     localisation: {
       ACCEPTED: "تم قبول الطلب.",
       PREPARED: "تم تحويل الطلب إلى قيد التجهيز.",
@@ -93,6 +96,8 @@ const COPY: Record<MerchantLocale, Copy> = {
     confirmCancel: "Confirm cancellation",
     keepOrder: "Keep order",
     reasonRequired: "Enter a reason of 3–300 characters.",
+    readOnlyNote:
+      "You can review this order only. Accept, prepare and cancel are unavailable until a platform administrator reactivates the store.",
     localisation: {
       ACCEPTED: "Order accepted.",
       PREPARED: "Order marked as preparing.",
@@ -124,12 +129,14 @@ export function MerchantOrderActions({
   fulfillmentStatus,
   cancellationReason,
   locale,
+  readOnly,
 }: {
   orderId: string;
   status: string;
   fulfillmentStatus: string;
   cancellationReason: string | null;
   locale: MerchantLocale;
+  readOnly: boolean;
 }) {
   const copy = COPY[locale];
   const router = useRouter();
@@ -144,6 +151,33 @@ export function MerchantOrderActions({
 
   const nextAction = nextMerchantOrderAction(status, fulfillmentStatus);
   const canCancel = canCancelMerchantOrder(status, fulfillmentStatus);
+
+  if (readOnly) {
+    return (
+      <section
+        className="space-y-3 rounded-lg border border-border bg-background p-3"
+        data-testid="merchant-order-actions"
+        data-order-status={status}
+        data-read-only="true"
+      >
+        {status === "cancelled" && cancellationReason ? (
+          <div
+            className="rounded-lg border border-border bg-muted/50 p-3 text-sm"
+            data-testid="merchant-order-cancelled-note"
+          >
+            <p className="text-xs text-muted-foreground">{copy.reasonLabel}</p>
+            <p className="break-words font-medium">{cancellationReason}</p>
+          </div>
+        ) : null}
+        <p
+          className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground"
+          data-testid="merchant-order-readonly-note"
+        >
+          {copy.readOnlyNote}
+        </p>
+      </section>
+    );
+  }
 
   function applyResult(
     result: MerchantOrderActionState,

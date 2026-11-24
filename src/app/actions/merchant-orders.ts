@@ -94,7 +94,9 @@ export async function acceptMerchantOrderAction(
   }
 
   const access = await getMerchantAccess();
-  if (!access) return { success: false, code: "DENIED" };
+  if (!access || access.readOnly) {
+    return { success: false, code: "DENIED" };
+  }
 
   const orderId = readOrderId(orderIdInput);
   if (!orderId) return { success: false, code: "INVALID_INPUT" };
@@ -121,7 +123,9 @@ export async function prepareMerchantOrderAction(
   }
 
   const access = await getMerchantAccess();
-  if (!access) return { success: false, code: "DENIED" };
+  if (!access || access.readOnly) {
+    return { success: false, code: "DENIED" };
+  }
 
   const orderId = readOrderId(orderIdInput);
   if (!orderId) return { success: false, code: "INVALID_INPUT" };
@@ -148,7 +152,9 @@ export async function cancelMerchantOrderAction(
   }
 
   const access = await getMerchantAccess();
-  if (!access) return { success: false, code: "DENIED" };
+  if (!access || access.readOnly) {
+    return { success: false, code: "DENIED" };
+  }
 
   const submitted =
     typeof input === "object" && input !== null

@@ -52,6 +52,12 @@ const access = {
   readOnly: false,
 };
 
+const readOnlyAccess = {
+  ...access,
+  store: { ...access.store, status: "suspended" as const },
+  readOnly: true,
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -91,6 +97,30 @@ describe("merchant order actions — authorization and enablement", () => {
     ).resolves.toEqual({ success: false, code: "DENIED" });
 
     expect(state.getTransactionDb).not.toHaveBeenCalled();
+  });
+
+  it("denies accept, prepare and cancel for read-only access before any mutation", async () => {
+    vi.stubEnv("RABET_MERCHANT_APP_ENABLED", "true");
+    state.getMerchantAccess.mockResolvedValue(readOnlyAccess);
+
+    await expect(acceptMerchantOrderAction(ORDER_ID)).resolves.toEqual({
+      success: false,
+      code: "DENIED",
+    });
+    await expect(prepareMerchantOrderAction(ORDER_ID)).resolves.toEqual({
+      success: false,
+      code: "DENIED",
+    });
+    await expect(
+      cancelMerchantOrderAction({ orderId: ORDER_ID, reason: "Valid reason" }),
+    ).resolves.toEqual({ success: false, code: "DENIED" });
+
+    expect(state.getTransactionDb).not.toHaveBeenCalled();
+    expect(state.acceptMerchantOrder).not.toHaveBeenCalled();
+    expect(state.prepareMerchantOrder).not.toHaveBeenCalled();
+    expect(state.cancelMerchantOrder).not.toHaveBeenCalled();
+    expect(state.revalidatePath).not.toHaveBeenCalled();
+    expect(state.refresh).not.toHaveBeenCalled();
   });
 
   it("rejects malformed order ids and invalid reasons before the database", async () => {

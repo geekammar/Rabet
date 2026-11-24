@@ -44,6 +44,8 @@ type Copy = {
   name: string;
   phone: string;
   address: string;
+  suspendedTitle: string;
+  suspendedBody: string;
 };
 
 const COPY: Record<MerchantLocale, Copy> = {
@@ -66,6 +68,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     name: "الاسم",
     phone: "الهاتف",
     address: "العنوان",
+    suspendedTitle: "المتجر موقوف مؤقتًا.",
+    suspendedBody:
+      "يمكنك الاطلاع على الطلبات فقط. القبول والتجهيز والإلغاء غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
   },
   en: {
     dir: "ltr",
@@ -86,6 +91,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     name: "Name",
     phone: "Phone",
     address: "Address",
+    suspendedTitle: "This store is suspended.",
+    suspendedBody:
+      "You can review orders only. Accept, prepare and cancel are unavailable until a platform administrator reactivates the store.",
   },
 };
 
@@ -156,11 +164,13 @@ function OrderCard({
   copy,
   locale,
   dateFormat,
+  readOnly,
 }: {
   order: MerchantOrder;
   copy: Copy;
   locale: MerchantLocale;
   dateFormat: Intl.DateTimeFormat;
+  readOnly: boolean;
 }) {
   return (
     <article
@@ -214,6 +224,7 @@ function OrderCard({
         fulfillmentStatus={order.fulfillmentStatus}
         cancellationReason={order.cancellationReason}
         locale={locale}
+        readOnly={readOnly}
       />
 
       <ul className="space-y-2 border-y border-border py-3 text-sm">
@@ -310,6 +321,17 @@ export default async function MerchantOrdersPage() {
         </p>
       </header>
 
+      {access.readOnly ? (
+        <div
+          role="status"
+          className="mb-6 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+          data-testid="merchant-orders-suspended-notice"
+        >
+          <p className="font-semibold">{copy.suspendedTitle}</p>
+          <p className="mt-1">{copy.suspendedBody}</p>
+        </div>
+      ) : null}
+
       {orders.length === 0 ? (
         <section className="rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">
           {copy.empty}
@@ -323,6 +345,7 @@ export default async function MerchantOrdersPage() {
               copy={copy}
               locale={locale}
               dateFormat={dateFormat}
+              readOnly={access.readOnly}
             />
           ))}
         </div>
