@@ -12,6 +12,11 @@ type Copy = {
   waitingProvisioning: string;
   preparingTitle: string;
   preparingBody: string;
+  verifyTitle: string;
+  verifyBody: string;
+  verify: string;
+  verifying: string;
+  openBotToVerify: string;
   recoverTitle: string;
   recoverBody: string;
   recover: string;
@@ -53,6 +58,12 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     preparingTitle: "تم إنشاء البوت، جارٍ تجهيز الاتصال…",
     preparingBody:
       "استلمنا البوت من تيليجرام ونتحقق من هويته الآن. لا تنشئ بوتًا آخر.",
+    verifyTitle: "تحقق من بوت متجرك",
+    verifyBody:
+      "افتح البوت الذي أنشأته واضغط Start، ثم ارجع هنا واضغط تحقق. لا نعرض البوت للتأكيد قبل إثبات أنه بوت هذه المحاولة.",
+    verify: "تحقق من البوت",
+    verifying: "جارٍ التحقق من البوت…",
+    openBotToVerify: "افتح البوت وأرسل Start",
     recoverTitle: "وجدنا البوت الذي أنشأته",
     recoverBody:
       "لدينا بيانات بوت متجرك التي أكدها تيليجرام. سنتحقق منها ثم نعرضها لتأكيد الربط.",
@@ -80,6 +91,8 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     readOnly: "المتجر موقوف مؤقتًا، ولا يمكن تغيير اتصال تيليجرام الآن.",
     errors: {
       BOT_REQUIRED: "تأكد من اتصال البوت قبل نشر متجرك.",
+      BOT_START_PENDING:
+        "لم نستلم إثبات فتح البوت بعد. افتح البوت واضغط Start من نفس حساب تيليجرام ثم أعد التحقق.",
       UNAVAILABLE: "ربط تيليجرام غير متاح في هذه البيئة.",
       DENIED: "لا يمكن تنفيذ هذا الإجراء لحسابك أو حالة متجرك الحالية.",
       NOT_FOUND: "لم يعد هذا الارتباط موجودًا. ابدأ محاولة جديدة.",
@@ -133,6 +146,12 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
     preparingTitle: "Bot created — preparing the connection…",
     preparingBody:
       "Telegram returned the new bot and we are verifying its identity now. Do not create another bot.",
+    verifyTitle: "Verify your store bot",
+    verifyBody:
+      "Open the bot you created and press Start, then return here and verify. The bot is not offered for confirmation until it proves it belongs to this attempt.",
+    verify: "Verify the bot",
+    verifying: "Verifying the bot…",
+    openBotToVerify: "Open the bot and press Start",
     recoverTitle: "We found the bot you created",
     recoverBody:
       "Nokmel stored the Telegram evidence for your store bot. We will re-verify it and show it for your confirmation.",
@@ -161,6 +180,8 @@ export const MERCHANT_TELEGRAM_COPY: Record<MerchantLocale, Copy> = {
       "The store is suspended, so the Telegram connection cannot be changed right now.",
     errors: {
       BOT_REQUIRED: "Connect your bot before publishing your store.",
+      BOT_START_PENDING:
+        "We have not received the bot Start proof yet. Open the bot and press Start from the same Telegram account, then verify again.",
       UNAVAILABLE: "Telegram connection is not available in this environment.",
       DENIED: "This action is not allowed for your account or store state.",
       NOT_FOUND: "This connection no longer exists. Start a new attempt.",

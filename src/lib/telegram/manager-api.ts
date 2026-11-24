@@ -41,12 +41,31 @@ export interface SetWebhookInput {
   dropPendingUpdates?: boolean;
 }
 
+export interface GetUpdatesInput {
+  offset?: number;
+  limit?: number;
+  timeout?: number;
+  allowedUpdates?: string[];
+}
+
+export interface TelegramBotUpdate {
+  update_id: number;
+  message?: {
+    message_id: number;
+    from?: TelegramUser;
+    chat: { id: number; type: string };
+    date: number;
+    text?: string;
+  };
+}
+
 export interface TelegramBotApiClient {
   getMe(): Promise<TelegramBotApiResult<TelegramUser>>;
   getManagedBotToken(botId: number): Promise<TelegramBotApiResult<string>>;
   setWebhook(input: SetWebhookInput): Promise<TelegramBotApiResult<true>>;
   getWebhookInfo(): Promise<TelegramBotApiResult<TelegramWebhookInfo>>;
   deleteWebhook(dropPendingUpdates?: boolean): Promise<TelegramBotApiResult<true>>;
+  getUpdates(input?: GetUpdatesInput): Promise<TelegramBotApiResult<TelegramBotUpdate[]>>;
 }
 
 interface ApiEnvelope<T> {
@@ -189,6 +208,17 @@ export function createTelegramBotApiClient(
       return call<true>("deleteWebhook", {
         drop_pending_updates: dropPendingUpdates,
       });
+    },
+
+    getUpdates(input: GetUpdatesInput = {}) {
+      const body: Record<string, unknown> = {};
+
+      if (input.offset !== undefined) body.offset = input.offset;
+      if (input.limit !== undefined) body.limit = input.limit;
+      if (input.timeout !== undefined) body.timeout = input.timeout;
+      if (input.allowedUpdates) body.allowed_updates = input.allowedUpdates;
+
+      return call<TelegramBotUpdate[]>("getUpdates", body);
     },
   };
 }

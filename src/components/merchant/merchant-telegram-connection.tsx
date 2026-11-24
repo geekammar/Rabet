@@ -25,6 +25,7 @@ import {
   startMerchantTelegramConnection,
   publishMerchantTelegramStore,
   recoverMerchantTelegramConnection,
+  verifyMerchantTelegramBotStart,
   type MerchantTelegramActionResult,
 } from "@/app/actions/merchant-telegram";
 import { Button } from "@/components/ui/button";
@@ -260,6 +261,22 @@ export function MerchantTelegramConnection({
     });
   }
 
+  function verifyBotStart(attemptId: string) {
+    setActionError(null);
+    startTransition(async () => {
+      const result = await verifyMerchantTelegramBotStart({ attemptId });
+
+      if (result.ok) {
+        setActionError(null);
+        router.refresh();
+      } else {
+        setActionError(
+          copy.errors[result.error] ?? copy.errors.OPERATION_FAILED,
+        );
+      }
+    });
+  }
+
   return (
     <section
       className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm"
@@ -367,9 +384,11 @@ export function MerchantTelegramConnection({
 
       {state.state === "preparing" ? (
         <div className="space-y-3" data-testid="merchant-telegram-preparing">
-          <p className="font-medium">{copy.preparingTitle}</p>
+          <p className="font-medium">
+            {state.verificationUrl ? copy.verifyTitle : copy.preparingTitle}
+          </p>
           <p className="text-sm text-muted-foreground">
-            {copy.preparingBody}
+            {state.verificationUrl ? copy.verifyBody : copy.preparingBody}
           </p>
           {state.botName || state.botUsername ? (
             <div className="rounded-lg border border-border bg-muted/30 p-3">
@@ -391,17 +410,43 @@ export function MerchantTelegramConnection({
               ) : null}
             </div>
           ) : null}
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11"
-            onClick={() => router.refresh()}
-            disabled={isPending}
-            data-testid="merchant-telegram-refresh"
-          >
-            <RefreshCw className="size-4" aria-hidden="true" />
-            {copy.refresh}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {state.verificationUrl ? (
+              <Button asChild className="min-h-11">
+                <a
+                  href={state.verificationUrl}
+                  rel="noreferrer"
+                  data-testid="merchant-telegram-verify-open"
+                >
+                  <ExternalLink className="size-4" aria-hidden="true" />
+                  {copy.openBotToVerify}
+                </a>
+              </Button>
+            ) : null}
+            {state.verificationUrl ? (
+              <Button
+                type="button"
+                className="min-h-11"
+                onClick={() => verifyBotStart(state.attemptId)}
+                disabled={readOnly || isPending}
+                data-testid="merchant-telegram-verify"
+              >
+                <CheckCircle2 className="size-4" aria-hidden="true" />
+                {isPending ? copy.verifying : copy.verify}
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              onClick={() => router.refresh()}
+              disabled={isPending}
+              data-testid="merchant-telegram-refresh"
+            >
+              <RefreshCw className="size-4" aria-hidden="true" />
+              {copy.refresh}
+            </Button>
+          </div>
         </div>
       ) : null}
 
