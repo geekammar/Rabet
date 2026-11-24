@@ -1,0 +1,101 @@
+name: COD QA PR57 isolated candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type PREPARE_COD_QA_PR57 to create the isolated DB, apply 0014, configure and deploy the QA service.'
+        type: string
+        default: ""
+        required: true
+  push:
+    branches:
+      - ops/cod-staging-acceptance
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-qa-pr57
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare isolated COD QA candidate
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[prepare-cod-qa-pr57]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 60
+
+    steps:
+      - name: Validate confirmation
+        env:
+          RABET_CONFIRM: ${{ inputs.confirm }}
+          RABET_REF: ${{ github.ref }}
+          RABET_EVENT: ${{ github.event_name }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [ "${RABET_EVENT}" = "workflow_dispatch" ]; then
+            if [ "${RABET_CONFIRM}" != "PREPARE_COD_QA_PR57" ]; then
+              echo "Confirmation must equal PREPARE_COD_QA_PR57." >&2
+              exit 1
+            fi
+          else
+            if [ "${RABET_REF}" != "refs/heads/ops/cod-staging-acceptance" ]; then
+              echo "Push trigger is restricted to ops/cod-staging-acceptance." >&2
+              exit 1
+            fi
+            if ! printf '%s' "${COMMIT_MESSAGE}" | grep -Fq '[prepare-cod-qa-pr57]'; then
+              echo "Push trigger marker [prepare-cod-qa-pr57] is missing." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch candidate branch
+        run: git fetch origin feat/cod-order-operations
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install orchestration dependencies
+        run: npm ci
+
+      - name: Create exact candidate worktree
+        run: |
+          set -euo pipefail
+          CANDIDATE_SHA="dfde73b63d842470d2ede6a70fb5ef8a588e7631"
+          git worktree add --detach /tmp/rabet-candidate "${CANDIDATE_SHA}"
+          test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${CANDIDATE_SHA}"
+
+      - name: Install candidate dependencies
+        working-directory: /tmp/rabet-candidate
+        run: npm ci
+
+      - name: Prepare isolated database, migrate, configure and deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          NEON_DEV_DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
+          CANDIDATE_SHA: dfde73b63d842470d2ede6a70fb5ef8a588e7631
+          BASELINE_SHA: e213189a19f4dce32ec3a139955bbece51489aba
+          BASELINE_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          QA_SERVICE_ID: srv-dc2vp7s9v7es73ev8p60
+          QA_APP_URL: https://nokmel-cod-qa-pr57.onrender.com
+          RABET_CODE_ROOT: /tmp/rabet-candidate
+        run: node scripts/cod-qa-pr57.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-qa-pr57-summary
+          path: /tmp/cod-qa-pr57-summary.json
+          if-no-files-found: ignore
+          retention-days: 14
