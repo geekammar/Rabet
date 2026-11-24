@@ -737,6 +737,22 @@ export async function bindLinkAttemptToTelegramUser(
         };
       }
 
+      // The per-user partial unique index reserves every attempt stored in a
+      // live status, even when its TTL has already passed. Expire only those
+      // eligible stale attempts for this exact Telegram identity before the
+      // bind update; a genuinely unexpired competing attempt still conflicts.
+      await tx
+        .update(telegramLinkAttempt)
+        .set({ status: "expired", failureCode: "expired", updatedAt: now })
+        .where(
+          and(
+            eq(telegramLinkAttempt.telegramUserId, input.telegramUserId),
+            ne(telegramLinkAttempt.id, attempt.id),
+            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+            lte(telegramLinkAttempt.expiresAt, now),
+          ),
+        );
+
       const [updated] = await tx
         .update(telegramLinkAttempt)
         .set({
@@ -854,11 +870,23 @@ export async function handleManagerStartMessage(
     return;
   }
 
-  if (bound.status === "mismatch" || bound.status === "conflict") {
+  if (bound.status === "mismatch") {
     const result = await transport.sendMessage({
       chatId: message.chat.id,
       text:
         "This connection link was already opened by another Telegram account. Return to the Rabet merchant dashboard and start a new connection.",
+    });
+    if (!result.ok) {
+      throw new Error(sanitizeTelegramError(result.error ?? "Send failed"));
+    }
+    return;
+  }
+
+  if (bound.status === "conflict") {
+    const result = await transport.sendMessage({
+      chatId: message.chat.id,
+      text:
+        "This Telegram account already has another active store connection attempt. Finish that attempt or wait for it to expire, then return to the Rabet merchant dashboard and try again.",
     });
     if (!result.ok) {
       throw new Error(sanitizeTelegramError(result.error ?? "Send failed"));

@@ -29,6 +29,7 @@ import {
   createTelegramLinkAttempt,
   ensureTelegramLinkAttempt,
   handleManagedBotEvent,
+  handleManagerStartMessage,
   readMerchantTelegramConnectionState,
   readReadyManagedConnection,
   recoverManagedTelegramCandidate,
@@ -624,6 +625,227 @@ describe.skipIf(!shouldRun)("managed Telegram bot connections", () => {
       telegramUserId: 7003,
     });
     expect(expiredBind.status).toBe("expired");
+  });
+
+  it("binds a fresh attempt after another store's same-account attempt expired by time while still stored active", async () => {
+    const telegramUserId = 7010;
+    const past = new Date(Date.now() - 60 * 60 * 1000);
+
+    const staleB = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeBId,
+      merchantUserId: fixture.userBId,
+      managerBotUsername: "RabetManagerBot",
+      now: past,
+    });
+    const boundStaleB = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: staleB.nonce,
+      telegramUserId,
+      now: past,
+    });
+    expect(boundStaleB.status).toBe("bound");
+
+    const [staleRow] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, staleB.attemptId));
+    expect(staleRow.status).toBe("pending");
+    expect(staleRow.telegramUserId).toBe(telegramUserId);
+    expect(staleRow.expiresAt.getTime()).toBeLessThan(Date.now());
+
+    const freshA = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const boundFreshA = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: freshA.nonce,
+      telegramUserId,
+    });
+
+    expect(boundFreshA.status).toBe("bound");
+
+    const [expiredB] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, staleB.attemptId));
+    expect(expiredB.status).toBe("expired");
+    expect(expiredB.failureCode).toBe("expired");
+
+    const [boundA] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, freshA.attemptId));
+    expect(boundA.telegramUserId).toBe(telegramUserId);
+    expect(boundA.status).toBe("pending");
+  });
+
+  it("keeps a genuinely live competing attempt protected from a second bind", async () => {
+    const telegramUserId = 7011;
+
+    const liveB = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeBId,
+      merchantUserId: fixture.userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const boundB = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: liveB.nonce,
+      telegramUserId,
+    });
+    expect(boundB.status).toBe("bound");
+
+    const freshA = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const competing = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: freshA.nonce,
+      telegramUserId,
+    });
+    expect(competing.status).toBe("conflict");
+
+    const [stillLiveB] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, liveB.attemptId));
+    expect(stillLiveB.status).toBe("pending");
+    expect(stillLiveB.telegramUserId).toBe(telegramUserId);
+
+    const [unboundA] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, freshA.attemptId));
+    expect(unboundA.telegramUserId).toBeNull();
+    expect(unboundA.status).toBe("pending");
+  });
+
+  it("rejects a different Telegram account without releasing the bound identity", async () => {
+    const telegramUserId = 7012;
+    const started = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+
+    const first = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: started.nonce,
+      telegramUserId,
+    });
+    expect(first.status).toBe("bound");
+
+    const wrongAccount = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: started.nonce,
+      telegramUserId: telegramUserId + 1,
+    });
+    expect(wrongAccount.status).toBe("mismatch");
+
+    const [row] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, started.attemptId));
+    expect(row.telegramUserId).toBe(telegramUserId);
+  });
+
+  it("allows only one of two concurrent binds for the same Telegram account", async () => {
+    const telegramUserId = 7013;
+    const attemptA = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const attemptB = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeBId,
+      merchantUserId: fixture.userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+
+    const [resultA, resultB] = await Promise.all([
+      bindLinkAttemptToTelegramUser(db(), {
+        nonce: attemptA.nonce,
+        telegramUserId,
+      }),
+      bindLinkAttemptToTelegramUser(db(), {
+        nonce: attemptB.nonce,
+        telegramUserId,
+      }),
+    ]);
+
+    expect([resultA.status, resultB.status].sort()).toEqual([
+      "bound",
+      "conflict",
+    ]);
+
+    const rows = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(sql`${telegramLinkAttempt.telegramUserId} = ${telegramUserId}`);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("pending");
+  });
+
+  it("uses different manager replies for an active competing attempt and a different account", async () => {
+    const mismatchUserId = 7014;
+    const conflictUserId = 7015;
+    const mismatchAttempt = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const boundMismatch = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: mismatchAttempt.nonce,
+      telegramUserId: mismatchUserId,
+    });
+    expect(boundMismatch.status).toBe("bound");
+
+    const mismatchTransport = createFakeTelegramTransport();
+    await handleManagerStartMessage(
+      db(),
+      mismatchTransport,
+      {
+        message_id: 1,
+        from: { id: mismatchUserId + 1, is_bot: false, first_name: "Other" },
+        chat: { id: mismatchUserId + 1, type: "private" },
+        date: 1,
+        text: `/start ${mismatchAttempt.nonce}`,
+      },
+    );
+    expect(mismatchTransport.sentMessages).toHaveLength(1);
+    const mismatchText = mismatchTransport.sentMessages[0].text;
+
+    const liveB = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeBId,
+      merchantUserId: fixture.userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const boundLiveB = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: liveB.nonce,
+      telegramUserId: conflictUserId,
+    });
+    expect(boundLiveB.status).toBe("bound");
+
+    const freshA = await createTelegramLinkAttempt(db(), {
+      storeId: fixture.storeAId,
+      merchantUserId: fixture.userAId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const conflictTransport = createFakeTelegramTransport();
+    await handleManagerStartMessage(
+      db(),
+      conflictTransport,
+      {
+        message_id: 2,
+        from: { id: conflictUserId, is_bot: false, first_name: "Merchant" },
+        chat: { id: conflictUserId, type: "private" },
+        date: 1,
+        text: `/start ${freshA.nonce}`,
+      },
+    );
+    expect(conflictTransport.sentMessages).toHaveLength(1);
+    const conflictText = conflictTransport.sentMessages[0].text;
+
+    expect(mismatchText).toContain("another Telegram account");
+    expect(conflictText).toContain("another active store connection attempt");
+    expect(conflictText).not.toBe(mismatchText);
   });
 
   it("prepares a candidate without touching the webhook, then activates only after merchant confirmation", async () => {
