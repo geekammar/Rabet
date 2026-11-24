@@ -3,11 +3,13 @@ ALTER TABLE "order" ADD COLUMN "accepted_at" timestamp with time zone;--> statem
 ALTER TABLE "order" ADD COLUMN "preparing_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "order" ADD COLUMN "cancelled_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "order" ADD COLUMN "cancellation_reason" text;--> statement-breakpoint
+ALTER TABLE "order" DISABLE TRIGGER "order_touch_updated_at";--> statement-breakpoint
 UPDATE "order"
 SET "cancellation_reason" = 'Legacy cancellation',
     "cancelled_at" = COALESCE("cancelled_at", "updated_at")
 WHERE "status" = 'cancelled'
   AND ("cancellation_reason" IS NULL OR "cancelled_at" IS NULL);--> statement-breakpoint
+ALTER TABLE "order" ENABLE TRIGGER "order_touch_updated_at";--> statement-breakpoint
 ALTER TABLE "order" ADD CONSTRAINT "order_merchant_progress_check" CHECK ((
         ("order"."status" = 'placed'
           AND "order"."accepted_at" IS NULL
