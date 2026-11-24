@@ -268,7 +268,10 @@ async function main() {
   if (productsResponse.status !== 200) {
     fail(`Merchant products page returned HTTP ${productsResponse.status}`);
   }
-  if (!productsHtml.includes("COD Test Product A")) {
+  if (
+    !productsHtml.includes("COD Test Product A") &&
+    !productsHtml.includes("منتج الدفع عند الاستلام أ")
+  ) {
     fail("Store A catalog product is not served on the merchant catalog page");
   }
 
