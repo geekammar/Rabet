@@ -1,11 +1,13 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   char,
   check,
   index,
   jsonb,
   pgTable,
+  primaryKey,
   smallint,
   text,
   timestamp,
@@ -114,6 +116,77 @@ export const language = pgTable(
     check(
       "language_text_direction_check",
       sql`${table.textDirection} IN ('ltr', 'rtl')`,
+    ),
+  ],
+);
+
+/**
+ * `store_language_setting` — the customer-facing default language for one
+ * store.
+ *
+ * This is additive to the legacy `bot_setting` singleton: existing stores keep
+ * their configured default through that row, and a store without an explicit
+ * row falls back to it. Writing here is merchant-scoped, so one store's choice
+ * never changes another store.
+ *
+ * The reference is nullable-free but the row itself is optional, which is the
+ * "not configured yet" state. A disabled language is ignored at read time so
+ * disabling Arabic cleanly falls back instead of leaving buyers stuck.
+ */
+export const storeLanguageSetting = pgTable(
+  "store_language_setting",
+  {
+    storeId: uuid("store_id")
+      .primaryKey()
+      .references(() => store.id, { onDelete: "restrict" }),
+    defaultLanguageId: uuid("default_language_id")
+      .notNull()
+      .references(() => language.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+);
+
+/**
+ * `buyer_language_preference` — one explicit buyer choice per store.
+ *
+ * The trusted identity is the pair `(store_id, telegram_user_id)`. It is a
+ * separate table because `customer.telegram_id` is global while a buyer may
+ * talk to more than one store bot: using another store's bot must not carry
+ * this preference across.
+ *
+ * A row is written only when the buyer explicitly selects a language. The
+ * absence of a row means "use the merchant default", not "English".
+ */
+export const buyerLanguagePreference = pgTable(
+  "buyer_language_preference",
+  {
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "restrict" }),
+    telegramUserId: bigint("telegram_user_id", { mode: "number" }).notNull(),
+    languageId: uuid("language_id")
+      .notNull()
+      .references(() => language.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "buyer_language_preference_pk",
+      columns: [table.storeId, table.telegramUserId],
+    }),
+    check(
+      "buyer_language_preference_telegram_user_positive_check",
+      sql`${table.telegramUserId} > 0`,
     ),
   ],
 );

@@ -12,6 +12,7 @@ import {
   listManagedProductsInCategory,
   readManagedCategory,
   readManagedProduct,
+  type ManagedTranslationPlan,
 } from "@/lib/catalog/managed-storefront";
 import {
   addToCart,
@@ -21,6 +22,7 @@ import {
   isCodAvailable,
   readCartForBuyer,
   readInventoryAvailability,
+  refreshReview,
   removeCartItem,
   saveAddressAndPrepareReview,
   savePhone,
@@ -29,6 +31,13 @@ import {
   type CheckoutReview,
   type CommerceSetting,
 } from "@/lib/commerce/orders";
+import {
+  resolveBuyerLanguage,
+  readStoreDefaultLanguage,
+  saveBuyerLanguagePreference,
+  type ResolvedBuyerLanguage,
+  type StoreLanguageChoice,
+} from "@/lib/data/store-language";
 import {
   createStoreScopeForExistingStore,
   type StoreScope,
@@ -45,9 +54,13 @@ import {
 import { readReadyManagedConnection } from "./manager-provisioning";
 import {
   managedCommerceCopy,
-  managedCommerceLocaleFromLanguageCode,
+  type CommerceCopy,
   type ManagedCommerceLocale,
 } from "./managed-commerce-copy";
+import {
+  buyerLocaleFromLanguageCode,
+  isBuyerLocale,
+} from "@/lib/commerce/buyer-language";
 import { tokens, type ParsedToken } from "./tokens";
 import {
   classifyErrorToSafeDiagnostic,
@@ -101,32 +114,155 @@ function json(body: unknown, status = 200): Response {
 }
 
 function homeKeyboard(
-  ui: { home: string },
+  copy: CommerceCopy,
+  languageContext?: string,
 ): TelegramInlineKeyboardButton[][] {
-  return [[{ text: ui.home, callback_data: tokens.home() }]];
+  return [
+    [
+      { text: copy.home, callback_data: tokens.home() },
+      {
+        text: copy.languageButton,
+        callback_data: tokens.languages(languageContext),
+      },
+    ],
+  ];
 }
 
-const UI = {
-  home: "Home",
-  products: "Products",
-  browseCategories: "Browse categories",
-  back: "Back",
-  previous: "Previous",
-  next: "Next",
-  unavailable: "This item is not available in this store.",
-  empty: "No products are available in this store yet.",
-  noCategories: "No categories are available in this store yet.",
-};
+function languageKeyboard(
+  copy: CommerceCopy,
+  currentLocale: ManagedCommerceLocale,
+  context: string | null,
+): { inline_keyboard: TelegramInlineKeyboardButton[][] } {
+  const mark = (locale: ManagedCommerceLocale) =>
+    currentLocale === locale ? "✓ " : "";
+
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: `${mark("ar")}${copy.languageArabic}`,
+          callback_data: tokens.lang("ar", context ?? undefined),
+        },
+      ],
+      [
+        {
+          text: `${mark("en")}${copy.languageEnglish}`,
+          callback_data: tokens.lang("en", context ?? undefined),
+        },
+      ],
+      [{ text: copy.home, callback_data: tokens.home() }],
+    ],
+  };
+}
+
+async function renderLanguageMenu(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number | undefined,
+  copy: CommerceCopy,
+  currentLocale: ManagedCommerceLocale,
+  context: string | null = null,
+  text = copy.languageTitle,
+): Promise<void> {
+  const params = {
+    chatId,
+    text,
+    replyMarkup: languageKeyboard(copy, currentLocale, context),
+  };
+
+  if (messageId) {
+    await editOrThrow(transport, { ...params, messageId });
+  } else {
+    await sendOrThrow(transport, params);
+  }
+}
 
 type CodContext = {
   enabled: boolean;
   setting: CommerceSetting | null;
 };
 
-type CommerceCopy = ReturnType<typeof managedCommerceCopy>;
+type LanguageContext = {
+  language: ResolvedBuyerLanguage;
+  copy: CommerceCopy;
+  plan: ManagedTranslationPlan;
+  storeDefault: StoreLanguageChoice | null;
+};
 
 function copyForLocale(locale: ManagedCommerceLocale): CommerceCopy {
   return managedCommerceCopy(locale);
+}
+
+function translationPlanFor(
+  language: ResolvedBuyerLanguage,
+): ManagedTranslationPlan {
+  return {
+    preferredCode: language.locale,
+    fallbackCode: language.storeDefaultCode,
+  };
+}
+
+async function languageContextFor(
+  db: Database,
+  scope: StoreScope,
+  buyerId: number | null,
+  profileLanguageCode: string | undefined,
+): Promise<LanguageContext> {
+  const storeDefault = await readStoreDefaultLanguage(db, scope.storeId);
+
+  if (buyerId !== null) {
+    const language = await resolveBuyerLanguage(db, {
+      storeId: scope.storeId,
+      telegramUserId: buyerId,
+      profileLanguageCode,
+    });
+
+    return {
+      language,
+      copy: copyForLocale(language.locale),
+      plan: translationPlanFor(language),
+      storeDefault,
+    };
+  }
+
+  const locale =
+    storeDefault && isBuyerLocale(storeDefault.code)
+      ? storeDefault.code
+      : buyerLocaleFromLanguageCode(profileLanguageCode);
+  const language: ResolvedBuyerLanguage = {
+    locale,
+    languageId: storeDefault?.id ?? null,
+    source: storeDefault ? "store_default" : "profile",
+    storeDefaultCode: storeDefault?.code ?? null,
+  };
+
+  return {
+    language,
+    copy: copyForLocale(locale),
+    plan: translationPlanFor(language),
+    storeDefault,
+  };
+}
+
+function isLanguageCommand(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return (
+    normalized === "/language" ||
+    normalized === "/lang" ||
+    normalized === "language" ||
+    normalized === "اللغة" ||
+    normalized === "اللغة / language"
+  );
+}
+
+function isCartCommand(text: string, copy: CommerceCopy): boolean {
+  const normalized = text.trim().toLowerCase();
+  return (
+    normalized === "/cart" ||
+    normalized === copy.cart.toLowerCase() ||
+    normalized === "cart" ||
+    normalized === "السلة"
+  );
 }
 
 function money(value: string, currency: string): string {
@@ -195,7 +331,8 @@ function reviewKeyboard(review: CheckoutReview, copy: CommerceCopy) {
           text: copy.backToCart,
           callback_data: tokens.backToCart(review.cartId),
         },
-        { text: UI.home, callback_data: tokens.home() },
+        { text: copy.languageButton, callback_data: tokens.languages() },
+        { text: copy.home, callback_data: tokens.home() },
       ],
     ],
   };
@@ -211,7 +348,10 @@ function cartKeyboard(cart: CartView, copy: CommerceCopy) {
   keyboard.push([
     { text: copy.checkout, callback_data: tokens.checkout(cart.id) },
   ]);
-  keyboard.push([{ text: UI.home, callback_data: tokens.home() }]);
+  keyboard.push([
+    { text: copy.languageButton, callback_data: tokens.languages() },
+    { text: copy.home, callback_data: tokens.home() },
+  ]);
 
   return { inline_keyboard: keyboard };
 }
@@ -227,7 +367,7 @@ async function renderCartView(
     const params = {
       chatId,
       text: `${copy.cartEmpty}\n\n${copy.cartHint}`,
-      replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+      replyMarkup: { inline_keyboard: homeKeyboard(copy) },
     };
 
     if (messageId) {
@@ -290,7 +430,13 @@ async function sendPhonePrompt(
       copy.phonePrompt,
     ].join("\n"),
     replyMarkup: {
-      keyboard: [[{ text: copy.sharePhone, request_contact: true }]],
+      keyboard: [
+        [{ text: copy.sharePhone, request_contact: true }],
+        [
+          { text: copy.cart },
+          { text: copy.languageButton },
+        ],
+      ],
       resize_keyboard: true,
       one_time_keyboard: true,
     },
@@ -306,7 +452,15 @@ async function sendAddressPrompt(
   await sendOrThrow(transport, {
     chatId,
     text,
-    replyMarkup: { remove_keyboard: true },
+    replyMarkup: {
+      keyboard: [
+        [
+          { text: copy.cart },
+          { text: copy.languageButton },
+        ],
+      ],
+      resize_keyboard: true,
+    },
   });
 }
 
@@ -337,7 +491,7 @@ async function renderPlacedOrder(
   const params = {
     chatId,
     text,
-    replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+    replyMarkup: { inline_keyboard: homeKeyboard(copy) },
   };
 
   if (messageId) {
@@ -386,27 +540,85 @@ function categoryButton(
   return { text: item.name, callback_data: tokens.storefrontCategory(item.id) };
 }
 
+async function localizeCartView(
+  db: Database,
+  scope: StoreScope,
+  cart: CartView,
+  plan: ManagedTranslationPlan,
+  copy: CommerceCopy,
+): Promise<CartView> {
+  const lines = await Promise.all(
+    cart.lines.map(async (line) => {
+      const product = await readManagedProduct(db, scope, line.productId, plan);
+
+      if (!product) {
+        return { ...line, name: copy.unavailableItem };
+      }
+
+      return {
+        ...line,
+        name: product.name,
+        description: product.description,
+      };
+    }),
+  );
+
+  return { ...cart, lines };
+}
+
+async function localizeReview(
+  db: Database,
+  scope: StoreScope,
+  review: CheckoutReview,
+  plan: ManagedTranslationPlan,
+  copy: CommerceCopy,
+): Promise<CheckoutReview> {
+  const lines = await Promise.all(
+    review.lines.map(async (line) => {
+      const product = await readManagedProduct(db, scope, line.productId, plan);
+
+      if (!product) {
+        return { ...line, name: copy.unavailableItem };
+      }
+
+      return {
+        ...line,
+        name: product.name,
+        description: product.description,
+      };
+    }),
+  );
+
+  return { ...review, lines };
+}
+
 async function renderHome(
   db: Database,
   scope: StoreScope,
   storeName: string,
   cod: CodContext,
   copy: CommerceCopy,
+  plan: ManagedTranslationPlan,
   transport: TelegramTransport,
   chatId: number,
   messageId?: number,
 ): Promise<void> {
-  const page = await listManagedProducts(db, scope, {
-    page: 1,
-    pageSize: PAGE_SIZE,
-  });
+  const page = await listManagedProducts(
+    db,
+    scope,
+    {
+      page: 1,
+      pageSize: PAGE_SIZE,
+    },
+    plan,
+  );
 
   const keyboard: TelegramInlineKeyboardButton[][] = page.items.map((item) => [
     productButton(item),
   ]);
 
   keyboard.push([
-    { text: UI.browseCategories, callback_data: tokens.storefrontCategories() },
+    { text: copy.browseCategories, callback_data: tokens.storefrontCategories() },
   ]);
 
   if (cod.enabled) {
@@ -415,14 +627,18 @@ async function renderHome(
 
   if (page.totalPages > 1) {
     keyboard.push([
-      { text: UI.next, callback_data: tokens.products(2) },
+      { text: copy.next, callback_data: tokens.products(2) },
     ]);
   }
 
+  keyboard.push([
+    { text: copy.languageButton, callback_data: tokens.languages("h") },
+  ]);
+
   const text =
     page.totalCount === 0
-      ? `Welcome to ${storeName}.\n\n${UI.empty}`
-      : `Welcome to ${storeName}.\n\n${UI.products}`;
+      ? `${copy.welcome(storeName)}\n\n${copy.empty}`
+      : `${copy.welcome(storeName)}\n\n${copy.products}`;
 
   const params = {
     chatId,
@@ -444,11 +660,18 @@ async function renderProducts(
   chatId: number,
   messageId: number,
   pageNumber: number,
+  copy: CommerceCopy,
+  plan: ManagedTranslationPlan,
 ): Promise<void> {
-  const page = await listManagedProducts(db, scope, {
-    page: pageNumber,
-    pageSize: PAGE_SIZE,
-  });
+  const page = await listManagedProducts(
+    db,
+    scope,
+    {
+      page: pageNumber,
+      pageSize: PAGE_SIZE,
+    },
+    plan,
+  );
 
   const keyboard: TelegramInlineKeyboardButton[][] = page.items.map((item) => [
     productButton(item),
@@ -458,25 +681,25 @@ async function renderProducts(
     const nav: TelegramInlineKeyboardButton[] = [];
     if (page.page > 1) {
       nav.push({
-        text: UI.previous,
+        text: copy.previous,
         callback_data: tokens.products(page.page - 1),
       });
     }
     if (page.page < page.totalPages) {
       nav.push({
-        text: UI.next,
+        text: copy.next,
         callback_data: tokens.products(page.page + 1),
       });
     }
     keyboard.push(nav);
   }
 
-  keyboard.push(...homeKeyboard(UI));
+  keyboard.push(...homeKeyboard(copy, `p:${page.page}`));
 
   const text =
     page.totalCount === 0
-      ? UI.empty
-      : `${UI.products} (${page.page}/${page.totalPages})`;
+      ? copy.empty
+      : `${copy.products} (${page.page}/${page.totalPages})`;
 
   await editOrThrow(transport, {
     chatId,
@@ -493,12 +716,19 @@ async function renderCategories(
   chatId: number,
   messageId: number,
   pageNumber: number,
+  copy: CommerceCopy,
+  plan: ManagedTranslationPlan,
 ): Promise<void> {
-  const page = await listManagedCategories(db, scope, {
-    parentId: null,
-    page: pageNumber,
-    pageSize: PAGE_SIZE,
-  });
+  const page = await listManagedCategories(
+    db,
+    scope,
+    {
+      parentId: null,
+      page: pageNumber,
+      pageSize: PAGE_SIZE,
+    },
+    plan,
+  );
 
   const keyboard: TelegramInlineKeyboardButton[][] = page.items.map((item) => [
     categoryButton(item),
@@ -508,25 +738,25 @@ async function renderCategories(
     const nav: TelegramInlineKeyboardButton[] = [];
     if (page.page > 1) {
       nav.push({
-        text: UI.previous,
+        text: copy.previous,
         callback_data: tokens.storefrontCategories(page.page - 1),
       });
     }
     if (page.page < page.totalPages) {
       nav.push({
-        text: UI.next,
+        text: copy.next,
         callback_data: tokens.storefrontCategories(page.page + 1),
       });
     }
     keyboard.push(nav);
   }
 
-  keyboard.push(...homeKeyboard(UI));
+  keyboard.push(...homeKeyboard(copy, "cs"));
 
   await editOrThrow(transport, {
     chatId,
     messageId,
-    text: page.totalCount === 0 ? UI.noCategories : UI.browseCategories,
+    text: page.totalCount === 0 ? copy.noCategories : copy.browseCategories,
     replyMarkup: { inline_keyboard: keyboard },
   });
 }
@@ -539,30 +769,47 @@ async function renderCategory(
   messageId: number,
   categoryId: string,
   pageNumber: number,
+  copy: CommerceCopy,
+  plan: ManagedTranslationPlan,
 ): Promise<void> {
-  const categoryRow = await readManagedCategory(db, scope, categoryId);
+  const categoryRow = await readManagedCategory(
+    db,
+    scope,
+    categoryId,
+    plan,
+  );
 
   if (!categoryRow) {
     await editOrThrow(transport, {
       chatId,
       messageId,
-      text: UI.unavailable,
-      replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+      text: copy.unavailable,
+      replyMarkup: { inline_keyboard: homeKeyboard(copy) },
     });
     return;
   }
 
   const [children, products] = await Promise.all([
-    listManagedCategories(db, scope, {
-      parentId: categoryId,
-      page: 1,
-      pageSize: PAGE_SIZE,
-    }),
-    listManagedProductsInCategory(db, scope, {
-      categoryId,
-      page: pageNumber,
-      pageSize: PAGE_SIZE,
-    }),
+    listManagedCategories(
+      db,
+      scope,
+      {
+        parentId: categoryId,
+        page: 1,
+        pageSize: PAGE_SIZE,
+      },
+      plan,
+    ),
+    listManagedProductsInCategory(
+      db,
+      scope,
+      {
+        categoryId,
+        page: pageNumber,
+        pageSize: PAGE_SIZE,
+      },
+      plan,
+    ),
   ]);
 
   const keyboard: TelegramInlineKeyboardButton[][] = [
@@ -574,7 +821,7 @@ async function renderCategory(
     const nav: TelegramInlineKeyboardButton[] = [];
     if (products.page > 1) {
       nav.push({
-        text: UI.previous,
+        text: copy.previous,
         callback_data: tokens.storefrontCategory(
           categoryId,
           products.page - 1,
@@ -583,7 +830,7 @@ async function renderCategory(
     }
     if (products.page < products.totalPages) {
       nav.push({
-        text: UI.next,
+        text: copy.next,
         callback_data: tokens.storefrontCategory(
           categoryId,
           products.page + 1,
@@ -595,12 +842,16 @@ async function renderCategory(
 
   keyboard.push([
     {
-      text: UI.back,
+      text: copy.back,
       callback_data: categoryRow.parentId
         ? tokens.storefrontCategory(categoryRow.parentId)
         : tokens.storefrontCategories(),
     },
-    { text: UI.home, callback_data: tokens.home() },
+    { text: copy.home, callback_data: tokens.home() },
+    {
+      text: copy.languageButton,
+      callback_data: tokens.languages(`c:${categoryId}:${pageNumber}`),
+    },
   ]);
 
   await editOrThrow(transport, {
@@ -616,19 +867,25 @@ async function renderProduct(
   scope: StoreScope,
   cod: CodContext,
   copy: CommerceCopy,
+  plan: ManagedTranslationPlan,
   transport: TelegramTransport,
   chatId: number,
   messageId: number,
   productId: string,
 ): Promise<void> {
-  const productRow = await readManagedProduct(db, scope, productId);
+  const productRow = await readManagedProduct(
+    db,
+    scope,
+    productId,
+    plan,
+  );
 
   if (!productRow) {
     await editOrThrow(transport, {
       chatId,
       messageId,
-      text: UI.unavailable,
-      replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+      text: copy.unavailable,
+      replyMarkup: { inline_keyboard: homeKeyboard(copy) },
     });
     return;
   }
@@ -670,10 +927,16 @@ async function renderProduct(
 
   keyboard.push([
     {
-      text: UI.back,
+      text: copy.back,
       callback_data: tokens.storefrontCategory(productRow.categoryId),
     },
-    { text: UI.home, callback_data: tokens.home() },
+    { text: copy.home, callback_data: tokens.home() },
+  ]);
+  keyboard.push([
+    {
+      text: copy.languageButton,
+      callback_data: tokens.languages(`pd:${productId}`),
+    },
   ]);
 
   await editOrThrow(transport, {
@@ -682,6 +945,17 @@ async function renderProduct(
     text: lines.join("\n\n"),
     replyMarkup: { inline_keyboard: keyboard },
   });
+}
+
+function phoneReplyMarkup(copy: CommerceCopy) {
+  return {
+    keyboard: [
+      [{ text: copy.sharePhone, request_contact: true }],
+      [{ text: copy.cart }, { text: copy.languageButton }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
 }
 
 async function dispatchMessage(
@@ -695,11 +969,14 @@ async function dispatchMessage(
   message: TelegramMessage,
 ): Promise<void> {
   const text = typeof message.text === "string" ? message.text.trim() : "";
-  const buyerId = message.from?.id;
-  const locale = managedCommerceLocaleFromLanguageCode(
+  const buyerId = message.from?.id ?? null;
+  const context = await languageContextFor(
+    db,
+    scope,
+    buyerId,
     message.from?.language_code,
   );
-  const copy = copyForLocale(locale);
+  const { copy, plan } = context;
 
   if (text === "/start" || text.startsWith("/start ")) {
     await renderHome(
@@ -708,6 +985,7 @@ async function dispatchMessage(
       storeName,
       cod,
       copy,
+      plan,
       transport,
       message.chat.id,
     );
@@ -721,17 +999,56 @@ async function dispatchMessage(
       storeName,
       cod,
       copy,
+      plan,
       transport,
       message.chat.id,
     );
     return;
   }
 
+  // The language menu and cart shortcut are text buttons on the phone and
+  // address reply keyboards, so they must be handled before those messages are
+  // parsed as contact data.
+  if (isLanguageCommand(text)) {
+    await renderLanguageMenu(
+      transport,
+      message.chat.id,
+      undefined,
+      copy,
+      context.language.locale,
+    );
+    return;
+  }
+
+  let activeCart: CartView | null = null;
+
   if (cod.enabled && commerceDb) {
-    const activeCart = await readCartForBuyer(db, scope, {
+    activeCart = await readCartForBuyer(db, scope, {
       connectionId,
       telegramUserId: buyerId,
     });
+
+    if (activeCart && isCartCommand(text, copy)) {
+      const cart =
+        activeCart.status === "checkout"
+          ? await backToCart(commerceDb, scope, {
+              cartId: activeCart.id,
+              connectionId,
+              telegramUserId: buyerId,
+            })
+          : activeCart;
+
+      await renderCartView(
+        transport,
+        message.chat.id,
+        undefined,
+        cart
+          ? await localizeCartView(db, scope, cart, plan, copy)
+          : null,
+        copy,
+      );
+      return;
+    }
 
     if (activeCart?.status === "checkout") {
       if (activeCart.checkoutState === "awaiting_phone") {
@@ -745,11 +1062,7 @@ async function dispatchMessage(
           await sendOrThrow(transport, {
             chatId: message.chat.id,
             text: copy.phoneOwn,
-            replyMarkup: {
-              keyboard: [[{ text: copy.sharePhone, request_contact: true }]],
-              resize_keyboard: true,
-              one_time_keyboard: true,
-            },
+            replyMarkup: phoneReplyMarkup(copy),
           });
           return;
         }
@@ -770,11 +1083,7 @@ async function dispatchMessage(
           await sendOrThrow(transport, {
             chatId: message.chat.id,
             text: copy.invalidPhone,
-            replyMarkup: {
-              keyboard: [[{ text: copy.sharePhone, request_contact: true }]],
-              resize_keyboard: true,
-              one_time_keyboard: true,
-            },
+            replyMarkup: phoneReplyMarkup(copy),
           });
           return;
         }
@@ -793,7 +1102,7 @@ async function dispatchMessage(
             transport,
             message.chat.id,
             undefined,
-            result.review,
+            await localizeReview(db, scope, result.review, plan, copy),
             copy,
           );
           return;
@@ -826,7 +1135,7 @@ async function dispatchMessage(
           replyMarkup: {
             inline_keyboard: [
               [{ text: copy.cart, callback_data: tokens.cart() }],
-              ...homeKeyboard(UI),
+              ...homeKeyboard(copy),
             ],
           },
         });
@@ -844,9 +1153,196 @@ async function dispatchMessage(
     storeName,
     cod,
     copy,
+    plan,
     transport,
     message.chat.id,
   );
+}
+
+async function renderAfterLanguageChange(
+  db: Database,
+  scope: StoreScope,
+  storeName: string,
+  connectionId: string,
+  cod: CodContext,
+  commerceDb: TransactionDatabase | null,
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number,
+  buyerId: number,
+  context: LanguageContext,
+): Promise<void> {
+  const { copy, plan } = context;
+
+  if (cod.enabled && commerceDb) {
+    const cart = await readCartForBuyer(db, scope, {
+      connectionId,
+      telegramUserId: buyerId,
+    });
+
+    if (cart) {
+      if (cart.status === "checkout") {
+        if (cart.checkoutState === "awaiting_phone") {
+          await editOrThrow(transport, {
+            chatId,
+            messageId,
+            text: copy.languageSaved,
+            replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+          });
+          await sendPhonePrompt(transport, chatId, cart, copy);
+          return;
+        }
+
+        if (cart.checkoutState === "awaiting_address") {
+          await editOrThrow(transport, {
+            chatId,
+            messageId,
+            text: copy.languageSaved,
+            replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+          });
+          await sendAddressPrompt(transport, chatId, copy);
+          return;
+        }
+
+        if (cart.checkoutState === "review") {
+          const refreshed = await refreshReview(commerceDb, scope, {
+            cartId: cart.id,
+            connectionId,
+            telegramUserId: buyerId,
+          });
+
+          if (refreshed.status === "review") {
+            await renderReviewView(
+              transport,
+              chatId,
+              messageId,
+              await localizeReview(db, scope, refreshed.review, plan, copy),
+              copy,
+            );
+            return;
+          }
+        }
+      }
+
+      await renderCartView(
+        transport,
+        chatId,
+        messageId,
+        await localizeCartView(db, scope, cart, plan, copy),
+        copy,
+      );
+      return;
+    }
+  }
+
+  await renderHome(
+    db,
+    scope,
+    storeName,
+    cod,
+    copy,
+    plan,
+    transport,
+    chatId,
+    messageId,
+  );
+}
+
+async function renderLanguageContextScreen(
+  db: Database,
+  scope: StoreScope,
+  storeName: string,
+  cod: CodContext,
+  copy: CommerceCopy,
+  plan: ManagedTranslationPlan,
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number,
+  context: string | null,
+): Promise<boolean> {
+  if (!context || context === "h") {
+    if (!context) return false;
+    await renderHome(
+      db,
+      scope,
+      storeName,
+      cod,
+      copy,
+      plan,
+      transport,
+      chatId,
+      messageId,
+    );
+    return true;
+  }
+
+  if (context === "cs") {
+    await renderCategories(
+      db,
+      scope,
+      transport,
+      chatId,
+      messageId,
+      1,
+      copy,
+      plan,
+    );
+    return true;
+  }
+
+  if (context.startsWith("p:")) {
+    const page = Number(context.slice(2));
+    if (Number.isInteger(page) && page > 0) {
+      await renderProducts(
+        db,
+        scope,
+        transport,
+        chatId,
+        messageId,
+        page,
+        copy,
+        plan,
+      );
+      return true;
+    }
+    return false;
+  }
+
+  if (context.startsWith("pd:")) {
+    await renderProduct(
+      db,
+      scope,
+      cod,
+      copy,
+      plan,
+      transport,
+      chatId,
+      messageId,
+      context.slice(3),
+    );
+    return true;
+  }
+
+  if (context.startsWith("c:")) {
+    const [categoryId, pageText] = context.slice(2).split(":");
+    const page = pageText ? Number(pageText) : 1;
+    if (Number.isInteger(page) && page > 0) {
+      await renderCategory(
+        db,
+        scope,
+        transport,
+        chatId,
+        messageId,
+        categoryId,
+        page,
+        copy,
+        plan,
+      );
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function dispatchCallback(
@@ -878,21 +1374,112 @@ async function dispatchCallback(
   const chatId = message.chat.id;
   const messageId = message.message_id;
   const buyerId = callbackQuery.from.id;
-  const locale = managedCommerceLocaleFromLanguageCode(
+  let context = await languageContextFor(
+    db,
+    scope,
+    buyerId,
     callbackQuery.from.language_code,
   );
-  const copy = copyForLocale(locale);
+  let { copy, plan } = context;
+
+  if (parsedToken.type === "languages") {
+    await renderLanguageMenu(
+      transport,
+      chatId,
+      messageId,
+      copy,
+      context.language.locale,
+      parsedToken.context,
+    );
+    return;
+  }
+
+  if (parsedToken.type === "lang") {
+    if (!isBuyerLocale(parsedToken.code)) {
+      await renderLanguageMenu(
+        transport,
+        chatId,
+        messageId,
+        copy,
+        context.language.locale,
+        parsedToken.context,
+        copy.invalidLanguage,
+      );
+      return;
+    }
+
+    const saved = await saveBuyerLanguagePreference(db, scope, {
+      telegramUserId: buyerId,
+      code: parsedToken.code,
+    });
+
+    if (!saved.ok) {
+      await renderLanguageMenu(
+        transport,
+        chatId,
+        messageId,
+        copy,
+        context.language.locale,
+        parsedToken.context,
+        copy.invalidLanguage,
+      );
+      return;
+    }
+
+    context = await languageContextFor(
+      db,
+      scope,
+      buyerId,
+      callbackQuery.from.language_code,
+    );
+    copy = context.copy;
+    plan = context.plan;
+
+    if (
+      await renderLanguageContextScreen(
+        db,
+        scope,
+        storeName,
+        cod,
+        copy,
+        plan,
+        transport,
+        chatId,
+        messageId,
+        parsedToken.context,
+      )
+    ) {
+      return;
+    }
+
+    await renderAfterLanguageChange(
+      db,
+      scope,
+      storeName,
+      connectionId,
+      cod,
+      commerceDb,
+      transport,
+      chatId,
+      messageId,
+      buyerId,
+      context,
+    );
+    return;
+  }
 
   if (cod.enabled && commerceDb) {
     if (parsedToken.type === "cart") {
+      const cart = await readCartForBuyer(db, scope, {
+        connectionId,
+        telegramUserId: buyerId,
+      });
+
       await renderCartView(
         transport,
         chatId,
         messageId,
-        await readCartForBuyer(db, scope, {
-          connectionId,
-          telegramUserId: buyerId,
-        }),
+        cart ? await localizeCartView(db, scope, cart, plan, copy) : null,
         copy,
       );
       return;
@@ -908,7 +1495,13 @@ async function dispatchCallback(
       });
 
       if (result.status === "added") {
-        await renderCartView(transport, chatId, messageId, result.cart, copy);
+        await renderCartView(
+          transport,
+          chatId,
+          messageId,
+          await localizeCartView(db, scope, result.cart, plan, copy),
+          copy,
+        );
         return;
       }
 
@@ -921,7 +1514,7 @@ async function dispatchCallback(
             : result.status === "cod_unavailable"
               ? copy.notOrderable
               : copy.unavailable,
-        replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+        replyMarkup: { inline_keyboard: homeKeyboard(copy) },
       });
       return;
     }
@@ -935,7 +1528,13 @@ async function dispatchCallback(
       });
 
       if (result.status === "updated") {
-        await renderCartView(transport, chatId, messageId, result.cart, copy);
+        await renderCartView(
+          transport,
+          chatId,
+          messageId,
+          await localizeCartView(db, scope, result.cart, plan, copy),
+          copy,
+        );
         return;
       }
 
@@ -948,7 +1547,7 @@ async function dispatchCallback(
             : result.status === "invalid_quantity"
               ? copy.maxQuantity
               : copy.genericUnavailable,
-        replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+        replyMarkup: { inline_keyboard: homeKeyboard(copy) },
       });
       return;
     }
@@ -962,7 +1561,13 @@ async function dispatchCallback(
       });
 
       if (result.status === "updated") {
-        await renderCartView(transport, chatId, messageId, result.cart, copy);
+        await renderCartView(
+          transport,
+          chatId,
+          messageId,
+          await localizeCartView(db, scope, result.cart, plan, copy),
+          copy,
+        );
         return;
       }
 
@@ -978,7 +1583,13 @@ async function dispatchCallback(
       });
 
       if (result.status === "updated") {
-        await renderCartView(transport, chatId, messageId, result.cart, copy);
+        await renderCartView(
+          transport,
+          chatId,
+          messageId,
+          await localizeCartView(db, scope, result.cart, plan, copy),
+          copy,
+        );
         return;
       }
 
@@ -995,7 +1606,9 @@ async function dispatchCallback(
       });
 
       if (result.status === "ready") {
-        await renderCartView(transport, chatId, messageId, result.cart, copy);
+        // The previous cart message stays as the buyer left it. One clear
+        // phone prompt is the next action, instead of re-rendering the cart
+        // first and then sending a second summary.
         await sendPhonePrompt(transport, chatId, result.cart, copy);
         return;
       }
@@ -1017,7 +1630,7 @@ async function dispatchCallback(
         replyMarkup: {
           inline_keyboard: [
             [{ text: copy.cart, callback_data: tokens.cart() }],
-            ...homeKeyboard(UI),
+            ...homeKeyboard(copy),
           ],
         },
       });
@@ -1043,7 +1656,7 @@ async function dispatchCallback(
           transport,
           chatId,
           messageId,
-          result.review,
+          await localizeReview(db, scope, result.review, plan, copy),
           copy,
         );
         return;
@@ -1054,7 +1667,7 @@ async function dispatchCallback(
           chatId,
           messageId,
           text: copy.checkoutNeedsDetails,
-          replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+          replyMarkup: { inline_keyboard: homeKeyboard(copy) },
         });
 
         const cart = await readCartForBuyer(db, scope, {
@@ -1088,7 +1701,7 @@ async function dispatchCallback(
           replyMarkup: {
             inline_keyboard: [
               [{ text: copy.cart, callback_data: tokens.cart() }],
-              ...homeKeyboard(UI),
+              ...homeKeyboard(copy),
             ],
           },
         });
@@ -1102,7 +1715,7 @@ async function dispatchCallback(
           result.status === "cod_unavailable"
             ? copy.notOrderable
             : copy.genericUnavailable,
-        replyMarkup: { inline_keyboard: homeKeyboard(UI) },
+        replyMarkup: { inline_keyboard: homeKeyboard(copy) },
       });
       return;
     }
@@ -1114,7 +1727,13 @@ async function dispatchCallback(
         telegramUserId: buyerId,
       });
 
-      await renderCartView(transport, chatId, messageId, cart, copy);
+      await renderCartView(
+        transport,
+        chatId,
+        messageId,
+        cart ? await localizeCartView(db, scope, cart, plan, copy) : null,
+        copy,
+      );
       return;
     }
   }
@@ -1126,6 +1745,7 @@ async function dispatchCallback(
       storeName,
       cod,
       copy,
+      plan,
       transport,
       chatId,
       messageId,
@@ -1141,6 +1761,8 @@ async function dispatchCallback(
       chatId,
       messageId,
       parsedToken.page,
+      copy,
+      plan,
     );
     return;
   }
@@ -1153,6 +1775,8 @@ async function dispatchCallback(
       chatId,
       messageId,
       parsedToken.page,
+      copy,
+      plan,
     );
     return;
   }
@@ -1166,6 +1790,8 @@ async function dispatchCallback(
       messageId,
       parsedToken.categoryId,
       parsedToken.page,
+      copy,
+      plan,
     );
     return;
   }
@@ -1176,6 +1802,7 @@ async function dispatchCallback(
       scope,
       cod,
       copy,
+      plan,
       transport,
       chatId,
       messageId,
@@ -1192,6 +1819,7 @@ async function dispatchCallback(
     storeName,
     cod,
     copy,
+    plan,
     transport,
     chatId,
     messageId,

@@ -53,3 +53,5 @@ export * from "./settings";
 export * from "./store-context";
 export * from "./telegram";
 export * from "./templates";
+
+export * from "./store-language";

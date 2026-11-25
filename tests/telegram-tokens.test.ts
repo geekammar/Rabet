@@ -153,13 +153,26 @@ describe("telegram tokens", () => {
     });
     expect(parseToken("prods")).toEqual({ type: "products", page: 1 });
     expect(parseToken("prods:3")).toEqual({ type: "products", page: 3 });
-    expect(parseToken("langs")).toEqual({ type: "languages" });
+    expect(parseToken("langs")).toEqual({ type: "languages", context: null });
+    expect(parseToken("langs:pd:550e8400-e29b-41d4-a716-446655440000")).toEqual({
+      type: "languages",
+      context: "pd:550e8400-e29b-41d4-a716-446655440000",
+    });
     expect(parseToken("support")).toEqual({ type: "support" });
     expect(parseToken("myinq")).toEqual({ type: "myInquiries", page: 1 });
     expect(parseToken("myinq:2")).toEqual({ type: "myInquiries", page: 2 });
     expect(parseToken("inq")).toEqual({ type: "inquiries", page: 1 });
     expect(parseToken("inq:2")).toEqual({ type: "inquiries", page: 2 });
-    expect(parseToken("lang:en")).toEqual({ type: "lang", code: "en" });
+    expect(parseToken("lang:en")).toEqual({
+      type: "lang",
+      code: "en",
+      context: null,
+    });
+    expect(parseToken("lang:ar:p:2")).toEqual({
+      type: "lang",
+      code: "ar",
+      context: "p:2",
+    });
     expect(parseToken(`c:${uuid}`)).toEqual({
       type: "category",
       categoryId: uuid,

@@ -1,7 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Package } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+import { Languages, Loader2, Package } from "lucide-react";
+
+import { saveMerchantStoreLanguageAction } from "@/app/actions/merchant-settings";
 
 import { Logo } from "@/components/brand/logo";
 import {
@@ -31,6 +35,14 @@ type Copy = {
   viewOrders: string;
   logout: string;
   languageLabel: string;
+  storeLanguageTitle: string;
+  storeLanguageBody: string;
+  storeLanguageArabic: string;
+  storeLanguageEnglish: string;
+  saveLanguage: string;
+  savingLanguage: string;
+  languageSaved: string;
+  languageError: string;
   suspendedTitle: string;
   suspendedBody: string;
   pendingBody: string;
@@ -57,6 +69,15 @@ const COPY: Record<MerchantLocale, Copy> = {
     viewOrders: "عرض الطلبات",
     logout: "تسجيل الخروج",
     languageLabel: "لغة الصفحة",
+    storeLanguageTitle: "لغة العملاء الافتراضية",
+    storeLanguageBody:
+      "اختر اللغة التي يبدأ بها المتسوقون في متجرك. يمكن للعميل تغييرها بنفسه، ويبقى اختياره مرتبطًا بهذا المتجر فقط.",
+    storeLanguageArabic: "العربية",
+    storeLanguageEnglish: "English",
+    saveLanguage: "حفظ اللغة",
+    savingLanguage: "جارٍ الحفظ...",
+    languageSaved: "تم حفظ لغة المتجر.",
+    languageError: "تعذّر حفظ اللغة. حاول مرة أخرى.",
     suspendedTitle: "المتجر موقوف مؤقتًا.",
     suspendedBody:
       "يمكنك الاطلاع على حالة المتجر فقط. التعديلات غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
@@ -83,6 +104,15 @@ const COPY: Record<MerchantLocale, Copy> = {
     viewOrders: "View orders",
     logout: "Sign out",
     languageLabel: "Page language",
+    storeLanguageTitle: "Default customer language",
+    storeLanguageBody:
+      "Choose the language buyers start with in your store. A buyer can change it, and that choice stays scoped to this store.",
+    storeLanguageArabic: "العربية",
+    storeLanguageEnglish: "English",
+    saveLanguage: "Save language",
+    savingLanguage: "Saving...",
+    languageSaved: "Store language saved.",
+    languageError: "The language could not be saved. Try again.",
     suspendedTitle: "This store is suspended.",
     suspendedBody:
       "You can review the store status only. Editing is unavailable until a platform administrator reactivates the store.",
@@ -109,6 +139,7 @@ export function MerchantSetup({
   isAndroidTelegramLaunch,
   telegramLaunchOrigin,
   codOrdersEnabled,
+  storeDefaultLanguageCode,
 }: {
   storeName: string;
   email: string;
@@ -119,11 +150,37 @@ export function MerchantSetup({
   isAndroidTelegramLaunch: boolean;
   telegramLaunchOrigin: string | null;
   codOrdersEnabled: boolean;
+  storeDefaultLanguageCode: "ar" | "en";
 }) {
   const [locale, setLocale] = useMerchantLocale(initialLocale, "setup");
   const copy = COPY[locale];
   const statusLabel = copy.status[status];
   const secondaryStatusLabel = COPY[locale === "ar" ? "en" : "ar"].status[status];
+  const router = useRouter();
+  const [storeLanguage, setStoreLanguage] = useState<"ar" | "en">(
+    storeDefaultLanguageCode,
+  );
+  const [languageMessage, setLanguageMessage] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const [isSavingLanguage, startSavingLanguage] = useTransition();
+
+  function saveStoreLanguage() {
+    setLanguageMessage(null);
+    startSavingLanguage(async () => {
+      const result = await saveMerchantStoreLanguageAction({
+        code: storeLanguage,
+      });
+
+      if (result.ok) {
+        setLanguageMessage({ ok: true, text: copy.languageSaved });
+        router.refresh();
+      } else {
+        setLanguageMessage({ ok: false, text: copy.languageError });
+      }
+    });
+  }
 
   return (
     <div
@@ -203,6 +260,81 @@ export function MerchantSetup({
           isAndroidTelegramLaunch={isAndroidTelegramLaunch}
           telegramLaunchOrigin={telegramLaunchOrigin}
         />
+
+        <section className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Languages className="size-5" aria-hidden="true" />
+            </div>
+            <div className="space-y-1">
+              <h2 className="font-heading text-lg font-semibold">
+                {copy.storeLanguageTitle}
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                {copy.storeLanguageBody}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(
+              [
+                ["ar", copy.storeLanguageArabic],
+                ["en", copy.storeLanguageEnglish],
+              ] as const
+            ).map(([code, label]) => (
+              <label
+                key={code}
+                className={`flex min-h-11 cursor-pointer items-center gap-2 rounded-lg border px-3 text-sm font-medium transition-colors ${
+                  storeLanguage === code
+                    ? "border-primary bg-primary/5"
+                    : "border-input bg-background"
+                } ${readOnly ? "cursor-not-allowed opacity-60" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="store-default-language"
+                  value={code}
+                  checked={storeLanguage === code}
+                  disabled={readOnly || isSavingLanguage}
+                  onChange={() => {
+                    setStoreLanguage(code);
+                    setLanguageMessage(null);
+                  }}
+                  className="size-4 accent-primary"
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+
+          {languageMessage ? (
+            <p
+              role="status"
+              className={`text-sm font-medium ${
+                languageMessage.ok
+                  ? "text-emerald-700 dark:text-emerald-300"
+                  : "text-destructive"
+              }`}
+            >
+              {languageMessage.text}
+            </p>
+          ) : null}
+
+          <Button
+            type="button"
+            onClick={saveStoreLanguage}
+            disabled={readOnly || isSavingLanguage}
+            className="min-h-11 gap-2"
+          >
+            {isSavingLanguage ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Languages className="size-4" aria-hidden="true" />
+            )}
+            {isSavingLanguage ? copy.savingLanguage : copy.saveLanguage}
+          </Button>
+        </section>
 
         <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">

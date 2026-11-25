@@ -77,11 +77,12 @@ import postgres from "postgres";
 
 const WIZARD = "rabet db:setup:dev";
 
-/** The thirty-five domain tables created by the committed chain. */
+/** The thirty-seven domain tables created by the committed chain. */
 export const EXPECTED_TABLES = [
   "admin_login_throttle",
   "app_user",
   "bot_setting",
+  "buyer_language_preference",
   "cart",
   "cart_item",
   "category",
@@ -109,6 +110,7 @@ export const EXPECTED_TABLES = [
   "seller_notification_setting",
   "store",
   "store_commerce_setting",
+  "store_language_setting",
   "store_membership",
   "telegram_connection",
   "telegram_link_attempt",
@@ -134,6 +136,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0013_cod_orders",
   "0014_sparkling_captain_stacy",
   "0015_cod_shipping_delivery_collection",
+  "0016_buyer_language_support",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -156,6 +159,10 @@ const COMMERCE_TABLES = new Set([
   "product_inventory",
   "store_commerce_setting",
 ]);
+const LANGUAGE_PREFERENCE_TABLES = new Set([
+  "buyer_language_preference",
+  "store_language_setting",
+]);
 
 /** The twenty-one domain tables present in the 0005 tenant-identity baseline. */
 export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
@@ -164,7 +171,8 @@ export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
     !MERCHANT_INVITATION_TABLES.has(t) &&
     !MERCHANT_SESSION_TABLES.has(t) &&
     !MANAGED_TELEGRAM_TABLES.has(t) &&
-    !COMMERCE_TABLES.has(t),
+    !COMMERCE_TABLES.has(t) &&
+    !LANGUAGE_PREFERENCE_TABLES.has(t),
 );
 
 /** The twenty-one tables present in the 0006 ownership baseline (no new table until 0008). */
@@ -176,7 +184,8 @@ export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
     !MERCHANT_INVITATION_TABLES.has(t) &&
     !MERCHANT_SESSION_TABLES.has(t) &&
     !MANAGED_TELEGRAM_TABLES.has(t) &&
-    !COMMERCE_TABLES.has(t),
+    !COMMERCE_TABLES.has(t) &&
+    !LANGUAGE_PREFERENCE_TABLES.has(t),
 );
 
 /**
@@ -187,12 +196,16 @@ export const EXPECTED_TABLES_V7 = EXPECTED_TABLES.filter(
   (t) =>
     !MERCHANT_SESSION_TABLES.has(t) &&
     !MANAGED_TELEGRAM_TABLES.has(t) &&
-    !COMMERCE_TABLES.has(t),
+    !COMMERCE_TABLES.has(t) &&
+    !LANGUAGE_PREFERENCE_TABLES.has(t),
 );
 
 /** The exact twenty-five-table inventory through 0009 (merchant_auth_throttle included). */
 export const EXPECTED_TABLES_V8 = EXPECTED_TABLES.filter(
-  (t) => !MANAGED_TELEGRAM_TABLES.has(t) && !COMMERCE_TABLES.has(t),
+  (t) =>
+    !MANAGED_TELEGRAM_TABLES.has(t) &&
+    !COMMERCE_TABLES.has(t) &&
+    !LANGUAGE_PREFERENCE_TABLES.has(t),
 );
 
 /** The exact twenty-five-table inventory through 0010 (no new table). */
@@ -200,11 +213,13 @@ export const EXPECTED_TABLES_V9 = [...EXPECTED_TABLES_V8];
 
 /** The twenty-eight-table inventory through 0011 (managed bot tables included). */
 export const EXPECTED_TABLES_V10 = EXPECTED_TABLES.filter(
-  (t) => !COMMERCE_TABLES.has(t),
+  (t) => !COMMERCE_TABLES.has(t) && !LANGUAGE_PREFERENCE_TABLES.has(t),
 );
 
 /** The thirty-five-table inventory through 0013 (COD tables included). */
-export const EXPECTED_TABLES_V11 = [...EXPECTED_TABLES];
+export const EXPECTED_TABLES_V11 = EXPECTED_TABLES.filter(
+  (t) => !LANGUAGE_PREFERENCE_TABLES.has(t),
+);
 
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
 export const EXPECTED_TABLES_V3 = EXPECTED_TABLES_V4.filter(
@@ -517,11 +532,21 @@ export const CRITICAL_CONSTRAINTS_V13 = [
   "order_cancellation_reason_length_check",
 ];
 
-/** CHECK constraints the current chain requires (0015 adds shipping and collection). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK constraints present through 0015 (shipping and collection). */
+export const CRITICAL_CONSTRAINTS_V14 = [
   ...CRITICAL_CONSTRAINTS_V13,
   "order_shipping_state_check",
   "order_payment_collection_state_check",
+];
+
+/** CHECK, foreign-key and domain constraints the current chain requires. */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V14,
+  "buyer_language_preference_telegram_user_positive_check",
+  "buyer_language_preference_store_id_store_id_fk",
+  "buyer_language_preference_language_id_language_id_fk",
+  "store_language_setting_store_id_store_id_fk",
+  "store_language_setting_default_language_id_language_id_fk",
 ];
 
 /** Notification update triggers created by migration 0003. */

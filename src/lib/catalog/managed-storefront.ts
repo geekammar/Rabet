@@ -49,6 +49,33 @@ type LoadedCatalog = {
   eligibleCategoryIds: Set<string>;
 };
 
+/**
+ * Preferred stored translation order for one buyer language.
+ *
+ * `preferredCode` is the resolved buyer language; `fallbackCode` is the
+ * merchant's configured default when it differs. The existing safe fallback
+ * (English, then any available translation, then the slug) stays last, so a
+ * product is never hidden just because one translation is missing.
+ */
+export type ManagedTranslationPlan = {
+  preferredCode: string;
+  fallbackCode?: string | null;
+};
+
+function translationPriority(
+  plan: ManagedTranslationPlan | undefined,
+  code: string,
+): number {
+  if (plan) {
+    if (code === plan.preferredCode) return 0;
+    if (plan.fallbackCode && code === plan.fallbackCode) return 1;
+    if (code === "en") return 2;
+    return 3;
+  }
+
+  return code === "en" ? 0 : 1;
+}
+
 export type ManagedProductPage = {
   items: Array<{
     id: string;
@@ -196,9 +223,10 @@ function paginate<T>(
   };
 }
 
-async function loadEnglishNames(
+async function loadProductTranslations(
   db: Database,
   productIds: string[],
+  plan?: ManagedTranslationPlan,
 ): Promise<{ names: Map<string, string>; descriptions: Map<string, string> }> {
   if (productIds.length === 0) {
     return { names: new Map(), descriptions: new Map() };
@@ -218,22 +246,34 @@ async function loadEnglishNames(
 
   const names = new Map<string, string>();
   const descriptions = new Map<string, string>();
+  const priorities = new Map<string, number>();
 
-  // English first, then the first available translation. The latter fallback
-  // keeps a store with only Arabic content usable.
+  // The lowest-priority-number translation wins; ties keep the first row in
+  // language-code order, which is deterministic. Without a plan this preserves
+  // the previous "English first, then first available" behavior.
   for (const row of rows) {
-    if (row.code === "en" || !names.has(row.productId)) {
+    const priority = translationPriority(plan, row.code);
+    const current = priorities.get(row.productId);
+
+    if (current === undefined || priority < current) {
+      priorities.set(row.productId, priority);
       names.set(row.productId, row.name);
-      if (row.description) descriptions.set(row.productId, row.description);
+
+      if (row.description) {
+        descriptions.set(row.productId, row.description);
+      } else {
+        descriptions.delete(row.productId);
+      }
     }
   }
 
   return { names, descriptions };
 }
 
-async function loadEnglishCategoryNames(
+async function loadCategoryTranslations(
   db: Database,
   categoryIds: string[],
+  plan?: ManagedTranslationPlan,
 ): Promise<Map<string, string>> {
   if (categoryIds.length === 0) return new Map();
 
@@ -249,9 +289,14 @@ async function loadEnglishCategoryNames(
     .orderBy(asc(language.code));
 
   const names = new Map<string, string>();
+  const priorities = new Map<string, number>();
 
   for (const row of rows) {
-    if (row.code === "en" || !names.has(row.categoryId)) {
+    const priority = translationPriority(plan, row.code);
+    const current = priorities.get(row.categoryId);
+
+    if (current === undefined || priority < current) {
+      priorities.set(row.categoryId, priority);
       names.set(row.categoryId, row.name);
     }
   }
@@ -263,6 +308,7 @@ export async function listManagedProducts(
   db: Database,
   scope: StoreScope,
   params: { page: number; pageSize: number },
+  translationPlan?: ManagedTranslationPlan,
 ): Promise<ManagedProductPage> {
   const loaded = await loadCatalog(db, scope);
   const ordered = loaded.products
@@ -279,9 +325,10 @@ export async function listManagedProducts(
     );
 
   const result = paginate(ordered, params.page, params.pageSize);
-  const { names, descriptions } = await loadEnglishNames(
+  const { names, descriptions } = await loadProductTranslations(
     db,
     result.items.map((row) => row.id),
+    translationPlan,
   );
 
   return {
@@ -301,6 +348,7 @@ export async function listManagedCategories(
   db: Database,
   scope: StoreScope,
   params: { parentId: string | null; page: number; pageSize: number },
+  translationPlan?: ManagedTranslationPlan,
 ): Promise<ManagedCategoryPage> {
   const loaded = await loadCatalog(db, scope);
   const categories = Array.from(loaded.categoryById.values())
@@ -312,9 +360,10 @@ export async function listManagedCategories(
     .sort((a, b) => a.sortOrder - b.sortOrder || compareStrings(a.id, b.id));
 
   const result = paginate(categories, params.page, params.pageSize);
-  const names = await loadEnglishCategoryNames(
+  const names = await loadCategoryTranslations(
     db,
     result.items.map((row) => row.id),
+    translationPlan,
   );
 
   return {
@@ -331,6 +380,7 @@ export async function listManagedProductsInCategory(
   db: Database,
   scope: StoreScope,
   params: { categoryId: string; page: number; pageSize: number },
+  translationPlan?: ManagedTranslationPlan,
 ): Promise<ManagedProductPage> {
   const loaded = await loadCatalog(db, scope);
 
@@ -345,9 +395,10 @@ export async function listManagedProductsInCategory(
     );
 
   const result = paginate(products, params.page, params.pageSize);
-  const { names, descriptions } = await loadEnglishNames(
+  const { names, descriptions } = await loadProductTranslations(
     db,
     result.items.map((row) => row.id),
+    translationPlan,
   );
 
   return {
@@ -367,6 +418,7 @@ export async function readManagedProduct(
   db: Database,
   scope: StoreScope,
   productId: string,
+  translationPlan?: ManagedTranslationPlan,
 ): Promise<ManagedProduct | null> {
   const loaded = await loadCatalog(db, scope);
   const row = loaded.products.find((productRow) => productRow.id === productId);
@@ -385,9 +437,18 @@ export async function readManagedProduct(
     .where(eq(productTranslation.productId, row.id))
     .orderBy(asc(language.code));
 
-  const preferred =
-    translations.find((translation) => translation.code === "en") ??
-    translations[0];
+  let preferred = translations[0];
+  let preferredPriority = preferred
+    ? translationPriority(translationPlan, preferred.code)
+    : Number.POSITIVE_INFINITY;
+
+  for (const translation of translations.slice(1)) {
+    const priority = translationPriority(translationPlan, translation.code);
+    if (priority < preferredPriority) {
+      preferred = translation;
+      preferredPriority = priority;
+    }
+  }
 
   return {
     id: row.id,
@@ -404,6 +465,7 @@ export async function readManagedCategory(
   db: Database,
   scope: StoreScope,
   categoryId: string,
+  translationPlan?: ManagedTranslationPlan,
 ): Promise<{ id: string; parentId: string | null; name: string } | null> {
   const loaded = await loadCatalog(db, scope);
 
@@ -414,7 +476,7 @@ export async function readManagedCategory(
   const row = loaded.categoryById.get(categoryId);
   if (!row) return null;
 
-  const names = await loadEnglishCategoryNames(db, [categoryId]);
+  const names = await loadCategoryTranslations(db, [categoryId], translationPlan);
 
   return {
     id: row.id,
