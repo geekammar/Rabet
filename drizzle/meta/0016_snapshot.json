@@ -1,5 +1,5 @@
 {
-  "id": "b16c043f-e1af-4b90-a18f-6417a10daaf3",
+  "id": "170eeae9-1a0d-4522-b616-3ec7ec4055fa",
   "prevId": "d09e75a9-21d8-4b8a-a4a8-130a422731d5",
   "version": "7",
   "dialect": "postgresql",
@@ -3729,9 +3729,9 @@
           "primaryKey": false,
           "notNull": true
         },
-        "language_id": {
-          "name": "language_id",
-          "type": "uuid",
+        "locale": {
+          "name": "locale",
+          "type": "char(2)",
           "primaryKey": false,
           "notNull": true
         },
@@ -3764,19 +3764,6 @@
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
-        },
-        "buyer_language_preference_language_id_language_id_fk": {
-          "name": "buyer_language_preference_language_id_language_id_fk",
-          "tableFrom": "buyer_language_preference",
-          "tableTo": "language",
-          "columnsFrom": [
-            "language_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -3794,6 +3781,10 @@
         "buyer_language_preference_telegram_user_positive_check": {
           "name": "buyer_language_preference_telegram_user_positive_check",
           "value": "\"buyer_language_preference\".\"telegram_user_id\" > 0"
+        },
+        "buyer_language_preference_locale_check": {
+          "name": "buyer_language_preference_locale_check",
+          "value": "\"buyer_language_preference\".\"locale\" IN ('ar', 'en')"
         }
       },
       "isRLSEnabled": false
@@ -3874,9 +3865,9 @@
           "primaryKey": true,
           "notNull": true
         },
-        "default_language_id": {
-          "name": "default_language_id",
-          "type": "uuid",
+        "locale": {
+          "name": "locale",
+          "type": "char(2)",
           "primaryKey": false,
           "notNull": true
         },
@@ -3909,25 +3900,17 @@
           ],
           "onDelete": "restrict",
           "onUpdate": "no action"
-        },
-        "store_language_setting_default_language_id_language_id_fk": {
-          "name": "store_language_setting_default_language_id_language_id_fk",
-          "tableFrom": "store_language_setting",
-          "tableTo": "language",
-          "columnsFrom": [
-            "default_language_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "store_language_setting_locale_check": {
+          "name": "store_language_setting_locale_check",
+          "value": "\"store_language_setting\".\"locale\" IN ('ar', 'en')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.telegram_update": {

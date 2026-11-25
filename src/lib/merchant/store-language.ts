@@ -1,30 +1,30 @@
 import "server-only";
 
-import { eq } from "drizzle-orm";
-
 import type { MerchantAccess } from "@/lib/auth/merchant-session";
-import { language, storeLanguageSetting } from "@/db/schema";
+import { storeLanguageSetting } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
-import { isBuyerLocale, type BuyerLocale } from "@/lib/commerce/buyer-language";
+import {
+  BUYER_LOCALE_META,
+  isBuyerLocale,
+  type BuyerLocale,
+} from "@/lib/commerce/buyer-language";
 import { resolveMerchantEligibility } from "@/lib/merchant/eligibility";
 
 export type MerchantStoreLanguageResult =
   | { ok: true; code: BuyerLocale; label: string }
   | { ok: false; error: "UNAVAILABLE" | "DENIED" | "INVALID_LANGUAGE" };
 
-const LANGUAGE_META: Record<BuyerLocale, { label: string; textDirection: "ltr" | "rtl" }> = {
-  ar: { label: "العربية", textDirection: "rtl" },
-  en: { label: "English", textDirection: "ltr" },
-};
-
 /**
- * Saves the authenticated merchant's default customer language.
+ * Saves the authenticated merchant's default buyer UI language.
  *
  * The write re-checks the same database-backed eligibility rule as the request
  * that rendered the form, so a suspended store, revoked membership, stale
  * session version or disabled user cannot save through an already-open page.
- * Only the server-minted store scope and the Arabic/English code cross this
+ * Only the server-minted store scope and the Arabic/English locale cross this
  * boundary; no submitted store id is read.
+ *
+ * The locale is stored as data on the store's own row. This function never
+ * inserts, enables, disables or modifies a global catalog `language` row.
  */
 export async function saveMerchantStoreLanguage(
   db: TransactionDatabase,
@@ -40,7 +40,7 @@ export async function saveMerchantStoreLanguage(
   }
 
   const code = input.code;
-  const meta = LANGUAGE_META[code];
+  const meta = BUYER_LOCALE_META[code];
 
   try {
     return await db.transaction(async (tx) => {
@@ -60,50 +60,16 @@ export async function saveMerchantStoreLanguage(
         return { ok: false, error: "DENIED" } as const;
       }
 
-      const [inserted] = await tx
-        .insert(language)
-        .values({
-          code,
-          label: meta.label,
-          textDirection: meta.textDirection,
-          isEnabled: true,
-        })
-        .onConflictDoNothing({ target: language.code })
-        .returning({ id: language.id });
-
-      let languageId = inserted?.id;
-
-      if (!languageId) {
-        const [existing] = await tx
-          .select({ id: language.id, isEnabled: language.isEnabled })
-          .from(language)
-          .where(eq(language.code, code))
-          .limit(1);
-
-        if (!existing) {
-          return { ok: false, error: "UNAVAILABLE" } as const;
-        }
-
-        if (!existing.isEnabled) {
-          await tx
-            .update(language)
-            .set({ isEnabled: true })
-            .where(eq(language.id, existing.id));
-        }
-
-        languageId = existing.id;
-      }
-
       await tx
         .insert(storeLanguageSetting)
         .values({
           storeId: access.scope.storeId,
-          defaultLanguageId: languageId,
+          locale: code,
         })
         .onConflictDoUpdate({
           target: storeLanguageSetting.storeId,
           set: {
-            defaultLanguageId: languageId,
+            locale: code,
             updatedAt: new Date(),
           },
         });

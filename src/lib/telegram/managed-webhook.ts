@@ -231,7 +231,6 @@ async function languageContextFor(
       : buyerLocaleFromLanguageCode(profileLanguageCode);
   const language: ResolvedBuyerLanguage = {
     locale,
-    languageId: storeDefault?.id ?? null,
     source: storeDefault ? "store_default" : "profile",
     storeDefaultCode: storeDefault?.code ?? null,
   };
@@ -491,7 +490,11 @@ async function renderPlacedOrder(
   const params = {
     chatId,
     text,
-    replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+    replyMarkup: {
+      inline_keyboard: [
+        [{ text: copy.home, callback_data: tokens.homeNew() }],
+      ],
+    },
   };
 
   if (messageId) {
@@ -1736,6 +1739,21 @@ async function dispatchCallback(
       );
       return;
     }
+  }
+
+  if (parsedToken.type === "homeNew") {
+    await renderHome(
+      db,
+      scope,
+      storeName,
+      cod,
+      copy,
+      plan,
+      transport,
+      chatId,
+      undefined,
+    );
+    return;
   }
 
   if (parsedToken.type === "home") {

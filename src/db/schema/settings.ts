@@ -121,17 +121,17 @@ export const language = pgTable(
 );
 
 /**
- * `store_language_setting` — the customer-facing default language for one
- * store.
+ * `store_language_setting` — the customer-facing UI language for one store.
  *
- * This is additive to the legacy `bot_setting` singleton: existing stores keep
- * their configured default through that row, and a store without an explicit
- * row falls back to it. Writing here is merchant-scoped, so one store's choice
- * never changes another store.
+ * The value is a validated `ar`/`en` locale, not a reference to the global
+ * catalog `language` rows. The two concepts are deliberately separate: a
+ * merchant may choose Arabic or English buyer UI even before the corresponding
+ * catalog metadata exists or while it is disabled. Treating the locale as data
+ * also means saving this setting can never insert, enable or modify a global
+ * language row.
  *
- * The reference is nullable-free but the row itself is optional, which is the
- * "not configured yet" state. A disabled language is ignored at read time so
- * disabling Arabic cleanly falls back instead of leaving buyers stuck.
+ * A missing row is the "not configured yet" state; compatible legacy
+ * `bot_setting` defaults for the same store remain a read-only fallback.
  */
 export const storeLanguageSetting = pgTable(
   "store_language_setting",
@@ -139,9 +139,7 @@ export const storeLanguageSetting = pgTable(
     storeId: uuid("store_id")
       .primaryKey()
       .references(() => store.id, { onDelete: "restrict" }),
-    defaultLanguageId: uuid("default_language_id")
-      .notNull()
-      .references(() => language.id, { onDelete: "restrict" }),
+    locale: char("locale", { length: 2 }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
@@ -149,6 +147,12 @@ export const storeLanguageSetting = pgTable(
       .notNull()
       .defaultNow(),
   },
+  (table) => [
+    check(
+      "store_language_setting_locale_check",
+      sql`${table.locale} IN ('ar', 'en')`,
+    ),
+  ],
 );
 
 /**
@@ -169,9 +173,7 @@ export const buyerLanguagePreference = pgTable(
       .notNull()
       .references(() => store.id, { onDelete: "restrict" }),
     telegramUserId: bigint("telegram_user_id", { mode: "number" }).notNull(),
-    languageId: uuid("language_id")
-      .notNull()
-      .references(() => language.id, { onDelete: "restrict" }),
+    locale: char("locale", { length: 2 }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
@@ -187,6 +189,10 @@ export const buyerLanguagePreference = pgTable(
     check(
       "buyer_language_preference_telegram_user_positive_check",
       sql`${table.telegramUserId} > 0`,
+    ),
+    check(
+      "buyer_language_preference_locale_check",
+      sql`${table.locale} IN ('ar', 'en')`,
     ),
   ],
 );

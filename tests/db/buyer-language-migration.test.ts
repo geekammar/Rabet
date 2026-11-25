@@ -190,6 +190,19 @@ describe.skipIf(!shouldRun)("buyer language migration 0016", () => {
       "store_language_setting",
     ]);
 
+    const columns = await pool.unsafe<{ table_name: string; column_name: string }>(`
+      select table_name, column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name in ('buyer_language_preference', 'store_language_setting')
+        and column_name in ('locale', 'language_id', 'default_language_id')
+      order by table_name, column_name
+    `);
+    expect(columns).toEqual([
+      { table_name: "buyer_language_preference", column_name: "locale" },
+      { table_name: "store_language_setting", column_name: "locale" },
+    ]);
+
     const preferences = await pool.unsafe<{ count: number }>(`
       select count(*)::int as count from buyer_language_preference
     `);

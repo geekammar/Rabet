@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -10,6 +10,7 @@ import {
   storeLanguageSetting,
 } from "@/db/schema";
 import {
+  BUYER_LOCALE_META,
   buyerLocaleFromLanguageCode,
   isBuyerLocale,
   type BuyerLocale,
@@ -20,54 +21,47 @@ import { assertStoreScope, type StoreScope } from "./store-scope";
 /**
  * Store-scoped customer language resolution.
  *
- * Priority is deliberate and stored, not inferred from the request:
+ * Buyer-facing UI language is stored as a validated `ar`/`en` locale. It is
+ * intentionally independent from the global catalog `language` rows: choosing
+ * Arabic UI must not create or enable Arabic catalog metadata, and a fresh
+ * store must be able to select either UI language even when those rows are
+ * missing or disabled.
+ *
+ * Resolution order:
  *
  *   1. the buyer's explicit choice for this exact store;
- *   2. the merchant's configured default for this store;
- *   3. the legacy `bot_setting` default for the same store, when one exists;
+ *   2. the merchant's explicit default for this store;
+ *   3. a compatible same-store legacy `bot_setting` default;
  *   4. the existing Telegram profile hint (`ar*` → Arabic, otherwise English).
  *
- * The legacy row is only a compatibility fallback. A row that belongs to a
- * different store never affects this store, and a disabled language is ignored
- * at read time so an old preference can never trap a buyer in a language the
- * store no longer offers.
+ * An unowned legacy singleton is not used as every managed store's default.
+ * The global language table only participates in step 3, and only when its row
+ * exists, is enabled and belongs to the same store.
  */
 
 export type StoreLanguageChoice = {
-  id: string;
-  code: string;
+  code: BuyerLocale;
   label: string;
   textDirection: "ltr" | "rtl";
-  isEnabled: boolean;
 };
 
 export type ResolvedBuyerLanguage = {
   locale: BuyerLocale;
-  languageId: string | null;
   source: "buyer" | "store_default" | "profile";
-  storeDefaultCode: string | null;
+  storeDefaultCode: BuyerLocale | null;
 };
 
-function toChoice(row: {
-  id: string;
-  code: string;
-  label: string;
-  textDirection: string;
-  isEnabled: boolean;
-}): StoreLanguageChoice {
+function choiceFor(code: BuyerLocale): StoreLanguageChoice {
+  const meta = BUYER_LOCALE_META[code];
   return {
-    id: row.id,
-    code: row.code,
-    label: row.label,
-    textDirection: row.textDirection === "rtl" ? "rtl" : "ltr",
-    isEnabled: row.isEnabled,
+    code,
+    label: meta.label,
+    textDirection: meta.textDirection,
   };
 }
 
 /**
- * Reads the explicit per-store row even when its language is disabled, so the
- * merchant settings card can explain the current value honestly. Buyer
- * resolution below uses the enabled-only reader instead.
+ * Reads the explicit per-store UI language, if one has been saved.
  */
 export async function readStoreLanguageChoice(
   db: Database,
@@ -76,75 +70,46 @@ export async function readStoreLanguageChoice(
   if (typeof storeId !== "string" || storeId.trim().length === 0) return null;
 
   const rows = await db
-    .select({
-      id: language.id,
-      code: language.code,
-      label: language.label,
-      textDirection: language.textDirection,
-      isEnabled: language.isEnabled,
-    })
+    .select({ locale: storeLanguageSetting.locale })
     .from(storeLanguageSetting)
-    .innerJoin(language, eq(language.id, storeLanguageSetting.defaultLanguageId))
     .where(eq(storeLanguageSetting.storeId, storeId))
     .limit(1);
 
-  return rows[0] ? toChoice(rows[0]) : null;
+  const locale = rows[0]?.locale;
+  return isBuyerLocale(locale) ? choiceFor(locale) : null;
 }
 
 /**
  * Resolves the merchant default for one store.
  *
- * The explicit per-store setting wins. Existing stores without that row keep
- * the default they already configured on the legacy singleton, but only when
- * that singleton is either unowned (the historical single-store state) or
- * belongs to the same store.
+ * The explicit per-store locale wins. A legacy `bot_setting` row is a fallback
+ * only when it belongs to this same store and its language is enabled; an
+ * unowned singleton is deliberately ignored.
  */
 export async function readStoreDefaultLanguage(
   db: Database,
   storeId: string,
 ): Promise<StoreLanguageChoice | null> {
+  const explicit = await readStoreLanguageChoice(db, storeId);
+  if (explicit) return explicit;
+
   if (typeof storeId !== "string" || storeId.trim().length === 0) return null;
 
-  const explicit = await db
-    .select({
-      id: language.id,
-      code: language.code,
-      label: language.label,
-      textDirection: language.textDirection,
-      isEnabled: language.isEnabled,
-    })
-    .from(storeLanguageSetting)
-    .innerJoin(language, eq(language.id, storeLanguageSetting.defaultLanguageId))
-    .where(
-      and(
-        eq(storeLanguageSetting.storeId, storeId),
-        eq(language.isEnabled, true),
-      ),
-    )
-    .limit(1);
-
-  if (explicit[0]) return toChoice(explicit[0]);
-
   const legacy = await db
-    .select({
-      id: language.id,
-      code: language.code,
-      label: language.label,
-      textDirection: language.textDirection,
-      isEnabled: language.isEnabled,
-    })
+    .select({ code: language.code })
     .from(botSetting)
     .innerJoin(language, eq(language.id, botSetting.defaultLanguageId))
     .where(
       and(
         eq(botSetting.id, 1),
-        or(eq(botSetting.storeId, storeId), isNull(botSetting.storeId)),
+        eq(botSetting.storeId, storeId),
         eq(language.isEnabled, true),
       ),
     )
     .limit(1);
 
-  return legacy[0] ? toChoice(legacy[0]) : null;
+  const code = legacy[0]?.code;
+  return isBuyerLocale(code) ? choiceFor(code) : null;
 }
 
 /**
@@ -164,34 +129,29 @@ export async function resolveBuyerLanguage(
   const storeDefaultCode = storeDefault?.code ?? null;
 
   const preference = await db
-    .select({
-      id: language.id,
-      code: language.code,
-    })
+    .select({ locale: buyerLanguagePreference.locale })
     .from(buyerLanguagePreference)
-    .innerJoin(language, eq(language.id, buyerLanguagePreference.languageId))
     .where(
       and(
         eq(buyerLanguagePreference.storeId, input.storeId),
         eq(buyerLanguagePreference.telegramUserId, input.telegramUserId),
-        eq(language.isEnabled, true),
       ),
     )
     .limit(1);
 
-  if (preference[0] && isBuyerLocale(preference[0].code)) {
+  const buyerLocale = preference[0]?.locale;
+
+  if (isBuyerLocale(buyerLocale)) {
     return {
-      locale: preference[0].code,
-      languageId: preference[0].id,
+      locale: buyerLocale,
       source: "buyer",
       storeDefaultCode,
     };
   }
 
-  if (storeDefault && isBuyerLocale(storeDefault.code)) {
+  if (storeDefault) {
     return {
       locale: storeDefault.code,
-      languageId: storeDefault.id,
       source: "store_default",
       storeDefaultCode,
     };
@@ -199,17 +159,16 @@ export async function resolveBuyerLanguage(
 
   return {
     locale: buyerLocaleFromLanguageCode(input.profileLanguageCode),
-    languageId: null,
     source: "profile",
     storeDefaultCode,
   };
 }
 
 /**
- * Persists one buyer's explicit language for one store.
+ * Persists one buyer's explicit UI language for one store.
  *
- * Only an enabled Arabic/English row may be written. The composite primary key
- * makes the write idempotent and keeps the preference strictly per store.
+ * The composite primary key makes the write idempotent and keeps the
+ * preference strictly per store. No global language row is read or written.
  */
 export async function saveBuyerLanguagePreference(
   db: Database,
@@ -223,24 +182,12 @@ export async function saveBuyerLanguagePreference(
   }
 
   try {
-    const rows = await db
-      .select({ id: language.id })
-      .from(language)
-      .where(and(eq(language.code, input.code), eq(language.isEnabled, true)))
-      .limit(1);
-
-    const row = rows[0];
-
-    if (!row) {
-      return { ok: false, error: "INVALID_LANGUAGE" };
-    }
-
     await db
       .insert(buyerLanguagePreference)
       .values({
         storeId: scope.storeId,
         telegramUserId: input.telegramUserId,
-        languageId: row.id,
+        locale: input.code,
       })
       .onConflictDoUpdate({
         target: [
@@ -248,7 +195,7 @@ export async function saveBuyerLanguagePreference(
           buyerLanguagePreference.telegramUserId,
         ],
         set: {
-          languageId: row.id,
+          locale: input.code,
           updatedAt: new Date(),
         },
       });

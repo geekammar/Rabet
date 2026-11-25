@@ -543,10 +543,10 @@ export const CRITICAL_CONSTRAINTS_V14 = [
 export const CRITICAL_CONSTRAINTS = [
   ...CRITICAL_CONSTRAINTS_V14,
   "buyer_language_preference_telegram_user_positive_check",
+  "buyer_language_preference_locale_check",
   "buyer_language_preference_store_id_store_id_fk",
-  "buyer_language_preference_language_id_language_id_fk",
+  "store_language_setting_locale_check",
   "store_language_setting_store_id_store_id_fk",
-  "store_language_setting_default_language_id_language_id_fk",
 ];
 
 /** Notification update triggers created by migration 0003. */

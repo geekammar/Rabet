@@ -11,6 +11,14 @@ export const BUYER_LOCALES = ["ar", "en"] as const;
 
 export type BuyerLocale = (typeof BUYER_LOCALES)[number];
 
+export const BUYER_LOCALE_META: Record<
+  BuyerLocale,
+  { label: string; textDirection: "ltr" | "rtl" }
+> = {
+  ar: { label: "العربية", textDirection: "rtl" },
+  en: { label: "English", textDirection: "ltr" },
+};
+
 export function isBuyerLocale(value: unknown): value is BuyerLocale {
   return value === "ar" || value === "en";
 }

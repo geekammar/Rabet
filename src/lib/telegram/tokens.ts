@@ -34,6 +34,7 @@ export function assertValidCallbackData(data: string): string {
 
 export const tokens = {
   home: (): string => assertValidCallbackData("home"),
+  homeNew: (): string => assertValidCallbackData("home:new"),
   rootCategory: (page?: number): string => {
     if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
       throw new Error(`Invalid page number: ${page}`);
@@ -194,6 +195,7 @@ export const tokens = {
 
 export type ParsedToken =
   | { type: "home" }
+  | { type: "homeNew" }
   | { type: "root"; page: number }
   | { type: "storefrontCategories"; page: number }
   | { type: "storefrontCategory"; categoryId: string; page: number }
@@ -232,6 +234,10 @@ export function parseToken(data?: string): ParsedToken {
 
   if (data === "home") {
     return { type: "home" };
+  }
+
+  if (data === "home:new") {
+    return { type: "homeNew" };
   }
 
   if (data === "cart") {

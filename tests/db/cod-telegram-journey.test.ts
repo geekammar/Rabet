@@ -361,6 +361,7 @@ function callbackUpdate(
   buyerId: number,
   data: string,
   languageCode?: string,
+  messageId?: number,
 ) {
   return {
     update_id: nextUpdateId(),
@@ -373,7 +374,7 @@ function callbackUpdate(
         ...(languageCode ? { language_code: languageCode } : {}),
       },
       message: {
-        message_id: 7000 + updateId,
+        message_id: messageId ?? 7000 + updateId,
         chat: { id: buyerId, type: "private" },
         date: 1,
       },
@@ -386,8 +387,8 @@ async function call(
   connectionId: string,
   body: unknown,
   secret = "bot-secret-a",
+  transport: FakeTelegramTransport = createFakeTelegramTransport(),
 ): Promise<{ status: number; transport: FakeTelegramTransport }> {
-  const transport = createFakeTelegramTransport();
   const response = await handleManagedTelegramWebhookRequest(
     webhookRequest(body, secret),
     connectionId,
@@ -434,18 +435,12 @@ function lastText(transport: FakeTelegramTransport): string {
 }
 
 async function setStoreDefault(storeId: string, code: "ar" | "en") {
-  const [row] = await db()
-    .select()
-    .from(language)
-    .where(eq(language.code, code))
-    .limit(1);
-
   await db()
     .insert(storeLanguageSetting)
-    .values({ storeId, defaultLanguageId: row.id })
+    .values({ storeId, locale: code })
     .onConflictDoUpdate({
       target: storeLanguageSetting.storeId,
-      set: { defaultLanguageId: row.id, updatedAt: new Date() },
+      set: { locale: code, updatedAt: new Date() },
     });
 }
 
@@ -1169,6 +1164,82 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     expect(lastText(added.transport)).toContain("9.50 SAR");
   });
 
+  it("keeps the saved phone when switching language at the address prompt", async () => {
+    await setStoreDefault(fixture.storeAId, "ar");
+    const buyer = 92006;
+
+    await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "/start", {}, "en"),
+    );
+    await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `p:${fixture.productAId}`, "en"),
+    );
+    const added = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `ca:${fixture.productAId}:1`, "en"),
+    );
+    const checkoutButton = lastButton(added.transport, "co:");
+    expect(checkoutButton?.callback_data).toBeDefined();
+
+    await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, checkoutButton!.callback_data!, "en"),
+    );
+
+    const phone = await call(
+      fixture.connectionAId,
+      contactUpdate(buyer, "+15557654321"),
+    );
+    expect(
+      phone.transport.sentMessages.some((entry) =>
+        entry.text.includes("أرسل عنوان التوصيل"),
+      ),
+    ).toBe(true);
+
+    const addressMenu = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "اللغة / Language"),
+    );
+    expect(lastText(addressMenu.transport)).toContain("اختر اللغة");
+
+    const addressLanguageButton = lastButton(addressMenu.transport, "lang:");
+    expect(addressLanguageButton?.callback_data).toBeDefined();
+
+    const switchedAtAddress = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "lang:en"),
+    );
+    expect(
+      switchedAtAddress.transport.sentMessages.some((entry) =>
+        entry.text.includes("Send the delivery address"),
+      ),
+    ).toBe(true);
+
+    const reviewed = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "456 Address Switch Street"),
+    );
+    const reviewText = lastText(reviewed.transport);
+    expect(reviewText).toContain("Review your order");
+    expect(reviewText).toContain("+15557654321");
+    expect(reviewText).toContain("456 Address Switch Street");
+
+    const confirmButton = lastButton(reviewed.transport, "cc:");
+    expect(confirmButton?.callback_data).toBeDefined();
+
+    await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, confirmButton!.callback_data!),
+    );
+
+    const orders = await db().select().from(order);
+    expect(orders).toHaveLength(1);
+    expect(orders[0].customerPhone).toBe("+15557654321");
+    expect(orders[0].deliveryAddress).toBe("456 Address Switch Street");
+  });
+
   it("saves the merchant default only for the authenticated store", async () => {
     const scopeA = await readStoreScopeForFixture(db(), fixture.storeAId);
     const accessA = {
@@ -1212,4 +1283,71 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     );
     expect(denied).toEqual({ ok: false, error: "DENIED" });
   });
+  it("keeps the placed receipt when returning home and changing language", async () => {
+    const { confirmData } = await completeReview();
+    const transport = createFakeTelegramTransport();
+
+    const confirmed = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, confirmData),
+      "bot-secret-a",
+      transport,
+    );
+
+    const receipt = confirmed.transport.editedMessages.at(-1);
+    expect(receipt?.text).toContain("placed");
+    expect(receipt?.text).toContain("Total: 37.00 SAR");
+    const receiptId = receipt!.messageId;
+
+    const receiptButtons = inlineButtons(receipt!);
+    expect(
+      receiptButtons.some((button) =>
+        button.callback_data?.startsWith("lang"),
+      ),
+    ).toBe(false);
+
+    const homeButton = receiptButtons.find(
+      (button) => button.callback_data === "home:new",
+    );
+    expect(homeButton).toBeDefined();
+
+    const home = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, homeButton!.callback_data!, undefined, receiptId),
+      "bot-secret-a",
+      transport,
+    );
+    expect(home.transport.sentMessages.at(-1)?.text).toContain("Welcome to");
+
+    const languageMenu = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, "langs:h", undefined, receiptId + 1),
+      "bot-secret-a",
+      transport,
+    );
+    expect(languageMenu.transport.editedMessages.at(-1)?.text).toContain(
+      "Choose your language",
+    );
+
+    const switched = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, "lang:ar:h", undefined, receiptId + 1),
+      "bot-secret-a",
+      transport,
+    );
+    expect(switched.transport.editedMessages.at(-1)?.text).toContain(
+      "مرحبًا بك",
+    );
+
+    const receiptEdits = switched.transport.editedMessages.filter(
+      (message) => message.messageId === receiptId,
+    );
+    expect(receiptEdits).toHaveLength(1);
+    expect(receiptEdits[0].text).toContain("placed");
+    expect(receiptEdits[0].text).toContain("ORD-");
+
+    expect(await db().select().from(order)).toHaveLength(1);
+    expect(await db().select().from(inventoryReservation)).toHaveLength(1);
+  });
+
 });
