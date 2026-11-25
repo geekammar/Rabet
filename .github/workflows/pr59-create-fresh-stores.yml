@@ -1,0 +1,88 @@
+name: PR59 create fresh QA stores
+
+on:
+  push:
+    branches:
+      - ops/buyer-lang-qa-pr59
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr59-create-fresh-stores
+  cancel-in-progress: false
+
+jobs:
+  create:
+    name: Create two fresh PR59 QA stores and credentials
+    if: contains(github.event.head_commit.message, '[prepare-pr59-stores]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch candidate branch
+        run: git fetch origin feat/buyer-language-simple-checkout
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install orchestration dependencies
+        run: npm ci
+
+      - name: Create exact candidate worktree
+        run: |
+          set -euo pipefail
+          CANDIDATE_SHA="9542b7c38ac7bacd7fd8287c2ce3936e284256f6"
+          git worktree add --detach /tmp/rabet-candidate "${CANDIDATE_SHA}"
+          test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${CANDIDATE_SHA}"
+
+      - name: Install candidate dependencies
+        working-directory: /tmp/rabet-candidate
+        run: npm ci
+
+      - name: Create two fresh stores through the invitation service
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SUMMARY_OUT: /tmp/pr59-stores/summary.json
+          CREDENTIALS_OUT: /tmp/pr59-stores/credentials.json
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pr59-stores
+          mkdir -p /tmp/rabet-candidate/node_modules/server-only
+          printf '{"name":"server-only","version":"0.0.0","main":"index.js"}\n' > /tmp/rabet-candidate/node_modules/server-only/package.json
+          printf 'module.exports = {};\n' > /tmp/rabet-candidate/node_modules/server-only/index.js
+          cp scripts/pr59-create-fresh-stores.ts /tmp/rabet-candidate/scripts/pr59-create-fresh-stores.ts
+          cd /tmp/rabet-candidate
+          npx tsx scripts/pr59-create-fresh-stores.ts
+
+      - name: Encrypt credential bundle for the operator
+        run: |
+          set -euo pipefail
+          export GNUPGHOME=/tmp/pr59-gpg
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          gpg --batch --import scripts/pr59-handoff-public.asc
+          FPR=$(gpg --list-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+          test -n "$FPR"
+          gpg --batch --yes --trust-model always --encrypt --recipient "$FPR" --output /tmp/pr59-stores/credentials.json.gpg /tmp/pr59-stores/credentials.json
+          rm /tmp/pr59-stores/credentials.json
+          test -s /tmp/pr59-stores/summary.json
+          test -s /tmp/pr59-stores/credentials.json.gpg
+
+      - name: Upload sanitized summary and encrypted credentials
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr59-fresh-stores
+          path: /tmp/pr59-stores/
+          if-no-files-found: ignore
+          retention-days: 7
