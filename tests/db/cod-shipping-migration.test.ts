@@ -7,7 +7,16 @@ import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
 import * as schema from "@/db/schema";
-import { hasTestCluster, testClusterUrl } from "./helpers";
+import type { TransactionDatabase } from "@/db/transaction-client";
+import {
+  collectMerchantOrderPayment,
+  markMerchantOrderDelivered,
+} from "@/lib/commerce/orders";
+import {
+  hasTestCluster,
+  readStoreScopeForFixture,
+  testClusterUrl,
+} from "./helpers";
 
 /**
  * Migration 0015 on a database that already has COD history.
@@ -311,6 +320,121 @@ describe.skipIf(!shouldRun)("0014 to 0015 COD shipping migration", () => {
         payment_collected_at: null,
       },
     ]);
+  });
+
+  it("delivers a historical handed order with an unknown handoff time through the production use case", async () => {
+    const storeId = "00000000-0000-4000-8000-000000000101";
+    const orderId = "00000000-0000-4000-8000-000000000111";
+    const scope = await readStoreScopeForFixture(db, storeId);
+    const tx = db as unknown as TransactionDatabase;
+
+    const inventoryBefore = await pool.unsafe<Record<string, unknown>>(`
+      select product_id, store_id, on_hand, reserved
+      from product_inventory order by product_id
+    `);
+    const reservationsBefore = await pool.unsafe<Record<string, unknown>>(`
+      select id, status, quantity, reserved_at, committed_at, released_at,
+             release_reason
+      from inventory_reservation where order_id = '00000000-0000-4000-8000-000000000111' order by id
+    `);
+    const itemsBefore = await pool.unsafe<Record<string, unknown>>(`
+      select id, product_name, unit_price, quantity, line_total, product_snapshot
+      from order_item where order_id = '00000000-0000-4000-8000-000000000111' order by id
+    `);
+    const [totalsBefore] = await pool.unsafe<{
+      subtotal: string;
+      delivery_fee: string;
+      total: string;
+    }>(`
+      select subtotal, delivery_fee, total from "order" where id = '00000000-0000-4000-8000-000000000111'
+    `);
+
+    const delivered = await markMerchantOrderDelivered(tx, scope, orderId);
+    expect(delivered).toMatchObject({
+      status: "delivered",
+      orderId,
+      orderStatus: "preparing",
+      fulfillmentStatus: "delivered",
+      paymentStatus: "awaiting_collection",
+    });
+
+    const [afterDelivery] = await pool.unsafe<{
+      handed_to_shipping_at: string | null;
+      delivered_at: string;
+      payment_status: string;
+      payment_collected_at: string | null;
+    }>(`
+      select handed_to_shipping_at, delivered_at, payment_status,
+             payment_collected_at
+      from "order" where id = '00000000-0000-4000-8000-000000000111'
+    `);
+
+    expect(afterDelivery.handed_to_shipping_at).toBeNull();
+    expect(afterDelivery.delivered_at).not.toBeNull();
+    expect(afterDelivery.payment_status).toBe("awaiting_collection");
+    expect(afterDelivery.payment_collected_at).toBeNull();
+
+    const deliveryRetry = await markMerchantOrderDelivered(tx, scope, orderId);
+    expect(deliveryRetry.status).toBe("already_applied");
+
+    const [afterRetry] = await pool.unsafe<{ delivered_at: string }>(`
+      select delivered_at from "order" where id = '00000000-0000-4000-8000-000000000111'
+    `);
+    expect(afterRetry.delivered_at).toEqual(afterDelivery.delivered_at);
+
+    const collected = await collectMerchantOrderPayment(tx, scope, orderId);
+    expect(collected).toMatchObject({
+      status: "collected",
+      fulfillmentStatus: "delivered",
+      paymentStatus: "collected",
+    });
+
+    const [afterCollection] = await pool.unsafe<{
+      handed_to_shipping_at: string | null;
+      delivered_at: string;
+      payment_status: string;
+      payment_collected_at: string;
+    }>(`
+      select handed_to_shipping_at, delivered_at, payment_status,
+             payment_collected_at
+      from "order" where id = '00000000-0000-4000-8000-000000000111'
+    `);
+
+    expect(afterCollection.handed_to_shipping_at).toBeNull();
+    expect(afterCollection.delivered_at).toEqual(afterDelivery.delivered_at);
+    expect(afterCollection.payment_status).toBe("collected");
+    expect(afterCollection.payment_collected_at).not.toBeNull();
+
+    const collectionRetry = await collectMerchantOrderPayment(tx, scope, orderId);
+    expect(collectionRetry.status).toBe("already_applied");
+
+    expect(
+      await pool.unsafe<Record<string, unknown>>(`
+        select product_id, store_id, on_hand, reserved
+        from product_inventory order by product_id
+      `),
+    ).toEqual(inventoryBefore);
+    expect(
+      await pool.unsafe<Record<string, unknown>>(`
+        select id, status, quantity, reserved_at, committed_at, released_at,
+               release_reason
+        from inventory_reservation where order_id = '00000000-0000-4000-8000-000000000111' order by id
+      `),
+    ).toEqual(reservationsBefore);
+    expect(
+      await pool.unsafe<Record<string, unknown>>(`
+        select id, product_name, unit_price, quantity, line_total, product_snapshot
+        from order_item where order_id = '00000000-0000-4000-8000-000000000111' order by id
+      `),
+    ).toEqual(itemsBefore);
+    const [totalsAfter] = await pool.unsafe<{
+      subtotal: string;
+      delivery_fee: string;
+      total: string;
+    }>(`
+      select subtotal, delivery_fee, total from "order" where id = '00000000-0000-4000-8000-000000000111'
+    `);
+    expect(totalsAfter).toEqual(totalsBefore);
   });
 
   it("allows a new action to record real timestamps and rejects inverted delivery times", async () => {

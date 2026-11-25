@@ -336,11 +336,9 @@ export const order = pgTable(
         OR
         (${table.fulfillmentStatus} = 'delivered'
           AND (
-            (${table.handedToShippingAt} IS NULL
-              AND ${table.deliveredAt} IS NULL)
+            ${table.handedToShippingAt} IS NULL
             OR
-            (${table.handedToShippingAt} IS NOT NULL
-              AND ${table.deliveredAt} IS NOT NULL
+            (${table.deliveredAt} IS NOT NULL
               AND ${table.deliveredAt} >= ${table.handedToShippingAt})
           ))
         OR

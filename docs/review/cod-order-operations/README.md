@@ -24,6 +24,7 @@ Viewport: **360 CSS px** (`720 px` image width at 2× device pixel ratio).
 | `13-read-only-orders-en-360.png` | Suspended-store read-only Orders view in English: orders remain readable, with no accept, prepare, shipping, delivery, collection or cancel controls. |
 | `14-read-only-orders-ar-360.png` | The same read-only state in Arabic RTL at 360 px. |
 | `15-historical-unknown-360.png` | A historical delivered/collected order whose shipping, delivery and collection event times were never recorded shows `Time unknown` instead of inferred dates. |
+| `16-legacy-delivery-unknown-handoff-360.png` | A historical handed order with no recorded handoff time can still record delivery; the handoff stays `Time unknown`, the delivery time is exact, and payment remains a separate `awaiting collection` badge. |
 
 
 ## Before / after current status
@@ -55,6 +56,10 @@ The browser suite also reconciles the disposable database at each step:
 - A historical delivered/collected order with null event timestamps shows
   `Time unknown` for handoff, delivery and collection; no inferred date is
   presented as exact.
+- A historical handed order with a committed reservation and no handoff time
+  can still be marked delivered: the handoff remains `Time unknown`, the real
+  delivery time is recorded, payment stays `awaiting collection`, and stock and
+  the committed reservation are unchanged.
 - The read-only pass suspends the store and proves orders stay readable while
   every mutation control is absent.
 

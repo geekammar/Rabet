@@ -11,11 +11,9 @@ ALTER TABLE "order" ADD CONSTRAINT "order_shipping_state_check" CHECK ((
         OR
         ("order"."fulfillment_status" = 'delivered'
           AND (
-            ("order"."handed_to_shipping_at" IS NULL
-              AND "order"."delivered_at" IS NULL)
+            "order"."handed_to_shipping_at" IS NULL
             OR
-            ("order"."handed_to_shipping_at" IS NOT NULL
-              AND "order"."delivered_at" IS NOT NULL
+            ("order"."delivered_at" IS NOT NULL
               AND "order"."delivered_at" >= "order"."handed_to_shipping_at")
           ))
         OR

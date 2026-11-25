@@ -598,6 +598,10 @@ async function main() {
         paymentBadge: payment?.getAttribute('data-value') ?? null,
         known: entries.filter((entry) => entry.getAttribute('data-known') === 'true').length,
         unknown: entries.filter((entry) => entry.getAttribute('data-known') === 'false').length,
+        entries: entries.map((entry) => ({
+          known: entry.getAttribute('data-known'),
+          text: entry.innerText,
+        })),
         text: card.innerText,
       };
     })()`);
@@ -990,6 +994,153 @@ async function main() {
   );
   await capturePhoneScreenshot("15-historical-unknown-360.png");
 
+  log("Delivering a historical handed order with an unknown handoff time...");
+  const [legacyProduct] = await pgClient`
+    insert into "product" ("store_id", "category_id", "slug", "price", "is_active", "sort_order")
+    values (${store.id}, ${category.id}, 'cod-browser-legacy-product', 11.00, true, 3)
+    returning id
+  `;
+  await pgClient`
+    insert into "product_inventory" ("product_id", "store_id", "on_hand", "reserved")
+    values (${legacyProduct.id}, ${store.id}, 4, 0)
+  `;
+  const [legacyOrder] = await pgClient`
+    insert into "order" (
+      "store_id", "connection_id", "telegram_user_id", "telegram_chat_id",
+      "reference", "checkout_key", "status", "payment_method", "payment_status",
+      "fulfillment_status", "currency", "subtotal", "delivery_fee", "total",
+      "customer_name", "customer_phone", "delivery_address",
+      "placed_at", "accepted_at", "preparing_at", "created_at", "updated_at"
+    )
+    values (
+      ${store.id}, ${connection.id}, 93005, 93005,
+      'ORD-HLN345', ${crypto.randomUUID()}, 'preparing', 'cod', 'awaiting_collection',
+      'handed_to_shipping', 'SAR', 11.00, 15.00, 26.00,
+      'Legacy Handoff Buyer', '+15550000004', '654 Legacy Handoff Street',
+      now() - interval '2 days', now() - interval '2 days' + interval '5 minutes',
+      now() - interval '2 days' + interval '10 minutes',
+      now() - interval '2 days', now() - interval '2 days' + interval '1 hour'
+    )
+    returning id
+  `;
+  const [legacyOrderItem] = await pgClient`
+    insert into "order_item" (
+      "order_id", "product_id", "product_name", "unit_price", "quantity",
+      "line_total", "product_snapshot"
+    )
+    values (
+      ${legacyOrder.id}, ${legacyProduct.id}, 'Legacy Handoff Product', 11.00, 1, 11.00,
+      ${JSON.stringify({
+        name: "Legacy Handoff Product",
+        description: "Legacy handoff fixture",
+        categoryId: category.id,
+        unitPrice: "11.00",
+        currency: "SAR",
+      })}::jsonb
+    )
+    returning id
+  `;
+  await pgClient`
+    insert into "inventory_reservation" (
+      "order_id", "order_item_id", "product_id", "store_id", "quantity", "status",
+      "reserved_at", "committed_at"
+    )
+    values (
+      ${legacyOrder.id}, ${legacyOrderItem.id}, ${legacyProduct.id}, ${store.id},
+      1, 'committed', now() - interval '2 days' + interval '10 minutes',
+      now() - interval '2 days' + interval '20 minutes'
+    )
+  `;
+  await navigate(`${BASE_URL}/app/orders`, "Orders with legacy handed order");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-deliver\"]'))",
+    "deliver action for the legacy handed order",
+  );
+
+  const legacyBefore = await readOrderCard("ORD-HLN345");
+  assert(
+    legacyBefore?.statusBadge === "handed_to_shipping" &&
+      legacyBefore?.paymentBadge === "awaiting_collection" &&
+      legacyBefore?.unknown === 1,
+    `Legacy handed order must start with unknown handoff, saw ${JSON.stringify(legacyBefore)}`,
+  );
+
+  await clickTestId("merchant-order-action-deliver");
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('Order delivery recorded.')",
+    "legacy delivery feedback",
+  );
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-collect_cod\"]'))",
+    "collection action after legacy delivery",
+  );
+
+  const legacyAfter = await readOrderCard("ORD-HLN345");
+  const legacyHandoffEntry = legacyAfter?.entries.find((entry) =>
+    entry.text.includes("Handed to shipping"),
+  );
+  const legacyDeliveryEntry = legacyAfter?.entries.find((entry) =>
+    entry.text.includes("Delivered"),
+  );
+  assert(
+    legacyAfter?.statusBadge === "delivered" &&
+      legacyAfter?.paymentBadge === "awaiting_collection",
+    `Legacy order must be delivered with payment still pending, saw ${JSON.stringify(legacyAfter)}`,
+  );
+  assert(
+    legacyHandoffEntry?.known === "false" &&
+      legacyHandoffEntry?.text.includes("Time unknown"),
+    `Legacy handoff time must stay unknown, saw ${JSON.stringify(legacyHandoffEntry)}`,
+  );
+  assert(
+    legacyDeliveryEntry?.known === "true" &&
+      !legacyDeliveryEntry?.text.includes("Time unknown"),
+    `Legacy delivery time must be recorded exactly, saw ${JSON.stringify(legacyDeliveryEntry)}`,
+  );
+
+  const [legacyAfterDb] = await pgClient`
+    select fulfillment_status, payment_status, handed_to_shipping_at,
+           delivered_at, payment_collected_at
+    from "order"
+    where id = ${legacyOrder.id}
+  `;
+  assert(
+    legacyAfterDb.fulfillment_status === "delivered" &&
+      legacyAfterDb.payment_status === "awaiting_collection",
+    "Legacy delivery must preserve awaiting collection",
+  );
+  assert(
+    legacyAfterDb.handed_to_shipping_at === null,
+    "Legacy delivery must not invent a handoff timestamp",
+  );
+  assert(
+    Boolean(legacyAfterDb.delivered_at) &&
+      legacyAfterDb.payment_collected_at === null,
+    "Legacy delivery must record its delivery time only",
+  );
+  const [legacyInventory] = await pgClient`
+    select on_hand, reserved
+    from product_inventory
+    where product_id = ${legacyProduct.id}
+  `;
+  assert(
+    legacyInventory.on_hand === 4 && legacyInventory.reserved === 0,
+    "Legacy delivery must not change stock",
+  );
+  const [legacyReservation] = await pgClient`
+    select status
+    from inventory_reservation
+    where order_id = ${legacyOrder.id}
+  `;
+  assert(
+    legacyReservation.status === "committed",
+    "Legacy delivery must not change the committed reservation",
+  );
+  await capturePhoneScreenshot("16-legacy-delivery-unknown-handoff-360.png");
+
   log("Running the phone-first pre-shipment cancellation flow on a second order...");
   await cdp.send("Network.setCookie", {
     name: "rabet-merchant-locale",
@@ -1306,11 +1457,11 @@ async function main() {
   assert(!englishReadOnly.cancel, "Read-only Orders must not render Cancel");
   assert(!englishReadOnly.form, "Read-only Orders must not render the cancel form");
   assert(
-    englishReadOnly.readOnlyNotes >= 4,
+    englishReadOnly.readOnlyNotes >= 5,
     `Expected read-only notes for every order, saw ${englishReadOnly.readOnlyNotes}`,
   );
   assert(
-    englishReadOnly.cards >= 4,
+    englishReadOnly.cards >= 5,
     `Expected every order to remain readable, saw ${englishReadOnly.cards}`,
   );
   assert(
