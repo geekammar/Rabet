@@ -1,0 +1,42 @@
+name: PR59 QA read-only inspection
+
+on:
+  push:
+    branches:
+      - ops/buyer-lang-qa-pr59
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr59-readonly-inspect
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Read-only PR59 QA DB and routing inspection
+    if: contains(github.event.head_commit.message, '[inspect-pr59-qa]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Inspect read-only
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SUMMARY_OUT: /tmp/pr59-readonly/summary.json
+        run: |
+          mkdir -p /tmp/pr59-readonly
+          node scripts/pr59-readonly-inspect.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr59-readonly-summary
+          path: /tmp/pr59-readonly/
+          if-no-files-found: ignore
+          retention-days: 7
