@@ -1,0 +1,102 @@
+name: Buyer language QA PR59 isolated candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type PREPARE_BUYER_LANG_QA_PR59 to create the isolated DB, apply 0016, seed language fixtures and deploy the PR59 QA service."
+        type: string
+        default: ""
+        required: true
+      reset_target:
+        description: "Recreate the disposable PR59 QA database and role if a previous preparation attempt failed."
+        type: boolean
+        default: false
+  push:
+    branches:
+      - ops/buyer-lang-qa-pr59
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-qa-pr59
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare isolated buyer-language QA candidate
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[prepare-cod-qa-pr59]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 60
+
+    steps:
+      - name: Validate confirmation
+        env:
+          RABET_CONFIRM: ${{ inputs.confirm }}
+          RABET_REF: ${{ github.ref }}
+          RABET_EVENT: ${{ github.event_name }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [ "${RABET_EVENT}" = "workflow_dispatch" ]; then
+            if [ "${RABET_CONFIRM}" != "PREPARE_BUYER_LANG_QA_PR59" ]; then
+              echo "Confirmation must equal PREPARE_BUYER_LANG_QA_PR59." >&2
+              exit 1
+            fi
+          else
+            if [ "${RABET_REF}" != "refs/heads/ops/buyer-lang-qa-pr59" ]; then
+              echo "Push trigger is restricted to ops/buyer-lang-qa-pr59." >&2
+              exit 1
+            fi
+            if ! printf '%s' "${COMMIT_MESSAGE}" | grep -Fq '[prepare-cod-qa-pr59]'; then
+              echo "Push trigger marker [prepare-cod-qa-pr59] is missing." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch candidate branch
+        run: git fetch origin feat/buyer-language-simple-checkout
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install orchestration dependencies
+        run: npm ci
+
+      - name: Create exact candidate worktree
+        run: |
+          set -euo pipefail
+          CANDIDATE_SHA="9542b7c38ac7bacd7fd8287c2ce3936e284256f6"
+          git worktree add --detach /tmp/rabet-candidate "${CANDIDATE_SHA}"
+          test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${CANDIDATE_SHA}"
+
+      - name: Install candidate dependencies
+        working-directory: /tmp/rabet-candidate
+        run: npm ci
+
+      - name: Prepare isolated DB, apply 0016, configure fixtures and deploy PR59 QA
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          NEON_DEV_DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
+          CANDIDATE_SHA: 9542b7c38ac7bacd7fd8287c2ce3936e284256f6
+          RESET_TARGET: ${{ inputs.reset_target }}
+          RABET_CODE_ROOT: /tmp/rabet-candidate
+        run: node scripts/cod-qa-pr59.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-qa-pr59-summary
+          path: /tmp/cod-qa-pr59-summary.json
+          if-no-files-found: ignore
+          retention-days: 14
