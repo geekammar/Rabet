@@ -8,6 +8,9 @@ import { getMerchantAccess } from "@/lib/auth/merchant-session";
 import {
   acceptMerchantOrder,
   cancelMerchantOrder,
+  collectMerchantOrderPayment,
+  handMerchantOrderToShipping,
+  markMerchantOrderDelivered,
   prepareMerchantOrder,
   type MerchantOrderMutationResult,
 } from "@/lib/commerce/orders";
@@ -23,6 +26,9 @@ export type MerchantOrderActionCode =
   | "ALREADY_APPLIED"
   | "ACCEPTED"
   | "PREPARED"
+  | "HANDED_TO_SHIPPING"
+  | "DELIVERED"
+  | "COLLECTED"
   | "CANCELLED"
   | "DATABASE_ERROR";
 
@@ -32,7 +38,9 @@ export type MerchantOrderActionState = {
   orderId?: string;
   status?: string;
   fulfillmentStatus?: string;
+  paymentStatus?: string;
   releasedQuantity?: number;
+  shippedQuantity?: number;
 };
 
 const ORDER_ID_PATTERN =
@@ -40,13 +48,22 @@ const ORDER_ID_PATTERN =
 
 function actionStateFromResult(
   result: MerchantOrderMutationResult,
-  successCode: "ACCEPTED" | "PREPARED" | "CANCELLED",
+  successCode:
+    | "ACCEPTED"
+    | "PREPARED"
+    | "HANDED_TO_SHIPPING"
+    | "DELIVERED"
+    | "COLLECTED"
+    | "CANCELLED",
 ): MerchantOrderActionState {
   switch (result.status) {
     case "accepted":
     case "preparing":
-    case "cancelled":
-      return {
+    case "handed_to_shipping":
+    case "delivered":
+    case "collected":
+    case "cancelled": {
+      const state: MerchantOrderActionState = {
         success: true,
         code: successCode,
         orderId: result.orderId,
@@ -54,8 +71,16 @@ function actionStateFromResult(
         fulfillmentStatus: result.fulfillmentStatus,
         releasedQuantity: result.releasedQuantity,
       };
-    case "already_applied":
-      return {
+      if (result.paymentStatus !== undefined) {
+        state.paymentStatus = result.paymentStatus;
+      }
+      if (result.shippedQuantity !== undefined) {
+        state.shippedQuantity = result.shippedQuantity;
+      }
+      return state;
+    }
+    case "already_applied": {
+      const state: MerchantOrderActionState = {
         success: true,
         code: "ALREADY_APPLIED",
         orderId: result.orderId,
@@ -63,6 +88,14 @@ function actionStateFromResult(
         fulfillmentStatus: result.fulfillmentStatus,
         releasedQuantity: result.releasedQuantity,
       };
+      if (result.paymentStatus !== undefined) {
+        state.paymentStatus = result.paymentStatus;
+      }
+      if (result.shippedQuantity !== undefined) {
+        state.shippedQuantity = result.shippedQuantity;
+      }
+      return state;
+    }
     case "not_found":
       return { success: false, code: "NOT_FOUND" };
     case "invalid_transition":
@@ -137,6 +170,93 @@ export async function prepareMerchantOrderAction(
       orderId,
     );
     const state = actionStateFromResult(result, "PREPARED");
+    if (state.success) refreshOrdersPage();
+    return state;
+  } catch {
+    return { success: false, code: "DATABASE_ERROR" };
+  }
+}
+
+export async function handMerchantOrderToShippingAction(
+  orderIdInput: unknown,
+): Promise<MerchantOrderActionState> {
+  if (!isMerchantAppEnabled()) {
+    return { success: false, code: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+  if (!access || access.readOnly) {
+    return { success: false, code: "DENIED" };
+  }
+
+  const orderId = readOrderId(orderIdInput);
+  if (!orderId) return { success: false, code: "INVALID_INPUT" };
+
+  try {
+    const result = await handMerchantOrderToShipping(
+      getTransactionDb(),
+      access.scope,
+      orderId,
+    );
+    const state = actionStateFromResult(result, "HANDED_TO_SHIPPING");
+    if (state.success) refreshOrdersPage();
+    return state;
+  } catch {
+    return { success: false, code: "DATABASE_ERROR" };
+  }
+}
+
+export async function markMerchantOrderDeliveredAction(
+  orderIdInput: unknown,
+): Promise<MerchantOrderActionState> {
+  if (!isMerchantAppEnabled()) {
+    return { success: false, code: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+  if (!access || access.readOnly) {
+    return { success: false, code: "DENIED" };
+  }
+
+  const orderId = readOrderId(orderIdInput);
+  if (!orderId) return { success: false, code: "INVALID_INPUT" };
+
+  try {
+    const result = await markMerchantOrderDelivered(
+      getTransactionDb(),
+      access.scope,
+      orderId,
+    );
+    const state = actionStateFromResult(result, "DELIVERED");
+    if (state.success) refreshOrdersPage();
+    return state;
+  } catch {
+    return { success: false, code: "DATABASE_ERROR" };
+  }
+}
+
+export async function collectMerchantOrderPaymentAction(
+  orderIdInput: unknown,
+): Promise<MerchantOrderActionState> {
+  if (!isMerchantAppEnabled()) {
+    return { success: false, code: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+  if (!access || access.readOnly) {
+    return { success: false, code: "DENIED" };
+  }
+
+  const orderId = readOrderId(orderIdInput);
+  if (!orderId) return { success: false, code: "INVALID_INPUT" };
+
+  try {
+    const result = await collectMerchantOrderPayment(
+      getTransactionDb(),
+      access.scope,
+      orderId,
+    );
+    const state = actionStateFromResult(result, "COLLECTED");
     if (state.success) refreshOrdersPage();
     return state;
   } catch {

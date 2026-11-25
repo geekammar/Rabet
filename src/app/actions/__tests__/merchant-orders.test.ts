@@ -5,6 +5,9 @@ const state = vi.hoisted(() => ({
   getMerchantAccess: vi.fn(),
   acceptMerchantOrder: vi.fn(),
   prepareMerchantOrder: vi.fn(),
+  handMerchantOrderToShipping: vi.fn(),
+  markMerchantOrderDelivered: vi.fn(),
+  collectMerchantOrderPayment: vi.fn(),
   cancelMerchantOrder: vi.fn(),
   revalidatePath: vi.fn(),
   refresh: vi.fn(),
@@ -21,6 +24,9 @@ vi.mock("@/lib/auth/merchant-session", () => ({
 vi.mock("@/lib/commerce/orders", () => ({
   acceptMerchantOrder: state.acceptMerchantOrder,
   prepareMerchantOrder: state.prepareMerchantOrder,
+  handMerchantOrderToShipping: state.handMerchantOrderToShipping,
+  markMerchantOrderDelivered: state.markMerchantOrderDelivered,
+  collectMerchantOrderPayment: state.collectMerchantOrderPayment,
   cancelMerchantOrder: state.cancelMerchantOrder,
 }));
 
@@ -32,6 +38,9 @@ vi.mock("next/cache", () => ({
 const {
   acceptMerchantOrderAction,
   prepareMerchantOrderAction,
+  handMerchantOrderToShippingAction,
+  markMerchantOrderDeliveredAction,
+  collectMerchantOrderPaymentAction,
   cancelMerchantOrderAction,
 } = await import("../merchant-orders");
 
@@ -93,13 +102,23 @@ describe("merchant order actions — authorization and enablement", () => {
       code: "DENIED",
     });
     await expect(
+      handMerchantOrderToShippingAction(ORDER_ID),
+    ).resolves.toEqual({ success: false, code: "DENIED" });
+    await expect(markMerchantOrderDeliveredAction(ORDER_ID)).resolves.toEqual({
+      success: false,
+      code: "DENIED",
+    });
+    await expect(
+      collectMerchantOrderPaymentAction(ORDER_ID),
+    ).resolves.toEqual({ success: false, code: "DENIED" });
+    await expect(
       cancelMerchantOrderAction({ orderId: ORDER_ID, reason: "Valid reason" }),
     ).resolves.toEqual({ success: false, code: "DENIED" });
 
     expect(state.getTransactionDb).not.toHaveBeenCalled();
   });
 
-  it("denies accept, prepare and cancel for read-only access before any mutation", async () => {
+  it("denies every order mutation for read-only access before any mutation", async () => {
     vi.stubEnv("RABET_MERCHANT_APP_ENABLED", "true");
     state.getMerchantAccess.mockResolvedValue(readOnlyAccess);
 
@@ -112,12 +131,25 @@ describe("merchant order actions — authorization and enablement", () => {
       code: "DENIED",
     });
     await expect(
+      handMerchantOrderToShippingAction(ORDER_ID),
+    ).resolves.toEqual({ success: false, code: "DENIED" });
+    await expect(markMerchantOrderDeliveredAction(ORDER_ID)).resolves.toEqual({
+      success: false,
+      code: "DENIED",
+    });
+    await expect(
+      collectMerchantOrderPaymentAction(ORDER_ID),
+    ).resolves.toEqual({ success: false, code: "DENIED" });
+    await expect(
       cancelMerchantOrderAction({ orderId: ORDER_ID, reason: "Valid reason" }),
     ).resolves.toEqual({ success: false, code: "DENIED" });
 
     expect(state.getTransactionDb).not.toHaveBeenCalled();
     expect(state.acceptMerchantOrder).not.toHaveBeenCalled();
     expect(state.prepareMerchantOrder).not.toHaveBeenCalled();
+    expect(state.handMerchantOrderToShipping).not.toHaveBeenCalled();
+    expect(state.markMerchantOrderDelivered).not.toHaveBeenCalled();
+    expect(state.collectMerchantOrderPayment).not.toHaveBeenCalled();
     expect(state.cancelMerchantOrder).not.toHaveBeenCalled();
     expect(state.revalidatePath).not.toHaveBeenCalled();
     expect(state.refresh).not.toHaveBeenCalled();
@@ -131,6 +163,15 @@ describe("merchant order actions — authorization and enablement", () => {
       success: false,
       code: "INVALID_INPUT",
     });
+    await expect(
+      handMerchantOrderToShippingAction("not-a-uuid"),
+    ).resolves.toEqual({ success: false, code: "INVALID_INPUT" });
+    await expect(
+      markMerchantOrderDeliveredAction("not-a-uuid"),
+    ).resolves.toEqual({ success: false, code: "INVALID_INPUT" });
+    await expect(
+      collectMerchantOrderPaymentAction("not-a-uuid"),
+    ).resolves.toEqual({ success: false, code: "INVALID_INPUT" });
     await expect(
       cancelMerchantOrderAction({ orderId: ORDER_ID, reason: "no" }),
     ).resolves.toEqual({ success: false, code: "INVALID_REASON" });
@@ -234,6 +275,110 @@ describe("merchant order actions — successful transitions", () => {
     expect(state.refresh).toHaveBeenCalledTimes(1);
   });
 
+  it("hands the order to shipping and reports the committed quantity once", async () => {
+    state.handMerchantOrderToShipping.mockResolvedValue({
+      status: "handed_to_shipping",
+      orderId: ORDER_ID,
+      reference: "ORD-ABC234",
+      orderStatus: "preparing",
+      fulfillmentStatus: "handed_to_shipping",
+      paymentStatus: "awaiting_collection",
+      cancellationReason: null,
+      releasedQuantity: 0,
+      shippedQuantity: 2,
+    });
+
+    await expect(handMerchantOrderToShippingAction(ORDER_ID)).resolves.toEqual({
+      success: true,
+      code: "HANDED_TO_SHIPPING",
+      orderId: ORDER_ID,
+      status: "preparing",
+      fulfillmentStatus: "handed_to_shipping",
+      paymentStatus: "awaiting_collection",
+      releasedQuantity: 0,
+      shippedQuantity: 2,
+    });
+
+    expect(state.handMerchantOrderToShipping).toHaveBeenCalledWith(
+      { kind: "transaction-db" },
+      access.scope,
+      ORDER_ID,
+    );
+    expect(state.revalidatePath).toHaveBeenCalledWith("/app/orders");
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks the order delivered without touching payment state", async () => {
+    state.markMerchantOrderDelivered.mockResolvedValue({
+      status: "delivered",
+      orderId: ORDER_ID,
+      reference: "ORD-ABC234",
+      orderStatus: "preparing",
+      fulfillmentStatus: "delivered",
+      paymentStatus: "awaiting_collection",
+      cancellationReason: null,
+      releasedQuantity: 0,
+      shippedQuantity: 0,
+    });
+
+    await expect(markMerchantOrderDeliveredAction(ORDER_ID)).resolves.toEqual({
+      success: true,
+      code: "DELIVERED",
+      orderId: ORDER_ID,
+      status: "preparing",
+      fulfillmentStatus: "delivered",
+      paymentStatus: "awaiting_collection",
+      releasedQuantity: 0,
+      shippedQuantity: 0,
+    });
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("records COD collection after delivery and reports an idempotent retry", async () => {
+    state.collectMerchantOrderPayment
+      .mockResolvedValueOnce({
+        status: "collected",
+        orderId: ORDER_ID,
+        reference: "ORD-ABC234",
+        orderStatus: "preparing",
+        fulfillmentStatus: "delivered",
+        paymentStatus: "collected",
+        cancellationReason: null,
+        releasedQuantity: 0,
+        shippedQuantity: 0,
+      })
+      .mockResolvedValueOnce({
+        status: "already_applied",
+        orderId: ORDER_ID,
+        reference: "ORD-ABC234",
+        orderStatus: "preparing",
+        fulfillmentStatus: "delivered",
+        paymentStatus: "collected",
+        cancellationReason: null,
+        releasedQuantity: 0,
+        shippedQuantity: 0,
+      });
+
+    await expect(collectMerchantOrderPaymentAction(ORDER_ID)).resolves.toEqual({
+      success: true,
+      code: "COLLECTED",
+      orderId: ORDER_ID,
+      status: "preparing",
+      fulfillmentStatus: "delivered",
+      paymentStatus: "collected",
+      releasedQuantity: 0,
+      shippedQuantity: 0,
+    });
+    await expect(collectMerchantOrderPaymentAction(ORDER_ID)).resolves.toMatchObject(
+      {
+        success: true,
+        code: "ALREADY_APPLIED",
+        paymentStatus: "collected",
+      },
+    );
+    expect(state.refresh).toHaveBeenCalledTimes(2);
+  });
+
   it("maps an invalid transition and does not refresh the page", async () => {
     state.prepareMerchantOrder.mockResolvedValue({
       status: "invalid_transition",
@@ -247,6 +392,36 @@ describe("merchant order actions — successful transitions", () => {
       status: "placed",
       fulfillmentStatus: "unfulfilled",
     });
+
+    state.handMerchantOrderToShipping.mockResolvedValue({
+      status: "invalid_transition",
+      currentStatus: "placed",
+      fulfillmentStatus: "unfulfilled",
+    });
+    state.markMerchantOrderDelivered.mockResolvedValue({
+      status: "invalid_transition",
+      currentStatus: "placed",
+      fulfillmentStatus: "unfulfilled",
+    });
+    state.collectMerchantOrderPayment.mockResolvedValue({
+      status: "invalid_transition",
+      currentStatus: "placed",
+      fulfillmentStatus: "unfulfilled",
+    });
+
+    for (const result of [
+      await handMerchantOrderToShippingAction(ORDER_ID),
+      await markMerchantOrderDeliveredAction(ORDER_ID),
+      await collectMerchantOrderPaymentAction(ORDER_ID),
+    ]) {
+      expect(result).toEqual({
+        success: false,
+        code: "INVALID_TRANSITION",
+        status: "placed",
+        fulfillmentStatus: "unfulfilled",
+      });
+    }
+
     expect(state.refresh).not.toHaveBeenCalled();
     expect(state.revalidatePath).not.toHaveBeenCalled();
   });

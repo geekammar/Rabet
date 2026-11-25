@@ -82,6 +82,7 @@ import {
   CRITICAL_CONSTRAINTS_V9,
   CRITICAL_CONSTRAINTS_V10,
   CRITICAL_CONSTRAINTS_V12,
+  CRITICAL_CONSTRAINTS_V13,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
@@ -1405,6 +1406,28 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 15 &&
+        inspected.state.pending[0] === "0015_cod_shipping_delivery_collection"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V11,
+          expectedIndexes: EXPECTED_INDEXES,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V13,
+          expectedHashes: ctx.committedHashes.slice(0, 15).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 15 migrations recorded, " +
+              "but live schema does not match the supported prior release (0014_sparkling_captain_stacy).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 14 &&
         inspected.state.pending[0] === "0014_sparkling_captain_stacy"
       ) {
@@ -1721,6 +1744,9 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV14 =
+        inspected.state.appliedCount === 15 &&
+        inspected.state.pending[0] === "0015_cod_shipping_delivery_collection";
       const isKnownPriorReleaseV13 =
         inspected.state.appliedCount === 14 &&
         inspected.state.pending[0] === "0014_sparkling_captain_stacy";
@@ -1761,7 +1787,33 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV13) {
+      if (isKnownPriorReleaseV14) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V11,
+          expectedIndexes: EXPECTED_INDEXES,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V13,
+          expectedHashes: ctx.committedHashes.slice(0, 15).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0014_sparkling_captain_stacy). " +
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV13) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V11,
@@ -1775,7 +1827,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0013_cod_orders). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -1801,7 +1853,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0012_mushy_scream). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -1827,7 +1879,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0011_careless_hulk). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -1853,7 +1905,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0010_wonderful_siren). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -1879,7 +1931,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0009_merchant_auth_throttle). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -1905,7 +1957,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0008_merchant_invitations_and_credentials). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -1931,7 +1983,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0007_admin_login_throttle). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -1957,7 +2009,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0006_tenant_ownership_expansion). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -1983,7 +2035,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0005_tenant_identity_foundation). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -2009,7 +2061,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0004_storefront_menu). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -2035,7 +2087,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0003_seller_notifications). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");
@@ -2061,7 +2113,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0002_payment_methods). " +
-              "Proceeding with migration to 0014_sparkling_captain_stacy.",
+              "Proceeding with migration to 0015_cod_shipping_delivery_collection.",
           );
         } else {
           io.line("");

@@ -31,6 +31,12 @@ type Copy = {
   title: string;
   subtitle: string;
   backToStore: string;
+  timeline: string;
+  acceptedAt: string;
+  preparingAt: string;
+  handedToShippingAt: string;
+  deliveredAt: string;
+  paymentCollectedAt: string;
   empty: string;
   order: string;
   payment: string;
@@ -53,8 +59,14 @@ const COPY: Record<MerchantLocale, Copy> = {
     dir: "rtl",
     title: "طلبات الدفع عند الاستلام",
     subtitle:
-      "اقبل الطلب وجهّزه أو ألغِه قبل الشحن. يُحصّل الدفع عند التسليم، وتظهر حالة الطلب والدفع والتجهيز بشكل منفصل.",
+      "اقبل الطلب وجهّزه، ثم سلّمه للشحن وأكّد التوصيل وسجّل التحصيل. تظهر حالة الطلب والدفع والتجهيز بشكل منفصل.",
     backToStore: "العودة إلى المتجر",
+    timeline: "المسار الزمني",
+    acceptedAt: "القبول",
+    preparingAt: "بدء التجهيز",
+    handedToShippingAt: "تسليم للشحن",
+    deliveredAt: "التوصيل",
+    paymentCollectedAt: "تحصيل الدفع",
     empty: "لا توجد طلبات دفع عند الاستلام بعد.",
     order: "الطلب",
     payment: "الدفع",
@@ -76,8 +88,14 @@ const COPY: Record<MerchantLocale, Copy> = {
     dir: "ltr",
     title: "COD orders",
     subtitle:
-      "Accept and prepare the order, or cancel before shipping. Cash is collected on delivery; order, payment and fulfillment states are shown separately.",
+      "Accept and prepare the order, hand it to shipping, mark it delivered and record COD collection. Order, payment and fulfillment states stay separate.",
     backToStore: "Back to store",
+    timeline: "Timeline",
+    acceptedAt: "Accepted",
+    preparingAt: "Preparing",
+    handedToShippingAt: "Handed to shipping",
+    deliveredAt: "Delivered",
+    paymentCollectedAt: "Cash collected",
     empty: "No cash-on-delivery orders yet.",
     order: "Order",
     payment: "Payment",
@@ -109,7 +127,7 @@ const STATUS_COPY: Record<
     awaiting_collection: "بانتظار التحصيل",
     collected: "تم التحصيل",
     failed: "فشل",
-    unfulfilled: "لم يُجهّز",
+    unfulfilled: "بانتظار الشحن",
     handed_to_shipping: "تم التسليم للشحن",
     delivered: "تم التوصيل",
     reserved: "محجوز",
@@ -125,7 +143,7 @@ const STATUS_COPY: Record<
     awaiting_collection: "awaiting collection",
     collected: "collected",
     failed: "failed",
-    unfulfilled: "unfulfilled",
+    unfulfilled: "awaiting handoff",
     handed_to_shipping: "handed to shipping",
     delivered: "delivered",
     reserved: "reserved",
@@ -172,6 +190,21 @@ function OrderCard({
   dateFormat: Intl.DateTimeFormat;
   readOnly: boolean;
 }) {
+  const timeline = [
+    { label: copy.acceptedAt, at: order.acceptedAt },
+    { label: copy.preparingAt, at: order.preparingAt },
+    { label: copy.handedToShippingAt, at: order.handedToShippingAt },
+    { label: copy.deliveredAt, at: order.deliveredAt },
+    { label: copy.paymentCollectedAt, at: order.paymentCollectedAt },
+  ]
+    .filter(
+      (entry): entry is { label: string; at: Date } => entry.at !== null,
+    )
+    .map((entry) => ({
+      label: entry.label,
+      at: `${dateFormat.format(entry.at)} UTC`,
+    }));
+
   return (
     <article
       className="space-y-4 rounded-xl border border-border bg-card p-4 shadow-sm"
@@ -222,10 +255,31 @@ function OrderCard({
         orderId={order.id}
         status={order.status}
         fulfillmentStatus={order.fulfillmentStatus}
+        paymentStatus={order.paymentStatus}
         cancellationReason={order.cancellationReason}
+        total={order.total}
+        currency={order.currency}
         locale={locale}
         readOnly={readOnly}
       />
+
+      {timeline.length > 0 ? (
+        <dl
+          className="space-y-1 rounded-lg border border-border p-3 text-xs"
+          data-testid="merchant-order-timeline"
+        >
+          <p className="font-medium text-muted-foreground">{copy.timeline}</p>
+          {timeline.map((entry) => (
+            <div
+              key={entry.label}
+              className="flex flex-wrap justify-between gap-2"
+            >
+              <dt className="text-muted-foreground">{entry.label}</dt>
+              <dd className="font-medium">{entry.at}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
 
       <ul className="space-y-2 border-y border-border py-3 text-sm">
         {order.items.map((item) => (

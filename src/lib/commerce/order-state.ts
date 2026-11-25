@@ -12,7 +12,12 @@ export type MerchantOrderStatus =
   | "preparing"
   | "cancelled";
 
-export type MerchantOrderNextAction = "accept" | "prepare";
+export type MerchantOrderNextAction =
+  | "accept"
+  | "prepare"
+  | "hand_to_shipping"
+  | "deliver"
+  | "collect_cod";
 
 export function isMerchantOrderStatus(
   value: string,
@@ -26,17 +31,29 @@ export function isMerchantOrderStatus(
 }
 
 /**
- * The one normal pre-shipment action still available. A cancelled order, an
- * order already handed to shipping, and a preparing order have no next step in
- * this slice.
+ * The one normal next action still available from the current state. An order
+ * that is already collected, failed, or cancelled has no next step.
  */
 export function nextMerchantOrderAction(
   status: string,
   fulfillmentStatus: string,
+  paymentStatus = "awaiting_collection",
 ): MerchantOrderNextAction | null {
-  if (fulfillmentStatus !== "unfulfilled") return null;
-  if (status === "placed") return "accept";
-  if (status === "accepted") return "prepare";
+  if (status === "cancelled" || fulfillmentStatus === "cancelled") return null;
+
+  if (fulfillmentStatus === "unfulfilled") {
+    if (status === "placed") return "accept";
+    if (status === "accepted") return "prepare";
+    if (status === "preparing") return "hand_to_shipping";
+    return null;
+  }
+
+  if (fulfillmentStatus === "handed_to_shipping") return "deliver";
+
+  if (fulfillmentStatus === "delivered") {
+    return paymentStatus === "awaiting_collection" ? "collect_cod" : null;
+  }
+
   return null;
 }
 
@@ -51,6 +68,29 @@ export function canCancelMerchantOrder(
   return (
     fulfillmentStatus === "unfulfilled" &&
     (status === "placed" || status === "accepted" || status === "preparing")
+  );
+}
+
+export function canHandMerchantOrderToShipping(
+  status: string,
+  fulfillmentStatus: string,
+): boolean {
+  return status === "preparing" && fulfillmentStatus === "unfulfilled";
+}
+
+export function canMarkMerchantOrderDelivered(
+  _status: string,
+  fulfillmentStatus: string,
+): boolean {
+  return fulfillmentStatus === "handed_to_shipping";
+}
+
+export function canRecordMerchantOrderCollection(
+  fulfillmentStatus: string,
+  paymentStatus: string,
+): boolean {
+  return (
+    fulfillmentStatus === "delivered" && paymentStatus === "awaiting_collection"
   );
 }
 
