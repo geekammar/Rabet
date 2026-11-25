@@ -1,0 +1,85 @@
+name: COD Staging migrate to PR59
+
+on:
+  push:
+    branches:
+      - ops/buyer-lang-qa-pr59
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-staging-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Recover, migrate and verify permanent COD Staging
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[migrate-cod-staging]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch candidate branch
+        run: git fetch origin feat/buyer-language-simple-checkout
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install orchestration dependencies
+        run: npm ci
+
+      - name: Create exact candidate worktree
+        run: |
+          set -euo pipefail
+          CANDIDATE_SHA="9542b7c38ac7bacd7fd8287c2ce3936e284256f6"
+          git worktree add --detach /tmp/rabet-candidate "${CANDIDATE_SHA}"
+          test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${CANDIDATE_SHA}"
+
+      - name: Install candidate dependencies
+        working-directory: /tmp/rabet-candidate
+        run: npm ci
+
+      - name: Create staging recovery point and verify target
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 9542b7c38ac7bacd7fd8287c2ce3936e284256f6
+          RABET_CODE_ROOT: /tmp/rabet-candidate
+        run: node scripts/cod-staging-migrate.mjs recovery
+
+      - name: Upload staging recovery point
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-recovery-${{ github.run_id }}
+          path: /tmp/cod-staging-recovery/
+          retention-days: 30
+
+      - name: Apply pending migrations and verify baseline
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 9542b7c38ac7bacd7fd8287c2ce3936e284256f6
+          RABET_CODE_ROOT: /tmp/rabet-candidate
+        run: node scripts/cod-staging-migrate.mjs migrate
+
+      - name: Upload migration summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-migrate-summary
+          path: /tmp/cod-staging-migrate-summary.json
+          if-no-files-found: ignore
+          retention-days: 30
