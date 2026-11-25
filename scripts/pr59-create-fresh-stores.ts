@@ -122,9 +122,11 @@ async function ensureCategory(
     limit 1
   `);
   if (result[0]) return result[0].id;
+  // The root sort-order unique index is global (parent_id IS NULL), so the
+  // next root order must be derived across all stores, not only this store.
   const max = await db.execute<{ next: number }>(sql`
     select coalesce(max(sort_order), 0) + 1 as next
-    from category where store_id = ${storeId} and parent_id is null
+    from category where parent_id is null
   `);
   const created = await db.execute<{ id: string }>(sql`
     insert into category (store_id, slug, sort_order, is_active)
