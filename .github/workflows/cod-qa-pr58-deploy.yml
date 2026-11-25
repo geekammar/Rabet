@@ -1,0 +1,100 @@
+name: COD QA PR58 deploy UX-01
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type DEPLOY_COD_QA_PR58 to deploy the exact candidate to isolated PR58 QA."
+        type: string
+        default: ""
+        required: true
+  push:
+    branches:
+      - ops/cod-qa-pr58
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-qa-pr58-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy UX-01 to isolated COD QA PR58
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[deploy-cod-qa-pr58]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 45
+
+    steps:
+      - name: Validate confirmation
+        env:
+          RABET_CONFIRM: ${{ inputs.confirm }}
+          RABET_REF: ${{ github.ref }}
+          RABET_EVENT: ${{ github.event_name }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [ "${RABET_EVENT}" = "workflow_dispatch" ]; then
+            if [ "${RABET_CONFIRM}" != "DEPLOY_COD_QA_PR58" ]; then
+              echo "Confirmation must equal DEPLOY_COD_QA_PR58." >&2
+              exit 1
+            fi
+          else
+            if [ "${RABET_REF}" != "refs/heads/ops/cod-qa-pr58" ]; then
+              echo "Push trigger is restricted to ops/cod-qa-pr58." >&2
+              exit 1
+            fi
+            if ! printf '%s' "${COMMIT_MESSAGE}" | grep -Fq '[deploy-cod-qa-pr58]'; then
+              echo "Push trigger marker [deploy-cod-qa-pr58] is missing." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch candidate branch
+        run: git fetch origin feat/cod-shipping-delivery-collection
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install orchestration dependencies
+        run: npm ci
+
+      - name: Verify exact candidate and no migration changes
+        run: |
+          set -euo pipefail
+          CANDIDATE_SHA="8ba40f05ea785aa31af89035196499026ebd2373"
+          PREVIOUS_SHA="94c4bc5b4a87ddee43ddcd08f90fe5b2332bad62"
+          test "$(git rev-parse "${CANDIDATE_SHA}^{commit}")" = "${CANDIDATE_SHA}"
+          if ! git diff --quiet "${PREVIOUS_SHA}" "${CANDIDATE_SHA}" -- drizzle drizzle.config.ts src/db/schema; then
+            echo "Migration or schema files changed between ${PREVIOUS_SHA} and ${CANDIDATE_SHA}." >&2
+            exit 1
+          fi
+          echo "Candidate pinned; no schema or migration changes."
+
+      - name: Deploy candidate to isolated QA
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          CANDIDATE_SHA: 8ba40f05ea785aa31af89035196499026ebd2373
+          PREVIOUS_SHA: 94c4bc5b4a87ddee43ddcd08f90fe5b2332bad62
+          QA_SERVICE_ID: srv-dc3e469ksfps739ru1ng
+          QA_APP_URL: https://nokmel-cod-qa-pr58.onrender.com
+          EXPECTED_DB_NAME: rabet_cod_qa_pr58
+        run: node scripts/cod-qa-pr58-deploy.mjs
+
+      - name: Upload sanitized deploy summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-qa-pr58-deploy-summary
+          path: /tmp/cod-qa-pr58-deploy-summary.json
+          if-no-files-found: ignore
+          retention-days: 14
