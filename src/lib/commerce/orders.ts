@@ -2207,7 +2207,11 @@ export async function listMerchantOrders(
     .select()
     .from(orderTable)
     .where(eq(orderTable.storeId, scope.storeId))
-    .orderBy(desc(orderTable.placedAt))
+    .orderBy(
+      desc(orderTable.placedAt),
+      desc(orderTable.createdAt),
+      desc(orderTable.id),
+    )
     .limit(Math.min(Math.max(1, limit), 200));
 
   if (orders.length === 0) return [];

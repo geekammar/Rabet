@@ -261,7 +261,8 @@ function OrderCard({
 
   return (
     <article
-      className="space-y-4 rounded-xl border border-border bg-card p-4 shadow-sm"
+      id={`merchant-order-${order.id}`}
+      className="scroll-mt-4 space-y-4 rounded-xl border border-border bg-card p-4 shadow-sm"
       data-testid="merchant-order-card"
       data-current-status={displayStatus}
       data-payment-status={order.paymentStatus}
@@ -313,6 +314,7 @@ function OrderCard({
         status={order.status}
         fulfillmentStatus={order.fulfillmentStatus}
         paymentStatus={order.paymentStatus}
+        orderReference={order.reference}
         cancellationReason={order.cancellationReason}
         total={order.total}
         currency={order.currency}

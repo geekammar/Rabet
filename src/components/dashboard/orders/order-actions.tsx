@@ -1,7 +1,12 @@
 "use client";
 
-import { useId, useState, useTransition, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import {
+  useEffect,
+  useId,
+  useState,
+  useTransition,
+  type FormEvent,
+} from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -47,6 +52,7 @@ type Copy = {
   shippingHint: string;
   confirmShipping: string;
   keepPreparing: string;
+  referenceLabel: string;
   collectionTitle: string;
   collectionHint: string;
   confirmCollection: string;
@@ -79,9 +85,10 @@ const COPY: Record<MerchantLocale, Copy> = {
     cancelledNote: "تم إلغاء هذا الطلب وتحرير المخزون المحجوز.",
     shippingTitle: "تسليم الطلب للشحن",
     shippingHint:
-      "سيتم تثبيت الحجز وخصم الكمية المشحونة من المخزون المتاح والفعلي. لا يمكن التراجع عن هذه الخطوة.",
+      "سيتم تثبيت الحجز وخصم الكمية المشحونة من المخزون الفعلي والمحجوز معًا؛ الكمية المتاحة للبيع لن تتغير لأنها كانت محجوزة بالفعل. لا يمكن التراجع عن هذه الخطوة.",
     confirmShipping: "تأكيد التسليم للشحن",
     keepPreparing: "ليس الآن",
+    referenceLabel: "مرجع الطلب",
     collectionTitle: "تسجيل تحصيل الدفع عند الاستلام",
     collectionHint:
       "أكّد فقط بعد استلام المبلغ نقدًا. ستتغير حالة الدفع وحدها، دون تغيير المخزون أو حالة التوصيل.",
@@ -132,9 +139,10 @@ const COPY: Record<MerchantLocale, Copy> = {
     cancelledNote: "This order is cancelled and its stock reservation was released.",
     shippingTitle: "Hand this order to shipping",
     shippingHint:
-      "This commits the reservation and removes the shipped quantity from on-hand stock. This step cannot be undone.",
+      "This commits the reservation and removes the shipped quantity from both on-hand and reserved stock. Available-to-sell stays the same because it was already reserved. This step cannot be undone.",
     confirmShipping: "Confirm hand to shipping",
     keepPreparing: "Not yet",
+    referenceLabel: "Order reference",
     collectionTitle: "Record cash-on-delivery collection",
     collectionHint:
       "Confirm only after you received the cash. This changes payment state only; stock and delivery do not change.",
@@ -186,6 +194,7 @@ export function MerchantOrderActions({
   status,
   fulfillmentStatus,
   paymentStatus,
+  orderReference,
   cancellationReason,
   total,
   currency,
@@ -196,6 +205,7 @@ export function MerchantOrderActions({
   status: string;
   fulfillmentStatus: string;
   paymentStatus: string;
+  orderReference: string;
   cancellationReason: string | null;
   total: string;
   currency: string;
@@ -203,7 +213,6 @@ export function MerchantOrderActions({
   readOnly: boolean;
 }) {
   const copy = COPY[locale];
-  const router = useRouter();
   const reasonId = useId();
   const reasonHintId = useId();
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -213,6 +222,7 @@ export function MerchantOrderActions({
   const [isCancelOpen, setIsCancelOpen] = useState(false);
   const [reason, setReason] = useState("");
   const [reasonError, setReasonError] = useState<string | null>(null);
+  const [actionCompletion, setActionCompletion] = useState(0);
 
   const nextAction = nextMerchantOrderAction(
     status,
@@ -220,6 +230,34 @@ export function MerchantOrderActions({
     paymentStatus,
   );
   const canCancel = canCancelMerchantOrder(status, fulfillmentStatus);
+
+  useEffect(() => {
+    if (actionCompletion === 0) return;
+
+    const card = document.getElementById(`merchant-order-${orderId}`);
+    if (!card) return;
+
+    card.scrollIntoView({ block: "start", behavior: "smooth" });
+
+    const nextActionTarget = nextAction
+      ? card.querySelector<HTMLElement>(
+          `[data-testid="merchant-order-action-${nextAction}"]`,
+        )
+      : null;
+    const target =
+      nextActionTarget ??
+      card.querySelector<HTMLElement>(
+        '[data-testid="merchant-order-action-feedback"]',
+      );
+    target?.focus({ preventScroll: true });
+  }, [
+    actionCompletion,
+    fulfillmentStatus,
+    nextAction,
+    orderId,
+    paymentStatus,
+    status,
+  ]);
 
   if (readOnly) {
     return (
@@ -280,7 +318,7 @@ export function MerchantOrderActions({
     }
 
     setConfirmation(null);
-    router.refresh();
+    setActionCompletion((value) => value + 1);
     return true;
   }
 
@@ -410,6 +448,12 @@ export function MerchantOrderActions({
             <p className="text-xs text-muted-foreground">
               {copy.shippingHint}
             </p>
+            <p
+              className="break-all text-xs font-medium text-muted-foreground"
+              data-testid="merchant-order-shipping-reference"
+            >
+              {copy.referenceLabel}: <span dir="ltr">{orderReference}</span>
+            </p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button
@@ -452,7 +496,16 @@ export function MerchantOrderActions({
             <p className="text-xs text-muted-foreground">
               {copy.collectionHint}
             </p>
-            <p className="text-sm font-semibold">
+            <p
+              className="break-all text-xs font-medium text-muted-foreground"
+              data-testid="merchant-order-collection-reference"
+            >
+              {copy.referenceLabel}: <span dir="ltr">{orderReference}</span>
+            </p>
+            <p
+              className="text-sm font-semibold"
+              data-testid="merchant-order-collection-amount"
+            >
               {total} {currency}
             </p>
           </div>
@@ -595,10 +648,11 @@ export function MerchantOrderActions({
       {feedback ? (
         <div
           role={feedback.tone === "error" ? "alert" : "status"}
+          tabIndex={-1}
           className={
             feedback.tone === "error"
-              ? "flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive"
-              : "flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-700 dark:text-emerald-400"
+              ? "flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive outline-none"
+              : "flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-700 outline-none dark:text-emerald-400"
           }
           data-testid={
             feedback.tone === "error"

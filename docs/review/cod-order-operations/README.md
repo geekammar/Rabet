@@ -24,6 +24,12 @@ Viewport: **360 CSS px** (`720 px` image width at 2× device pixel ratio).
 | `13-read-only-orders-en-360.png` | Suspended-store read-only Orders view in English: orders remain readable, with no accept, prepare, shipping, delivery, collection or cancel controls. |
 | `14-read-only-orders-ar-360.png` | The same read-only state in Arabic RTL at 360 px. |
 | `15-historical-unknown-360.png` | A historical delivered/collected order whose shipping, delivery and collection event times were never recorded shows `Time unknown` instead of inferred dates. |
+| `17-adjacent-orders-before-360.png` | Two adjacent orders with different next actions before the UX fix scenario: handoff on `ORD-UXA234` and collection on `ORD-UXB345`. |
+| `17b-shipping-confirm-reference-360.png` | The handoff confirmation names `ORD-UXA234` and explains that on-hand and reserved both decrease while available-to-sell is unchanged. |
+| `18-adjacent-after-handoff-360.png` | After handoff the acted order remains first, its next delivery action stays visible, and the neighboring collection order is unchanged. |
+| `19-adjacent-after-collection-ar-360.png` | Arabic RTL collection on `ORD-UXB345`: the confirmation names the order with `20.00 SAR`, the acted card stays in view after success, and `ORD-UXA234` remains unchanged. |
+| `19b-collection-confirm-reference-ar-360.png` | Arabic RTL collection confirmation showing the selected order reference and exact amount before submission. |
+| `19c-shipping-confirm-reference-ar-360.png` | Arabic RTL handoff confirmation naming `ORD-UXC456` and the corrected copy: on-hand and reserved both decrease, while available-to-sell stays unchanged. |
 | `16-legacy-delivery-unknown-handoff-360.png` | A historical handed order with no recorded handoff time can still record delivery; the handoff stays `Time unknown`, the delivery time is exact, and payment remains a separate `awaiting collection` badge. |
 
 

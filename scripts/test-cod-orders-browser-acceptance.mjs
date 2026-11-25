@@ -579,6 +579,55 @@ async function main() {
     assert(clicked, `Expected ${testId} to be clickable`);
   };
 
+  const findOrderCardExpression = (reference) =>
+    `[...document.querySelectorAll('[data-testid="merchant-order-card"]')].find((candidate) => candidate.innerText.includes(${JSON.stringify(reference)}))`;
+
+  const scrollToOrder = async (reference) => {
+    const scrolled = await cdp.evaluate(`(() => {
+      const card = ${findOrderCardExpression(reference)};
+      if (!card) return false;
+      card.scrollIntoView({ block: "start", behavior: "instant" });
+      return true;
+    })()`);
+    assert(scrolled, `Expected ${reference} card to exist for scrolling`);
+  };
+
+  const clickOrderTestId = async (reference, testId) => {
+    const clicked = await cdp.evaluate(`(() => {
+      const card = ${findOrderCardExpression(reference)};
+      const element = card?.querySelector('[data-testid="${testId}"]');
+      if (!element) return false;
+      element.click();
+      return true;
+    })()`);
+    assert(clicked, `Expected ${testId} inside ${reference} to be clickable`);
+  };
+
+  const readUxSequence = async () =>
+    cdp.evaluate(`(() => {
+      const cards = [...document.querySelectorAll('[data-testid="merchant-order-card"]')];
+      const details = cards.map((card, index) => {
+        const match = card.innerText.match(/ORD-[A-Z2-9]{6}/);
+        return {
+          index,
+          reference: match?.[0] ?? null,
+          status: card.getAttribute('data-current-status'),
+          payment: card.getAttribute('data-payment-status'),
+          top: card.getBoundingClientRect().top,
+          bottom: card.getBoundingClientRect().bottom,
+        };
+      });
+      const a = details.find((entry) => entry.reference === "ORD-UXA234");
+      const b = details.find((entry) => entry.reference === "ORD-UXB345");
+      return {
+        order: details.map((entry) => entry.reference),
+        a,
+        b,
+        viewportHeight: window.innerHeight,
+        scrollY: window.scrollY,
+      };
+    })()`);
+
   const readOrderCard = async (reference = null) =>
     cdp.evaluate(`(() => {
       const cards = [...document.querySelectorAll('[data-testid="merchant-order-card"]')];
@@ -1368,6 +1417,297 @@ async function main() {
   );
   await capturePhoneScreenshot("12-cancelled-ar-360.png");
 
+  log("Seeding adjacent UX orders with different next actions...");
+  const [uxProduct] = await pgClient`
+    insert into "product" ("store_id", "category_id", "slug", "price", "is_active", "sort_order")
+    values (${store.id}, ${category.id}, 'cod-browser-ux-product', 11.00, true, 4)
+    returning id
+  `;
+  await pgClient`
+    insert into "product_inventory" ("product_id", "store_id", "on_hand", "reserved")
+    values (${uxProduct.id}, ${store.id}, 4, 3)
+  `;
+  const uxOrders = await pgClient`
+    insert into "order" (
+      "store_id", "connection_id", "telegram_user_id", "telegram_chat_id",
+      "reference", "checkout_key", "status", "payment_method", "payment_status",
+      "fulfillment_status", "currency", "subtotal", "delivery_fee", "total",
+      "customer_name", "customer_phone", "delivery_address",
+      "placed_at", "accepted_at", "preparing_at", "created_at", "updated_at",
+      "handed_to_shipping_at", "delivered_at"
+    )
+    values
+    (
+      ${store.id}, ${connection.id}, 93006, 93006,
+      'ORD-UXA234', ${crypto.randomUUID()}, 'preparing', 'cod', 'awaiting_collection',
+      'unfulfilled', 'SAR', 22.00, 9.00, 31.00,
+      'Adjacent Handoff Buyer', '+15550000006', '700 Adjacent Handoff Street',
+      now() - interval '30 seconds', now() - interval '30 seconds',
+      now() - interval '30 seconds', now() - interval '30 seconds',
+      now() - interval '30 seconds', null, null
+    ),
+    (
+      ${store.id}, ${connection.id}, 93007, 93007,
+      'ORD-UXB345', ${crypto.randomUUID()}, 'preparing', 'cod', 'awaiting_collection',
+      'delivered', 'SAR', 11.00, 9.00, 20.00,
+      'Adjacent Collection Buyer', '+15550000007', '701 Adjacent Collection Street',
+      now() - interval '30 seconds', now() - interval '30 seconds',
+      now() - interval '30 seconds', now() - interval '30 seconds',
+      now() - interval '30 seconds', now() - interval '2 hours',
+      now() - interval '1 hour'
+    ),
+    (
+      ${store.id}, ${connection.id}, 93008, 93008,
+      'ORD-UXC456', ${crypto.randomUUID()}, 'preparing', 'cod', 'awaiting_collection',
+      'unfulfilled', 'SAR', 11.00, 9.00, 20.00,
+      'Arabic Shipping Copy Buyer', '+15550000008', '702 Arabic Shipping Copy Street',
+      now() - interval '1 minute', now() - interval '1 minute',
+      now() - interval '1 minute', now() - interval '1 minute',
+      now() - interval '1 minute', null, null
+    )
+    returning id, reference
+  `;
+  const uxOrderByRef = new Map(uxOrders.map((row) => [row.reference, row.id]));
+  const [uxAItem] = await pgClient`
+    insert into "order_item" (
+      "order_id", "product_id", "product_name", "unit_price", "quantity",
+      "line_total", "product_snapshot"
+    )
+    values (
+      ${uxOrderByRef.get("ORD-UXA234")}, ${uxProduct.id}, 'Adjacent Handoff Product',
+      11.00, 2, 22.00,
+      ${JSON.stringify({
+        name: "Adjacent Handoff Product",
+        description: "Adjacent UX fixture",
+        categoryId: category.id,
+        unitPrice: "11.00",
+        currency: "SAR",
+      })}::jsonb
+    )
+    returning id
+  `;
+  const [uxBItem] = await pgClient`
+    insert into "order_item" (
+      "order_id", "product_id", "product_name", "unit_price", "quantity",
+      "line_total", "product_snapshot"
+    )
+    values (
+      ${uxOrderByRef.get("ORD-UXB345")}, ${uxProduct.id}, 'Adjacent Collection Product',
+      11.00, 1, 11.00,
+      ${JSON.stringify({
+        name: "Adjacent Collection Product",
+        description: "Adjacent UX fixture",
+        categoryId: category.id,
+        unitPrice: "11.00",
+        currency: "SAR",
+      })}::jsonb
+    )
+    returning id
+  `;
+  const [uxCItem] = await pgClient`
+    insert into "order_item" (
+      "order_id", "product_id", "product_name", "unit_price", "quantity",
+      "line_total", "product_snapshot"
+    )
+    values (
+      ${uxOrderByRef.get("ORD-UXC456")}, ${uxProduct.id}, 'Arabic Shipping Copy Product',
+      11.00, 1, 11.00,
+      ${JSON.stringify({
+        name: "Arabic Shipping Copy Product",
+        description: "Arabic shipping copy fixture",
+        categoryId: category.id,
+        unitPrice: "11.00",
+        currency: "SAR",
+      })}::jsonb
+    )
+    returning id
+  `;
+  await pgClient`
+    insert into "inventory_reservation" (
+      "order_id", "order_item_id", "product_id", "store_id", "quantity", "status",
+      "reserved_at", "committed_at"
+    )
+    values
+    (
+      ${uxOrderByRef.get("ORD-UXA234")}, ${uxAItem.id}, ${uxProduct.id},
+      ${store.id}, 2, 'reserved', now() - interval '30 seconds', null
+    ),
+    (
+      ${uxOrderByRef.get("ORD-UXB345")}, ${uxBItem.id}, ${uxProduct.id},
+      ${store.id}, 1, 'committed', now() - interval '2 hours',
+      now() - interval '2 hours'
+    ),
+    (
+      ${uxOrderByRef.get("ORD-UXC456")}, ${uxCItem.id}, ${uxProduct.id},
+      ${store.id}, 1, 'reserved', now() - interval '1 minute', null
+    )
+  `;
+
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant-locale",
+    value: "en",
+    domain: "127.0.0.1",
+    path: "/",
+  });
+  await navigate(`${BASE_URL}/app/orders`, "Adjacent UX orders");
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('ORD-UXA234') && document.body.innerText.includes('ORD-UXB345')",
+    "adjacent UX order cards",
+  );
+  await scrollToOrder("ORD-UXA234");
+  const uxBefore = await readUxSequence();
+  log(`UX before handoff: ${JSON.stringify(uxBefore)}`);
+  assert(
+    uxBefore.a && uxBefore.b && Math.abs(uxBefore.a.index - uxBefore.b.index) === 1,
+    `Adjacent UX orders must be adjacent, saw ${JSON.stringify(uxBefore)}`,
+  );
+  await capturePhoneScreenshot("17-adjacent-orders-before-360.png");
+
+  await clickOrderTestId("ORD-UXA234", "merchant-order-action-hand_to_shipping");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-shipping-confirm\"]'))",
+    "adjacent handoff confirmation",
+  );
+  const uxShippingConfirmText = await cdp.evaluate(
+    "document.querySelector('[data-testid=\"merchant-order-shipping-confirm\"]')?.innerText ?? ''",
+  );
+  log(`UX shipping confirmation: ${JSON.stringify(uxShippingConfirmText)}`);
+  await capturePhoneScreenshot("17b-shipping-confirm-reference-360.png");
+  await clickOrderTestId("ORD-UXA234", "merchant-order-shipping-submit");
+  await waitFor(
+    cdp,
+    `(${findOrderCardExpression("ORD-UXA234")})?.getAttribute('data-current-status') === 'handed_to_shipping'`,
+    "adjacent handoff status",
+  );
+  const uxAfterHandoff = await readUxSequence();
+  const uxNeighborB = await readOrderCard("ORD-UXB345");
+  const uxFocusAfterHandoff = await cdp.evaluate(
+    "document.activeElement?.getAttribute('data-testid') ?? document.activeElement?.tagName ?? null",
+  );
+  log(`UX after handoff: ${JSON.stringify(uxAfterHandoff)} focus=${uxFocusAfterHandoff}`);
+  assert(
+    uxShippingConfirmText.includes("ORD-UXA234"),
+    `Shipping confirmation must name the selected order, saw ${JSON.stringify(uxShippingConfirmText)}`,
+  );
+  assert(
+    uxAfterHandoff.a && uxAfterHandoff.b &&
+      uxAfterHandoff.a.index === uxBefore.a.index &&
+      uxAfterHandoff.b.index === uxBefore.b.index,
+    `Acted order and adjacent order must not change positions, before ${JSON.stringify(uxBefore)} after ${JSON.stringify(uxAfterHandoff)}`,
+  );
+  assert(
+    uxAfterHandoff.a.top >= 0 &&
+      uxAfterHandoff.a.top < uxAfterHandoff.viewportHeight,
+    `Acted order must remain in view after handoff, saw ${JSON.stringify(uxAfterHandoff)}`,
+  );
+  assert(
+    uxAfterHandoff.a.status === "handed_to_shipping" &&
+      uxAfterHandoff.b.status === "delivered" &&
+      uxNeighborB?.paymentBadge === "awaiting_collection",
+    `Neighboring order must remain unchanged, saw ${JSON.stringify({ uxAfterHandoff, uxNeighborB })}`,
+  );
+  assert(
+    uxFocusAfterHandoff === "merchant-order-action-deliver",
+    `Focus must move to the selected order's next action, saw ${uxFocusAfterHandoff}`,
+  );
+  await capturePhoneScreenshot("18-adjacent-after-handoff-360.png");
+
+  log("Exercising adjacent collection in Arabic RTL...");
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant-locale",
+    value: "ar",
+    domain: "127.0.0.1",
+    path: "/",
+  });
+  await navigate(`${BASE_URL}/app/orders`, "Arabic adjacent UX orders");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-orders-page\"]')?.getAttribute('dir') === 'rtl'",
+    "Arabic adjacent RTL page",
+  );
+  await scrollToOrder("ORD-UXC456");
+  await clickOrderTestId("ORD-UXC456", "merchant-order-action-hand_to_shipping");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-shipping-confirm\"]'))",
+    "Arabic shipping confirmation",
+  );
+  const arabicShippingConfirmText = await cdp.evaluate(
+    "document.querySelector('[data-testid=\"merchant-order-shipping-confirm\"]')?.innerText ?? ''",
+  );
+  log(`UX Arabic shipping confirmation: ${JSON.stringify(arabicShippingConfirmText)}`);
+  assert(
+    arabicShippingConfirmText.includes("ORD-UXC456") &&
+      arabicShippingConfirmText.includes("المخزون الفعلي والمحجوز") &&
+      arabicShippingConfirmText.includes("المتاحة للبيع"),
+    `Arabic shipping confirmation must name the order and explain stock movement, saw ${JSON.stringify(arabicShippingConfirmText)}`,
+  );
+  await capturePhoneScreenshot("19c-shipping-confirm-reference-ar-360.png");
+  await clickOrderTestId("ORD-UXC456", "merchant-order-shipping-cancel");
+
+  await scrollToOrder("ORD-UXB345");
+  const uxArabicBefore = await readUxSequence();
+  await clickOrderTestId("ORD-UXB345", "merchant-order-action-collect_cod");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-collection-confirm\"]'))",
+    "adjacent collection confirmation",
+  );
+  const uxCollectionConfirmText = await cdp.evaluate(
+    "document.querySelector('[data-testid=\"merchant-order-collection-confirm\"]')?.innerText ?? ''",
+  );
+  log(`UX collection confirmation: ${JSON.stringify(uxCollectionConfirmText)}`);
+  await capturePhoneScreenshot("19b-collection-confirm-reference-ar-360.png");
+  await clickOrderTestId("ORD-UXB345", "merchant-order-collection-submit");
+  await waitFor(
+    cdp,
+    `(${findOrderCardExpression("ORD-UXB345")})?.getAttribute('data-payment-status') === 'collected'`,
+    "adjacent collection status",
+  );
+  const uxAfterCollection = await readUxSequence();
+  const uxNeighborA = await readOrderCard("ORD-UXA234");
+  const uxFocusAfterCollection = await cdp.evaluate(
+    "document.activeElement?.getAttribute('data-testid') ?? document.activeElement?.tagName ?? null",
+  );
+  log(`UX after Arabic collection: ${JSON.stringify(uxAfterCollection)} focus=${uxFocusAfterCollection}`);
+  assert(
+    uxCollectionConfirmText.includes("ORD-UXB345") &&
+      uxCollectionConfirmText.includes("20.00") &&
+      uxCollectionConfirmText.includes("SAR"),
+    `Collection confirmation must name the order and exact amount, saw ${JSON.stringify(uxCollectionConfirmText)}`,
+  );
+  assert(
+    uxAfterCollection.a && uxAfterCollection.b &&
+      uxAfterCollection.a.index === uxArabicBefore.a.index &&
+      uxAfterCollection.b.index === uxArabicBefore.b.index,
+    `Arabic acted order and neighbor must not change positions, before ${JSON.stringify(uxArabicBefore)} after ${JSON.stringify(uxAfterCollection)}`,
+  );
+  assert(
+    uxAfterCollection.b.top >= 0 &&
+      uxAfterCollection.b.top < uxAfterCollection.viewportHeight,
+    `Acted order must remain in view after Arabic collection, saw ${JSON.stringify(uxAfterCollection)}`,
+  );
+  assert(
+    uxAfterCollection.b.status === "delivered" &&
+      uxAfterCollection.b.payment === "collected" &&
+      uxNeighborA?.statusBadge === "handed_to_shipping",
+    `Arabic neighbor must remain unchanged, saw ${JSON.stringify({ uxAfterCollection, uxNeighborA })}`,
+  );
+  assert(
+    uxFocusAfterCollection === "merchant-order-action-feedback",
+    `Focus must remain with the selected order's feedback, saw ${uxFocusAfterCollection}`,
+  );
+  const uxArabicOverflow = await cdp.evaluate(
+    "Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)",
+  );
+  assert(
+    uxArabicOverflow <= 361,
+    `Expected no horizontal scroll in Arabic adjacent UX view, saw ${uxArabicOverflow}`,
+  );
+  await capturePhoneScreenshot("19-adjacent-after-collection-ar-360.png");
+
   log("Seeding a placed order and suspending the store for read-only coverage...");
   const [readOnlyOrder] = await pgClient`
     insert into "order" (
@@ -1457,11 +1797,11 @@ async function main() {
   assert(!englishReadOnly.cancel, "Read-only Orders must not render Cancel");
   assert(!englishReadOnly.form, "Read-only Orders must not render the cancel form");
   assert(
-    englishReadOnly.readOnlyNotes >= 5,
+    englishReadOnly.readOnlyNotes >= 8,
     `Expected read-only notes for every order, saw ${englishReadOnly.readOnlyNotes}`,
   );
   assert(
-    englishReadOnly.cards >= 5,
+    englishReadOnly.cards >= 8,
     `Expected every order to remain readable, saw ${englishReadOnly.cards}`,
   );
   assert(
