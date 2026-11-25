@@ -25,6 +25,9 @@ import { lockConnectionStoreShared } from "@/lib/telegram/connection-locks";
 import { isCodOrdersDeploymentEnabled } from "./feature";
 import {
   canCancelMerchantOrder,
+  canHandMerchantOrderToShipping,
+  canMarkMerchantOrderDelivered,
+  canRecordMerchantOrderCollection,
   normalizeCancellationReason,
 } from "./order-state";
 
@@ -147,6 +150,9 @@ export type MerchantOrder = {
   deliveryAddress: string;
   acceptedAt: Date | null;
   preparingAt: Date | null;
+  handedToShippingAt: Date | null;
+  deliveredAt: Date | null;
+  paymentCollectedAt: Date | null;
   cancelledAt: Date | null;
   cancellationReason: string | null;
   items: MerchantOrderItem[];
@@ -158,12 +164,22 @@ type MerchantOrderProgress = {
   reference: string;
   orderStatus: string;
   fulfillmentStatus: string;
+  paymentStatus: string;
   cancellationReason: string | null;
   releasedQuantity: number;
+  shippedQuantity: number;
 };
 
 export type MerchantOrderMutationResult =
-  | ({ status: "accepted" | "preparing" | "cancelled" } & MerchantOrderProgress)
+  | ({
+      status:
+        | "accepted"
+        | "preparing"
+        | "handed_to_shipping"
+        | "delivered"
+        | "collected"
+        | "cancelled";
+    } & MerchantOrderProgress)
   | ({ status: "already_applied" } & MerchantOrderProgress)
   | { status: "not_found" }
   | {
@@ -1654,14 +1670,17 @@ type MerchantOrderRow = typeof orderTable.$inferSelect;
 function orderProgress(
   row: MerchantOrderRow,
   releasedQuantity = 0,
+  shippedQuantity = 0,
 ): MerchantOrderProgress {
   return {
     orderId: row.id,
     reference: row.reference,
     orderStatus: row.status,
     fulfillmentStatus: row.fulfillmentStatus,
+    paymentStatus: row.paymentStatus,
     cancellationReason: row.cancellationReason,
     releasedQuantity,
+    shippedQuantity,
   };
 }
 
@@ -1790,6 +1809,264 @@ export async function prepareMerchantOrder(
     if (!updated) throw new Error("Order preparation could not be persisted");
 
     return { status: "preparing", ...orderProgress(updated) };
+  });
+}
+
+/**
+ * Merchant handoff: preparing + reserved -> handed_to_shipping + committed.
+ *
+ * The order row is locked first, so a retry or a concurrent cancellation and
+ * handoff serialize. Only the transaction that observes a still-unfulfilled
+ * order commits each reservation and removes the shipped quantity from both
+ * `on_hand` and `reserved`; every later request is a no-op. Delivery and COD
+ * collection never touch inventory.
+ */
+export async function handMerchantOrderToShipping(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  orderId: string,
+): Promise<MerchantOrderMutationResult> {
+  assertStoreScope(scope);
+
+  return db.transaction(async (tx) => {
+    const row = await readMerchantOrderForUpdate(tx, scope, orderId);
+    if (!row) return { status: "not_found" };
+
+    if (row.status === "cancelled" || row.fulfillmentStatus === "cancelled") {
+      return invalidOrderTransition(row);
+    }
+
+    if (
+      row.fulfillmentStatus === "handed_to_shipping" ||
+      row.fulfillmentStatus === "delivered"
+    ) {
+      return { status: "already_applied", ...orderProgress(row) };
+    }
+
+    if (!canHandMerchantOrderToShipping(row.status, row.fulfillmentStatus)) {
+      return invalidOrderTransition(row);
+    }
+
+    const items = await tx
+      .select({
+        productId: orderItem.productId,
+        quantity: orderItem.quantity,
+      })
+      .from(orderItem)
+      .where(eq(orderItem.orderId, row.id))
+      .orderBy(orderItem.productId);
+
+    const reservations = await tx
+      .select({
+        id: inventoryReservation.id,
+        productId: inventoryReservation.productId,
+        quantity: inventoryReservation.quantity,
+        status: inventoryReservation.status,
+      })
+      .from(inventoryReservation)
+      .where(
+        and(
+          eq(inventoryReservation.orderId, row.id),
+          eq(inventoryReservation.storeId, scope.storeId),
+        ),
+      )
+      .orderBy(inventoryReservation.productId)
+      .for("update");
+
+    if (items.length === 0 || reservations.length !== items.length) {
+      throw new Error("Order reservations do not match its items");
+    }
+
+    for (const [index, reservation] of reservations.entries()) {
+      const item = items[index];
+
+      if (
+        reservation.status !== "reserved" ||
+        reservation.productId !== item.productId ||
+        reservation.quantity !== item.quantity
+      ) {
+        throw new Error("Order reservation is not holdable for shipping");
+      }
+    }
+
+    const now = new Date();
+    let shippedQuantity = 0;
+
+    for (const reservation of reservations) {
+      const [committed] = await tx
+        .update(inventoryReservation)
+        .set({
+          status: "committed",
+          committedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(inventoryReservation.id, reservation.id),
+            eq(inventoryReservation.status, "reserved"),
+          ),
+        )
+        .returning({ quantity: inventoryReservation.quantity });
+
+      if (!committed) {
+        throw new Error("Inventory reservation could not be committed");
+      }
+
+      const [inventory] = await tx
+        .update(productInventory)
+        .set({
+          onHand: sql`${productInventory.onHand} - ${committed.quantity}`,
+          reserved: sql`${productInventory.reserved} - ${committed.quantity}`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(productInventory.productId, reservation.productId),
+            eq(productInventory.storeId, scope.storeId),
+            gte(productInventory.onHand, committed.quantity),
+            gte(productInventory.reserved, committed.quantity),
+          ),
+        )
+        .returning({ productId: productInventory.productId });
+
+      if (!inventory) {
+        throw new Error("Inventory reservation does not match held stock");
+      }
+
+      shippedQuantity += committed.quantity;
+    }
+
+    const [updated] = await tx
+      .update(orderTable)
+      .set({
+        fulfillmentStatus: "handed_to_shipping",
+        handedToShippingAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.status, "preparing"),
+          eq(orderTable.fulfillmentStatus, "unfulfilled"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Order handoff could not be persisted");
+
+    return {
+      status: "handed_to_shipping",
+      ...orderProgress(updated, 0, shippedQuantity),
+    };
+  });
+}
+
+/**
+ * Delivery can only follow a handoff to shipping. It records the delivery
+ * timestamp and leaves payment and inventory untouched.
+ */
+export async function markMerchantOrderDelivered(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  orderId: string,
+): Promise<MerchantOrderMutationResult> {
+  assertStoreScope(scope);
+
+  return db.transaction(async (tx) => {
+    const row = await readMerchantOrderForUpdate(tx, scope, orderId);
+    if (!row) return { status: "not_found" };
+
+    if (row.status === "cancelled" || row.fulfillmentStatus === "cancelled") {
+      return invalidOrderTransition(row);
+    }
+
+    if (row.fulfillmentStatus === "delivered") {
+      return { status: "already_applied", ...orderProgress(row) };
+    }
+
+    if (!canMarkMerchantOrderDelivered(row.status, row.fulfillmentStatus)) {
+      return invalidOrderTransition(row);
+    }
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(orderTable)
+      .set({
+        fulfillmentStatus: "delivered",
+        deliveredAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.fulfillmentStatus, "handed_to_shipping"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Order delivery could not be persisted");
+
+    return { status: "delivered", ...orderProgress(updated) };
+  });
+}
+
+/**
+ * COD collection can only be recorded after delivery and only changes payment
+ * state. It never changes fulfillment, reservations or inventory.
+ */
+export async function collectMerchantOrderPayment(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  orderId: string,
+): Promise<MerchantOrderMutationResult> {
+  assertStoreScope(scope);
+
+  return db.transaction(async (tx) => {
+    const row = await readMerchantOrderForUpdate(tx, scope, orderId);
+    if (!row) return { status: "not_found" };
+
+    if (row.status === "cancelled" || row.fulfillmentStatus === "cancelled") {
+      return invalidOrderTransition(row);
+    }
+
+    if (row.paymentStatus === "collected") {
+      return row.fulfillmentStatus === "delivered"
+        ? { status: "already_applied", ...orderProgress(row) }
+        : invalidOrderTransition(row);
+    }
+
+    if (
+      !canRecordMerchantOrderCollection(
+        row.fulfillmentStatus,
+        row.paymentStatus,
+      )
+    ) {
+      return invalidOrderTransition(row);
+    }
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(orderTable)
+      .set({
+        paymentStatus: "collected",
+        paymentCollectedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.fulfillmentStatus, "delivered"),
+          eq(orderTable.paymentStatus, "awaiting_collection"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Order collection could not be persisted");
+
+    return { status: "collected", ...orderProgress(updated) };
   });
 }
 
@@ -1930,7 +2207,11 @@ export async function listMerchantOrders(
     .select()
     .from(orderTable)
     .where(eq(orderTable.storeId, scope.storeId))
-    .orderBy(desc(orderTable.placedAt))
+    .orderBy(
+      desc(orderTable.placedAt),
+      desc(orderTable.createdAt),
+      desc(orderTable.id),
+    )
     .limit(Math.min(Math.max(1, limit), 200));
 
   if (orders.length === 0) return [];
@@ -1990,6 +2271,9 @@ export async function listMerchantOrders(
     deliveryAddress: row.deliveryAddress,
     acceptedAt: row.acceptedAt,
     preparingAt: row.preparingAt,
+    handedToShippingAt: row.handedToShippingAt,
+    deliveredAt: row.deliveredAt,
+    paymentCollectedAt: row.paymentCollectedAt,
     cancelledAt: row.cancelledAt,
     cancellationReason: row.cancellationReason,
     items: itemsByOrder.get(row.id) ?? [],

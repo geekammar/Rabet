@@ -133,6 +133,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0012_mushy_scream",
   "0013_cod_orders",
   "0014_sparkling_captain_stacy",
+  "0015_cod_shipping_delivery_collection",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -508,12 +509,19 @@ export const CRITICAL_CONSTRAINTS_V12 = [
   "inventory_reservation_status_check",
 ];
 
-/** CHECK constraints the current chain requires (0014 adds merchant operations). */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK constraints present through 0014 (merchant operations). */
+export const CRITICAL_CONSTRAINTS_V13 = [
   ...CRITICAL_CONSTRAINTS_V12,
   "order_merchant_progress_check",
   "order_cancellation_state_check",
   "order_cancellation_reason_length_check",
+];
+
+/** CHECK constraints the current chain requires (0015 adds shipping and collection). */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V13,
+  "order_shipping_state_check",
+  "order_payment_collection_state_check",
 ];
 
 /** Notification update triggers created by migration 0003. */

@@ -249,6 +249,15 @@ export const order = pgTable(
       .defaultNow(),
     acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: "date" }),
     preparingAt: timestamp("preparing_at", { withTimezone: true, mode: "date" }),
+    handedToShippingAt: timestamp("handed_to_shipping_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true, mode: "date" }),
+    paymentCollectedAt: timestamp("payment_collected_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true, mode: "date" }),
     cancellationReason: text("cancellation_reason"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
@@ -314,6 +323,36 @@ export const order = pgTable(
     check(
       "order_fulfillment_status_check",
       sql`${table.fulfillmentStatus} IN ('unfulfilled', 'handed_to_shipping', 'delivered', 'cancelled')`,
+    ),
+    check(
+      "order_shipping_state_check",
+      sql`(
+        (${table.fulfillmentStatus} = 'unfulfilled'
+          AND ${table.handedToShippingAt} IS NULL
+          AND ${table.deliveredAt} IS NULL)
+        OR
+        (${table.fulfillmentStatus} = 'handed_to_shipping'
+          AND ${table.deliveredAt} IS NULL)
+        OR
+        (${table.fulfillmentStatus} = 'delivered'
+          AND (
+            ${table.handedToShippingAt} IS NULL
+            OR
+            (${table.deliveredAt} IS NOT NULL
+              AND ${table.deliveredAt} >= ${table.handedToShippingAt})
+          ))
+        OR
+        (${table.fulfillmentStatus} = 'cancelled'
+          AND ${table.handedToShippingAt} IS NULL
+          AND ${table.deliveredAt} IS NULL)
+      )`,
+    ),
+    check(
+      "order_payment_collection_state_check",
+      sql`(
+        ${table.paymentStatus} = 'collected'
+        OR ${table.paymentCollectedAt} IS NULL
+      )`,
     ),
     check("order_currency_allowlist_check", CURRENCIES),
     check(

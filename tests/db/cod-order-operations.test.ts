@@ -16,7 +16,10 @@ import type { TransactionDatabase } from "@/db/transaction-client";
 import {
   acceptMerchantOrder,
   cancelMerchantOrder,
+  collectMerchantOrderPayment,
+  handMerchantOrderToShipping,
   listMerchantOrders,
+  markMerchantOrderDelivered,
   prepareMerchantOrder,
 } from "@/lib/commerce/orders";
 import {
@@ -575,7 +578,10 @@ describe.skipIf(!shouldRun)("merchant COD order operations", () => {
 
     await db()
       .update(order)
-      .set({ fulfillmentStatus: "handed_to_shipping" })
+      .set({
+        fulfillmentStatus: "handed_to_shipping",
+        handedToShippingAt: new Date(),
+      })
       .where(eq(order.id, shippingOrderId));
 
     const tooLate = await cancelMerchantOrder(tx(), scopeA, {
@@ -692,6 +698,15 @@ describe.skipIf(!shouldRun)("merchant COD order operations", () => {
         reason: "Cross-store cancellation attempt",
       }),
     ).toEqual({ status: "not_found" });
+    expect(
+      await handMerchantOrderToShipping(tx(), scopeB, orderId),
+    ).toEqual({ status: "not_found" });
+    expect(await markMerchantOrderDelivered(tx(), scopeB, orderId)).toEqual({
+      status: "not_found",
+    });
+    expect(await collectMerchantOrderPayment(tx(), scopeB, orderId)).toEqual({
+      status: "not_found",
+    });
 
     for (const reason of [
       "",
@@ -802,6 +817,485 @@ describe.skipIf(!shouldRun)("merchant COD order operations", () => {
           reservation.releaseReason === null,
       ),
     ).toBe(true);
+
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 5,
+      reserved: 2,
+    });
+    expect(await inventory(fixture.productA2Id)).toMatchObject({
+      onHand: 10,
+      reserved: 1,
+    });
+  });
+
+  it("hands two units to shipping once from 5 on-hand / 3 reserved, then delivers and collects without further stock changes", async () => {
+    const orderId = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABL934",
+      items: [
+        {
+          productId: fixture.productA1Id,
+          productName: "Ops A One",
+          unitPriceCents: 1100,
+          quantity: 2,
+        },
+      ],
+    });
+    const scopeA = await scope(fixture.storeAId);
+
+    await acceptMerchantOrder(tx(), scopeA, orderId);
+    await prepareMerchantOrder(tx(), scopeA, orderId);
+    await db()
+      .update(productInventory)
+      .set({ reserved: 3 })
+      .where(eq(productInventory.productId, fixture.productA1Id));
+
+    const [before] = await db()
+      .select()
+      .from(order)
+      .where(eq(order.id, orderId));
+
+    const shipped = await handMerchantOrderToShipping(tx(), scopeA, orderId);
+    expect(shipped).toMatchObject({
+      status: "handed_to_shipping",
+      orderId,
+      orderStatus: "preparing",
+      fulfillmentStatus: "handed_to_shipping",
+      paymentStatus: "awaiting_collection",
+      shippedQuantity: 2,
+      releasedQuantity: 0,
+    });
+
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 3,
+      reserved: 1,
+    });
+
+    const committedReservations = await reservationsFor(orderId);
+    expect(committedReservations).toHaveLength(1);
+    expect(committedReservations[0].status).toBe("committed");
+    expect(committedReservations[0].committedAt).not.toBeNull();
+    expect(committedReservations[0].releasedAt).toBeNull();
+
+    const [afterShipping] = await db()
+      .select()
+      .from(order)
+      .where(eq(order.id, orderId));
+    expect(afterShipping.fulfillmentStatus).toBe("handed_to_shipping");
+    expect(afterShipping.handedToShippingAt).not.toBeNull();
+    expect(afterShipping.deliveredAt).toBeNull();
+    expect(afterShipping.paymentStatus).toBe("awaiting_collection");
+    expect(afterShipping.paymentCollectedAt).toBeNull();
+    expect(afterShipping.total).toBe(before.total);
+    expect(afterShipping.subtotal).toBe(before.subtotal);
+    expect(afterShipping.deliveryFee).toBe(before.deliveryFee);
+    expect(afterShipping.paymentMethod).toBe(before.paymentMethod);
+    expect(afterShipping.customerName).toBe(before.customerName);
+    expect(afterShipping.deliveryAddress).toBe(before.deliveryAddress);
+
+    const shippingRetry = await handMerchantOrderToShipping(
+      tx(),
+      scopeA,
+      orderId,
+    );
+    expect(shippingRetry).toMatchObject({
+      status: "already_applied",
+      fulfillmentStatus: "handed_to_shipping",
+      shippedQuantity: 0,
+    });
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 3,
+      reserved: 1,
+    });
+
+    const delivered = await markMerchantOrderDelivered(tx(), scopeA, orderId);
+    expect(delivered).toMatchObject({
+      status: "delivered",
+      orderStatus: "preparing",
+      fulfillmentStatus: "delivered",
+      paymentStatus: "awaiting_collection",
+    });
+
+    const [afterDelivery] = await db()
+      .select()
+      .from(order)
+      .where(eq(order.id, orderId));
+    expect(afterDelivery.deliveredAt).not.toBeNull();
+    expect(afterDelivery.handedToShippingAt).toEqual(
+      afterShipping.handedToShippingAt,
+    );
+    expect(afterDelivery.paymentStatus).toBe("awaiting_collection");
+    expect(afterDelivery.paymentCollectedAt).toBeNull();
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 3,
+      reserved: 1,
+    });
+    expect((await reservationsFor(orderId))[0].status).toBe("committed");
+
+    const deliveryRetry = await markMerchantOrderDelivered(
+      tx(),
+      scopeA,
+      orderId,
+    );
+    expect(deliveryRetry.status).toBe("already_applied");
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 3,
+      reserved: 1,
+    });
+
+    const collected = await collectMerchantOrderPayment(tx(), scopeA, orderId);
+    expect(collected).toMatchObject({
+      status: "collected",
+      orderStatus: "preparing",
+      fulfillmentStatus: "delivered",
+      paymentStatus: "collected",
+    });
+
+    const [afterCollection] = await db()
+      .select()
+      .from(order)
+      .where(eq(order.id, orderId));
+    expect(afterCollection.paymentStatus).toBe("collected");
+    expect(afterCollection.paymentCollectedAt).not.toBeNull();
+    expect(afterCollection.deliveredAt).toEqual(afterDelivery.deliveredAt);
+    expect(afterCollection.total).toBe(before.total);
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 3,
+      reserved: 1,
+    });
+    expect((await reservationsFor(orderId))[0].status).toBe("committed");
+
+    const collectionRetry = await collectMerchantOrderPayment(
+      tx(),
+      scopeA,
+      orderId,
+    );
+    expect(collectionRetry.status).toBe("already_applied");
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 3,
+      reserved: 1,
+    });
+
+    const merchantOrders = await listMerchantOrders(asAppDb(db()), scopeA);
+    expect(merchantOrders[0]).toMatchObject({
+      id: orderId,
+      fulfillmentStatus: "delivered",
+      paymentStatus: "collected",
+      handedToShippingAt: afterShipping.handedToShippingAt,
+      deliveredAt: afterDelivery.deliveredAt,
+      paymentCollectedAt: afterCollection.paymentCollectedAt,
+    });
+  });
+
+  it("refuses shipping before preparation, delivery before handoff and collection before delivery", async () => {
+    const orderId = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABM945",
+      items: standardItems(),
+    });
+    const scopeA = await scope(fixture.storeAId);
+
+    expect(
+      await handMerchantOrderToShipping(tx(), scopeA, orderId),
+    ).toMatchObject({
+      status: "invalid_transition",
+      currentStatus: "placed",
+      fulfillmentStatus: "unfulfilled",
+    });
+    expect(await markMerchantOrderDelivered(tx(), scopeA, orderId)).toMatchObject(
+      {
+        status: "invalid_transition",
+        currentStatus: "placed",
+        fulfillmentStatus: "unfulfilled",
+      },
+    );
+    expect(await collectMerchantOrderPayment(tx(), scopeA, orderId)).toMatchObject(
+      {
+        status: "invalid_transition",
+        currentStatus: "placed",
+        fulfillmentStatus: "unfulfilled",
+      },
+    );
+
+    await acceptMerchantOrder(tx(), scopeA, orderId);
+    expect(
+      await handMerchantOrderToShipping(tx(), scopeA, orderId),
+    ).toMatchObject({
+      status: "invalid_transition",
+      currentStatus: "accepted",
+      fulfillmentStatus: "unfulfilled",
+    });
+
+    await prepareMerchantOrder(tx(), scopeA, orderId);
+    expect(await markMerchantOrderDelivered(tx(), scopeA, orderId)).toMatchObject(
+      {
+        status: "invalid_transition",
+        currentStatus: "preparing",
+        fulfillmentStatus: "unfulfilled",
+      },
+    );
+    expect(await collectMerchantOrderPayment(tx(), scopeA, orderId)).toMatchObject(
+      {
+        status: "invalid_transition",
+        currentStatus: "preparing",
+        fulfillmentStatus: "unfulfilled",
+      },
+    );
+
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 5,
+      reserved: 2,
+    });
+    expect(await inventory(fixture.productA2Id)).toMatchObject({
+      onHand: 10,
+      reserved: 1,
+    });
+
+    await handMerchantOrderToShipping(tx(), scopeA, orderId);
+
+    expect(await collectMerchantOrderPayment(tx(), scopeA, orderId)).toMatchObject(
+      {
+        status: "invalid_transition",
+        currentStatus: "preparing",
+        fulfillmentStatus: "handed_to_shipping",
+      },
+    );
+
+    await markMerchantOrderDelivered(tx(), scopeA, orderId);
+    expect(
+      await handMerchantOrderToShipping(tx(), scopeA, orderId),
+    ).toMatchObject({
+      status: "already_applied",
+      fulfillmentStatus: "delivered",
+    });
+  });
+
+  it("serializes concurrent shipping retries so stock is deducted exactly once", async () => {
+    const orderId = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABN956",
+      items: [
+        {
+          productId: fixture.productA1Id,
+          productName: "Ops A One",
+          unitPriceCents: 1100,
+          quantity: 2,
+        },
+      ],
+    });
+    const scopeA = await scope(fixture.storeAId);
+
+    await acceptMerchantOrder(tx(), scopeA, orderId);
+    await prepareMerchantOrder(tx(), scopeA, orderId);
+    await db()
+      .update(productInventory)
+      .set({ reserved: 3 })
+      .where(eq(productInventory.productId, fixture.productA1Id));
+
+    const results = await Promise.all([
+      handMerchantOrderToShipping(tx(), scopeA, orderId),
+      handMerchantOrderToShipping(tx(), scopeA, orderId),
+    ]);
+
+    expect(results.map((result) => result.status).sort()).toEqual([
+      "already_applied",
+      "handed_to_shipping",
+    ]);
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 3,
+      reserved: 1,
+    });
+
+    const reservations = await reservationsFor(orderId);
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0].status).toBe("committed");
+    expect(reservations[0].committedAt).not.toBeNull();
+  });
+
+  it("serializes cancellation against shipping so only the winner changes stock", async () => {
+    const orderId = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABP967",
+      items: standardItems(),
+    });
+    const scopeA = await scope(fixture.storeAId);
+
+    await acceptMerchantOrder(tx(), scopeA, orderId);
+    await prepareMerchantOrder(tx(), scopeA, orderId);
+
+    const results = await Promise.all([
+      cancelMerchantOrder(tx(), scopeA, {
+        orderId,
+        reason: "Concurrent cancellation versus shipping",
+      }),
+      handMerchantOrderToShipping(tx(), scopeA, orderId),
+    ]);
+    const statuses = results.map((result) => result.status).sort();
+    const winner = statuses.find((status) => status !== "invalid_transition");
+
+    expect([
+      ["cancelled", "invalid_transition"],
+      ["handed_to_shipping", "invalid_transition"],
+    ]).toContainEqual(statuses);
+
+    const [finalOrder] = await db()
+      .select()
+      .from(order)
+      .where(eq(order.id, orderId));
+    const reservations = await reservationsFor(orderId);
+
+    if (winner === "handed_to_shipping") {
+      expect(finalOrder.status).toBe("preparing");
+      expect(finalOrder.fulfillmentStatus).toBe("handed_to_shipping");
+      expect(await inventory(fixture.productA1Id)).toMatchObject({
+        onHand: 3,
+        reserved: 0,
+      });
+      expect(await inventory(fixture.productA2Id)).toMatchObject({
+        onHand: 9,
+        reserved: 0,
+      });
+      expect(
+        reservations.every(
+          (reservation) => reservation.status === "committed",
+        ),
+      ).toBe(true);
+
+      const lateCancel = await cancelMerchantOrder(tx(), scopeA, {
+        orderId,
+        reason: "Cancellation after handoff",
+      });
+      expect(lateCancel).toMatchObject({
+        status: "invalid_transition",
+        fulfillmentStatus: "handed_to_shipping",
+      });
+    } else {
+      expect(winner).toBe("cancelled");
+      expect(finalOrder.status).toBe("cancelled");
+      expect(finalOrder.fulfillmentStatus).toBe("cancelled");
+      expect(await inventory(fixture.productA1Id)).toMatchObject({
+        onHand: 5,
+        reserved: 0,
+      });
+      expect(await inventory(fixture.productA2Id)).toMatchObject({
+        onHand: 10,
+        reserved: 0,
+      });
+      expect(
+        reservations.every((reservation) => reservation.status === "released"),
+      ).toBe(true);
+
+      const lateHandoff = await handMerchantOrderToShipping(tx(), scopeA, orderId);
+      expect(lateHandoff).toMatchObject({
+        status: "invalid_transition",
+        currentStatus: "cancelled",
+        fulfillmentStatus: "cancelled",
+      });
+    }
+  });
+
+  it("rolls back committed reservations and stock when handoff persistence fails", async () => {
+    const orderId = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABQ978",
+      items: standardItems(),
+    });
+    const scopeA = await scope(fixture.storeAId);
+
+    await acceptMerchantOrder(tx(), scopeA, orderId);
+    await prepareMerchantOrder(tx(), scopeA, orderId);
+
+    await db().execute(sql`
+      create or replace function reject_order_handoff()
+      returns trigger language plpgsql as $$
+      begin
+        if new.fulfillment_status = 'handed_to_shipping' then
+          raise exception 'handoff blocked by acceptance fixture';
+        end if;
+        return new;
+      end;
+      $$
+    `);
+    await db().execute(sql`
+      create trigger reject_order_handoff_trigger
+      before update on "order"
+      for each row execute function reject_order_handoff()
+    `);
+
+    let handoffError: unknown = null;
+
+    try {
+      await handMerchantOrderToShipping(tx(), scopeA, orderId);
+    } catch (error) {
+      handoffError = error;
+    } finally {
+      await db().execute(
+        sql`drop trigger if exists reject_order_handoff_trigger on "order"`,
+      );
+      await db().execute(
+        sql`drop function if exists reject_order_handoff()`,
+      );
+    }
+
+    expect(pgErrorMessage(handoffError)).toContain(
+      "handoff blocked by acceptance fixture",
+    );
+
+    const [unchangedOrder] = await db()
+      .select()
+      .from(order)
+      .where(eq(order.id, orderId));
+    expect(unchangedOrder.status).toBe("preparing");
+    expect(unchangedOrder.fulfillmentStatus).toBe("unfulfilled");
+    expect(unchangedOrder.handedToShippingAt).toBeNull();
+
+    const reservations = await reservationsFor(orderId);
+    expect(
+      reservations.every((reservation) => reservation.status === "reserved"),
+    ).toBe(true);
+
+    expect(await inventory(fixture.productA1Id)).toMatchObject({
+      onHand: 5,
+      reserved: 2,
+    });
+    expect(await inventory(fixture.productA2Id)).toMatchObject({
+      onHand: 10,
+      reserved: 1,
+    });
+  });
+
+  it("refuses handoff when a held reservation no longer matches and changes nothing", async () => {
+    const orderId = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABR989",
+      items: standardItems(),
+    });
+    const scopeA = await scope(fixture.storeAId);
+
+    await acceptMerchantOrder(tx(), scopeA, orderId);
+    await prepareMerchantOrder(tx(), scopeA, orderId);
+
+    const reservations = await reservationsFor(orderId);
+    await db()
+      .update(inventoryReservation)
+      .set({ status: "released", releasedAt: new Date() })
+      .where(eq(inventoryReservation.id, reservations[0].id));
+
+    await expect(
+      handMerchantOrderToShipping(tx(), scopeA, orderId),
+    ).rejects.toThrowError(/not holdable for shipping/);
+
+    const [unchangedOrder] = await db()
+      .select()
+      .from(order)
+      .where(eq(order.id, orderId));
+    expect(unchangedOrder.fulfillmentStatus).toBe("unfulfilled");
 
     expect(await inventory(fixture.productA1Id)).toMatchObject({
       onHand: 5,

@@ -1130,6 +1130,7 @@ describe("production runner flows and execution", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
     expect(output()).toContain("0005_tenant_identity_foundation");
@@ -1190,6 +1191,7 @@ describe("production runner flows and execution", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1233,6 +1235,7 @@ describe("production runner flows and execution", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1277,12 +1280,13 @@ describe("production runner flows and execution", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0007_admin_login_throttle)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0014_sparkling_captain_stacy",
+      "Proceeding with migration to 0015_cod_shipping_delivery_collection",
     );
     expect(output()).toContain("Production migration complete");
   });
@@ -1379,6 +1383,7 @@ describe("production runner flows and execution", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1480,12 +1485,13 @@ describe("production runner flows and execution", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0005_tenant_identity_foundation)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0014_sparkling_captain_stacy",
+      "Proceeding with migration to 0015_cod_shipping_delivery_collection",
     );
   });
 
@@ -1548,12 +1554,13 @@ describe("production runner flows and execution", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0006_tenant_ownership_expansion)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0014_sparkling_captain_stacy",
+      "Proceeding with migration to 0015_cod_shipping_delivery_collection",
     );
   });
 
@@ -2143,6 +2150,7 @@ describe("production runner 0008 to 0010 upgrade", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2151,7 +2159,7 @@ describe("production runner 0008 to 0010 upgrade", () => {
       "Verified healthy prior release (0008_merchant_invitations_and_credentials)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0014_sparkling_captain_stacy",
+      "Proceeding with migration to 0015_cod_shipping_delivery_collection",
     );
     expect(output()).toContain("Validating the result on live database");
   });
@@ -2251,6 +2259,7 @@ describe("production runner 0009 to 0010 upgrade", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(output()).toContain("Validating prior release schema on target");
@@ -2290,6 +2299,7 @@ describe("production runner 0009 to 0010 upgrade", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2298,7 +2308,7 @@ describe("production runner 0009 to 0010 upgrade", () => {
       "Verified healthy prior release (0009_merchant_auth_throttle)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0014_sparkling_captain_stacy",
+      "Proceeding with migration to 0015_cod_shipping_delivery_collection",
     );
     expect(output()).toContain("Validating the result on live database");
   });
@@ -2393,6 +2403,7 @@ describe("production runner 0010 to 0011 upgrade", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(output()).toContain("Validating prior release schema on target");
@@ -2431,6 +2442,7 @@ describe("production runner 0010 to 0011 upgrade", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2439,7 +2451,7 @@ describe("production runner 0010 to 0011 upgrade", () => {
       "Verified healthy prior release (0010_wonderful_siren)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0014_sparkling_captain_stacy",
+      "Proceeding with migration to 0015_cod_shipping_delivery_collection",
     );
     expect(output()).toContain("Validating the result on live database");
   });
@@ -2550,6 +2562,7 @@ describe("production runner 0011 to 0012 upgrade", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(output()).toContain("Validating prior release schema on target");
@@ -2587,6 +2600,7 @@ describe("production runner 0011 to 0012 upgrade", () => {
       "0012_mushy_scream",
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2595,7 +2609,7 @@ describe("production runner 0011 to 0012 upgrade", () => {
       "Verified healthy prior release (0011_careless_hulk)",
     );
     expect(output()).toContain(
-      "Proceeding with migration to 0014_sparkling_captain_stacy",
+      "Proceeding with migration to 0015_cod_shipping_delivery_collection",
     );
     expect(output()).toContain("Validating the result on live database");
   });
@@ -2633,6 +2647,7 @@ describe("production runner 0012 to 0013 upgrade", () => {
     expect(result.state?.pending).toEqual([
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(output()).toContain("0012_mushy_scream");
   });
@@ -2667,6 +2682,7 @@ describe("production runner 0012 to 0013 upgrade", () => {
     expect(result.writes.migrationsApplied).toEqual([
       "0013_cod_orders",
       "0014_sparkling_captain_stacy",
+      "0015_cod_shipping_delivery_collection",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
