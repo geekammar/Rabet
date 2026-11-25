@@ -1,7 +1,7 @@
 import "server-only";
 
 import crypto from "node:crypto";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -23,6 +23,10 @@ import {
 } from "@/lib/data/store-scope";
 import { lockConnectionStoreShared } from "@/lib/telegram/connection-locks";
 import { isCodOrdersDeploymentEnabled } from "./feature";
+import {
+  canCancelMerchantOrder,
+  normalizeCancellationReason,
+} from "./order-state";
 
 /**
  * Scoped cash-on-delivery commerce for one verified managed Store Bot.
@@ -141,9 +145,33 @@ export type MerchantOrder = {
   customerName: string;
   customerPhone: string;
   deliveryAddress: string;
+  acceptedAt: Date | null;
+  preparingAt: Date | null;
+  cancelledAt: Date | null;
+  cancellationReason: string | null;
   items: MerchantOrderItem[];
   reservationStatuses: string[];
 };
+
+type MerchantOrderProgress = {
+  orderId: string;
+  reference: string;
+  orderStatus: string;
+  fulfillmentStatus: string;
+  cancellationReason: string | null;
+  releasedQuantity: number;
+};
+
+export type MerchantOrderMutationResult =
+  | ({ status: "accepted" | "preparing" | "cancelled" } & MerchantOrderProgress)
+  | ({ status: "already_applied" } & MerchantOrderProgress)
+  | { status: "not_found" }
+  | {
+      status: "invalid_transition";
+      currentStatus: string;
+      fulfillmentStatus: string;
+    }
+  | { status: "invalid_reason" };
 
 function queryBuilder(db: CommerceQueryDatabase): Database {
   return db as unknown as Database;
@@ -1618,6 +1646,279 @@ export async function backToCart(
   });
 }
 
+const ORDER_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type MerchantOrderRow = typeof orderTable.$inferSelect;
+
+function orderProgress(
+  row: MerchantOrderRow,
+  releasedQuantity = 0,
+): MerchantOrderProgress {
+  return {
+    orderId: row.id,
+    reference: row.reference,
+    orderStatus: row.status,
+    fulfillmentStatus: row.fulfillmentStatus,
+    cancellationReason: row.cancellationReason,
+    releasedQuantity,
+  };
+}
+
+/**
+ * Locates an order only inside the merchant's trusted store scope and locks the
+ * row for the rest of the transaction. A client-supplied order id is a
+ * locator, never an authorization input: an id from another store is reported
+ * exactly like an unknown id.
+ */
+async function readMerchantOrderForUpdate(
+  db: CommerceTransaction,
+  scope: StoreScope,
+  orderId: string,
+): Promise<MerchantOrderRow | null> {
+  assertStoreScope(scope);
+
+  if (!ORDER_ID_PATTERN.test(orderId)) return null;
+
+  const rows = await db
+    .select()
+    .from(orderTable)
+    .where(
+      and(
+        eq(orderTable.id, orderId),
+        eq(orderTable.storeId, scope.storeId),
+      ),
+    )
+    .limit(1)
+    .for("update");
+
+  return rows[0] ?? null;
+}
+
+function invalidOrderTransition(
+  row: MerchantOrderRow,
+): MerchantOrderMutationResult {
+  return {
+    status: "invalid_transition",
+    currentStatus: row.status,
+    fulfillmentStatus: row.fulfillmentStatus,
+  };
+}
+
+/**
+ * Merchant acceptance: placed -> accepted. Repeating the same request after a
+ * successful acceptance is safe and does not move the timestamp.
+ */
+export async function acceptMerchantOrder(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  orderId: string,
+): Promise<MerchantOrderMutationResult> {
+  assertStoreScope(scope);
+
+  return db.transaction(async (tx) => {
+    const row = await readMerchantOrderForUpdate(tx, scope, orderId);
+    if (!row) return { status: "not_found" };
+
+    if (row.fulfillmentStatus !== "unfulfilled") {
+      return invalidOrderTransition(row);
+    }
+
+    if (row.status === "accepted") {
+      return { status: "already_applied", ...orderProgress(row) };
+    }
+
+    if (row.status !== "placed") return invalidOrderTransition(row);
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(orderTable)
+      .set({ status: "accepted", acceptedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.status, "placed"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Order acceptance could not be persisted");
+
+    return { status: "accepted", ...orderProgress(updated) };
+  });
+}
+
+/**
+ * Merchant preparation: accepted -> preparing. Preparation is refused until
+ * acceptance has been recorded, and a retry after success is a no-op.
+ */
+export async function prepareMerchantOrder(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  orderId: string,
+): Promise<MerchantOrderMutationResult> {
+  assertStoreScope(scope);
+
+  return db.transaction(async (tx) => {
+    const row = await readMerchantOrderForUpdate(tx, scope, orderId);
+    if (!row) return { status: "not_found" };
+
+    if (row.fulfillmentStatus !== "unfulfilled") {
+      return invalidOrderTransition(row);
+    }
+
+    if (row.status === "preparing") {
+      return { status: "already_applied", ...orderProgress(row) };
+    }
+
+    if (row.status !== "accepted") return invalidOrderTransition(row);
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(orderTable)
+      .set({ status: "preparing", preparingAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.status, "accepted"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Order preparation could not be persisted");
+
+    return { status: "preparing", ...orderProgress(updated) };
+  });
+}
+
+/**
+ * Pre-shipment cancellation with a required reason. The order row is locked
+ * first, so concurrent retries serialize: exactly one transaction releases the
+ * reservations and decrements `reserved`; the other observes `cancelled` and
+ * changes nothing.
+ *
+ * `on_hand` is deliberately untouched. Nothing was physically removed from the
+ * store before shipment, so only the hold is returned to available stock.
+ */
+export async function cancelMerchantOrder(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  input: { orderId: string; reason: unknown },
+): Promise<MerchantOrderMutationResult> {
+  assertStoreScope(scope);
+
+  const reason = normalizeCancellationReason(input.reason);
+  if (!reason) return { status: "invalid_reason" };
+
+  return db.transaction(async (tx) => {
+    const row = await readMerchantOrderForUpdate(tx, scope, input.orderId);
+    if (!row) return { status: "not_found" };
+
+    if (row.status === "cancelled") {
+      return { status: "already_applied", ...orderProgress(row) };
+    }
+
+    if (!canCancelMerchantOrder(row.status, row.fulfillmentStatus)) {
+      return invalidOrderTransition(row);
+    }
+
+    const reservations = await tx
+      .select({
+        id: inventoryReservation.id,
+        productId: inventoryReservation.productId,
+        quantity: inventoryReservation.quantity,
+        status: inventoryReservation.status,
+      })
+      .from(inventoryReservation)
+      .where(
+        and(
+          eq(inventoryReservation.orderId, row.id),
+          eq(inventoryReservation.storeId, scope.storeId),
+        ),
+      )
+      .orderBy(inventoryReservation.productId)
+      .for("update");
+
+    if (reservations.some((reservation) => reservation.status === "committed")) {
+      return invalidOrderTransition(row);
+    }
+
+    const now = new Date();
+    let releasedQuantity = 0;
+
+    for (const reservation of reservations) {
+      if (reservation.status !== "reserved") continue;
+
+      const [released] = await tx
+        .update(inventoryReservation)
+        .set({
+          status: "released",
+          releasedAt: now,
+          releaseReason: reason,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(inventoryReservation.id, reservation.id),
+            eq(inventoryReservation.status, "reserved"),
+          ),
+        )
+        .returning({ quantity: inventoryReservation.quantity });
+
+      if (!released) {
+        throw new Error("Inventory reservation could not be released");
+      }
+
+      const [inventory] = await tx
+        .update(productInventory)
+        .set({
+          reserved: sql`${productInventory.reserved} - ${released.quantity}`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(productInventory.productId, reservation.productId),
+            eq(productInventory.storeId, scope.storeId),
+            gte(productInventory.reserved, released.quantity),
+          ),
+        )
+        .returning({ productId: productInventory.productId });
+
+      if (!inventory) {
+        throw new Error("Inventory reservation does not match held stock");
+      }
+
+      releasedQuantity += released.quantity;
+    }
+
+    const [updated] = await tx
+      .update(orderTable)
+      .set({
+        status: "cancelled",
+        fulfillmentStatus: "cancelled",
+        cancellationReason: reason,
+        cancelledAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Order cancellation could not be persisted");
+
+    return {
+      status: "cancelled",
+      ...orderProgress(updated, releasedQuantity),
+    };
+  });
+}
+
 export async function listMerchantOrders(
   db: Database,
   scope: StoreScope,
@@ -1687,6 +1988,10 @@ export async function listMerchantOrders(
     customerName: row.customerName,
     customerPhone: row.customerPhone,
     deliveryAddress: row.deliveryAddress,
+    acceptedAt: row.acceptedAt,
+    preparingAt: row.preparingAt,
+    cancelledAt: row.cancelledAt,
+    cancellationReason: row.cancellationReason,
     items: itemsByOrder.get(row.id) ?? [],
     reservationStatuses: reservationsByOrder.get(row.id) ?? [],
   }));

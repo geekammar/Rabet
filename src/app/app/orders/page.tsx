@@ -3,6 +3,7 @@ import Link from "next/link";
 import { connection } from "next/server";
 import { notFound } from "next/navigation";
 
+import { MerchantOrderActions } from "@/components/dashboard/orders/order-actions";
 import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
@@ -19,7 +20,7 @@ import {
 export async function generateMetadata(): Promise<Metadata> {
   return merchantPageMetadata(
     "orders",
-    "Read-only cash-on-delivery orders for the signed-in store.",
+    "Accept, prepare or cancel cash-on-delivery orders for the signed-in store.",
   );
 }
 
@@ -43,6 +44,8 @@ type Copy = {
   name: string;
   phone: string;
   address: string;
+  suspendedTitle: string;
+  suspendedBody: string;
 };
 
 const COPY: Record<MerchantLocale, Copy> = {
@@ -50,7 +53,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     dir: "rtl",
     title: "طلبات الدفع عند الاستلام",
     subtitle:
-      "عرض للقراءة فقط. يُحصّل الدفع عند التسليم، وتظهر حالة الطلب والدفع والتجهيز بشكل منفصل.",
+      "اقبل الطلب وجهّزه أو ألغِه قبل الشحن. يُحصّل الدفع عند التسليم، وتظهر حالة الطلب والدفع والتجهيز بشكل منفصل.",
     backToStore: "العودة إلى المتجر",
     empty: "لا توجد طلبات دفع عند الاستلام بعد.",
     order: "الطلب",
@@ -65,12 +68,15 @@ const COPY: Record<MerchantLocale, Copy> = {
     name: "الاسم",
     phone: "الهاتف",
     address: "العنوان",
+    suspendedTitle: "المتجر موقوف مؤقتًا.",
+    suspendedBody:
+      "يمكنك الاطلاع على الطلبات فقط. القبول والتجهيز والإلغاء غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
   },
   en: {
     dir: "ltr",
     title: "COD orders",
     subtitle:
-      "Read-only. Cash is collected on delivery; order, payment and fulfillment states are shown separately.",
+      "Accept and prepare the order, or cancel before shipping. Cash is collected on delivery; order, payment and fulfillment states are shown separately.",
     backToStore: "Back to store",
     empty: "No cash-on-delivery orders yet.",
     order: "Order",
@@ -85,6 +91,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     name: "Name",
     phone: "Phone",
     address: "Address",
+    suspendedTitle: "This store is suspended.",
+    suspendedBody:
+      "You can review orders only. Accept, prepare and cancel are unavailable until a platform administrator reactivates the store.",
   },
 };
 
@@ -94,6 +103,8 @@ const STATUS_COPY: Record<
 > = {
   ar: {
     placed: "تم الطلب",
+    accepted: "مقبول",
+    preparing: "قيد التجهيز",
     cancelled: "ملغي",
     awaiting_collection: "بانتظار التحصيل",
     collected: "تم التحصيل",
@@ -108,6 +119,8 @@ const STATUS_COPY: Record<
   },
   en: {
     placed: "placed",
+    accepted: "accepted",
+    preparing: "preparing",
     cancelled: "cancelled",
     awaiting_collection: "awaiting collection",
     collected: "collected",
@@ -151,11 +164,13 @@ function OrderCard({
   copy,
   locale,
   dateFormat,
+  readOnly,
 }: {
   order: MerchantOrder;
   copy: Copy;
   locale: MerchantLocale;
   dateFormat: Intl.DateTimeFormat;
+  readOnly: boolean;
 }) {
   return (
     <article
@@ -202,6 +217,15 @@ function OrderCard({
           />
         ))}
       </div>
+
+      <MerchantOrderActions
+        orderId={order.id}
+        status={order.status}
+        fulfillmentStatus={order.fulfillmentStatus}
+        cancellationReason={order.cancellationReason}
+        locale={locale}
+        readOnly={readOnly}
+      />
 
       <ul className="space-y-2 border-y border-border py-3 text-sm">
         {order.items.map((item) => (
@@ -297,6 +321,17 @@ export default async function MerchantOrdersPage() {
         </p>
       </header>
 
+      {access.readOnly ? (
+        <div
+          role="status"
+          className="mb-6 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+          data-testid="merchant-orders-suspended-notice"
+        >
+          <p className="font-semibold">{copy.suspendedTitle}</p>
+          <p className="mt-1">{copy.suspendedBody}</p>
+        </div>
+      ) : null}
+
       {orders.length === 0 ? (
         <section className="rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">
           {copy.empty}
@@ -310,6 +345,7 @@ export default async function MerchantOrdersPage() {
               copy={copy}
               locale={locale}
               dateFormat={dateFormat}
+              readOnly={access.readOnly}
             />
           ))}
         </div>

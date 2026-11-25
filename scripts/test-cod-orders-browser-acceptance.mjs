@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -37,6 +38,9 @@ const APP_PORT = 3446;
 const CDP_PORT = 9346;
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const SESSION_SALT = "rabet-merchant.session-token";
+const REVIEW_DIR =
+  process.env.RABET_COD_SCREENSHOT_DIR ??
+  path.resolve(process.cwd(), "docs/review/cod-order-operations");
 
 let appServer = null;
 let chromeProcess = null;
@@ -540,6 +544,160 @@ async function main() {
     `Expected no horizontal scroll at 360 px, saw ${overflow}`,
   );
 
+  const capturePhoneScreenshot = async (filename) => {
+    const metrics = await cdp.send("Page.getLayoutMetrics");
+    const contentSize = metrics.cssContentSize ?? metrics.contentSize;
+    const height = Math.max(800, Math.ceil(contentSize?.height ?? 800));
+    const screenshot = await cdp.send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width: 360, height, scale: 1 },
+    });
+
+    mkdirSync(REVIEW_DIR, { recursive: true });
+    const filePath = path.join(REVIEW_DIR, filename);
+    writeFileSync(filePath, Buffer.from(screenshot.data, "base64"));
+    log(`Saved phone-width screenshot: ${filePath}`);
+  };
+
+  const clickTestId = async (testId) => {
+    const clicked = await cdp.evaluate(`(() => {
+      const element = document.querySelector('[data-testid="${testId}"]');
+      if (!element) return false;
+      element.click();
+      return true;
+    })()`);
+    assert(clicked, `Expected ${testId} to be clickable`);
+  };
+
+  log("Running the phone-first accept and prepare flow...");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-accept\"]'))",
+    "Accept order action",
+  );
+  await capturePhoneScreenshot("01-order-placed-360.png");
+
+  await clickTestId("merchant-order-action-accept");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-prepare\"]'))",
+    "Start preparing action after acceptance",
+  );
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('Order accepted.')",
+    "acceptance feedback",
+  );
+  await capturePhoneScreenshot("02-order-accepted-360.png");
+
+  await clickTestId("merchant-order-action-prepare");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-cancel\"]'))",
+    "cancellation action while preparing",
+  );
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('Order marked as preparing.')",
+    "preparing feedback",
+  );
+  await capturePhoneScreenshot("03-order-preparing-360.png");
+
+  log("Running the phone-first pre-shipment cancellation flow...");
+  await clickTestId("merchant-order-action-cancel");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-cancel-reason\"]'))",
+    "cancellation reason field",
+  );
+
+  const cancellationReason = "Customer requested cancellation";
+  const typedReason = await cdp.evaluate(`(() => {
+    const element = document.querySelector('[data-testid="merchant-order-cancel-reason"]');
+    if (!element) return null;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    ).set;
+    setter.call(element, ${JSON.stringify(cancellationReason)});
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return element.value;
+  })()`);
+  assert(
+    typedReason === cancellationReason,
+    `Expected cancellation reason to be entered, saw ${JSON.stringify(typedReason)}`,
+  );
+  await capturePhoneScreenshot("04-order-cancel-reason-360.png");
+
+  await clickTestId("merchant-order-cancel-submit");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-feedback\"]'))",
+    "cancellation feedback",
+  );
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('This order is cancelled and its stock reservation was released.')",
+    "cancelled state",
+  );
+  await waitFor(
+    cdp,
+    `document.body.innerText.includes(${JSON.stringify(cancellationReason)})`,
+    "saved cancellation reason",
+  );
+
+  const cancelledBody = await cdp.evaluate("document.body.innerText");
+  for (const expected of [
+    "cancelled",
+    "released",
+    "Order cancelled and the reservation released once.",
+  ]) {
+    assert(
+      cancelledBody.includes(expected),
+      `Cancelled Orders page should include ${JSON.stringify(expected)}`,
+    );
+  }
+
+  await capturePhoneScreenshot("05-order-cancelled-360.png");
+
+  const [cancelledInventory] = await pgClient`
+    select on_hand, reserved
+    from product_inventory
+    where product_id = ${product.id}
+  `;
+  assert(
+    cancelledInventory.on_hand === 5,
+    `Cancellation must preserve on-hand stock, saw ${cancelledInventory.on_hand}`,
+  );
+  assert(
+    cancelledInventory.reserved === 0,
+    `Cancellation must release the full hold, saw ${cancelledInventory.reserved}`,
+  );
+
+  const cancelledReservations = await pgClient`
+    select status, release_reason, released_at
+    from inventory_reservation
+    where order_id = ${order.id}
+  `;
+  assert(
+    cancelledReservations.length === 1,
+    `Expected one reservation, saw ${cancelledReservations.length}`,
+  );
+  assert(
+    cancelledReservations[0].status === "released",
+    `Expected released reservation, saw ${cancelledReservations[0].status}`,
+  );
+  assert(
+    cancelledReservations[0].release_reason === cancellationReason,
+    "Cancellation reason must be stored on the released reservation",
+  );
+  assert(
+    Boolean(cancelledReservations[0].released_at),
+    "Released reservation must record its release timestamp",
+  );
+
   log("Checking Arabic RTL merchant Orders copy...");
   await cdp.send("Network.setCookie", {
     name: "rabet-merchant-locale",
@@ -557,7 +715,8 @@ async function main() {
   for (const expected of [
     "طلبات الدفع عند الاستلام",
     "بانتظار التحصيل",
-    "محجوز",
+    "ملغي",
+    "محرر",
     "الدفع عند الاستلام",
   ]) {
     assert(
@@ -572,6 +731,159 @@ async function main() {
     arabicOverflow <= 361,
     `Expected no horizontal scroll in Arabic at 360 px, saw ${arabicOverflow}`,
   );
+  await capturePhoneScreenshot("06-order-cancelled-ar-360.png");
+
+  log("Seeding a placed order and suspending the store for read-only coverage...");
+  const [readOnlyOrder] = await pgClient`
+    insert into "order" (
+      "store_id", "connection_id", "telegram_user_id", "telegram_chat_id",
+      "reference", "checkout_key", "status", "payment_method", "payment_status",
+      "fulfillment_status", "currency", "subtotal", "delivery_fee", "total",
+      "customer_name", "customer_phone", "delivery_address"
+    )
+    values (
+      ${store.id}, ${connection.id}, 93002, 93002,
+      'ORD-DEF567', ${crypto.randomUUID()}, 'placed', 'cod', 'awaiting_collection',
+      'unfulfilled', 'SAR', 11.00, 15.00, 26.00,
+      'Synthetic Buyer Two', '+15550000001', '456 Synthetic Read Only Street'
+    )
+    returning id
+  `;
+  const [readOnlyOrderItem] = await pgClient`
+    insert into "order_item" (
+      "order_id", "product_id", "product_name", "unit_price", "quantity",
+      "line_total", "product_snapshot"
+    )
+    values (
+      ${readOnlyOrder.id}, ${product.id}, 'Synthetic COD Product', 11.00, 1, 11.00,
+      ${JSON.stringify({
+        name: "Synthetic COD Product",
+        description: "Read-only fixture",
+        categoryId: category.id,
+        unitPrice: "11.00",
+        currency: "SAR",
+      })}::jsonb
+    )
+    returning id
+  `;
+  await pgClient`
+    insert into "inventory_reservation" (
+      "order_id", "order_item_id", "product_id", "store_id", "quantity", "status"
+    )
+    values (${readOnlyOrder.id}, ${readOnlyOrderItem.id}, ${product.id}, ${store.id}, 1, 'reserved')
+  `;
+  await pgClient`
+    update product_inventory
+    set reserved = reserved + 1
+    where product_id = ${product.id}
+  `;
+  await pgClient`
+    update store
+    set status = 'suspended'
+    where id = ${store.id}
+  `;
+
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant-locale",
+    value: "en",
+    domain: "127.0.0.1",
+    path: "/",
+  });
+  await navigate(`${BASE_URL}/app/orders`, "English read-only orders");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-orders-suspended-notice\"]'))",
+    "English read-only suspended notice",
+  );
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('ORD-DEF567')",
+    "read-only order card",
+  );
+
+  const englishReadOnly = await cdp.evaluate(`(() => ({
+    accept: Boolean(document.querySelector('[data-testid="merchant-order-action-accept"]')),
+    prepare: Boolean(document.querySelector('[data-testid="merchant-order-action-prepare"]')),
+    cancel: Boolean(document.querySelector('[data-testid="merchant-order-action-cancel"]')),
+    form: Boolean(document.querySelector('[data-testid="merchant-order-cancel-form"]')),
+    readOnlyNotes: document.querySelectorAll('[data-testid="merchant-order-readonly-note"]').length,
+    cards: document.querySelectorAll('[data-testid="merchant-order-card"]').length,
+    text: document.body.innerText,
+    overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+  }))()`);
+  assert(!englishReadOnly.accept, "Read-only Orders must not render Accept");
+  assert(!englishReadOnly.prepare, "Read-only Orders must not render Prepare");
+  assert(!englishReadOnly.cancel, "Read-only Orders must not render Cancel");
+  assert(!englishReadOnly.form, "Read-only Orders must not render the cancel form");
+  assert(
+    englishReadOnly.readOnlyNotes >= 2,
+    `Expected read-only notes for both orders, saw ${englishReadOnly.readOnlyNotes}`,
+  );
+  assert(
+    englishReadOnly.cards >= 2,
+    `Expected both orders to remain readable, saw ${englishReadOnly.cards}`,
+  );
+  assert(
+    englishReadOnly.text.includes("This store is suspended."),
+    "English read-only notice should be visible",
+  );
+  assert(
+    englishReadOnly.text.includes(
+      "You can review this order only. Accept, prepare and cancel are unavailable",
+    ),
+    "English read-only per-order note should be visible",
+  );
+  assert(
+    englishReadOnly.overflow <= 361,
+    `Expected no horizontal scroll in English read-only mode, saw ${englishReadOnly.overflow}`,
+  );
+  await capturePhoneScreenshot("07-read-only-orders-en-360.png");
+
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant-locale",
+    value: "ar",
+    domain: "127.0.0.1",
+    path: "/",
+  });
+  await navigate(`${BASE_URL}/app/orders`, "Arabic read-only orders");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-orders-page\"]')?.getAttribute('dir') === 'rtl'",
+    "Arabic read-only RTL page",
+  );
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-orders-suspended-notice\"]'))",
+    "Arabic read-only suspended notice",
+  );
+
+  const arabicReadOnly = await cdp.evaluate(`(() => ({
+    accept: Boolean(document.querySelector('[data-testid="merchant-order-action-accept"]')),
+    prepare: Boolean(document.querySelector('[data-testid="merchant-order-action-prepare"]')),
+    cancel: Boolean(document.querySelector('[data-testid="merchant-order-action-cancel"]')),
+    form: Boolean(document.querySelector('[data-testid="merchant-order-cancel-form"]')),
+    text: document.body.innerText,
+    overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+  }))()`);
+  assert(!arabicReadOnly.accept, "Arabic read-only Orders must not render Accept");
+  assert(!arabicReadOnly.prepare, "Arabic read-only Orders must not render Prepare");
+  assert(!arabicReadOnly.cancel, "Arabic read-only Orders must not render Cancel");
+  assert(!arabicReadOnly.form, "Arabic read-only Orders must not render the cancel form");
+  for (const expected of [
+    "المتجر موقوف مؤقتًا.",
+    "يمكنك مراجعة الطلب فقط.",
+    "ORD-DEF567",
+  ]) {
+    assert(
+      arabicReadOnly.text.includes(expected),
+      `Arabic read-only Orders should include ${JSON.stringify(expected)}`,
+    );
+  }
+  assert(
+    arabicReadOnly.overflow <= 361,
+    `Expected no horizontal scroll in Arabic read-only mode, saw ${arabicReadOnly.overflow}`,
+  );
+  await capturePhoneScreenshot("08-read-only-orders-ar-360.png");
 
   log("Checking that the Orders entry is hidden when COD is off...");
   const probePort = 3447;

@@ -207,7 +207,11 @@ export const cartItem = pgTable(
   ],
 );
 
-export type OrderStatus = "placed" | "cancelled";
+export type OrderStatus =
+  | "placed"
+  | "accepted"
+  | "preparing"
+  | "cancelled";
 export type PaymentStatus = "awaiting_collection" | "collected" | "failed";
 export type FulfillmentStatus =
   | "unfulfilled"
@@ -243,6 +247,10 @@ export const order = pgTable(
     placedAt: timestamp("placed_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: "date" }),
+    preparingAt: timestamp("preparing_at", { withTimezone: true, mode: "date" }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true, mode: "date" }),
+    cancellationReason: text("cancellation_reason"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
@@ -260,7 +268,43 @@ export const order = pgTable(
     check("order_reference_format_check", ORDER_REFERENCE),
     check(
       "order_status_check",
-      sql`${table.status} IN ('placed', 'cancelled')`,
+      sql`${table.status} IN ('placed', 'accepted', 'preparing', 'cancelled')`,
+    ),
+    check(
+      "order_merchant_progress_check",
+      sql`(
+        (${table.status} = 'placed'
+          AND ${table.acceptedAt} IS NULL
+          AND ${table.preparingAt} IS NULL)
+        OR
+        (${table.status} = 'accepted'
+          AND ${table.acceptedAt} IS NOT NULL
+          AND ${table.preparingAt} IS NULL)
+        OR
+        (${table.status} = 'preparing'
+          AND ${table.acceptedAt} IS NOT NULL
+          AND ${table.preparingAt} IS NOT NULL)
+        OR
+        (${table.status} = 'cancelled')
+      )`,
+    ),
+    check(
+      "order_cancellation_state_check",
+      sql`(
+        (${table.status} = 'cancelled'
+          AND ${table.cancellationReason} IS NOT NULL
+          AND btrim(${table.cancellationReason}) <> ''
+          AND ${table.cancelledAt} IS NOT NULL)
+        OR
+        (${table.status} <> 'cancelled'
+          AND ${table.cancellationReason} IS NULL
+          AND ${table.cancelledAt} IS NULL)
+      )`,
+    ),
+    check(
+      "order_cancellation_reason_length_check",
+      sql`${table.cancellationReason} IS NULL
+        OR char_length(${table.cancellationReason}) BETWEEN 3 AND 300`,
     ),
     check("order_payment_method_check", sql`${table.paymentMethod} = 'cod'`),
     check(

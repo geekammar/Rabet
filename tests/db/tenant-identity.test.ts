@@ -101,7 +101,7 @@ describe.skipIf(!shouldRun)("S1.1 tenant identity schema", () => {
       from drizzle.__drizzle_migrations
     `);
 
-    expect(journal[0].count).toBe(14);
+    expect(journal[0].count).toBe(15);
   });
 
   it("leaves every pre-existing domain table in place", async () => {
