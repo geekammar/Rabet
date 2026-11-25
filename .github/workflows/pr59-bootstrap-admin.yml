@@ -1,0 +1,54 @@
+name: PR59 bootstrap QA platform admin
+
+on:
+  push:
+    branches:
+      - ops/buyer-lang-qa-pr59
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr59-bootstrap-admin
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    name: Bootstrap the QA-only platform Super Admin
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[bootstrap-pr59-admin]')
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install orchestration dependencies
+        run: npm ci
+
+      - name: Bootstrap the QA-only platform Super Admin
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          PR59_QA_PLATFORM_ADMIN_PASSWORD_HASH: ${{ secrets.PR59_QA_PLATFORM_ADMIN_PASSWORD_HASH }}
+          SUMMARY_OUT: /tmp/pr59-admin/summary.json
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pr59-admin
+          node scripts/pr59-bootstrap-admin.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr59-admin-summary
+          path: /tmp/pr59-admin/
+          if-no-files-found: ignore
+          retention-days: 7
