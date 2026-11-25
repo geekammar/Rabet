@@ -88,7 +88,7 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           NEON_DEV_DATABASE_URL: ${{ secrets.NEON_DEV_DATABASE_URL }}
           CANDIDATE_SHA: 9542b7c38ac7bacd7fd8287c2ce3936e284256f6
-          RESET_TARGET: ${{ inputs.reset_target }}
+          RESET_TARGET: ${{ github.event_name == 'push' && 'true' || inputs.reset_target }}
           RABET_CODE_ROOT: /tmp/rabet-candidate
         run: node scripts/cod-qa-pr59.mjs
 

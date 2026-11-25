@@ -24,7 +24,7 @@ const QA_DB_NAME = "rabet_buyer_lang_qa_pr59";
 const QA_DB_ROLE = "rabet_buyer_lang_qa_pr59";
 
 const PREFERRED_STORE_A = "cod-pr56-store-c";
-const PREFERRED_STORE_B = "cod-pr56-store-b";
+const PREFERRED_STORE_B = "cod-pr56-store-a";
 const PREFERRED_READONLY_STORE = "cod-pr57-store-d";
 
 const WORK_DIR = "/tmp/cod-qa-pr59";
