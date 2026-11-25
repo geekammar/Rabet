@@ -113,6 +113,36 @@ export async function readStoreDefaultLanguage(
 }
 
 /**
+ * Reads the store's legacy catalog default language used for merchant-entered
+ * catalog content.
+ *
+ * This is intentionally separate from the buyer UI locale. `store_language_setting`
+ * and `buyer_language_preference` change only menus, buttons, prompts,
+ * checkout and receipt copy; they never choose a catalog translation.
+ *
+ * A missing row means the older store has no canonical catalog marker. The
+ * catalog reader then uses its deterministic English -> Arabic -> other-code
+ * fallback, independent of the buyer UI.
+ */
+export async function readStoreCatalogLanguageCode(
+  db: Database,
+  storeId: string,
+): Promise<string | null> {
+  if (typeof storeId !== "string" || storeId.trim().length === 0) return null;
+
+  const rows = await db
+    .select({ code: language.code })
+    .from(botSetting)
+    .innerJoin(language, eq(language.id, botSetting.defaultLanguageId))
+    .where(
+      and(eq(botSetting.id, 1), eq(botSetting.storeId, storeId)),
+    )
+    .limit(1);
+
+  return rows[0]?.code ?? null;
+}
+
+/**
  * Resolves the effective buyer language for one trusted store/buyer pair.
  *
  * `telegramUserId` is the verified sender id, never a callback payload value.

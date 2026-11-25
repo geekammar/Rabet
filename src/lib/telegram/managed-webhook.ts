@@ -12,7 +12,7 @@ import {
   listManagedProductsInCategory,
   readManagedCategory,
   readManagedProduct,
-  type ManagedTranslationPlan,
+  type ManagedCatalogContentPlan,
 } from "@/lib/catalog/managed-storefront";
 import {
   addToCart,
@@ -34,6 +34,7 @@ import {
 import {
   resolveBuyerLanguage,
   readStoreDefaultLanguage,
+  readStoreCatalogLanguageCode,
   saveBuyerLanguagePreference,
   type ResolvedBuyerLanguage,
   type StoreLanguageChoice,
@@ -185,7 +186,7 @@ type CodContext = {
 type LanguageContext = {
   language: ResolvedBuyerLanguage;
   copy: CommerceCopy;
-  plan: ManagedTranslationPlan;
+  plan: ManagedCatalogContentPlan;
   storeDefault: StoreLanguageChoice | null;
 };
 
@@ -193,13 +194,10 @@ function copyForLocale(locale: ManagedCommerceLocale): CommerceCopy {
   return managedCommerceCopy(locale);
 }
 
-function translationPlanFor(
-  language: ResolvedBuyerLanguage,
-): ManagedTranslationPlan {
-  return {
-    preferredCode: language.locale,
-    fallbackCode: language.storeDefaultCode,
-  };
+function catalogContentPlanFor(
+  defaultLanguageCode: string | null,
+): ManagedCatalogContentPlan {
+  return { defaultLanguageCode };
 }
 
 async function languageContextFor(
@@ -208,7 +206,11 @@ async function languageContextFor(
   buyerId: number | null,
   profileLanguageCode: string | undefined,
 ): Promise<LanguageContext> {
-  const storeDefault = await readStoreDefaultLanguage(db, scope.storeId);
+  const [storeDefault, catalogLanguageCode] = await Promise.all([
+    readStoreDefaultLanguage(db, scope.storeId),
+    readStoreCatalogLanguageCode(db, scope.storeId),
+  ]);
+  const plan = catalogContentPlanFor(catalogLanguageCode);
 
   if (buyerId !== null) {
     const language = await resolveBuyerLanguage(db, {
@@ -220,7 +222,7 @@ async function languageContextFor(
     return {
       language,
       copy: copyForLocale(language.locale),
-      plan: translationPlanFor(language),
+      plan,
       storeDefault,
     };
   }
@@ -238,7 +240,7 @@ async function languageContextFor(
   return {
     language,
     copy: copyForLocale(locale),
-    plan: translationPlanFor(language),
+    plan,
     storeDefault,
   };
 }
@@ -547,7 +549,7 @@ async function localizeCartView(
   db: Database,
   scope: StoreScope,
   cart: CartView,
-  plan: ManagedTranslationPlan,
+  plan: ManagedCatalogContentPlan,
   copy: CommerceCopy,
 ): Promise<CartView> {
   const lines = await Promise.all(
@@ -573,7 +575,7 @@ async function localizeReview(
   db: Database,
   scope: StoreScope,
   review: CheckoutReview,
-  plan: ManagedTranslationPlan,
+  plan: ManagedCatalogContentPlan,
   copy: CommerceCopy,
 ): Promise<CheckoutReview> {
   const lines = await Promise.all(
@@ -601,7 +603,7 @@ async function renderHome(
   storeName: string,
   cod: CodContext,
   copy: CommerceCopy,
-  plan: ManagedTranslationPlan,
+  plan: ManagedCatalogContentPlan,
   transport: TelegramTransport,
   chatId: number,
   messageId?: number,
@@ -664,7 +666,7 @@ async function renderProducts(
   messageId: number,
   pageNumber: number,
   copy: CommerceCopy,
-  plan: ManagedTranslationPlan,
+  plan: ManagedCatalogContentPlan,
 ): Promise<void> {
   const page = await listManagedProducts(
     db,
@@ -720,7 +722,7 @@ async function renderCategories(
   messageId: number,
   pageNumber: number,
   copy: CommerceCopy,
-  plan: ManagedTranslationPlan,
+  plan: ManagedCatalogContentPlan,
 ): Promise<void> {
   const page = await listManagedCategories(
     db,
@@ -773,7 +775,7 @@ async function renderCategory(
   categoryId: string,
   pageNumber: number,
   copy: CommerceCopy,
-  plan: ManagedTranslationPlan,
+  plan: ManagedCatalogContentPlan,
 ): Promise<void> {
   const categoryRow = await readManagedCategory(
     db,
@@ -870,7 +872,7 @@ async function renderProduct(
   scope: StoreScope,
   cod: CodContext,
   copy: CommerceCopy,
-  plan: ManagedTranslationPlan,
+  plan: ManagedCatalogContentPlan,
   transport: TelegramTransport,
   chatId: number,
   messageId: number,
@@ -1098,7 +1100,7 @@ async function dispatchMessage(
           connectionId,
           telegramUserId: buyerId,
           address: text,
-        });
+        }, plan);
 
         if (result.status === "review") {
           await renderReviewView(
@@ -1212,7 +1214,7 @@ async function renderAfterLanguageChange(
             cartId: cart.id,
             connectionId,
             telegramUserId: buyerId,
-          });
+          }, plan);
 
           if (refreshed.status === "review") {
             await renderReviewView(
@@ -1257,7 +1259,7 @@ async function renderLanguageContextScreen(
   storeName: string,
   cod: CodContext,
   copy: CommerceCopy,
-  plan: ManagedTranslationPlan,
+  plan: ManagedCatalogContentPlan,
   transport: TelegramTransport,
   chatId: number,
   messageId: number,
@@ -1606,7 +1608,7 @@ async function dispatchCallback(
         connectionId,
         telegramUserId: buyerId,
         profileName: callbackQuery.from.first_name,
-      });
+      }, plan);
 
       if (result.status === "ready") {
         // The previous cart message stays as the buyer left it. One clear
@@ -1647,7 +1649,7 @@ async function dispatchCallback(
         telegramUserId: buyerId,
         telegramChatId: chatId,
         expectedQuoteVersion: parsedToken.quoteVersion,
-      });
+      }, plan);
 
       if (result.status === "placed" || result.status === "already_placed") {
         await renderPlacedOrder(transport, chatId, messageId, result, copy);

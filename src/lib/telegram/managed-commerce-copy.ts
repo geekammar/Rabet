@@ -1,10 +1,11 @@
 /**
  * Localized copy for the managed buyer storefront and its COD flow.
  *
- * The managed path offers exactly two buyer languages. Product and category
- * names come from stored translations; this module only owns interface copy,
- * validation text and the receipt. Nothing here reads a merged customer row:
- * the resolved per-store language is passed in by the webhook.
+ * The managed path offers exactly two buyer UI languages. Product and category
+ * names are merchant catalog content and are deliberately not chosen by this
+ * UI locale; this module only owns interface copy, validation text and the
+ * receipt. Nothing here reads a merged customer row: the resolved per-store
+ * UI language is passed in by the webhook.
  */
 
 import {

@@ -16,7 +16,10 @@ import {
   telegramConnection,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
-import { readManagedProduct } from "@/lib/catalog/managed-storefront";
+import {
+  readManagedProduct,
+  type ManagedCatalogContentPlan,
+} from "@/lib/catalog/managed-storefront";
 import {
   assertStoreScope,
   type StoreScope,
@@ -556,6 +559,7 @@ async function loadCartLines(
   db: CommerceQueryDatabase,
   scope: StoreScope,
   cartRow: CartRow,
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<{
   lines: CartLine[];
   subtotalCents: number;
@@ -581,6 +585,7 @@ async function loadCartLines(
       db as unknown as Database,
       scope,
       item.productId,
+      catalogContentPlan,
     );
 
     if (!product) {
@@ -682,6 +687,7 @@ async function quoteCart(
   db: CommerceQueryDatabase,
   scope: StoreScope,
   cartRow: CartRow,
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<{
   review: CheckoutReview;
   nextVersion: number;
@@ -690,7 +696,7 @@ async function quoteCart(
 }> {
   const setting = await loadSettingOrFail(db, scope);
   const { lines, subtotalCents, unavailable, inventoryAvailable } =
-    await loadCartLines(db, scope, cartRow);
+    await loadCartLines(db, scope, cartRow, catalogContentPlan);
 
   if (unavailable.length > 0) {
     throw new CartQuoteError("item_unavailable", unavailable[0]);
@@ -1021,6 +1027,7 @@ export async function startCheckout(
     telegramUserId: number;
     profileName?: string;
   },
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<StartCheckoutResult> {
   assertStoreScope(scope);
 
@@ -1039,7 +1046,7 @@ export async function startCheckout(
     if (!cartRow) return { status: "not_found" };
 
     try {
-      const quoted = await quoteCart(tx, scope, cartRow);
+      const quoted = await quoteCart(tx, scope, cartRow, catalogContentPlan);
       const profileName = normalizeCustomerName(input.profileName);
       const customerName =
         cartRow.customerName ?? profileName ?? null;
@@ -1159,6 +1166,7 @@ export async function saveAddressAndPrepareReview(
     telegramUserId: number;
     address: unknown;
   },
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<AddressResult> {
   assertStoreScope(scope);
   const address = normalizeAddress(input.address);
@@ -1187,7 +1195,7 @@ export async function saveAddressAndPrepareReview(
     const withAddress = { ...cartRow, deliveryAddress: address };
 
     try {
-      const quoted = await quoteCart(tx, scope, withAddress);
+      const quoted = await quoteCart(tx, scope, withAddress, catalogContentPlan);
 
       await tx
         .update(cart)
@@ -1244,6 +1252,7 @@ export async function refreshReview(
     connectionId: string;
     telegramUserId: number;
   },
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<PrepareReviewResult> {
   assertStoreScope(scope);
 
@@ -1262,7 +1271,7 @@ export async function refreshReview(
     }
 
     try {
-      const quoted = await quoteCart(tx, scope, cartRow);
+      const quoted = await quoteCart(tx, scope, cartRow, catalogContentPlan);
 
       await tx
         .update(cart)
@@ -1303,6 +1312,7 @@ export async function confirmCodOrder(
     telegramChatId: number;
     expectedQuoteVersion: number;
   },
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<ConfirmOrderResult> {
   assertStoreScope(scope);
 
@@ -1347,7 +1357,7 @@ export async function confirmCodOrder(
     let quoted: Awaited<ReturnType<typeof quoteCart>>;
 
     try {
-      quoted = await quoteCart(tx, scope, cartRow);
+      quoted = await quoteCart(tx, scope, cartRow, catalogContentPlan);
     } catch (error) {
       if (error instanceof CartQuoteError) {
         if (error.reason === "cod_unavailable") {

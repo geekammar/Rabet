@@ -50,30 +50,30 @@ type LoadedCatalog = {
 };
 
 /**
- * Preferred stored translation order for one buyer language.
+ * Merchant-entered catalog content is not buyer-UI-localized.
  *
- * `preferredCode` is the resolved buyer language; `fallbackCode` is the
- * merchant's configured default when it differs. The existing safe fallback
- * (English, then any available translation, then the slug) stays last, so a
- * product is never hidden just because one translation is missing.
+ * `defaultLanguageCode` is the store's existing legacy catalog default
+ * (`bot_setting.default_language_id`). When that translation exists it wins in
+ * every buyer language. When it is absent, or the older store has no
+ * bot_setting row, the deterministic fallback is English, then Arabic, then
+ * any other language code, then the product/category slug. The buyer UI locale
+ * and `store_language_setting` never participate in this choice.
+ *
+ * This keeps names, descriptions and category names stable across buyer
+ * language changes while preserving all existing translation rows.
  */
-export type ManagedTranslationPlan = {
-  preferredCode: string;
-  fallbackCode?: string | null;
+export type ManagedCatalogContentPlan = {
+  defaultLanguageCode: string | null;
 };
 
-function translationPriority(
-  plan: ManagedTranslationPlan | undefined,
+function catalogTranslationPriority(
+  plan: ManagedCatalogContentPlan | undefined,
   code: string,
 ): number {
-  if (plan) {
-    if (code === plan.preferredCode) return 0;
-    if (plan.fallbackCode && code === plan.fallbackCode) return 1;
-    if (code === "en") return 2;
-    return 3;
-  }
-
-  return code === "en" ? 0 : 1;
+  if (plan?.defaultLanguageCode && code === plan.defaultLanguageCode) return 0;
+  if (code === "en") return 1;
+  if (code === "ar") return 2;
+  return 3;
 }
 
 export type ManagedProductPage = {
@@ -226,7 +226,7 @@ function paginate<T>(
 async function loadProductTranslations(
   db: Database,
   productIds: string[],
-  plan?: ManagedTranslationPlan,
+  plan?: ManagedCatalogContentPlan,
 ): Promise<{ names: Map<string, string>; descriptions: Map<string, string> }> {
   if (productIds.length === 0) {
     return { names: new Map(), descriptions: new Map() };
@@ -249,10 +249,10 @@ async function loadProductTranslations(
   const priorities = new Map<string, number>();
 
   // The lowest-priority-number translation wins; ties keep the first row in
-  // language-code order, which is deterministic. Without a plan this preserves
-  // the previous "English first, then first available" behavior.
+  // language-code order, which is deterministic. With no catalog default this
+  // is the English -> Arabic -> other-code fallback, never the buyer UI.
   for (const row of rows) {
-    const priority = translationPriority(plan, row.code);
+    const priority = catalogTranslationPriority(plan, row.code);
     const current = priorities.get(row.productId);
 
     if (current === undefined || priority < current) {
@@ -273,7 +273,7 @@ async function loadProductTranslations(
 async function loadCategoryTranslations(
   db: Database,
   categoryIds: string[],
-  plan?: ManagedTranslationPlan,
+  plan?: ManagedCatalogContentPlan,
 ): Promise<Map<string, string>> {
   if (categoryIds.length === 0) return new Map();
 
@@ -292,7 +292,7 @@ async function loadCategoryTranslations(
   const priorities = new Map<string, number>();
 
   for (const row of rows) {
-    const priority = translationPriority(plan, row.code);
+    const priority = catalogTranslationPriority(plan, row.code);
     const current = priorities.get(row.categoryId);
 
     if (current === undefined || priority < current) {
@@ -308,7 +308,7 @@ export async function listManagedProducts(
   db: Database,
   scope: StoreScope,
   params: { page: number; pageSize: number },
-  translationPlan?: ManagedTranslationPlan,
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<ManagedProductPage> {
   const loaded = await loadCatalog(db, scope);
   const ordered = loaded.products
@@ -328,7 +328,7 @@ export async function listManagedProducts(
   const { names, descriptions } = await loadProductTranslations(
     db,
     result.items.map((row) => row.id),
-    translationPlan,
+    catalogContentPlan,
   );
 
   return {
@@ -348,7 +348,7 @@ export async function listManagedCategories(
   db: Database,
   scope: StoreScope,
   params: { parentId: string | null; page: number; pageSize: number },
-  translationPlan?: ManagedTranslationPlan,
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<ManagedCategoryPage> {
   const loaded = await loadCatalog(db, scope);
   const categories = Array.from(loaded.categoryById.values())
@@ -363,7 +363,7 @@ export async function listManagedCategories(
   const names = await loadCategoryTranslations(
     db,
     result.items.map((row) => row.id),
-    translationPlan,
+    catalogContentPlan,
   );
 
   return {
@@ -380,7 +380,7 @@ export async function listManagedProductsInCategory(
   db: Database,
   scope: StoreScope,
   params: { categoryId: string; page: number; pageSize: number },
-  translationPlan?: ManagedTranslationPlan,
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<ManagedProductPage> {
   const loaded = await loadCatalog(db, scope);
 
@@ -398,7 +398,7 @@ export async function listManagedProductsInCategory(
   const { names, descriptions } = await loadProductTranslations(
     db,
     result.items.map((row) => row.id),
-    translationPlan,
+    catalogContentPlan,
   );
 
   return {
@@ -418,7 +418,7 @@ export async function readManagedProduct(
   db: Database,
   scope: StoreScope,
   productId: string,
-  translationPlan?: ManagedTranslationPlan,
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<ManagedProduct | null> {
   const loaded = await loadCatalog(db, scope);
   const row = loaded.products.find((productRow) => productRow.id === productId);
@@ -439,11 +439,11 @@ export async function readManagedProduct(
 
   let preferred = translations[0];
   let preferredPriority = preferred
-    ? translationPriority(translationPlan, preferred.code)
+    ? catalogTranslationPriority(catalogContentPlan, preferred.code)
     : Number.POSITIVE_INFINITY;
 
   for (const translation of translations.slice(1)) {
-    const priority = translationPriority(translationPlan, translation.code);
+    const priority = catalogTranslationPriority(catalogContentPlan, translation.code);
     if (priority < preferredPriority) {
       preferred = translation;
       preferredPriority = priority;
@@ -465,7 +465,7 @@ export async function readManagedCategory(
   db: Database,
   scope: StoreScope,
   categoryId: string,
-  translationPlan?: ManagedTranslationPlan,
+  catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<{ id: string; parentId: string | null; name: string } | null> {
   const loaded = await loadCatalog(db, scope);
 
@@ -476,7 +476,7 @@ export async function readManagedCategory(
   const row = loaded.categoryById.get(categoryId);
   if (!row) return null;
 
-  const names = await loadCategoryTranslations(db, [categoryId], translationPlan);
+  const names = await loadCategoryTranslations(db, [categoryId], catalogContentPlan);
 
   return {
     id: row.id,
