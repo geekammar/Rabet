@@ -332,12 +332,17 @@ export const order = pgTable(
           AND ${table.deliveredAt} IS NULL)
         OR
         (${table.fulfillmentStatus} = 'handed_to_shipping'
-          AND ${table.handedToShippingAt} IS NOT NULL
           AND ${table.deliveredAt} IS NULL)
         OR
         (${table.fulfillmentStatus} = 'delivered'
-          AND ${table.handedToShippingAt} IS NOT NULL
-          AND ${table.deliveredAt} IS NOT NULL)
+          AND (
+            (${table.handedToShippingAt} IS NULL
+              AND ${table.deliveredAt} IS NULL)
+            OR
+            (${table.handedToShippingAt} IS NOT NULL
+              AND ${table.deliveredAt} IS NOT NULL
+              AND ${table.deliveredAt} >= ${table.handedToShippingAt})
+          ))
         OR
         (${table.fulfillmentStatus} = 'cancelled'
           AND ${table.handedToShippingAt} IS NULL
@@ -347,11 +352,8 @@ export const order = pgTable(
     check(
       "order_payment_collection_state_check",
       sql`(
-        (${table.paymentStatus} = 'collected'
-          AND ${table.paymentCollectedAt} IS NOT NULL)
-        OR
-        (${table.paymentStatus} <> 'collected'
-          AND ${table.paymentCollectedAt} IS NULL)
+        ${table.paymentStatus} = 'collected'
+        OR ${table.paymentCollectedAt} IS NULL
       )`,
     ),
     check("order_currency_allowlist_check", CURRENCIES),

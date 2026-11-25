@@ -37,10 +37,10 @@ type Copy = {
   handedToShippingAt: string;
   deliveredAt: string;
   paymentCollectedAt: string;
+  unknownTime: string;
   empty: string;
-  order: string;
+  status: string;
   payment: string;
-  fulfillment: string;
   method: string;
   stock: string;
   subtotal: string;
@@ -59,7 +59,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     dir: "rtl",
     title: "طلبات الدفع عند الاستلام",
     subtitle:
-      "اقبل الطلب وجهّزه، ثم سلّمه للشحن وأكّد التوصيل وسجّل التحصيل. تظهر حالة الطلب والدفع والتجهيز بشكل منفصل.",
+      "اقبل الطلب وجهّزه، ثم سلّمه للشحن وأكّد التوصيل وسجّل التحصيل. تظهر الحالة الحالية وحالة الدفع بشكل منفصل.",
     backToStore: "العودة إلى المتجر",
     timeline: "المسار الزمني",
     acceptedAt: "القبول",
@@ -67,10 +67,10 @@ const COPY: Record<MerchantLocale, Copy> = {
     handedToShippingAt: "تسليم للشحن",
     deliveredAt: "التوصيل",
     paymentCollectedAt: "تحصيل الدفع",
+    unknownTime: "الوقت غير معروف",
     empty: "لا توجد طلبات دفع عند الاستلام بعد.",
-    order: "الطلب",
+    status: "الحالة",
     payment: "الدفع",
-    fulfillment: "التجهيز",
     method: "الطريقة",
     stock: "المخزون",
     subtotal: "المجموع الفرعي",
@@ -88,7 +88,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     dir: "ltr",
     title: "COD orders",
     subtitle:
-      "Accept and prepare the order, hand it to shipping, mark it delivered and record COD collection. Order, payment and fulfillment states stay separate.",
+      "Accept and prepare the order, hand it to shipping, mark it delivered and record COD collection. The current status and payment are shown separately.",
     backToStore: "Back to store",
     timeline: "Timeline",
     acceptedAt: "Accepted",
@@ -96,10 +96,10 @@ const COPY: Record<MerchantLocale, Copy> = {
     handedToShippingAt: "Handed to shipping",
     deliveredAt: "Delivered",
     paymentCollectedAt: "Cash collected",
+    unknownTime: "Time unknown",
     empty: "No cash-on-delivery orders yet.",
-    order: "Order",
+    status: "Status",
     payment: "Payment",
-    fulfillment: "Fulfillment",
     method: "Method",
     stock: "Stock",
     subtotal: "Subtotal",
@@ -164,17 +164,83 @@ function StatusPill({
   label,
   value,
   locale,
+  testId,
 }: {
   label: string;
   value: string;
   locale: MerchantLocale;
+  testId?: string;
 }) {
   return (
-    <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs font-medium">
+    <span
+      className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs font-medium"
+      data-testid={testId}
+      data-value={value}
+    >
       <span className="text-muted-foreground">{label}</span>
       <span className="break-all">{statusLabel(value, locale)}</span>
     </span>
   );
+}
+
+/**
+ * One operational status for the merchant. Before handoff the merchant
+ * progress state is current; after handoff the fulfillment state is current.
+ * Payment remains a separate badge.
+ */
+function currentOrderStatus(order: MerchantOrder): string {
+  if (order.status === "cancelled" || order.fulfillmentStatus === "cancelled") {
+    return "cancelled";
+  }
+
+  if (
+    order.fulfillmentStatus === "handed_to_shipping" ||
+    order.fulfillmentStatus === "delivered"
+  ) {
+    return order.fulfillmentStatus;
+  }
+
+  return order.status;
+}
+
+type TimelineEntry = {
+  label: string;
+  at: Date | null;
+};
+
+function buildTimeline(order: MerchantOrder, copy: Copy): TimelineEntry[] {
+  const entries: TimelineEntry[] = [];
+
+  if (order.acceptedAt) {
+    entries.push({ label: copy.acceptedAt, at: order.acceptedAt });
+  }
+
+  if (order.preparingAt) {
+    entries.push({ label: copy.preparingAt, at: order.preparingAt });
+  }
+
+  if (
+    order.fulfillmentStatus === "handed_to_shipping" ||
+    order.fulfillmentStatus === "delivered"
+  ) {
+    entries.push({
+      label: copy.handedToShippingAt,
+      at: order.handedToShippingAt,
+    });
+  }
+
+  if (order.fulfillmentStatus === "delivered") {
+    entries.push({ label: copy.deliveredAt, at: order.deliveredAt });
+  }
+
+  if (order.paymentStatus === "collected") {
+    entries.push({
+      label: copy.paymentCollectedAt,
+      at: order.paymentCollectedAt,
+    });
+  }
+
+  return entries;
 }
 
 function OrderCard({
@@ -190,25 +256,15 @@ function OrderCard({
   dateFormat: Intl.DateTimeFormat;
   readOnly: boolean;
 }) {
-  const timeline = [
-    { label: copy.acceptedAt, at: order.acceptedAt },
-    { label: copy.preparingAt, at: order.preparingAt },
-    { label: copy.handedToShippingAt, at: order.handedToShippingAt },
-    { label: copy.deliveredAt, at: order.deliveredAt },
-    { label: copy.paymentCollectedAt, at: order.paymentCollectedAt },
-  ]
-    .filter(
-      (entry): entry is { label: string; at: Date } => entry.at !== null,
-    )
-    .map((entry) => ({
-      label: entry.label,
-      at: `${dateFormat.format(entry.at)} UTC`,
-    }));
+  const timeline = buildTimeline(order, copy);
+  const displayStatus = currentOrderStatus(order);
 
   return (
     <article
       className="space-y-4 rounded-xl border border-border bg-card p-4 shadow-sm"
       data-testid="merchant-order-card"
+      data-current-status={displayStatus}
+      data-payment-status={order.paymentStatus}
     >
       <header className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 space-y-1">
@@ -225,16 +281,17 @@ function OrderCard({
       </header>
 
       <div className="flex flex-wrap gap-1.5">
-        <StatusPill label={copy.order} value={order.status} locale={locale} />
+        <StatusPill
+          label={copy.status}
+          value={displayStatus}
+          locale={locale}
+          testId="merchant-order-status"
+        />
         <StatusPill
           label={copy.payment}
           value={order.paymentStatus}
           locale={locale}
-        />
-        <StatusPill
-          label={copy.fulfillment}
-          value={order.fulfillmentStatus}
-          locale={locale}
+          testId="merchant-order-payment"
         />
         <StatusPill
           label={copy.method}
@@ -273,9 +330,15 @@ function OrderCard({
             <div
               key={entry.label}
               className="flex flex-wrap justify-between gap-2"
+              data-testid="merchant-order-timeline-entry"
+              data-known={entry.at ? "true" : "false"}
             >
               <dt className="text-muted-foreground">{entry.label}</dt>
-              <dd className="font-medium">{entry.at}</dd>
+              <dd className="font-medium">
+                {entry.at
+                  ? `${dateFormat.format(entry.at)} UTC`
+                  : copy.unknownTime}
+              </dd>
             </div>
           ))}
         </dl>

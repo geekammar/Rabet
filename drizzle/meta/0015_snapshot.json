@@ -1,5 +1,5 @@
 {
-  "id": "3197a79e-51a4-4fc1-bdba-9f708e8ca6a2",
+  "id": "631a88cd-ce65-4579-9ddd-0672a034a39f",
   "prevId": "4c568a52-8495-4aa1-853d-1e1b7f1848c9",
   "version": "7",
   "dialect": "postgresql",
@@ -2003,11 +2003,11 @@
         },
         "order_shipping_state_check": {
           "name": "order_shipping_state_check",
-          "value": "(\n        (\"order\".\"fulfillment_status\" = 'unfulfilled'\n          AND \"order\".\"handed_to_shipping_at\" IS NULL\n          AND \"order\".\"delivered_at\" IS NULL)\n        OR\n        (\"order\".\"fulfillment_status\" = 'handed_to_shipping'\n          AND \"order\".\"handed_to_shipping_at\" IS NOT NULL\n          AND \"order\".\"delivered_at\" IS NULL)\n        OR\n        (\"order\".\"fulfillment_status\" = 'delivered'\n          AND \"order\".\"handed_to_shipping_at\" IS NOT NULL\n          AND \"order\".\"delivered_at\" IS NOT NULL)\n        OR\n        (\"order\".\"fulfillment_status\" = 'cancelled'\n          AND \"order\".\"handed_to_shipping_at\" IS NULL\n          AND \"order\".\"delivered_at\" IS NULL)\n      )"
+          "value": "(\n        (\"order\".\"fulfillment_status\" = 'unfulfilled'\n          AND \"order\".\"handed_to_shipping_at\" IS NULL\n          AND \"order\".\"delivered_at\" IS NULL)\n        OR\n        (\"order\".\"fulfillment_status\" = 'handed_to_shipping'\n          AND \"order\".\"delivered_at\" IS NULL)\n        OR\n        (\"order\".\"fulfillment_status\" = 'delivered'\n          AND (\n            (\"order\".\"handed_to_shipping_at\" IS NULL\n              AND \"order\".\"delivered_at\" IS NULL)\n            OR\n            (\"order\".\"handed_to_shipping_at\" IS NOT NULL\n              AND \"order\".\"delivered_at\" IS NOT NULL\n              AND \"order\".\"delivered_at\" >= \"order\".\"handed_to_shipping_at\")\n          ))\n        OR\n        (\"order\".\"fulfillment_status\" = 'cancelled'\n          AND \"order\".\"handed_to_shipping_at\" IS NULL\n          AND \"order\".\"delivered_at\" IS NULL)\n      )"
         },
         "order_payment_collection_state_check": {
           "name": "order_payment_collection_state_check",
-          "value": "(\n        (\"order\".\"payment_status\" = 'collected'\n          AND \"order\".\"payment_collected_at\" IS NOT NULL)\n        OR\n        (\"order\".\"payment_status\" <> 'collected'\n          AND \"order\".\"payment_collected_at\" IS NULL)\n      )"
+          "value": "(\n        \"order\".\"payment_status\" = 'collected'\n        OR \"order\".\"payment_collected_at\" IS NULL\n      )"
         },
         "order_currency_allowlist_check": {
           "name": "order_currency_allowlist_check",

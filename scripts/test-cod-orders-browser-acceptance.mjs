@@ -579,6 +579,29 @@ async function main() {
     assert(clicked, `Expected ${testId} to be clickable`);
   };
 
+  const readOrderCard = async (reference = null) =>
+    cdp.evaluate(`(() => {
+      const cards = [...document.querySelectorAll('[data-testid="merchant-order-card"]')];
+      const card = ${
+        reference
+          ? `cards.find((candidate) => candidate.textContent.includes(${JSON.stringify(reference)}))`
+          : "cards[0]"
+      };
+      if (!card) return null;
+      const status = card.querySelector('[data-testid="merchant-order-status"]');
+      const payment = card.querySelector('[data-testid="merchant-order-payment"]');
+      const entries = [...card.querySelectorAll('[data-testid="merchant-order-timeline-entry"]')];
+      return {
+        currentStatus: card.getAttribute('data-current-status'),
+        paymentStatus: card.getAttribute('data-payment-status'),
+        statusBadge: status?.getAttribute('data-value') ?? null,
+        paymentBadge: payment?.getAttribute('data-value') ?? null,
+        known: entries.filter((entry) => entry.getAttribute('data-known') === 'true').length,
+        unknown: entries.filter((entry) => entry.getAttribute('data-known') === 'false').length,
+        text: card.innerText,
+      };
+    })()`);
+
   log("Running the phone-first accept, prepare, shipping, delivery and collection flow...");
   await waitFor(
     cdp,
@@ -616,6 +639,16 @@ async function main() {
     !preparingBody.includes("Not prepared"),
     "Preparing must not be shown beside Not prepared",
   );
+  const preparingCard = await readOrderCard();
+  assert(
+    preparingCard?.currentStatus === "preparing" &&
+      preparingCard?.statusBadge === "preparing",
+    `Before handoff the current status must be preparing, saw ${JSON.stringify(preparingCard)}`,
+  );
+  assert(
+    preparingCard?.unknown === 0 && preparingCard?.known >= 2,
+    "Known preparation steps must not be shown as unknown",
+  );
   await capturePhoneScreenshot("03-order-preparing-360.png");
 
   log("Handing the order to shipping with an explicit stock confirmation...");
@@ -637,6 +670,24 @@ async function main() {
     cdp,
     "document.body.innerText.includes('Handed 2 units to shipping and committed stock exactly once.')",
     "shipping feedback with committed quantity",
+  );
+
+  const shippedCard = await readOrderCard();
+  assert(
+    shippedCard?.currentStatus === "handed_to_shipping" &&
+      shippedCard?.statusBadge === "handed_to_shipping" &&
+      shippedCard?.paymentBadge === "awaiting_collection",
+    `After handoff the current badge must be fulfillment, saw ${JSON.stringify(shippedCard)}`,
+  );
+  assert(
+    shippedCard?.statusBadge !== "preparing",
+    "Preparing must not remain the current-status badge after handoff",
+  );
+  assert(
+    shippedCard?.text.includes("Preparing") &&
+      shippedCard?.known >= 3 &&
+      shippedCard?.unknown === 0,
+    "The historical preparing step must remain in the timeline with a known time",
   );
 
   const [shippingInventory] = await pgClient`
@@ -704,6 +755,22 @@ async function main() {
     "delivery feedback",
   );
 
+  const deliveredCard = await readOrderCard();
+  assert(
+    deliveredCard?.currentStatus === "delivered" &&
+      deliveredCard?.statusBadge === "delivered" &&
+      deliveredCard?.paymentBadge === "awaiting_collection",
+    `After delivery the status and payment badges must stay separate, saw ${JSON.stringify(deliveredCard)}`,
+  );
+  assert(
+    deliveredCard?.statusBadge !== "preparing",
+    "Preparing must not remain the current-status badge after delivery",
+  );
+  assert(
+    deliveredCard?.known >= 4 && deliveredCard?.unknown === 0,
+    "Delivery must add a known timeline entry",
+  );
+
   const [deliveredOrder] = await pgClient`
     select fulfillment_status, payment_status, delivered_at,
            payment_collected_at, total
@@ -756,6 +823,22 @@ async function main() {
     "no further primary action after collection",
   );
 
+  const collectedCard = await readOrderCard();
+  assert(
+    collectedCard?.currentStatus === "delivered" &&
+      collectedCard?.statusBadge === "delivered" &&
+      collectedCard?.paymentBadge === "collected",
+    `After collection the status stays delivered and payment is separate, saw ${JSON.stringify(collectedCard)}`,
+  );
+  assert(
+    collectedCard?.statusBadge !== "preparing",
+    "Preparing must not remain the current-status badge after collection",
+  );
+  assert(
+    collectedCard?.known >= 5 && collectedCard?.unknown === 0,
+    "Newly executed actions must show their actual recorded timeline timestamps",
+  );
+
   const [collectedOrder] = await pgClient`
     select fulfillment_status, payment_status, delivered_at,
            payment_collected_at, total
@@ -805,6 +888,13 @@ async function main() {
     "Arabic RTL orders page",
   );
   const arabicCollectedBody = await cdp.evaluate("document.body.innerText");
+  const arabicCollectedCard = await readOrderCard();
+  assert(
+    arabicCollectedCard?.statusBadge === "delivered" &&
+      arabicCollectedCard?.paymentBadge === "collected" &&
+      !arabicCollectedBody.includes("قيد التجهيز"),
+    `Arabic current status must not remain preparing, saw ${JSON.stringify(arabicCollectedCard)}`,
+  );
   for (const expected of [
     "طلبات الدفع عند الاستلام",
     "تم التحصيل",
@@ -828,6 +918,77 @@ async function main() {
     `Expected no horizontal scroll in Arabic at 360 px, saw ${arabicCollectedOverflow}`,
   );
   await capturePhoneScreenshot("09-collected-ar-360.png");
+
+  log("Checking a historical delivered order with unknown event times...");
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant-locale",
+    value: "en",
+    domain: "127.0.0.1",
+    path: "/",
+  });
+  const [unknownHistoricalOrder] = await pgClient`
+    insert into "order" (
+      "store_id", "connection_id", "telegram_user_id", "telegram_chat_id",
+      "reference", "checkout_key", "status", "payment_method", "payment_status",
+      "fulfillment_status", "currency", "subtotal", "delivery_fee", "total",
+      "customer_name", "customer_phone", "delivery_address",
+      "placed_at", "accepted_at", "preparing_at", "created_at", "updated_at"
+    )
+    values (
+      ${store.id}, ${connection.id}, 93004, 93004,
+      'ORD-HJM234', ${crypto.randomUUID()}, 'preparing', 'cod', 'collected',
+      'delivered', 'SAR', 11.00, 15.00, 26.00,
+      'Historical Buyer', '+15550000003', '321 Historical Street',
+      now() - interval '3 days', now() - interval '3 days' + interval '5 minutes',
+      now() - interval '3 days' + interval '10 minutes',
+      now() - interval '3 days', now() - interval '3 days' + interval '1 hour'
+    )
+    returning id
+  `;
+  await pgClient`
+    insert into "order_item" (
+      "order_id", "product_id", "product_name", "unit_price", "quantity",
+      "line_total", "product_snapshot"
+    )
+    values (
+      ${unknownHistoricalOrder.id}, ${product.id}, 'Synthetic COD Product', 11.00, 1, 11.00,
+      ${JSON.stringify({
+        name: "Synthetic COD Product",
+        description: "Historical fixture",
+        categoryId: category.id,
+        unitPrice: "11.00",
+        currency: "SAR",
+      })}::jsonb
+    )
+  `;
+  await navigate(`${BASE_URL}/app/orders`, "Orders with historical order");
+  await waitFor(
+    cdp,
+    "document.body.innerText.includes('ORD-HJM234')",
+    "historical order card",
+  );
+
+  const historicalCard = await readOrderCard("ORD-HJM234");
+  assert(
+    historicalCard?.currentStatus === "delivered" &&
+      historicalCard?.statusBadge === "delivered" &&
+      historicalCard?.paymentBadge === "collected",
+    `Historical status must be current without inference, saw ${JSON.stringify(historicalCard)}`,
+  );
+  assert(
+    historicalCard?.unknown === 3 && historicalCard?.known === 2,
+    `Historical handoff/delivery/collection times must be unknown, saw ${JSON.stringify(historicalCard)}`,
+  );
+  assert(
+    historicalCard?.text.includes("Time unknown"),
+    "Historical missing event times must be explicitly marked unknown",
+  );
+  const completedCard = await readOrderCard();
+  assert(
+    completedCard?.unknown === 0 && completedCard?.known >= 5,
+    "Newly executed order must keep exact recorded timeline dates",
+  );
+  await capturePhoneScreenshot("15-historical-unknown-360.png");
 
   log("Running the phone-first pre-shipment cancellation flow on a second order...");
   await cdp.send("Network.setCookie", {
@@ -1145,11 +1306,11 @@ async function main() {
   assert(!englishReadOnly.cancel, "Read-only Orders must not render Cancel");
   assert(!englishReadOnly.form, "Read-only Orders must not render the cancel form");
   assert(
-    englishReadOnly.readOnlyNotes >= 3,
+    englishReadOnly.readOnlyNotes >= 4,
     `Expected read-only notes for every order, saw ${englishReadOnly.readOnlyNotes}`,
   );
   assert(
-    englishReadOnly.cards >= 3,
+    englishReadOnly.cards >= 4,
     `Expected every order to remain readable, saw ${englishReadOnly.cards}`,
   );
   assert(
