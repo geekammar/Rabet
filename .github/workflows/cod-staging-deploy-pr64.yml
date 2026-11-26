@@ -1,0 +1,61 @@
+name: COD Staging Deploy PR64
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DEPLOY_PR64_COD_STAGING to authorize the exact-SHA deploy on permanent COD Staging.'
+        type: string
+        default: ""
+        required: true
+  push:
+    branches:
+      - ops/vodafone-attention-staging-pr64
+
+permissions:
+  contents: read
+
+# Intentionally shares PR63's group so the permanent Staging service can
+# never receive two orchestrated deployments at the same time.
+concurrency:
+  group: cod-staging-deploy-pr63
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy PR64 and smoke-test transfer Needs Attention on permanent COD Staging
+    if: (github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY_PR64_COD_STAGING') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy-cod-staging-pr64]'))
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy exact PR64 SHA and verify Staging
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: ef3d7e98e84de1f70931291e4dd66187f9f70660
+          DEPLOY_CONFIRM: DEPLOY_PR64_COD_STAGING
+        run: node scripts/cod-staging-deploy-pr64.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-pr64-deploy-summary
+          path: /tmp/cod-staging-pr64-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
