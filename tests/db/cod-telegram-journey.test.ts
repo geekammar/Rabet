@@ -3,21 +3,30 @@ import { eq, sql } from "drizzle-orm";
 
 import {
   appUser,
+  botSetting,
+  buyerLanguagePreference,
   cart,
   category,
   categoryTranslation,
   inventoryReservation,
   language,
   order,
+  orderItem,
   product,
   productInventory,
   productTranslation,
   store,
   storeCommerceSetting,
+  storeLanguageSetting,
   storeMembership,
   telegramConnection,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
+import {
+  readStoreLanguageChoice,
+  resolveBuyerLanguage,
+} from "@/lib/data/store-language";
+import { saveMerchantStoreLanguage } from "@/lib/merchant/store-language";
 import { hashWebhookSecret } from "@/lib/telegram/connection-secrets";
 import { handleManagedTelegramWebhookRequest } from "@/lib/telegram/managed-webhook";
 import {
@@ -29,6 +38,7 @@ import {
   createTestDatabase,
   hasTestCluster,
   nextOrder,
+  readStoreScopeForFixture,
   type TestDatabase,
 } from "./helpers";
 
@@ -47,6 +57,9 @@ type Fixture = {
   connectionAId: string;
   connectionBId: string;
   languageId: string;
+  arabicLanguageId: string;
+  userAId: string;
+  userBId: string;
 };
 
 let fixture: Fixture;
@@ -64,6 +77,15 @@ beforeAll(async () => {
   const [english] = await db
     .insert(language)
     .values({ code: "en", label: "English", isEnabled: true })
+    .returning();
+  const [arabic] = await db
+    .insert(language)
+    .values({
+      code: "ar",
+      label: "العربية",
+      textDirection: "rtl",
+      isEnabled: true,
+    })
     .returning();
 
   const [storeA] = await db
@@ -110,6 +132,7 @@ beforeAll(async () => {
 
   await db.insert(categoryTranslation).values([
     { categoryId: categoryA.id, languageId: english.id, name: "Bot A Root" },
+    { categoryId: categoryA.id, languageId: arabic.id, name: "جذر المتجر أ" },
     { categoryId: categoryB.id, languageId: english.id, name: "Bot B Root" },
   ]);
 
@@ -142,6 +165,12 @@ beforeAll(async () => {
       languageId: english.id,
       name: "Bot A One",
       description: "Bot A description",
+    },
+    {
+      productId: productA.id,
+      languageId: arabic.id,
+      name: "منتج أ واحد",
+      description: "وصف المنتج أ",
     },
     {
       productId: productB.id,
@@ -210,6 +239,9 @@ beforeAll(async () => {
     connectionAId: connectionA.id,
     connectionBId: connectionB.id,
     languageId: english.id,
+    arabicLanguageId: arabic.id,
+    userAId: userA.id,
+    userBId: userB.id,
   };
 });
 
@@ -234,6 +266,10 @@ beforeEach(async () => {
       "telegram_managed_update"
     restart identity cascade
   `);
+
+  await db.execute(sql`truncate table "buyer_language_preference"`);
+  await db.execute(sql`truncate table "store_language_setting"`);
+  await db.execute(sql`truncate table "bot_setting"`);
 
   await db
     .update(product)
@@ -328,6 +364,7 @@ function callbackUpdate(
   buyerId: number,
   data: string,
   languageCode?: string,
+  messageId?: number,
 ) {
   return {
     update_id: nextUpdateId(),
@@ -340,7 +377,7 @@ function callbackUpdate(
         ...(languageCode ? { language_code: languageCode } : {}),
       },
       message: {
-        message_id: 7000 + updateId,
+        message_id: messageId ?? 7000 + updateId,
         chat: { id: buyerId, type: "private" },
         date: 1,
       },
@@ -353,8 +390,8 @@ async function call(
   connectionId: string,
   body: unknown,
   secret = "bot-secret-a",
+  transport: FakeTelegramTransport = createFakeTelegramTransport(),
 ): Promise<{ status: number; transport: FakeTelegramTransport }> {
-  const transport = createFakeTelegramTransport();
   const response = await handleManagedTelegramWebhookRequest(
     webhookRequest(body, secret),
     connectionId,
@@ -398,6 +435,16 @@ function lastText(transport: FakeTelegramTransport): string {
     transport.sentMessages.at(-1)?.text ??
     ""
   );
+}
+
+async function setStoreDefault(storeId: string, code: "ar" | "en") {
+  await db()
+    .insert(storeLanguageSetting)
+    .values({ storeId, locale: code })
+    .onConflictDoUpdate({
+      target: storeLanguageSetting.storeId,
+      set: { locale: code, updatedAt: new Date() },
+    });
 }
 
 async function startProductFlow(
@@ -822,4 +869,555 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     ).toBe(true);
     expect(await db().select().from(order)).toHaveLength(0);
   });
+
+  it("resolves a buyer choice per store and keeps the merchant default for another buyer", async () => {
+    await setStoreDefault(fixture.storeAId, "ar");
+    await setStoreDefault(fixture.storeBId, "en");
+
+    const buyer = 92003;
+
+    const startA = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "/start", {}, "en"),
+    );
+    expect(lastText(startA.transport)).toContain("مرحبًا بك");
+
+    const otherBuyer = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_B, "/start", {}, "en"),
+    );
+    expect(lastText(otherBuyer.transport)).toContain("مرحبًا بك");
+
+    const menu = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "langs"),
+    );
+    expect(lastText(menu.transport)).toContain("اختر اللغة");
+
+    const chosen = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "lang:en", "ar"),
+    );
+    expect(lastText(chosen.transport)).toContain("Welcome to");
+
+    const resumed = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "/start", {}, "ar"),
+    );
+    expect(lastText(resumed.transport)).toContain("Welcome to");
+
+    const storeBStart = await call(
+      fixture.connectionBId,
+      messageUpdate(buyer, "/start", {}, "ar"),
+      "bot-secret-b",
+    );
+    expect(lastText(storeBStart.transport)).toContain("Welcome to");
+
+    const preferences = await db().select().from(buyerLanguagePreference);
+    expect(preferences).toHaveLength(1);
+    expect(preferences[0].storeId).toBe(fixture.storeAId);
+    expect(preferences[0].telegramUserId).toBe(buyer);
+
+    const resolvedA = await resolveBuyerLanguage(asAppDb(db()), {
+      storeId: fixture.storeAId,
+      telegramUserId: buyer,
+      profileLanguageCode: "ar",
+    });
+    expect(resolvedA.source).toBe("buyer");
+    expect(resolvedA.locale).toBe("en");
+
+    const resolvedB = await resolveBuyerLanguage(asAppDb(db()), {
+      storeId: fixture.storeBId,
+      telegramUserId: buyer,
+      profileLanguageCode: "ar",
+    });
+    expect(resolvedB.source).toBe("store_default");
+    expect(resolvedB.locale).toBe("en");
+  });
+
+  it("keeps merchant catalog text stable while buyer UI and checkout language change", async () => {
+    await db().insert(botSetting).values({
+      id: 1,
+      storeId: fixture.storeAId,
+      defaultLanguageId: fixture.arabicLanguageId,
+      currency: "SAR",
+      displayName: "Bot COD Store A",
+    });
+    await setStoreDefault(fixture.storeAId, "ar");
+    const buyer = 92004;
+
+    await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "/start", {}, "en"),
+    );
+
+    const categoryArabic = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `sc:${fixture.categoryAId}`, "en"),
+    );
+    expect(lastText(categoryArabic.transport)).toContain("جذر المتجر أ");
+
+    const product = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `p:${fixture.productAId}`, "en"),
+    );
+    expect(lastText(product.transport)).toContain("منتج أ واحد");
+    expect(lastText(product.transport)).toContain("وصف المنتج أ");
+
+    const productLanguageButton = lastButton(product.transport, "langs:");
+    expect(productLanguageButton?.callback_data).toBeDefined();
+
+    const productMenu = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, productLanguageButton!.callback_data!),
+    );
+    expect(lastText(productMenu.transport)).toContain("اختر اللغة");
+
+    const englishChoice = inlineButtons(
+      productMenu.transport.editedMessages.at(-1)!,
+    ).find((button) => button.callback_data?.startsWith("lang:en"));
+    expect(englishChoice?.callback_data).toBeDefined();
+
+    const productEnglish = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, englishChoice!.callback_data!),
+    );
+    expect(lastText(productEnglish.transport)).toContain("منتج أ واحد");
+    expect(lastText(productEnglish.transport)).toContain("وصف المنتج أ");
+    expect(
+      inlineButtons(productEnglish.transport.editedMessages.at(-1)!).some(
+        (button) => button.text === "Add 1",
+      ),
+    ).toBe(true);
+
+    const categoryEnglishUi = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `sc:${fixture.categoryAId}`, "en"),
+    );
+    expect(lastText(categoryEnglishUi.transport)).toContain("جذر المتجر أ");
+    expect(
+      inlineButtons(categoryEnglishUi.transport.editedMessages.at(-1)!).some(
+        (button) => button.text === "Home",
+      ),
+    ).toBe(true);
+
+    const productArabicLanguageButton = lastButton(
+      productEnglish.transport,
+      "langs:",
+    );
+    expect(productArabicLanguageButton?.callback_data).toBeDefined();
+
+    const productArabic = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, productArabicLanguageButton!.callback_data!),
+    );
+    expect(lastText(productArabic.transport)).toContain("Choose your language");
+
+    const arabicChoice = inlineButtons(
+      productArabic.transport.editedMessages.at(-1)!,
+    ).find((button) => button.callback_data?.startsWith("lang:ar"));
+    expect(arabicChoice?.callback_data).toBeDefined();
+
+    const productBackToArabic = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, arabicChoice!.callback_data!),
+    );
+    expect(lastText(productBackToArabic.transport)).toContain("منتج أ واحد");
+    expect(lastText(productBackToArabic.transport)).toContain("وصف المنتج أ");
+
+    const added = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `ca:${fixture.productAId}:2`, "en"),
+    );
+    expect(lastText(added.transport)).toContain("منتج أ واحد");
+    expect(lastText(added.transport)).toContain("× 2");
+
+    const cartMenu = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "langs"),
+    );
+    expect(lastText(cartMenu.transport)).toContain("اختر اللغة");
+
+    const cartEnglish = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "lang:en"),
+    );
+    expect(lastText(cartEnglish.transport)).toContain("Cart");
+    expect(lastText(cartEnglish.transport)).toContain("منتج أ واحد");
+    expect(lastText(cartEnglish.transport)).toContain("× 2");
+    expect(lastText(cartEnglish.transport)).toContain("Subtotal: 22.00 SAR");
+
+    const checkoutButton = lastButton(cartEnglish.transport, "co:");
+    expect(checkoutButton?.text).toBe("Checkout");
+
+    const checkout = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, checkoutButton!.callback_data!),
+    );
+    expect(
+      checkout.transport.sentMessages.some((entry) =>
+        entry.text.includes("Send your phone number"),
+      ),
+    ).toBe(true);
+
+    const phoneMenu = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "اللغة / Language"),
+    );
+    expect(lastText(phoneMenu.transport)).toContain("Choose your language");
+
+    const phoneArabic = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "lang:ar"),
+    );
+    expect(
+      phoneArabic.transport.sentMessages.some((entry) =>
+        entry.text.includes("أرسل رقم هاتفك"),
+      ),
+    ).toBe(true);
+
+    const phone = await call(
+      fixture.connectionAId,
+      contactUpdate(buyer, "+15551234567"),
+    );
+    expect(
+      phone.transport.sentMessages.some((entry) =>
+        entry.text.includes("أرسل عنوان التوصيل"),
+      ),
+    ).toBe(true);
+
+    const reviewed = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "123 Synthetic Telegram Street"),
+    );
+    const arabicReview = lastText(reviewed.transport);
+    expect(arabicReview).toContain("راجع طلبك");
+    expect(arabicReview).toContain("منتج أ واحد × 2");
+    expect(arabicReview).toContain("+15551234567");
+    expect(arabicReview).toContain("123 Synthetic Telegram Street");
+    expect(arabicReview).toContain("الإجمالي: 37.00 SAR");
+
+    const reviewMenu = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "langs"),
+    );
+    expect(lastText(reviewMenu.transport)).toContain("اختر اللغة");
+
+    const reviewEnglish = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "lang:en"),
+    );
+    const englishReview = lastText(reviewEnglish.transport);
+    expect(englishReview).toContain("Review your order");
+    expect(englishReview).toContain("منتج أ واحد × 2");
+    expect(englishReview).toContain("+15551234567");
+    expect(englishReview).toContain("123 Synthetic Telegram Street");
+    expect(englishReview).toContain("Total: 37.00 SAR");
+
+    const confirmButton = lastButton(reviewEnglish.transport, "cc:");
+    expect(confirmButton?.text).toBe("Confirm order — cash on delivery");
+
+    const confirmed = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, confirmButton!.callback_data!),
+    );
+    expect(lastText(confirmed.transport)).toContain("placed");
+    expect(lastText(confirmed.transport)).toContain("Total: 37.00 SAR");
+
+    const orders = await db().select().from(order);
+    expect(orders).toHaveLength(1);
+    expect(orders[0].customerPhone).toBe("+15551234567");
+    expect(orders[0].deliveryAddress).toBe("123 Synthetic Telegram Street");
+
+    const items = await db().select().from(orderItem);
+    expect(items).toHaveLength(1);
+    expect(items[0].productName).toBe("منتج أ واحد");
+
+    const reservations = await db().select().from(inventoryReservation);
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0].quantity).toBe(2);
+
+    // Changing the merchant's buyer-facing default must not switch catalog text.
+    await setStoreDefault(fixture.storeAId, "en");
+    const secondBuyer = 92007;
+    const secondStart = await call(
+      fixture.connectionAId,
+      messageUpdate(secondBuyer, "/start", {}, "en"),
+    );
+    expect(lastText(secondStart.transport)).toContain("Welcome to");
+    const secondProduct = await call(
+      fixture.connectionAId,
+      callbackUpdate(secondBuyer, `p:${fixture.productAId}`, "en"),
+    );
+    expect(lastText(secondProduct.transport)).toContain("منتج أ واحد");
+    expect(lastText(secondProduct.transport)).toContain("وصف المنتج أ");
+  });
+
+  it("keeps single-language catalog records visible with a deterministic fallback", async () => {
+    await db().insert(botSetting).values({
+      id: 1,
+      storeId: fixture.storeAId,
+      defaultLanguageId: fixture.arabicLanguageId,
+      currency: "SAR",
+      displayName: "Bot COD Store A",
+    });
+    await setStoreDefault(fixture.storeAId, "ar");
+
+    const [categoryRow] = await db()
+      .insert(category)
+      .values({
+        storeId: fixture.storeAId,
+        slug: "store-a-fallback-root",
+        sortOrder: nextOrder(),
+        isActive: true,
+      })
+      .returning();
+    await db().insert(categoryTranslation).values({
+      categoryId: categoryRow.id,
+      languageId: fixture.languageId,
+      name: "English Only Category",
+    });
+    const [productRow] = await db()
+      .insert(product)
+      .values({
+        storeId: fixture.storeAId,
+        categoryId: categoryRow.id,
+        slug: "store-a-english-only-product",
+        price: "9.50",
+        isActive: true,
+        sortOrder: nextOrder(),
+      })
+      .returning();
+    await db().insert(productTranslation).values({
+      productId: productRow.id,
+      languageId: fixture.languageId,
+      name: "English Only Product",
+      description: "Only the safe fallback language exists.",
+    });
+    await db().insert(productInventory).values({
+      productId: productRow.id,
+      storeId: fixture.storeAId,
+      onHand: 3,
+      reserved: 0,
+    });
+
+    const buyer = 92005;
+
+    const start = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "/start", {}, "en"),
+    );
+    expect(lastText(start.transport)).toContain("مرحبًا بك");
+
+    const categoryView = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `sc:${categoryRow.id}`, "en"),
+    );
+    expect(lastText(categoryView.transport)).toContain("English Only Category");
+
+    const productView = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `p:${productRow.id}`, "en"),
+    );
+    expect(lastText(productView.transport)).toContain("English Only Product");
+    expect(lastText(productView.transport)).toContain(
+      "Only the safe fallback language exists.",
+    );
+    expect(lastText(productView.transport)).toContain("9.50");
+
+    const added = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `ca:${productRow.id}:1`, "en"),
+    );
+    expect(lastText(added.transport)).toContain("السلة");
+    expect(lastText(added.transport)).toContain("English Only Product");
+    expect(lastText(added.transport)).toContain("9.50 SAR");
+  });
+
+  it("keeps the saved phone when switching language at the address prompt", async () => {
+    await setStoreDefault(fixture.storeAId, "ar");
+    const buyer = 92006;
+
+    await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "/start", {}, "en"),
+    );
+    await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `p:${fixture.productAId}`, "en"),
+    );
+    const added = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, `ca:${fixture.productAId}:1`, "en"),
+    );
+    const checkoutButton = lastButton(added.transport, "co:");
+    expect(checkoutButton?.callback_data).toBeDefined();
+
+    await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, checkoutButton!.callback_data!, "en"),
+    );
+
+    const phone = await call(
+      fixture.connectionAId,
+      contactUpdate(buyer, "+15557654321"),
+    );
+    expect(
+      phone.transport.sentMessages.some((entry) =>
+        entry.text.includes("أرسل عنوان التوصيل"),
+      ),
+    ).toBe(true);
+
+    const addressMenu = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "اللغة / Language"),
+    );
+    expect(lastText(addressMenu.transport)).toContain("اختر اللغة");
+
+    const addressLanguageButton = lastButton(addressMenu.transport, "lang:");
+    expect(addressLanguageButton?.callback_data).toBeDefined();
+
+    const switchedAtAddress = await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, "lang:en"),
+    );
+    expect(
+      switchedAtAddress.transport.sentMessages.some((entry) =>
+        entry.text.includes("Send the delivery address"),
+      ),
+    ).toBe(true);
+
+    const reviewed = await call(
+      fixture.connectionAId,
+      messageUpdate(buyer, "456 Address Switch Street"),
+    );
+    const reviewText = lastText(reviewed.transport);
+    expect(reviewText).toContain("Review your order");
+    expect(reviewText).toContain("+15557654321");
+    expect(reviewText).toContain("456 Address Switch Street");
+
+    const confirmButton = lastButton(reviewed.transport, "cc:");
+    expect(confirmButton?.callback_data).toBeDefined();
+
+    await call(
+      fixture.connectionAId,
+      callbackUpdate(buyer, confirmButton!.callback_data!),
+    );
+
+    const orders = await db().select().from(order);
+    expect(orders).toHaveLength(1);
+    expect(orders[0].customerPhone).toBe("+15557654321");
+    expect(orders[0].deliveryAddress).toBe("456 Address Switch Street");
+  });
+
+  it("saves the merchant default only for the authenticated store", async () => {
+    const scopeA = await readStoreScopeForFixture(db(), fixture.storeAId);
+    const accessA = {
+      userId: fixture.userAId,
+      email: "botcod.a@example.test",
+      sessionVersion: 0,
+      role: "owner" as const,
+      store: {
+        id: fixture.storeAId,
+        name: "Bot COD Store A",
+        slug: "bot-cod-store-a",
+        status: "active" as const,
+      },
+      scope: scopeA,
+      readOnly: false,
+    };
+
+    const saved = await saveMerchantStoreLanguage(
+      db() as unknown as TransactionDatabase,
+      accessA,
+      { code: "ar" },
+    );
+    expect(saved.ok).toBe(true);
+
+    const storeAChoice = await readStoreLanguageChoice(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    const storeBChoice = await readStoreLanguageChoice(
+      asAppDb(db()),
+      fixture.storeBId,
+    );
+
+    expect(storeAChoice?.code).toBe("ar");
+    expect(storeBChoice).toBeNull();
+
+    const denied = await saveMerchantStoreLanguage(
+      db() as unknown as TransactionDatabase,
+      { ...accessA, readOnly: true },
+      { code: "en" },
+    );
+    expect(denied).toEqual({ ok: false, error: "DENIED" });
+  });
+  it("keeps the placed receipt when returning home and changing language", async () => {
+    const { confirmData } = await completeReview();
+    const transport = createFakeTelegramTransport();
+
+    const confirmed = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, confirmData),
+      "bot-secret-a",
+      transport,
+    );
+
+    const receipt = confirmed.transport.editedMessages.at(-1);
+    expect(receipt?.text).toContain("placed");
+    expect(receipt?.text).toContain("Total: 37.00 SAR");
+    const receiptId = receipt!.messageId;
+
+    const receiptButtons = inlineButtons(receipt!);
+    expect(
+      receiptButtons.some((button) =>
+        button.callback_data?.startsWith("lang"),
+      ),
+    ).toBe(false);
+
+    const homeButton = receiptButtons.find(
+      (button) => button.callback_data === "home:new",
+    );
+    expect(homeButton).toBeDefined();
+
+    const home = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, homeButton!.callback_data!, undefined, receiptId),
+      "bot-secret-a",
+      transport,
+    );
+    expect(home.transport.sentMessages.at(-1)?.text).toContain("Welcome to");
+
+    const languageMenu = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, "langs:h", undefined, receiptId + 1),
+      "bot-secret-a",
+      transport,
+    );
+    expect(languageMenu.transport.editedMessages.at(-1)?.text).toContain(
+      "Choose your language",
+    );
+
+    const switched = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, "lang:ar:h", undefined, receiptId + 1),
+      "bot-secret-a",
+      transport,
+    );
+    expect(switched.transport.editedMessages.at(-1)?.text).toContain(
+      "مرحبًا بك",
+    );
+
+    const receiptEdits = switched.transport.editedMessages.filter(
+      (message) => message.messageId === receiptId,
+    );
+    expect(receiptEdits).toHaveLength(1);
+    expect(receiptEdits[0].text).toContain("placed");
+    expect(receiptEdits[0].text).toContain("ORD-");
+
+    expect(await db().select().from(order)).toHaveLength(1);
+    expect(await db().select().from(inventoryReservation)).toHaveLength(1);
+  });
+
 });

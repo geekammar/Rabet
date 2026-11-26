@@ -1,24 +1,41 @@
 /**
- * Localized copy for the new COD cart/checkout flow only.
+ * Localized copy for the managed buyer storefront and its COD flow.
  *
- * Existing managed storefront copy (home, product names, categories) is
- * intentionally unchanged by this slice. The merchant app has its own locale
- * cookie; this module follows the Telegram user's profile language for the new
- * buyer-facing commerce messages.
+ * The managed path offers exactly two buyer UI languages. Product and category
+ * names are merchant catalog content and are deliberately not chosen by this
+ * UI locale; this module only owns interface copy, validation text and the
+ * receipt. Nothing here reads a merged customer row: the resolved per-store
+ * UI language is passed in by the webhook.
  */
 
-export type ManagedCommerceLocale = "ar" | "en";
+import {
+  buyerLocaleFromLanguageCode,
+  type BuyerLocale,
+} from "@/lib/commerce/buyer-language";
 
-export function managedCommerceLocaleFromLanguageCode(
-  code: string | undefined,
-): ManagedCommerceLocale {
-  return typeof code === "string" && code.toLowerCase().startsWith("ar")
-    ? "ar"
-    : "en";
-}
+export type ManagedCommerceLocale = BuyerLocale;
 
-type CommerceCopy = {
+export const managedCommerceLocaleFromLanguageCode = buyerLocaleFromLanguageCode;
+
+export type CommerceCopy = {
+  home: string;
+  back: string;
+  previous: string;
+  next: string;
+  products: string;
+  browseCategories: string;
   cart: string;
+  languageButton: string;
+  languageTitle: string;
+  languageArabic: string;
+  languageEnglish: string;
+  languageSaved: string;
+  invalidLanguage: string;
+  welcome: (storeName: string) => string;
+  empty: string;
+  noCategories: string;
+  unavailable: string;
+  unavailableItem: string;
   cartEmpty: string;
   cartHint: string;
   cartUnavailableNote: string;
@@ -45,7 +62,6 @@ type CommerceCopy = {
   orderPlaced: (reference: string) => string;
   awaitingCollection: string;
   reservedNote: string;
-  unavailable: string;
   outOfStock: string;
   notOrderable: string;
   genericUnavailable: string;
@@ -57,7 +73,25 @@ type CommerceCopy = {
 
 const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
   en: {
+    home: "Home",
+    back: "Back",
+    previous: "Previous",
+    next: "Next",
+    products: "Products",
+    browseCategories: "Browse categories",
     cart: "Cart",
+    languageButton: "اللغة / Language",
+    languageTitle: "Choose your language",
+    languageArabic: "العربية",
+    languageEnglish: "English",
+    languageSaved: "Language updated.",
+    invalidLanguage:
+      "That language is not available. Choose Arabic or English.",
+    welcome: (storeName) => `Welcome to ${storeName}.`,
+    empty: "No products are available in this store yet.",
+    noCategories: "No categories are available in this store yet.",
+    unavailable: "This item is not available in this store.",
+    unavailableItem: "Unavailable item",
     cartEmpty: "Your cart is empty.",
     cartHint: "Send /start to browse the store.",
     cartUnavailableNote:
@@ -88,7 +122,6 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     orderPlaced: (reference) => `Order ${reference} placed.`,
     awaitingCollection: "Payment: cash on delivery — awaiting collection.",
     reservedNote: "The store has reserved the items for this order.",
-    unavailable: "This item is not available in this store.",
     outOfStock: "This product is out of stock.",
     notOrderable: "This product cannot be ordered online.",
     genericUnavailable: "This cart is not available.",
@@ -100,7 +133,24 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     addQuantity: (quantity) => `Add ${quantity}`,
   },
   ar: {
+    home: "الرئيسية",
+    back: "رجوع",
+    previous: "السابق",
+    next: "التالي",
+    products: "المنتجات",
+    browseCategories: "تصفح الأقسام",
     cart: "السلة",
+    languageButton: "اللغة / Language",
+    languageTitle: "اختر اللغة",
+    languageArabic: "العربية",
+    languageEnglish: "English",
+    languageSaved: "تم تحديث اللغة.",
+    invalidLanguage: "هذه اللغة غير متاحة. اختر العربية أو الإنجليزية.",
+    welcome: (storeName) => `مرحبًا بك في ${storeName}.`,
+    empty: "لا توجد منتجات متاحة في هذا المتجر بعد.",
+    noCategories: "لا توجد أقسام متاحة في هذا المتجر بعد.",
+    unavailable: "هذا العنصر غير متاح في هذا المتجر.",
+    unavailableItem: "عنصر غير متاح",
     cartEmpty: "سلتك فارغة.",
     cartHint: "أرسل /start لتصفح المتجر.",
     cartUnavailableNote:
@@ -131,7 +181,6 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     orderPlaced: (reference) => `تم تسجيل الطلب ${reference}.`,
     awaitingCollection: "الدفع عند الاستلام — بانتظار التحصيل.",
     reservedNote: "تم حجز المنتجات لهذا الطلب.",
-    unavailable: "هذا العنصر غير متاح في هذا المتجر.",
     outOfStock: "هذا المنتج غير متوفر حاليًا.",
     notOrderable: "لا يمكن طلب هذا المنتج عبر المتجر.",
     genericUnavailable: "هذه السلة غير متاحة.",

@@ -1,11 +1,13 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   char,
   check,
   index,
   jsonb,
   pgTable,
+  primaryKey,
   smallint,
   text,
   timestamp,
@@ -114,6 +116,83 @@ export const language = pgTable(
     check(
       "language_text_direction_check",
       sql`${table.textDirection} IN ('ltr', 'rtl')`,
+    ),
+  ],
+);
+
+/**
+ * `store_language_setting` — the customer-facing UI language for one store.
+ *
+ * The value is a validated `ar`/`en` locale, not a reference to the global
+ * catalog `language` rows. The two concepts are deliberately separate: a
+ * merchant may choose Arabic or English buyer UI even before the corresponding
+ * catalog metadata exists or while it is disabled. Treating the locale as data
+ * also means saving this setting can never insert, enable or modify a global
+ * language row.
+ *
+ * A missing row is the "not configured yet" state; compatible legacy
+ * `bot_setting` defaults for the same store remain a read-only fallback.
+ */
+export const storeLanguageSetting = pgTable(
+  "store_language_setting",
+  {
+    storeId: uuid("store_id")
+      .primaryKey()
+      .references(() => store.id, { onDelete: "restrict" }),
+    locale: char("locale", { length: 2 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    check(
+      "store_language_setting_locale_check",
+      sql`${table.locale} IN ('ar', 'en')`,
+    ),
+  ],
+);
+
+/**
+ * `buyer_language_preference` — one explicit buyer choice per store.
+ *
+ * The trusted identity is the pair `(store_id, telegram_user_id)`. It is a
+ * separate table because `customer.telegram_id` is global while a buyer may
+ * talk to more than one store bot: using another store's bot must not carry
+ * this preference across.
+ *
+ * A row is written only when the buyer explicitly selects a language. The
+ * absence of a row means "use the merchant default", not "English".
+ */
+export const buyerLanguagePreference = pgTable(
+  "buyer_language_preference",
+  {
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "restrict" }),
+    telegramUserId: bigint("telegram_user_id", { mode: "number" }).notNull(),
+    locale: char("locale", { length: 2 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "buyer_language_preference_pk",
+      columns: [table.storeId, table.telegramUserId],
+    }),
+    check(
+      "buyer_language_preference_telegram_user_positive_check",
+      sql`${table.telegramUserId} > 0`,
+    ),
+    check(
+      "buyer_language_preference_locale_check",
+      sql`${table.locale} IN ('ar', 'en')`,
     ),
   ],
 );

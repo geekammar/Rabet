@@ -113,6 +113,13 @@
       "when": 1795610475439,
       "tag": "0015_cod_shipping_delivery_collection",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1795633679616,
+      "tag": "0016_buyer_language_support",
+      "breakpoints": true
     }
   ]
 }

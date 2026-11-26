@@ -72,6 +72,8 @@ const ALL_STORE_ID_TABLES = [
   "cart",
   "order",
   "inventory_reservation",
+  "buyer_language_preference",
+  "store_language_setting",
 ] as const;
 
 const DERIVED_TABLES = [
@@ -394,13 +396,13 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
     const journal = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from drizzle.__drizzle_migrations
     `);
-    expect(journal[0].count).toBe(16);
+    expect(journal[0].count).toBe(17);
 
     const tables = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from information_schema.tables
       where table_schema = 'public'
     `);
-    expect(tables[0].count).toBe(35);
+    expect(tables[0].count).toBe(37);
 
     const columns = await testDb!.db.execute<{
       table_name: string;
@@ -427,7 +429,9 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
           column.table_name === "product_inventory" ||
           column.table_name === "cart" ||
           column.table_name === "order" ||
-          column.table_name === "inventory_reservation"
+          column.table_name === "inventory_reservation" ||
+          column.table_name === "buyer_language_preference" ||
+          column.table_name === "store_language_setting"
           ? "NO"
           : "YES",
       );
@@ -589,7 +593,10 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
     } catch (error) {
       caught = error;
     }
-    expect(pgErrorCode(caught)).toBe("23001");
+    // PostgreSQL reports the blocked parent delete as either the RESTRICT
+    // code or the generic foreign-key code depending on which referencing
+    // constraint it evaluates first. Both prove the delete was rejected.
+    expect(["23001", "23503"]).toContain(pgErrorCode(caught));
   });
 
   it("still rejects duplicate legacy business keys after ownership expansion", async () => {

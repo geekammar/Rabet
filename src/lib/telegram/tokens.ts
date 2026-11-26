@@ -11,6 +11,16 @@ export const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const LANG_CODE_REGEX = /^[a-z]{2}$/;
 export const PAGE_REGEX = /^[1-9][0-9]{0,4}$/;
+const LANGUAGE_CONTEXT_PATTERN =
+  /^(?:h|p:[1-9][0-9]{0,4}|cs|c:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::[1-9][0-9]{0,4})?|pd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+function assertLanguageContext(context: string | undefined): string | null {
+  if (context === undefined) return null;
+  if (!LANGUAGE_CONTEXT_PATTERN.test(context)) {
+    throw new Error(`Invalid language context: "${context}"`);
+  }
+  return context;
+}
 
 export function assertValidCallbackData(data: string): string {
   const byteLen = Buffer.byteLength(data, "utf8");
@@ -24,6 +34,7 @@ export function assertValidCallbackData(data: string): string {
 
 export const tokens = {
   home: (): string => assertValidCallbackData("home"),
+  homeNew: (): string => assertValidCallbackData("home:new"),
   rootCategory: (page?: number): string => {
     if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
       throw new Error(`Invalid page number: ${page}`);
@@ -102,7 +113,10 @@ export const tokens = {
     }
     return assertValidCallbackData(page && page > 1 ? `prods:${page}` : "prods");
   },
-  languages: (): string => assertValidCallbackData("langs"),
+  languages: (context?: string): string => {
+    const parsed = assertLanguageContext(context);
+    return assertValidCallbackData(parsed ? `langs:${parsed}` : "langs");
+  },
   support: (): string => assertValidCallbackData("support"),
   myInquiries: (page?: number): string => {
     if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
@@ -110,11 +124,14 @@ export const tokens = {
     }
     return assertValidCallbackData(page && page > 1 ? `myinq:${page}` : "myinq");
   },
-  lang: (code: string): string => {
+  lang: (code: string, context?: string): string => {
     if (!LANG_CODE_REGEX.test(code)) {
       throw new Error(`Invalid language code format: "${code}"`);
     }
-    return assertValidCallbackData(`lang:${code}`);
+    const parsed = assertLanguageContext(context);
+    return assertValidCallbackData(
+      parsed ? `lang:${code}:${parsed}` : `lang:${code}`,
+    );
   },
   category: (categoryId: string, page?: number): string => {
     if (categoryId !== "root" && !UUID_REGEX.test(categoryId)) {
@@ -178,6 +195,7 @@ export const tokens = {
 
 export type ParsedToken =
   | { type: "home" }
+  | { type: "homeNew" }
   | { type: "root"; page: number }
   | { type: "storefrontCategories"; page: number }
   | { type: "storefrontCategory"; categoryId: string; page: number }
@@ -190,10 +208,10 @@ export type ParsedToken =
   | { type: "confirmCod"; cartId: string; quoteVersion: number }
   | { type: "backToCart"; cartId: string }
   | { type: "products"; page: number }
-  | { type: "languages" }
+  | { type: "languages"; context: string | null }
   | { type: "support" }
   | { type: "myInquiries"; page: number }
-  | { type: "lang"; code: string }
+  | { type: "lang"; code: string; context: string | null }
   | { type: "category"; categoryId: string; page: number }
   | { type: "product"; productId: string }
   | { type: "productInquiry"; productId: string }
@@ -216,6 +234,10 @@ export function parseToken(data?: string): ParsedToken {
 
   if (data === "home") {
     return { type: "home" };
+  }
+
+  if (data === "home:new") {
+    return { type: "homeNew" };
   }
 
   if (data === "cart") {
@@ -290,7 +312,14 @@ export function parseToken(data?: string): ParsedToken {
   }
 
   if (data === "langs") {
-    return { type: "languages" };
+    return { type: "languages", context: null };
+  }
+
+  if (data.startsWith("langs:")) {
+    const context = data.slice(6);
+    return LANGUAGE_CONTEXT_PATTERN.test(context)
+      ? { type: "languages", context }
+      : { type: "unknown", raw: data };
   }
 
   if (data === "support") {
@@ -368,11 +397,21 @@ export function parseToken(data?: string): ParsedToken {
   }
 
   if (data.startsWith("lang:")) {
-    const code = data.slice(5);
+    const parts = data.slice(5).split(":");
+    const code = parts[0];
+
     if (!LANG_CODE_REGEX.test(code)) {
       return { type: "unknown", raw: data };
     }
-    return { type: "lang", code };
+
+    if (parts.length === 1) {
+      return { type: "lang", code, context: null };
+    }
+
+    const context = parts.slice(1).join(":");
+    return LANGUAGE_CONTEXT_PATTERN.test(context)
+      ? { type: "lang", code, context }
+      : { type: "unknown", raw: data };
   }
 
   if (data.startsWith("c:")) {

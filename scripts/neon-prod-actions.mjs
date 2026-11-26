@@ -83,6 +83,7 @@ import {
   CRITICAL_CONSTRAINTS_V10,
   CRITICAL_CONSTRAINTS_V12,
   CRITICAL_CONSTRAINTS_V13,
+  CRITICAL_CONSTRAINTS_V14,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
@@ -1406,6 +1407,28 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 16 &&
+        inspected.state.pending[0] === "0016_buyer_language_support"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V11,
+          expectedIndexes: EXPECTED_INDEXES,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V14,
+          expectedHashes: ctx.committedHashes.slice(0, 16).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 16 migrations recorded, " +
+              "but live schema does not match the supported prior release (0015_cod_shipping_delivery_collection).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 15 &&
         inspected.state.pending[0] === "0015_cod_shipping_delivery_collection"
       ) {
@@ -1744,6 +1767,9 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV15 =
+        inspected.state.appliedCount === 16 &&
+        inspected.state.pending[0] === "0016_buyer_language_support";
       const isKnownPriorReleaseV14 =
         inspected.state.appliedCount === 15 &&
         inspected.state.pending[0] === "0015_cod_shipping_delivery_collection";
@@ -1787,7 +1813,33 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV14) {
+      if (isKnownPriorReleaseV15) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V11,
+          expectedIndexes: EXPECTED_INDEXES,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V14,
+          expectedHashes: ctx.committedHashes.slice(0, 16).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0015_cod_shipping_delivery_collection). " +
+              "Proceeding with migration to 0016_buyer_language_support.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV14) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V11,
