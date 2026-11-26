@@ -59,9 +59,14 @@ const orders = [
 function renderAttention(
   locale: "ar" | "en",
   items: typeof orders,
+  totalPending = items.length,
 ) {
   return renderToStaticMarkup(
-    createElement(MerchantNeedsAttention, { locale, orders: items }),
+    createElement(MerchantNeedsAttention, {
+      locale,
+      orders: items,
+      totalPending,
+    }),
   );
 }
 
@@ -78,10 +83,10 @@ describe("Merchant Needs Attention section", () => {
     expect(html).toContain("37.00 SAR");
     expect(html).toContain("122.50 SAR");
     expect(html).toContain(
-      `href="/app/orders#merchant-order-${orders[0].id}"`,
+      `href="/app/orders?order=${orders[0].id}#merchant-order-${orders[0].id}"`,
     );
     expect(html).toContain(
-      `href="/app/orders#merchant-order-${orders[1].id}"`,
+      `href="/app/orders?order=${orders[1].id}#merchant-order-${orders[1].id}"`,
     );
     expect(html).toContain('href="/app/orders"');
     expect(html).toContain("View all orders");
@@ -97,8 +102,26 @@ describe("Merchant Needs Attention section", () => {
     expect(html).toContain("ORD-ABC234");
     expect(html).toContain("عرض كل الطلبات");
     expect(html).toContain(
-      `href="/app/orders#merchant-order-${orders[0].id}"`,
+      `href="/app/orders?order=${orders[0].id}#merchant-order-${orders[0].id}"`,
     );
+  });
+
+  it("shows the full pending count separately from a bounded preview", () => {
+    const html = renderAttention("en", orders, 28);
+
+    expect(html).toContain('data-pending-count="28"');
+    expect(html).toContain('data-preview-count="2"');
+    expect(html).toContain("28 awaiting acceptance");
+    expect(html).toContain('data-testid="merchant-needs-attention-preview-note"');
+    expect(html).toContain("Showing the first 2 of 28.");
+    expect(html).toContain("ORD-ABC234");
+  });
+
+  it("localizes the bounded preview note in Arabic", () => {
+    const html = renderAttention("ar", orders, 28);
+
+    expect(html).toContain("بانتظار القبول: 28");
+    expect(html).toContain("يتم عرض أول 2 من 28.");
   });
 
   it("shows an honest empty state while keeping the orders route", () => {
@@ -128,6 +151,7 @@ describe("Merchant setup entry point", () => {
         telegramLaunchOrigin: null,
         codOrdersEnabled: true,
         needsAttentionOrders: orders,
+        needsAttentionTotal: orders.length,
         storeDefaultLanguageCode: "en",
         telegramSupportUsername: null,
         ...overrides,
@@ -156,7 +180,10 @@ describe("Merchant setup entry point", () => {
   });
 
   it("shows the empty state when COD is enabled with no pending orders", () => {
-    const html = renderSetup({ needsAttentionOrders: [] });
+    const html = renderSetup({
+      needsAttentionOrders: [],
+      needsAttentionTotal: 0,
+    });
 
     expect(html).toContain('data-pending-count="0"');
     expect(html).toContain("No orders are waiting for acceptance.");
@@ -166,6 +193,7 @@ describe("Merchant setup entry point", () => {
     const html = renderSetup({
       codOrdersEnabled: false,
       needsAttentionOrders: [],
+      needsAttentionTotal: 0,
     });
 
     expect(html).not.toContain('data-testid="merchant-needs-attention"');

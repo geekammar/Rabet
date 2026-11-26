@@ -9,6 +9,7 @@ type Copy = {
   title: string;
   body: string;
   waiting: (count: number) => string;
+  showingFirst: (shown: number, total: number) => string;
   emptyTitle: string;
   emptyBody: string;
   review: string;
@@ -23,6 +24,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     title: "يحتاج تدخلك",
     body: "طلبات الدفع عند الاستلام التي لم تُقبل بعد تظهر هنا حتى تراجعها.",
     waiting: (count) => `بانتظار القبول: ${count}`,
+    showingFirst: (shown, total) => `يتم عرض أول ${shown} من ${total}.`,
     emptyTitle: "لا توجد طلبات بانتظار القبول.",
     emptyBody: "كل طلبات الدفع عند الاستلام تمت مراجعتها.",
     review: "مراجعة الطلب",
@@ -35,6 +37,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     title: "Needs Attention",
     body: "Cash-on-delivery orders that have not been accepted yet appear here for review.",
     waiting: (count) => `${count} awaiting acceptance`,
+    showingFirst: (shown, total) => `Showing the first ${shown} of ${total}.`,
     emptyTitle: "No orders are waiting for acceptance.",
     emptyBody: "All cash-on-delivery orders have been reviewed.",
     review: "Review order",
@@ -54,11 +57,14 @@ export type MerchantNeedsAttentionOrder = {
 export function MerchantNeedsAttention({
   locale,
   orders,
+  totalPending,
 }: {
   locale: MerchantLocale;
   orders: MerchantNeedsAttentionOrder[];
+  totalPending: number;
 }) {
   const copy = COPY[locale];
+  const hasMore = orders.length < totalPending;
 
   return (
     <section
@@ -67,7 +73,8 @@ export function MerchantNeedsAttention({
       aria-labelledby="merchant-needs-attention-title"
       className="space-y-4 rounded-xl border border-amber-300 bg-amber-50/60 p-5 shadow-sm dark:border-amber-900/50 dark:bg-amber-950/20"
       data-testid="merchant-needs-attention"
-      data-pending-count={orders.length}
+      data-pending-count={totalPending}
+      data-preview-count={orders.length}
     >
       <div className="flex items-start gap-3">
         <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-700 dark:text-amber-300">
@@ -85,10 +92,18 @@ export function MerchantNeedsAttention({
               className="inline-flex min-h-7 items-center rounded-full border border-amber-300 bg-background px-2.5 text-xs font-medium text-amber-800 dark:border-amber-900/60 dark:text-amber-200"
               data-testid="merchant-needs-attention-count"
             >
-              {copy.waiting(orders.length)}
+              {copy.waiting(totalPending)}
             </span>
           </div>
           <p className="text-sm text-muted-foreground">{copy.body}</p>
+          {hasMore ? (
+            <p
+              className="text-xs font-medium text-amber-800 dark:text-amber-200"
+              data-testid="merchant-needs-attention-preview-note"
+            >
+              {copy.showingFirst(orders.length, totalPending)}
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -114,7 +129,7 @@ export function MerchantNeedsAttention({
           {orders.map((order) => (
             <li key={order.id} data-testid="merchant-needs-attention-order">
               <Link
-                href={`/app/orders#merchant-order-${order.id}`}
+                href={`/app/orders?order=${order.id}#merchant-order-${order.id}`}
                 className="flex min-h-11 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2.5 outline-none transition-colors hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50"
                 data-testid="merchant-needs-attention-link"
                 data-order-id={order.id}

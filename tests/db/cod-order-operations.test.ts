@@ -17,11 +17,13 @@ import {
   acceptMerchantOrder,
   cancelMerchantOrder,
   collectMerchantOrderPayment,
+  countMerchantOrdersAwaitingAcceptance,
   handMerchantOrderToShipping,
   listMerchantOrders,
   listMerchantOrdersAwaitingAcceptance,
   markMerchantOrderDelivered,
   prepareMerchantOrder,
+  readMerchantOrderById,
 } from "@/lib/commerce/orders";
 import {
   CANCELLATION_REASON_MAX_LENGTH,
@@ -212,6 +214,22 @@ async function scope(storeId: string) {
 
 function money(cents: number): string {
   return `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+}
+
+const TEST_REFERENCE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+function testOrderReference(prefix: string, index: number): string {
+  let remaining = index;
+  let suffix = "";
+
+  for (let position = 0; position < 4; position += 1) {
+    suffix =
+      TEST_REFERENCE_ALPHABET[remaining % TEST_REFERENCE_ALPHABET.length] +
+      suffix;
+    remaining = Math.floor(remaining / TEST_REFERENCE_ALPHABET.length);
+  }
+
+  return `ORD-${prefix}${suffix}`;
 }
 
 type SeedItem = {
@@ -520,6 +538,121 @@ describe.skipIf(!shouldRun)("merchant COD order operations", () => {
         (order) => order.id,
       ),
     ).toEqual([foreign]);
+  });
+
+  it("counts all pending orders, bounds the preview, and reads an older selected order only inside the store scope", async () => {
+    const scopeA = await scope(fixture.storeAId);
+    const scopeB = await scope(fixture.storeBId);
+    const now = Date.now();
+    const acceptedPlacedAt = new Date(now - 60_000);
+    const acceptedAt = new Date(now - 30_000);
+
+    await db()
+      .insert(order)
+      .values(
+        Array.from({ length: 101 }, (_, index) => ({
+          storeId: fixture.storeAId,
+          connectionId: fixture.connectionAId,
+          telegramUserId: 95_000 + index,
+          telegramChatId: 95_000 + index,
+          reference: testOrderReference("ZZ", index),
+          checkoutKey: crypto.randomUUID(),
+          status: "accepted",
+          paymentMethod: "cod",
+          paymentStatus: "awaiting_collection",
+          fulfillmentStatus: "unfulfilled",
+          currency: "SAR",
+          subtotal: "11.00",
+          deliveryFee: "0.00",
+          total: "11.00",
+          customerName: "Accepted Buyer",
+          customerPhone: "+15550000000",
+          deliveryAddress: "123 Accepted Street",
+          placedAt: acceptedPlacedAt,
+          acceptedAt,
+        })),
+      );
+
+    const pendingBase = now - 10 * 24 * 60 * 60 * 1000;
+    const pendingOrders = await db()
+      .insert(order)
+      .values(
+        Array.from({ length: 28 }, (_, index) => {
+          const placedAt = new Date(pendingBase + index * 60_000);
+
+          return {
+            storeId: fixture.storeAId,
+            connectionId: fixture.connectionAId,
+            telegramUserId: 96_000 + index,
+            telegramChatId: 96_000 + index,
+            reference: testOrderReference("PN", index),
+            checkoutKey: crypto.randomUUID(),
+            status: "placed",
+            paymentMethod: "cod",
+            paymentStatus: "awaiting_collection",
+            fulfillmentStatus: "unfulfilled",
+            currency: "SAR",
+            subtotal: "11.00",
+            deliveryFee: "15.00",
+            total: "26.00",
+            customerName: "Pending Buyer",
+            customerPhone: "+15550000001",
+            deliveryAddress: "456 Pending Street",
+            placedAt,
+            createdAt: placedAt,
+            updatedAt: placedAt,
+          };
+        }),
+      )
+      .returning({ id: order.id, reference: order.reference });
+
+    const selected = pendingOrders[pendingOrders.length - 1];
+
+    expect(
+      await countMerchantOrdersAwaitingAcceptance(asAppDb(db()), scopeA),
+    ).toBe(28);
+    expect(
+      await countMerchantOrdersAwaitingAcceptance(asAppDb(db()), scopeB),
+    ).toBe(0);
+
+    const preview = await listMerchantOrdersAwaitingAcceptance(
+      asAppDb(db()),
+      scopeA,
+    );
+    expect(preview).toHaveLength(20);
+    expect(preview[0]).toMatchObject({
+      id: selected.id,
+      reference: selected.reference,
+    });
+
+    const latest = await listMerchantOrders(asAppDb(db()), scopeA);
+    expect(latest).toHaveLength(100);
+    expect(latest.some((merchantOrder) => merchantOrder.id === selected.id)).toBe(
+      false,
+    );
+
+    await expect(
+      readMerchantOrderById(asAppDb(db()), scopeA, selected.id),
+    ).resolves.toMatchObject({
+      id: selected.id,
+      reference: selected.reference,
+      status: "placed",
+      items: [],
+      reservationStatuses: [],
+    });
+    await expect(
+      readMerchantOrderById(asAppDb(db()), scopeB, selected.id),
+    ).resolves.toBeNull();
+    await expect(
+      readMerchantOrderById(
+        asAppDb(db()),
+        scopeA,
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      readMerchantOrderById(asAppDb(db()), scopeA, "not-a-valid-id"),
+    ).resolves.toBeNull();
   });
 
   it("refuses preparation before acceptance and any action after cancellation", async () => {

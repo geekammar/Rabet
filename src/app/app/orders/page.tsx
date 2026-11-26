@@ -9,6 +9,7 @@ import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
 import {
   listMerchantOrders,
+  readMerchantOrderById,
   type MerchantOrder,
 } from "@/lib/commerce/orders";
 import type { MerchantLocale } from "@/lib/merchant/locale";
@@ -399,16 +400,41 @@ function OrderCard({
   );
 }
 
-export default async function MerchantOrdersPage() {
+const ORDER_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function readSelectedOrderId(
+  value: string | string[] | undefined,
+): string | null {
+  const candidate = Array.isArray(value) ? value[0] : value;
+
+  return typeof candidate === "string" && ORDER_ID_PATTERN.test(candidate)
+    ? candidate
+    : null;
+}
+
+export default async function MerchantOrdersPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ order?: string | string[] }>;
+}) {
   await connection();
 
   if (!isMerchantAppEnabled()) notFound();
 
   const access = await requireMerchantAccess();
-  const [orders, locale] = await Promise.all([
-    listMerchantOrders(getDb(), access.scope),
+  const [params, locale] = await Promise.all([
+    searchParams,
     readMerchantLocale(),
   ]);
+  const db = getDb();
+  const orders = await listMerchantOrders(db, access.scope);
+  const selectedOrderId = readSelectedOrderId(params.order);
+  const selectedOrder =
+    selectedOrderId && !orders.some((order) => order.id === selectedOrderId)
+      ? await readMerchantOrderById(db, access.scope, selectedOrderId)
+      : null;
+  const visibleOrders = selectedOrder ? [...orders, selectedOrder] : orders;
   const copy = COPY[locale];
   const dateFormat = new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
@@ -451,13 +477,13 @@ export default async function MerchantOrdersPage() {
         </div>
       ) : null}
 
-      {orders.length === 0 ? (
+      {visibleOrders.length === 0 ? (
         <section className="rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">
           {copy.empty}
         </section>
       ) : (
         <div className="space-y-4">
-          {orders.map((order) => (
+          {visibleOrders.map((order) => (
             <OrderCard
               key={order.id}
               order={order}

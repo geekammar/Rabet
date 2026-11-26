@@ -9,6 +9,7 @@ import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
 import {
+  countMerchantOrdersAwaitingAcceptance,
   isCodAvailable,
   listMerchantOrdersAwaitingAcceptance,
 } from "@/lib/commerce/orders";
@@ -46,6 +47,7 @@ export default async function MerchantSetupPage() {
     storeDefaultLanguage,
     telegramSupportUsername,
     needsAttentionOrders,
+    needsAttentionTotal,
   ] = await Promise.all([
     readMerchantTelegramConnectionState(db, {
       scope: access.scope,
@@ -55,6 +57,7 @@ export default async function MerchantSetupPage() {
     readStoreDefaultLanguage(db, access.store.id),
     readStoreTelegramSupportUsername(db, access.store.id),
     listMerchantOrdersAwaitingAcceptance(db, access.scope),
+    countMerchantOrdersAwaitingAcceptance(db, access.scope),
   ]);
 
   return (
@@ -69,6 +72,7 @@ export default async function MerchantSetupPage() {
       telegramLaunchOrigin={telegramLaunchOrigin}
       codOrdersEnabled={codAvailability.enabled}
       needsAttentionOrders={needsAttentionOrders}
+      needsAttentionTotal={needsAttentionTotal}
       storeDefaultLanguageCode={storeDefaultLanguage?.code === "ar" ? "ar" : "en"}
       telegramSupportUsername={telegramSupportUsername}
     />

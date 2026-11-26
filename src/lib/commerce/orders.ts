@@ -2214,6 +2214,29 @@ export type MerchantOrderAttention = {
   placedAt: Date;
 };
 
+function awaitingAcceptanceCondition(scope: StoreScope) {
+  return and(
+    eq(orderTable.storeId, scope.storeId),
+    eq(orderTable.paymentMethod, "cod"),
+    eq(orderTable.status, "placed"),
+    eq(orderTable.fulfillmentStatus, "unfulfilled"),
+  );
+}
+
+export async function countMerchantOrdersAwaitingAcceptance(
+  db: Database,
+  scope: StoreScope,
+): Promise<number> {
+  assertStoreScope(scope);
+
+  const [row] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(orderTable)
+    .where(awaitingAcceptanceCondition(scope));
+
+  return row?.total ?? 0;
+}
+
 export async function listMerchantOrdersAwaitingAcceptance(
   db: Database,
   scope: StoreScope,
@@ -2230,14 +2253,7 @@ export async function listMerchantOrdersAwaitingAcceptance(
       placedAt: orderTable.placedAt,
     })
     .from(orderTable)
-    .where(
-      and(
-        eq(orderTable.storeId, scope.storeId),
-        eq(orderTable.paymentMethod, "cod"),
-        eq(orderTable.status, "placed"),
-        eq(orderTable.fulfillmentStatus, "unfulfilled"),
-      ),
-    )
+    .where(awaitingAcceptanceCondition(scope))
     .orderBy(
       desc(orderTable.placedAt),
       desc(orderTable.createdAt),
@@ -2246,24 +2262,10 @@ export async function listMerchantOrdersAwaitingAcceptance(
     .limit(Math.min(Math.max(1, limit), 50));
 }
 
-export async function listMerchantOrders(
+async function loadMerchantOrderViews(
   db: Database,
-  scope: StoreScope,
-  limit = 100,
+  orders: MerchantOrderRow[],
 ): Promise<MerchantOrder[]> {
-  assertStoreScope(scope);
-
-  const orders = await db
-    .select()
-    .from(orderTable)
-    .where(eq(orderTable.storeId, scope.storeId))
-    .orderBy(
-      desc(orderTable.placedAt),
-      desc(orderTable.createdAt),
-      desc(orderTable.id),
-    )
-    .limit(Math.min(Math.max(1, limit), 200));
-
   if (orders.length === 0) return [];
 
   const orderIds = orders.map((row) => row.id);
@@ -2329,4 +2331,51 @@ export async function listMerchantOrders(
     items: itemsByOrder.get(row.id) ?? [],
     reservationStatuses: reservationsByOrder.get(row.id) ?? [],
   }));
+}
+
+export async function listMerchantOrders(
+  db: Database,
+  scope: StoreScope,
+  limit = 100,
+): Promise<MerchantOrder[]> {
+  assertStoreScope(scope);
+
+  const orders = await db
+    .select()
+    .from(orderTable)
+    .where(eq(orderTable.storeId, scope.storeId))
+    .orderBy(
+      desc(orderTable.placedAt),
+      desc(orderTable.createdAt),
+      desc(orderTable.id),
+    )
+    .limit(Math.min(Math.max(1, limit), 200));
+
+  return loadMerchantOrderViews(db, orders);
+}
+
+export async function readMerchantOrderById(
+  db: Database,
+  scope: StoreScope,
+  orderId: string,
+): Promise<MerchantOrder | null> {
+  assertStoreScope(scope);
+
+  if (!ORDER_ID_PATTERN.test(orderId)) return null;
+
+  const orders = await db
+    .select()
+    .from(orderTable)
+    .where(
+      and(
+        eq(orderTable.id, orderId),
+        eq(orderTable.storeId, scope.storeId),
+      ),
+    )
+    .limit(1);
+
+  if (orders.length === 0) return null;
+
+  const [order] = await loadMerchantOrderViews(db, orders);
+  return order ?? null;
 }

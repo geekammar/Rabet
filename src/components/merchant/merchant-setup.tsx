@@ -191,6 +191,7 @@ export function MerchantSetup({
   telegramLaunchOrigin,
   codOrdersEnabled,
   needsAttentionOrders,
+  needsAttentionTotal,
   storeDefaultLanguageCode,
   telegramSupportUsername,
 }: {
@@ -204,6 +205,7 @@ export function MerchantSetup({
   telegramLaunchOrigin: string | null;
   codOrdersEnabled: boolean;
   needsAttentionOrders: MerchantNeedsAttentionOrder[];
+  needsAttentionTotal: number;
   storeDefaultLanguageCode: "ar" | "en";
   telegramSupportUsername: string | null;
 }) {
@@ -344,10 +346,11 @@ export function MerchantSetup({
           </dl>
         </section>
 
-        {codOrdersEnabled || needsAttentionOrders.length > 0 ? (
+        {codOrdersEnabled || needsAttentionTotal > 0 ? (
           <MerchantNeedsAttention
             locale={locale}
             orders={needsAttentionOrders}
+            totalPending={needsAttentionTotal}
           />
         ) : null}
 
