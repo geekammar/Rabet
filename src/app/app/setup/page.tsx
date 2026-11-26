@@ -8,7 +8,10 @@ import { isAndroidUserAgent } from "@/components/merchant/telegram-official-laun
 import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
-import { isCodAvailable } from "@/lib/commerce/orders";
+import {
+  isCodAvailable,
+  listMerchantOrdersAwaitingAcceptance,
+} from "@/lib/commerce/orders";
 import { readStoreDefaultLanguage } from "@/lib/data/store-language";
 import { trustedApplicationOrigin } from "@/lib/http/request-origin";
 import {
@@ -36,15 +39,20 @@ export default async function MerchantSetupPage() {
     requestHeaders.get("user-agent"),
   );
   const db = getDb();
-  const [telegramConnection, codAvailability, storeDefaultLanguage] =
-    await Promise.all([
-      readMerchantTelegramConnectionState(db, {
-        scope: access.scope,
-        merchantUserId: access.userId,
-      }),
-      isCodAvailable(db, access.scope),
-      readStoreDefaultLanguage(db, access.store.id),
-    ]);
+  const [
+    telegramConnection,
+    codAvailability,
+    storeDefaultLanguage,
+    needsAttentionOrders,
+  ] = await Promise.all([
+    readMerchantTelegramConnectionState(db, {
+      scope: access.scope,
+      merchantUserId: access.userId,
+    }),
+    isCodAvailable(db, access.scope),
+    readStoreDefaultLanguage(db, access.store.id),
+    listMerchantOrdersAwaitingAcceptance(db, access.scope),
+  ]);
 
   return (
     <MerchantSetup
@@ -57,6 +65,7 @@ export default async function MerchantSetupPage() {
       isAndroidTelegramLaunch={isAndroidTelegramLaunch}
       telegramLaunchOrigin={telegramLaunchOrigin}
       codOrdersEnabled={codAvailability.enabled}
+      needsAttentionOrders={needsAttentionOrders}
       storeDefaultLanguageCode={storeDefaultLanguage?.code === "ar" ? "ar" : "en"}
     />
   );

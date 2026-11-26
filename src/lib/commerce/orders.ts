@@ -2206,6 +2206,46 @@ export async function cancelMerchantOrder(
   });
 }
 
+export type MerchantOrderAttention = {
+  id: string;
+  reference: string;
+  total: string;
+  currency: string;
+  placedAt: Date;
+};
+
+export async function listMerchantOrdersAwaitingAcceptance(
+  db: Database,
+  scope: StoreScope,
+  limit = 20,
+): Promise<MerchantOrderAttention[]> {
+  assertStoreScope(scope);
+
+  return db
+    .select({
+      id: orderTable.id,
+      reference: orderTable.reference,
+      total: orderTable.total,
+      currency: orderTable.currency,
+      placedAt: orderTable.placedAt,
+    })
+    .from(orderTable)
+    .where(
+      and(
+        eq(orderTable.storeId, scope.storeId),
+        eq(orderTable.paymentMethod, "cod"),
+        eq(orderTable.status, "placed"),
+        eq(orderTable.fulfillmentStatus, "unfulfilled"),
+      ),
+    )
+    .orderBy(
+      desc(orderTable.placedAt),
+      desc(orderTable.createdAt),
+      desc(orderTable.id),
+    )
+    .limit(Math.min(Math.max(1, limit), 50));
+}
+
 export async function listMerchantOrders(
   db: Database,
   scope: StoreScope,

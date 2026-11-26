@@ -19,6 +19,7 @@ import {
   collectMerchantOrderPayment,
   handMerchantOrderToShipping,
   listMerchantOrders,
+  listMerchantOrdersAwaitingAcceptance,
   markMerchantOrderDelivered,
   prepareMerchantOrder,
 } from "@/lib/commerce/orders";
@@ -424,6 +425,101 @@ describe.skipIf(!shouldRun)("merchant COD order operations", () => {
       "reserved",
       "reserved",
     ]);
+  });
+
+  it("lists only COD orders still waiting for acceptance inside the store scope", async () => {
+    await db()
+      .update(productInventory)
+      .set({ onHand: 20, reserved: 0 })
+      .where(eq(productInventory.productId, fixture.productA1Id));
+
+    const waitingOne = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABS234",
+      items: standardItems(),
+    });
+    const waitingTwo = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABT345",
+      items: standardItems(),
+    });
+    const accepted = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABV456",
+      items: standardItems(),
+    });
+    const cancelled = await seedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      reference: "ORD-ABW567",
+      items: standardItems(),
+    });
+    const foreign = await seedOrder({
+      storeId: fixture.storeBId,
+      connectionId: fixture.connectionBId,
+      reference: "ORD-ABX678",
+      items: [
+        {
+          productId: fixture.productB1Id,
+          productName: "Ops B One",
+          unitPriceCents: 3000,
+          quantity: 1,
+        },
+      ],
+    });
+
+    const scopeA = await scope(fixture.storeAId);
+    const scopeB = await scope(fixture.storeBId);
+
+    await acceptMerchantOrder(tx(), scopeA, accepted);
+    await cancelMerchantOrder(tx(), scopeA, {
+      orderId: cancelled,
+      reason: "Customer changed their mind",
+    });
+
+    const initial = await listMerchantOrdersAwaitingAcceptance(
+      asAppDb(db()),
+      scopeA,
+    );
+    expect(initial.map((order) => order.id).sort()).toEqual(
+      [waitingOne, waitingTwo].sort(),
+    );
+    expect(initial.find((order) => order.id === waitingOne)).toMatchObject({
+      reference: "ORD-ABS234",
+      total: "57.00",
+      currency: "SAR",
+    });
+    expect(initial[0].placedAt).toBeInstanceOf(Date);
+
+    expect(
+      (await listMerchantOrdersAwaitingAcceptance(asAppDb(db()), scopeB)).map(
+        (order) => order.id,
+      ),
+    ).toEqual([foreign]);
+
+    await acceptMerchantOrder(tx(), scopeA, waitingOne);
+    expect(
+      (await listMerchantOrdersAwaitingAcceptance(asAppDb(db()), scopeA)).map(
+        (order) => order.id,
+      ),
+    ).toEqual([waitingTwo]);
+
+    await cancelMerchantOrder(tx(), scopeA, {
+      orderId: waitingTwo,
+      reason: "Buyer requested cancellation",
+    });
+    expect(
+      await listMerchantOrdersAwaitingAcceptance(asAppDb(db()), scopeA),
+    ).toEqual([]);
+
+    expect(
+      (await listMerchantOrdersAwaitingAcceptance(asAppDb(db()), scopeB)).map(
+        (order) => order.id,
+      ),
+    ).toEqual([foreign]);
   });
 
   it("refuses preparation before acceptance and any action after cancellation", async () => {
