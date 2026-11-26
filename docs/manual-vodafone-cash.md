@@ -28,13 +28,17 @@ own independent switch and continues to work unchanged.
    instructions used at that moment, creates the stock reservation, and shows
    the **exact total** plus those snapshotted instructions. Later merchant
    setting changes and retries never rewrite what the buyer was told.
-3. The buyer taps "I have transferred — submit reference". Nokmel sends a
-   ForceReply prompt for that exact order; the prompt message id is bound to
-   the order under the verified store, connection, buyer and chat context.
+3. The buyer taps "I have transferred — submit reference". Each prompt request
+   receives a fresh token; only the current token may bind its Telegram
+   message id under the verified store, connection, buyer and chat context, so
+   a delayed older send cannot replace a newer prompt.
 4. The buyer replies to that prompt with the reference from the receipt.
-   Ordinary messages, replies without a bound prompt, another buyer's prompt
-   and a newer prompt for a different order cannot be assigned to the wrong
-   order. Repeated replies remain idempotent.
+   The claim transaction locks the order and re-checks that the replied message
+   is still the current prompt for that store, connection, buyer, chat and
+   order before writing. Ordinary messages, replies without a bound prompt,
+   another buyer's prompt, a superseded prompt and a newer prompt for a
+   different order cannot be assigned to the wrong order. Repeated replies
+   after submission remain idempotent.
 5. Submitting the claim moves the order to `transfer_awaiting_review` and shows
    "Awaiting merchant verification". The claim never changes payment to paid.
 

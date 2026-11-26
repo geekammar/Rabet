@@ -1464,7 +1464,9 @@ async function dispatchMessage(
             {
               connectionId,
               telegramUserId: buyerId,
+              telegramChatId: message.chat.id,
               orderId: state.orderId,
+              promptMessageId,
               reference: text,
             },
           );
@@ -1473,27 +1475,40 @@ async function dispatchMessage(
             claim.status === "invalid_reference" ||
             claim.status === "reference_conflict"
           ) {
-            const newPromptMessageId = await sendTransferReferencePrompt(
-              transport,
-              message.chat.id,
-              state,
-              copy,
-              copy.transferReferenceInvalid,
+            const replacement = await requestVodafoneCashTransferReference(
+              commerceDb,
+              scope,
+              {
+                connectionId,
+                telegramUserId: buyerId,
+                orderId: state.orderId,
+              },
             );
 
-            if (newPromptMessageId !== null) {
-              await bindVodafoneCashTransferPromptMessage(
-                commerceDb,
-                scope,
-                {
-                  connectionId,
-                  telegramUserId: buyerId,
-                  orderId: state.orderId,
-                  messageId: newPromptMessageId,
-                },
+            if (replacement.status === "prompted") {
+              const newPromptMessageId = await sendTransferReferencePrompt(
+                transport,
+                message.chat.id,
+                replacement,
+                copy,
+                copy.transferReferenceInvalid,
               );
+
+              if (newPromptMessageId !== null) {
+                await bindVodafoneCashTransferPromptMessage(
+                  commerceDb,
+                  scope,
+                  {
+                    connectionId,
+                    telegramUserId: buyerId,
+                    orderId: state.orderId,
+                    messageId: newPromptMessageId,
+                    promptToken: replacement.promptToken,
+                  },
+                );
+              }
+              return;
             }
-            return;
           }
 
           const latest = await readVodafoneCashOrderState(
@@ -2268,6 +2283,7 @@ async function dispatchCallback(
             telegramUserId: buyerId,
             orderId: result.orderId,
             messageId: promptMessageId,
+            promptToken: result.promptToken,
           });
         }
         return;

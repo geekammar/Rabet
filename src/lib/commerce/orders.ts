@@ -1941,7 +1941,10 @@ export type VodafoneTransferOrderSummary = {
 };
 
 export type RequestTransferReferenceResult =
-  | ({ status: "prompted" } & VodafoneTransferOrderSummary)
+  | ({
+      status: "prompted";
+      promptToken: string;
+    } & VodafoneTransferOrderSummary)
   | ({
       status: "already_submitted";
       claimStatus: string;
@@ -1962,6 +1965,7 @@ export type SubmitTransferClaimResult =
     } & VodafoneTransferOrderSummary)
   | { status: "invalid_reference" }
   | { status: "reference_conflict" }
+  | { status: "prompt_superseded" }
   | { status: "not_found" }
   | { status: "invalid_state"; paymentStatus: string };
 
@@ -2241,11 +2245,13 @@ export async function requestVodafoneCashTransferReference(
     }
 
     const now = new Date();
+    const promptToken = crypto.randomUUID();
     const [updated] = await tx
       .update(orderTable)
       .set({
         transferReferenceRequestedAt: now,
         transferPromptMessageId: null,
+        transferPromptToken: promptToken,
         updatedAt: now,
       })
       .where(
@@ -2259,7 +2265,11 @@ export async function requestVodafoneCashTransferReference(
 
     if (!updated) throw new Error("Transfer prompt could not be persisted");
 
-    return { status: "prompted", ...transferSummary(updated) };
+    return {
+      status: "prompted",
+      promptToken,
+      ...transferSummary(updated),
+    };
   });
 }
 
@@ -2275,6 +2285,7 @@ export async function bindVodafoneCashTransferPromptMessage(
     telegramUserId: number;
     orderId: string;
     messageId: number;
+    promptToken: string;
   },
 ): Promise<boolean> {
   assertStoreScope(scope);
@@ -2289,7 +2300,13 @@ export async function bindVodafoneCashTransferPromptMessage(
     }
 
     const row = await readBuyerVodafoneOrderForUpdate(tx, scope, input);
-    if (!row || row.paymentStatus !== "awaiting_transfer") return false;
+    if (
+      !row ||
+      row.paymentStatus !== "awaiting_transfer" ||
+      row.transferPromptToken !== input.promptToken
+    ) {
+      return false;
+    }
 
     const now = new Date();
     const [updated] = await tx
@@ -2300,6 +2317,7 @@ export async function bindVodafoneCashTransferPromptMessage(
           eq(orderTable.id, row.id),
           eq(orderTable.storeId, scope.storeId),
           eq(orderTable.paymentStatus, "awaiting_transfer"),
+          eq(orderTable.transferPromptToken, input.promptToken),
         ),
       )
       .returning({ id: orderTable.id });
@@ -2324,7 +2342,9 @@ export async function submitVodafoneCashTransferClaim(
   input: {
     connectionId: string;
     telegramUserId: number;
+    telegramChatId: number;
     orderId: string;
+    promptMessageId: number;
     reference: unknown;
   },
 ): Promise<SubmitTransferClaimResult> {
@@ -2343,7 +2363,8 @@ export async function submitVodafoneCashTransferClaim(
     if (
       !row ||
       row.status === "cancelled" ||
-      row.fulfillmentStatus === "cancelled"
+      row.fulfillmentStatus === "cancelled" ||
+      row.telegramChatId !== input.telegramChatId
     ) {
       return { status: "not_found" };
     }
@@ -2359,6 +2380,15 @@ export async function submitVodafoneCashTransferClaim(
 
     if (row.paymentStatus !== "awaiting_transfer") {
       return { status: "invalid_state", paymentStatus: row.paymentStatus };
+    }
+
+    if (
+      !Number.isSafeInteger(input.promptMessageId) ||
+      input.promptMessageId < 1 ||
+      row.transferPromptMessageId !== input.promptMessageId ||
+      row.transferPromptToken === null
+    ) {
+      return { status: "prompt_superseded" };
     }
 
     const now = new Date();
@@ -2392,6 +2422,7 @@ export async function submitVodafoneCashTransferClaim(
       .set({
         paymentStatus: "transfer_awaiting_review",
         transferReferenceRequestedAt: null,
+        transferPromptToken: null,
         updatedAt: now,
       })
       .where(

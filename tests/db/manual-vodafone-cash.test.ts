@@ -381,12 +381,63 @@ async function placeVodafoneOrder(input?: { quantity?: number; buyerId?: number 
   return { ...prepared, placed };
 }
 
-async function submitClaim(orderId: string, reference = VODAFONE_REFERENCE) {
+let promptMessageSequence = 50000;
+
+async function submitClaim(
+  orderId: string,
+  reference = VODAFONE_REFERENCE,
+  options?: {
+    buyerId?: number;
+    telegramChatId?: number;
+    promptMessageId?: number;
+  },
+) {
   const storeScope = await scope(fixture.storeAId);
+  const buyerId = options?.buyerId ?? BUYER_A;
+  const telegramChatId = options?.telegramChatId ?? buyerId;
+  let promptMessageId = options?.promptMessageId;
+
+  if (!promptMessageId) {
+    const existing = await readVodafoneCashOrderState(tx(), storeScope, {
+      connectionId: fixture.connectionAId,
+      telegramUserId: buyerId,
+      orderId,
+    });
+    promptMessageId = existing?.transferPromptMessageId ?? undefined;
+
+    if (!promptMessageId) {
+      const requested = await requestVodafoneCashTransferReference(
+        tx(),
+        storeScope,
+        {
+          connectionId: fixture.connectionAId,
+          telegramUserId: buyerId,
+          orderId,
+        },
+      );
+      if (requested.status !== "prompted") {
+        throw new Error(`Prompt failed: ${requested.status}`);
+      }
+
+      promptMessageId = ++promptMessageSequence;
+      expect(
+        await bindVodafoneCashTransferPromptMessage(tx(), storeScope, {
+          connectionId: fixture.connectionAId,
+          telegramUserId: buyerId,
+          orderId,
+          messageId: promptMessageId,
+          promptToken: requested.promptToken,
+        }),
+      ).toBe(true);
+    }
+  }
+
   return submitVodafoneCashTransferClaim(tx(), storeScope, {
     connectionId: fixture.connectionAId,
-    telegramUserId: BUYER_A,
+    telegramUserId: buyerId,
+    telegramChatId,
     orderId,
+    promptMessageId,
     reference,
   });
 }
@@ -555,6 +606,7 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
         telegramUserId: BUYER_A,
         orderId: placed.orderId,
         messageId: 9001,
+        promptToken: requested.promptToken,
       }),
     ).toBe(true);
 
@@ -682,6 +734,7 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       telegramUserId: BUYER_A,
       orderId: placed.orderId,
       messageId: 9101,
+      promptToken: requested.promptToken,
     });
 
     await submitClaim(placed.orderId, "SNAPSHOT-CLAIM-REF");
@@ -758,12 +811,14 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
         },
       );
       expect(requested.status).toBe("prompted");
+      if (requested.status !== "prompted") return;
       expect(
         await bindVodafoneCashTransferPromptMessage(tx(), storeScope, {
           connectionId: fixture.connectionAId,
           telegramUserId: BUYER_A,
           orderId,
           messageId,
+          promptToken: requested.promptToken,
         }),
       ).toBe(true);
     }
@@ -791,7 +846,9 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       {
         connectionId: fixture.connectionAId,
         telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
         orderId: second.placed.orderId,
+        promptMessageId: 9202,
         reference: "SECOND-ORDER-REF",
       },
     );
@@ -803,7 +860,9 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       {
         connectionId: fixture.connectionAId,
         telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
         orderId: first.placed.orderId,
+        promptMessageId: 9201,
         reference: "FIRST-ORDER-REF",
       },
     );
@@ -815,7 +874,9 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       {
         connectionId: fixture.connectionAId,
         telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
         orderId: first.placed.orderId,
+        promptMessageId: 9201,
         reference: "FIRST-ORDER-REF",
       },
     );
@@ -852,6 +913,213 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
         promptMessageId: 9299,
       }),
     ).toBeNull();
+  });
+
+  it("rejects a reply whose prompt was replaced between lookup and claim write", async () => {
+    const { placed } = await placeVodafoneOrder();
+    const storeScope = await scope(fixture.storeAId);
+
+    const firstPrompt = await requestVodafoneCashTransferReference(
+      tx(),
+      storeScope,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+      },
+    );
+    expect(firstPrompt.status).toBe("prompted");
+    if (firstPrompt.status !== "prompted") return;
+
+    expect(
+      await bindVodafoneCashTransferPromptMessage(tx(), storeScope, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+        messageId: 9401,
+        promptToken: firstPrompt.promptToken,
+      }),
+    ).toBe(true);
+
+    // This is the webhook's initial lookup. The prompt is replaced after it.
+    const lookedUp = await readVodafoneCashOrderByPromptReply(
+      tx(),
+      storeScope,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        promptMessageId: 9401,
+      },
+    );
+    expect(lookedUp).toMatchObject({ orderId: placed.orderId });
+
+    const secondPrompt = await requestVodafoneCashTransferReference(
+      tx(),
+      storeScope,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+      },
+    );
+    expect(secondPrompt.status).toBe("prompted");
+    if (secondPrompt.status !== "prompted") return;
+    expect(secondPrompt.promptToken).not.toBe(firstPrompt.promptToken);
+
+    expect(
+      await bindVodafoneCashTransferPromptMessage(tx(), storeScope, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+        messageId: 9402,
+        promptToken: secondPrompt.promptToken,
+      }),
+    ).toBe(true);
+
+    const superseded = await submitVodafoneCashTransferClaim(
+      tx(),
+      storeScope,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        orderId: placed.orderId,
+        promptMessageId: 9401,
+        reference: "SUPERSEDED-REF",
+      },
+    );
+    expect(superseded.status).toBe("prompt_superseded");
+    expect(await claimRow(placed.orderId)).toBeUndefined();
+    expect((await orderRow(placed.orderId)).paymentStatus).toBe(
+      "awaiting_transfer",
+    );
+    expect((await orderRow(placed.orderId)).transferPromptMessageId).toBe(9402);
+    expect(await inventoryFor(fixture.productAId)).toMatchObject({
+      onHand: 5,
+      reserved: 2,
+    });
+
+    const current = await submitVodafoneCashTransferClaim(tx(), storeScope, {
+      connectionId: fixture.connectionAId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      orderId: placed.orderId,
+      promptMessageId: 9402,
+      reference: "CURRENT-REF",
+    });
+    expect(current.status).toBe("submitted");
+
+    const repeatedOldReply = await submitVodafoneCashTransferClaim(
+      tx(),
+      storeScope,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        orderId: placed.orderId,
+        promptMessageId: 9401,
+        reference: "SUPERSEDED-REF",
+      },
+    );
+    expect(repeatedOldReply.status).toBe("already_submitted");
+    expect(await claimRow(placed.orderId)).toMatchObject({
+      reference: "CURRENT-REF",
+      status: "pending",
+    });
+    const claims = await db()
+      .select()
+      .from(orderPaymentClaim)
+      .where(eq(orderPaymentClaim.orderId, placed.orderId));
+    expect(claims).toHaveLength(1);
+    expect(await inventoryFor(fixture.productAId)).toMatchObject({
+      onHand: 5,
+      reserved: 2,
+    });
+  });
+
+  it("does not let a delayed older prompt binding replace the newer one", async () => {
+    const { placed } = await placeVodafoneOrder();
+    const storeScope = await scope(fixture.storeAId);
+
+    const older = await requestVodafoneCashTransferReference(
+      tx(),
+      storeScope,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+      },
+    );
+    const newer = await requestVodafoneCashTransferReference(
+      tx(),
+      storeScope,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+      },
+    );
+    expect(older.status).toBe("prompted");
+    expect(newer.status).toBe("prompted");
+    if (older.status !== "prompted" || newer.status !== "prompted") return;
+
+    // The newer send completes first.
+    expect(
+      await bindVodafoneCashTransferPromptMessage(tx(), storeScope, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+        messageId: 9502,
+        promptToken: newer.promptToken,
+      }),
+    ).toBe(true);
+
+    // The older send completes later and must not overwrite the binding.
+    expect(
+      await bindVodafoneCashTransferPromptMessage(tx(), storeScope, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+        messageId: 9501,
+        promptToken: older.promptToken,
+      }),
+    ).toBe(false);
+
+    expect((await orderRow(placed.orderId)).transferPromptMessageId).toBe(9502);
+    expect(
+      await readVodafoneCashOrderByPromptReply(tx(), storeScope, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+        promptMessageId: 9501,
+      }),
+    ).toBeNull();
+
+    const stale = await submitVodafoneCashTransferClaim(tx(), storeScope, {
+      connectionId: fixture.connectionAId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      orderId: placed.orderId,
+      promptMessageId: 9501,
+      reference: "DELAYED-OLD-REF",
+    });
+    expect(stale.status).toBe("prompt_superseded");
+    expect(await claimRow(placed.orderId)).toBeUndefined();
+    expect(await inventoryFor(fixture.productAId)).toMatchObject({
+      onHand: 5,
+      reserved: 2,
+    });
+
+    const accepted = await submitVodafoneCashTransferClaim(tx(), storeScope, {
+      connectionId: fixture.connectionAId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+      orderId: placed.orderId,
+      promptMessageId: 9502,
+      reference: "DELAYED-NEW-REF",
+    });
+    expect(accepted.status).toBe("submitted");
   });
 
   it("verifies a transfer once, records the actor and time, and leaves stock reserved", async () => {
@@ -916,16 +1184,24 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
   it("rejects a claim once, records the decision and releases the reservation", async () => {
     const { placed } = await placeVodafoneOrder();
     const storeScope = await scope(fixture.storeAId);
-    await requestVodafoneCashTransferReference(tx(), storeScope, {
-      connectionId: fixture.connectionAId,
-      telegramUserId: BUYER_A,
-      orderId: placed.orderId,
-    });
+    const requested = await requestVodafoneCashTransferReference(
+      tx(),
+      storeScope,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        orderId: placed.orderId,
+      },
+    );
+    expect(requested.status).toBe("prompted");
+    if (requested.status !== "prompted") return;
+
     await bindVodafoneCashTransferPromptMessage(tx(), storeScope, {
       connectionId: fixture.connectionAId,
       telegramUserId: BUYER_A,
       orderId: placed.orderId,
       messageId: 9301,
+      promptToken: requested.promptToken,
     });
     await submitClaim(placed.orderId);
 
@@ -1079,7 +1355,9 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       {
         connectionId: fixture.connectionBId,
         telegramUserId: BUYER_B,
+        telegramChatId: BUYER_B,
         orderId: placed.orderId,
+        promptMessageId: 1,
         reference: "CROSS-STORE-REF",
       },
     );
@@ -1171,15 +1449,10 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
     );
     expect(promptAfterStoreDisable.status).toBe("prompted");
 
-    const claimAfterStoreDisable = await submitVodafoneCashTransferClaim(
-      tx(),
-      storeScope,
-      {
-        connectionId: fixture.connectionAId,
-        telegramUserId: BUYER_A,
-        orderId: placed.orderId,
-        reference: "STORE-DISABLED-REF",
-      },
+    const claimAfterStoreDisable = await submitClaim(
+      placed.orderId,
+      "STORE-DISABLED-REF",
+      { buyerId: BUYER_A },
     );
     expect(claimAfterStoreDisable).toMatchObject({
       status: "submitted",
@@ -1206,15 +1479,10 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       });
     expect(promptAfterDeploymentDisable.status).toBe("prompted");
 
-    const claimAfterDeploymentDisable = await submitVodafoneCashTransferClaim(
-      tx(),
-      storeScope,
-      {
-        connectionId: fixture.connectionAId,
-        telegramUserId: BUYER_B,
-        orderId: second.placed.orderId,
-        reference: "DEPLOYMENT-DISABLED-REF",
-      },
+    const claimAfterDeploymentDisable = await submitClaim(
+      second.placed.orderId,
+      "DEPLOYMENT-DISABLED-REF",
+      { buyerId: BUYER_B },
     );
     expect(claimAfterDeploymentDisable).toMatchObject({
       status: "submitted",
@@ -1319,7 +1587,9 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       {
         connectionId: fixture.connectionAId,
         telegramUserId: BUYER_B,
+        telegramChatId: BUYER_B,
         orderId: codPlaced.orderId,
+        promptMessageId: 1,
         reference: "COD-NOT-A-TRANSFER",
       },
     );

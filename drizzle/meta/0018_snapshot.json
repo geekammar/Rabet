@@ -1,5 +1,5 @@
 {
-  "id": "110a17a8-276a-4a73-9e76-6325b0fe0ee5",
+  "id": "cdc5f4e9-5edd-40da-8377-7de22ebc9fff",
   "prevId": "f9eeb339-d8e2-4316-ae8c-95de89995717",
   "version": "7",
   "dialect": "postgresql",
@@ -1866,6 +1866,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "transfer_prompt_token": {
+          "name": "transfer_prompt_token",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "transfer_snapshot": {
           "name": "transfer_snapshot",
           "type": "jsonb",
@@ -2032,7 +2038,7 @@
         },
         "order_transfer_reference_request_state_check": {
           "name": "order_transfer_reference_request_state_check",
-          "value": "(\n        (\"order\".\"transfer_reference_requested_at\" IS NULL\n          OR \"order\".\"payment_method\" = 'vodafone_cash')\n        AND\n        (\"order\".\"transfer_prompt_message_id\" IS NULL\n          OR (\"order\".\"payment_method\" = 'vodafone_cash'\n            AND \"order\".\"transfer_prompt_message_id\" > 0))\n      )"
+          "value": "(\n        (\"order\".\"transfer_reference_requested_at\" IS NULL\n          OR \"order\".\"payment_method\" = 'vodafone_cash')\n        AND\n        (\"order\".\"transfer_prompt_message_id\" IS NULL\n          OR (\"order\".\"payment_method\" = 'vodafone_cash'\n            AND \"order\".\"transfer_prompt_message_id\" > 0))\n        AND\n        (\"order\".\"transfer_prompt_token\" IS NULL\n          OR \"order\".\"payment_method\" = 'vodafone_cash')\n      )"
         },
         "order_transfer_snapshot_state_check": {
           "name": "order_transfer_snapshot_state_check",

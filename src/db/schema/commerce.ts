@@ -332,6 +332,7 @@ export const order = pgTable(
     transferPromptMessageId: bigint("transfer_prompt_message_id", {
       mode: "number",
     }),
+    transferPromptToken: uuid("transfer_prompt_token"),
     transferSnapshot: jsonb("transfer_snapshot"),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true, mode: "date" }),
     cancellationReason: text("cancellation_reason"),
@@ -430,6 +431,9 @@ export const order = pgTable(
         (${table.transferPromptMessageId} IS NULL
           OR (${table.paymentMethod} = 'vodafone_cash'
             AND ${table.transferPromptMessageId} > 0))
+        AND
+        (${table.transferPromptToken} IS NULL
+          OR ${table.paymentMethod} = 'vodafone_cash')
       )`,
     ),
     check(
