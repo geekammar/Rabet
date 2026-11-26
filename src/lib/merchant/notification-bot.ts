@@ -6,12 +6,14 @@ import type { MerchantAccess } from "@/lib/auth/merchant-session";
 import {
   confirmMerchantNotificationBotPairing,
   disconnectMerchantNotificationBot as deleteMerchantNotificationBot,
+  markMerchantNotificationBotPairingAmbiguous,
+  mergeMerchantNotificationBotPairingCandidates,
   readMerchantNotificationBotSecret,
-  recordMerchantNotificationBotPairingProgress,
   recordMerchantNotificationBotTestSuccess,
   saveMerchantNotificationBotToken,
   startMerchantNotificationBotPairing as replaceMerchantNotificationBotPairing,
 } from "@/lib/data/merchant-notification-bot";
+import type { MerchantNotificationPairingCandidate } from "@/db/schema/merchant-notification-bot";
 import { RabetDataError } from "@/lib/data/errors";
 import type { MerchantNotificationBotSecret } from "@/lib/data/merchant-notification-bot";
 import { resolveMerchantEligibility } from "@/lib/merchant/eligibility";
@@ -27,7 +29,8 @@ import {
   MERCHANT_NOTIFICATION_PAIRING_TTL_MS,
   normalizeMerchantNotificationBotToken,
   readMerchantNotificationBotIdentity,
-  readMerchantNotificationBotPairing,
+  readMerchantNotificationBotPairingPage,
+  type MerchantNotificationBotPairingPageResult,
   sendMerchantNotificationBotTest as deliverMerchantNotificationBotTest,
 } from "@/lib/telegram/merchant-notification-bot";
 import type { TelegramTransport } from "@/lib/telegram/types";
@@ -83,8 +86,8 @@ export type MerchantNotificationBotDeps = {
   now?: () => Date;
   api?: TelegramBotApiClient;
   transport?: TelegramTransport;
-  /** Test seam for bounded backlog progress; production uses 10 batches. */
-  pairingMaxBatches?: number;
+  /** Test seam for bounded backlog progress; production uses 10 pages. */
+  pairingMaxPages?: number;
 };
 
 function safeCategory(error: unknown): string {
@@ -188,36 +191,224 @@ async function readSecret(
   );
 }
 
-async function advancePairingCursor(
+const DEFAULT_PAIRING_MAX_PAGES = 10;
+const MAX_PAIRING_MAX_PAGES = 50;
+
+function boundedPageCount(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_PAIRING_MAX_PAGES;
+  }
+
+  return Math.min(
+    MAX_PAIRING_MAX_PAGES,
+    Math.max(1, Math.floor(value)),
+  );
+}
+
+function pairingPageError(
+  error: Extract<
+    MerchantNotificationBotPairingPageResult,
+    { status: "error" }
+  >,
+): MerchantNotificationBotResult {
+  switch (error.code) {
+    case "INVALID_TOKEN":
+      return { ok: false, error: "INVALID_TOKEN" };
+    case "WEBHOOK_ACTIVE":
+      return { ok: false, error: "PAIRING_WEBHOOK_ACTIVE" };
+    case "RATE_LIMITED":
+      return {
+        ok: false,
+        error: "TELEGRAM_UNAVAILABLE",
+        retryAfterSeconds: error.retryAfterSeconds,
+      };
+    case "NETWORK":
+      return { ok: false, error: "TELEGRAM_UNAVAILABLE" };
+    default:
+      return { ok: false, error: "PAIRING_UNAVAILABLE" };
+  }
+}
+
+async function pairingWriteStaleResult(
+  db: TransactionDatabase,
+  access: MerchantAccess,
+): Promise<Extract<MerchantNotificationBotResult, { ok: false }>> {
+  const current = await readSecret(db, access);
+
+  if (!current) return { ok: false, error: "NOT_CONNECTED" };
+
+  if (current.pairingFailureCode === "ambiguous") {
+    return { ok: false, error: "PAIRING_AMBIGUOUS" };
+  }
+
+  if (!current.pairingCodeHash || !current.pairingExpiresAt) {
+    return { ok: false, error: "PAIRING_REQUIRED" };
+  }
+
+  return { ok: false, error: "PAIRING_EXPIRED" };
+}
+
+async function mergePairingPage(
   db: TransactionDatabase,
   access: MerchantAccess,
   pairingCodeHash: string,
-  nextOffset: number | null,
-): Promise<"advanced" | "denied"> {
-  if (nextOffset === null) return "advanced";
-
+  candidates: MerchantNotificationPairingCandidate[],
+  nextOffset: number,
+): Promise<
+  | {
+      ok: true;
+      candidates: MerchantNotificationPairingCandidate[];
+      nextOffset: number;
+    }
+  | Extract<MerchantNotificationBotResult, { ok: false }>
+> {
   try {
-    return await db.transaction(async (tx) => {
+    const outcome = await db.transaction(async (tx) => {
       if (!(await recheckMerchantAccess(tx, access))) {
-        return "denied" as const;
+        return { status: "denied" } as const;
       }
 
-      await recordMerchantNotificationBotPairingProgress(
+      const merged = await mergeMerchantNotificationBotPairingCandidates(
         tx as unknown as Database,
         {
           storeId: access.scope.storeId,
           pairingCodeHash,
+          candidates,
           nextOffset,
         },
       );
 
-      return "advanced" as const;
+      return merged
+        ? ({ status: "merged", merged } as const)
+        : ({ status: "stale" } as const);
     });
+
+    if (outcome.status === "denied") {
+      return { ok: false, error: "DENIED" };
+    }
+
+    if (outcome.status === "stale") {
+      return pairingWriteStaleResult(db, access);
+    }
+
+    return {
+      ok: true,
+      candidates: outcome.merged.candidates,
+      nextOffset: outcome.merged.nextOffset,
+    };
   } catch (error) {
-    // Progress is an optimisation; the next check re-reads the same evaluated
-    // batch rather than skipping it. Access denial is still authoritative.
-    logFailure("pairing_progress_write", error);
-    return "advanced";
+    logFailure("pairing_page_write", error);
+    return { ok: false, error: "OPERATION_FAILED" };
+  }
+}
+
+async function markPairingAmbiguous(
+  db: TransactionDatabase,
+  access: MerchantAccess,
+  pairingCodeHash: string,
+): Promise<MerchantNotificationBotResult> {
+  try {
+    const outcome = await db.transaction(async (tx) => {
+      if (!(await recheckMerchantAccess(tx, access))) {
+        return "denied" as const;
+      }
+
+      const marked = await markMerchantNotificationBotPairingAmbiguous(
+        tx as unknown as Database,
+        {
+          storeId: access.scope.storeId,
+          pairingCodeHash,
+        },
+      );
+
+      return marked ? ("marked" as const) : ("stale" as const);
+    });
+
+    if (outcome === "denied") {
+      return { ok: false, error: "DENIED" };
+    }
+
+    if (outcome === "marked") {
+      return { ok: false, error: "PAIRING_AMBIGUOUS" };
+    }
+
+    return pairingWriteStaleResult(db, access);
+  } catch (error) {
+    logFailure("pairing_ambiguous_write", error);
+    return { ok: false, error: "OPERATION_FAILED" };
+  }
+}
+
+async function confirmPairingCandidate(
+  db: TransactionDatabase,
+  access: MerchantAccess,
+  pairingCodeHash: string,
+  candidate: MerchantNotificationPairingCandidate,
+): Promise<MerchantNotificationBotResult> {
+  try {
+    const outcome = await db.transaction(async (tx) => {
+      if (!(await recheckMerchantAccess(tx, access))) {
+        return { status: "denied" } as const;
+      }
+
+      const confirmed = await confirmMerchantNotificationBotPairing(
+        tx as unknown as Database,
+        {
+          storeId: access.scope.storeId,
+          pairingCodeHash,
+          chatId: candidate.chatId,
+          chatTitle: candidate.title,
+          chatUsername: candidate.username,
+        },
+      );
+
+      if (confirmed) return { status: "confirmed" } as const;
+
+      const current = await readMerchantNotificationBotSecret(
+        tx as unknown as Database,
+        access.scope.storeId,
+      );
+
+      if (!current) return { status: "missing" } as const;
+
+      if (
+        current.pairingFailureCode === "ambiguous" ||
+        (current.pairingCandidates?.length ?? 0) > 1
+      ) {
+        await markMerchantNotificationBotPairingAmbiguous(
+          tx as unknown as Database,
+          {
+            storeId: access.scope.storeId,
+            pairingCodeHash,
+          },
+        );
+
+        return { status: "ambiguous" } as const;
+      }
+
+      return { status: "stale" } as const;
+    });
+
+    if (outcome.status === "denied") {
+      return { ok: false, error: "DENIED" };
+    }
+
+    if (outcome.status === "confirmed") {
+      return { ok: true };
+    }
+
+    if (outcome.status === "ambiguous") {
+      return { ok: false, error: "PAIRING_AMBIGUOUS" };
+    }
+
+    if (outcome.status === "missing") {
+      return { ok: false, error: "NOT_CONNECTED" };
+    }
+
+    return pairingWriteStaleResult(db, access);
+  } catch (error) {
+    logFailure("pairing_confirm_write", error);
+    return { ok: false, error: "OPERATION_FAILED" };
   }
 }
 
@@ -427,6 +618,10 @@ export async function checkMerchantNotificationBotPairing(
     return { ok: false, error: "NOT_CONNECTED" };
   }
 
+  if (secret.pairingFailureCode === "ambiguous") {
+    return { ok: false, error: "PAIRING_AMBIGUOUS" };
+  }
+
   if (!secret.pairingCodeHash || !secret.pairingExpiresAt) {
     return { ok: false, error: "PAIRING_REQUIRED" };
   }
@@ -449,81 +644,79 @@ export async function checkMerchantNotificationBotPairing(
     return { ok: false, error: "UNAVAILABLE" };
   }
 
-  const match = await readMerchantNotificationBotPairing(
-    token,
-    secret.pairingCodeHash,
-    {
-      api: deps.api,
-      offset: secret.pairingUpdateOffset,
-      maxBatches: deps.pairingMaxBatches,
-    },
-  );
+  let candidates = secret.pairingCandidates ?? [];
+  let offset = secret.pairingUpdateOffset ?? undefined;
+  let scanComplete = false;
+  const maxPages = boundedPageCount(deps.pairingMaxPages);
 
-  if (match.status === "pending" || match.status === "ambiguous") {
-    const progress = await advancePairingCursor(
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+    const page = await readMerchantNotificationBotPairingPage(
+      token,
+      secret.pairingCodeHash,
+      { api: deps.api, offset, limit: 100 },
+    );
+
+    if (page.status === "error") {
+      return pairingPageError(page);
+    }
+
+    if (page.nextOffset === null) {
+      if (page.candidates.length === 0) {
+        scanComplete = true;
+        break;
+      }
+
+      // Updates without a usable update id cannot be confirmed safely.
+      return { ok: false, error: "PAIRING_UNAVAILABLE" };
+    }
+
+    const merged = await mergePairingPage(
       db,
       access,
       secret.pairingCodeHash,
-      match.nextOffset,
+      page.candidates,
+      page.nextOffset,
     );
 
-    if (progress === "denied") {
-      return { ok: false, error: "DENIED" };
-    }
+    if (!merged.ok) return merged;
 
-    return {
-      ok: false,
-      error:
-        match.status === "pending"
-          ? "PAIRING_PENDING"
-          : "PAIRING_AMBIGUOUS",
-    };
-  }
+    candidates = merged.candidates;
+    offset = merged.nextOffset;
 
-  if (match.status === "error") {
-    switch (match.code) {
-      case "INVALID_TOKEN":
-        return { ok: false, error: "INVALID_TOKEN" };
-      case "WEBHOOK_ACTIVE":
-        return { ok: false, error: "PAIRING_WEBHOOK_ACTIVE" };
-      case "RATE_LIMITED":
-        return {
-          ok: false,
-          error: "TELEGRAM_UNAVAILABLE",
-          retryAfterSeconds: match.retryAfterSeconds,
-        };
-      default:
-        return { ok: false, error: "PAIRING_UNAVAILABLE" };
-    }
-  }
-
-  try {
-    const outcome = await db.transaction(async (tx) => {
-      if (!(await recheckMerchantAccess(tx, access))) {
-        return { ok: false, error: "DENIED" } as const;
-      }
-
-      const confirmed = await confirmMerchantNotificationBotPairing(
-        tx as unknown as Database,
-        {
-          storeId: access.scope.storeId,
-          pairingCodeHash: secret.pairingCodeHash!,
-          chatId: match.chat.chatId,
-          chatTitle: match.chat.title,
-          chatUsername: match.chat.username,
-        },
+    if (candidates.length > 1) {
+      return markPairingAmbiguous(
+        db,
+        access,
+        secret.pairingCodeHash,
       );
+    }
 
-      return confirmed
-        ? ({ ok: true } as const)
-        : ({ ok: false, error: "PAIRING_EXPIRED" } as const);
-    });
-
-    return outcome;
-  } catch (error) {
-    logFailure("pairing_confirm_write", error);
-    return { ok: false, error: "OPERATION_FAILED" };
+    if (!page.isFullPage) {
+      scanComplete = true;
+      break;
+    }
   }
+
+  if (!scanComplete) {
+    // The page budget stopped the scan before a short/empty page. The last
+    // full page's candidates and cursor are already persisted.
+    return { ok: false, error: "PAIRING_PENDING" };
+  }
+
+  if (candidates.length === 0) {
+    return { ok: false, error: "PAIRING_PENDING" };
+  }
+
+  if (candidates.length > 1) {
+    return markPairingAmbiguous(db, access, secret.pairingCodeHash);
+  }
+
+  return confirmPairingCandidate(
+    db,
+    access,
+    secret.pairingCodeHash,
+    candidates[0],
+  );
 }
 
 /**

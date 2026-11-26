@@ -2,6 +2,8 @@ import "server-only";
 
 import crypto from "node:crypto";
 
+import type { MerchantNotificationPairingCandidate } from "@/db/schema/merchant-notification-bot";
+
 import {
   createTelegramBotApiClient,
   type TelegramBotApiClient,
@@ -219,14 +221,38 @@ export function findMerchantNotificationPairingMatch(
   updates: TelegramBotUpdate[],
   expectedHash: string,
 ): MerchantNotificationPairingMatch {
-  if (!PAIRING_HASH_PATTERN.test(expectedHash)) {
-    return { status: "pending" };
-  }
+  const candidates = merchantNotificationPairingCandidatesFromUpdates(
+    updates,
+    expectedHash,
+  );
 
-  const matches = new Map<
-    string,
-    { chatId: string; title: string | null; username: string | null; date: number }
-  >();
+  if (candidates.length === 0) return { status: "pending" };
+
+  if (candidates.length > 1) return { status: "ambiguous" };
+
+  const [chat] = candidates;
+
+  return {
+    status: "paired",
+    chat: {
+      chatId: chat.chatId,
+      title: chat.title,
+      username: chat.username,
+    },
+  };
+}
+
+/**
+ * Extracts one candidate per distinct private chat from a page. Repeated
+ * messages from the same chat keep only the latest metadata.
+ */
+export function merchantNotificationPairingCandidatesFromUpdates(
+  updates: TelegramBotUpdate[],
+  expectedHash: string,
+): MerchantNotificationPairingCandidate[] {
+  if (!PAIRING_HASH_PATTERN.test(expectedHash)) return [];
+
+  const byChat = new Map<string, MerchantNotificationPairingCandidate>();
 
   for (const update of updates) {
     const message = update.message;
@@ -243,10 +269,10 @@ export function findMerchantNotificationPairingMatch(
       continue;
     }
 
-    const current = matches.get(candidate.chatId);
+    const current = byChat.get(candidate.chatId);
 
     if (!current || candidate.date >= current.date) {
-      matches.set(candidate.chatId, {
+      byChat.set(candidate.chatId, {
         chatId: candidate.chatId,
         title: candidate.title,
         username: candidate.username,
@@ -255,32 +281,18 @@ export function findMerchantNotificationPairingMatch(
     }
   }
 
-  if (matches.size === 0) return { status: "pending" };
-
-  if (matches.size > 1) return { status: "ambiguous" };
-
-  const [chat] = matches.values();
-
-  return {
-    status: "paired",
-    chat: {
-      chatId: chat.chatId,
-      title: chat.title,
-      username: chat.username,
-    },
-  };
+  return [...byChat.values()];
 }
 
-type MerchantNotificationPairingProgress = {
-  /**
-   * The next Telegram update id to request, or null when the batch contained
-   * no updates. Persisted only for the same live challenge.
-   */
-  nextOffset: number | null;
-};
+export const MERCHANT_NOTIFICATION_PAIRING_PAGE_LIMIT = 100;
 
-export type MerchantNotificationBotPairingResult =
-  | (MerchantNotificationPairingMatch & MerchantNotificationPairingProgress)
+export type MerchantNotificationBotPairingPageResult =
+  | {
+      status: "ok";
+      candidates: MerchantNotificationPairingCandidate[];
+      nextOffset: number | null;
+      isFullPage: boolean;
+    }
   | {
       status: "error";
       code:
@@ -297,7 +309,7 @@ function classifyPairingFailure(result: {
   errorKind?: TelegramErrorKind;
   httpStatus?: number;
   retryAfterSeconds?: number;
-}): Extract<MerchantNotificationBotPairingResult, { status: "error" }> {
+}): Extract<MerchantNotificationBotPairingPageResult, { status: "error" }> {
   if (result.errorKind === "rate_limited") {
     return {
       status: "error",
@@ -327,21 +339,6 @@ function classifyPairingFailure(result: {
   return { status: "error", code: "UNAVAILABLE" };
 }
 
-const PAIRING_UPDATE_BATCH_LIMIT = 100;
-const DEFAULT_PAIRING_MAX_BATCHES = 10;
-const MAX_PAIRING_MAX_BATCHES = 50;
-
-function boundedBatchCount(value: number | undefined): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return DEFAULT_PAIRING_MAX_BATCHES;
-  }
-
-  return Math.min(
-    MAX_PAIRING_MAX_BATCHES,
-    Math.max(1, Math.floor(value)),
-  );
-}
-
 function validOffset(value: number | null | undefined): number | undefined {
   return typeof value === "number" &&
     Number.isSafeInteger(value) &&
@@ -351,91 +348,63 @@ function validOffset(value: number | null | undefined): number | undefined {
 }
 
 /**
- * Reads update batches from the notification bot and looks for the pairing
- * code. The persisted offset makes repeated checks advance through a backlog
- * in bounded batches. A batch is always evaluated before the next request
- * confirms it, so an update that may contain the active challenge is never
- * discarded first.
+ * Reads one page of updates from the notification bot and returns only the
+ * distinct candidates it contains. The caller must persist these candidates
+ * and the next offset before asking for another page, because the next request
+ * is what confirms this page on Telegram's side.
  *
  * The bot must not have a webhook registered; Telegram rejects `getUpdates`
  * with a conflict when one is active, which is reported as `WEBHOOK_ACTIVE`.
  */
-export async function readMerchantNotificationBotPairing(
+export async function readMerchantNotificationBotPairingPage(
   token: string,
   expectedHash: string,
   deps?: {
     api?: TelegramBotApiClient;
     offset?: number | null;
-    maxBatches?: number;
+    limit?: number;
   },
-): Promise<MerchantNotificationBotPairingResult> {
+): Promise<MerchantNotificationBotPairingPageResult> {
   const api = deps?.api ?? createTelegramBotApiClient(token);
-  const maxBatches = boundedBatchCount(deps?.maxBatches);
-  let offset = validOffset(deps?.offset);
+  const limit = Math.min(
+    MERCHANT_NOTIFICATION_PAIRING_PAGE_LIMIT,
+    Math.max(
+      1,
+      Math.floor(deps?.limit ?? MERCHANT_NOTIFICATION_PAIRING_PAGE_LIMIT),
+    ),
+  );
+  const offset = validOffset(deps?.offset);
+
+  const updates = await api.getUpdates({
+    ...(offset !== undefined ? { offset } : {}),
+    limit,
+    allowedUpdates: ["message"],
+  });
+
+  if (!updates.ok) {
+    return classifyPairingFailure(updates);
+  }
 
   let highestUpdateId: number | null = null;
 
-  for (let batch = 0; batch < maxBatches; batch++) {
-    const updates = await api.getUpdates({
-      ...(offset !== undefined ? { offset } : {}),
-      limit: PAIRING_UPDATE_BATCH_LIMIT,
-      allowedUpdates: ["message"],
-    });
-
-    if (!updates.ok) {
-      return classifyPairingFailure(updates);
+  for (const update of updates.result) {
+    if (Number.isSafeInteger(update.update_id)) {
+      highestUpdateId =
+        highestUpdateId === null
+          ? update.update_id
+          : Math.max(highestUpdateId, update.update_id);
     }
-
-    if (updates.result.length === 0) break;
-
-    let batchHighest: number | null = null;
-
-    for (const update of updates.result) {
-      if (Number.isSafeInteger(update.update_id)) {
-        batchHighest =
-          batchHighest === null
-            ? update.update_id
-            : Math.max(batchHighest, update.update_id);
-      }
-    }
-
-    const batchNextOffset =
-      batchHighest === null ? null : batchHighest + 1;
-
-    // Evaluate the whole batch before any later request can confirm it.
-    const match = findMerchantNotificationPairingMatch(
-      updates.result,
-      expectedHash,
-    );
-
-    if (match.status === "paired") {
-      return { ...match, nextOffset: batchNextOffset };
-    }
-
-    if (match.status === "ambiguous") {
-      return { ...match, nextOffset: batchNextOffset };
-    }
-
-    if (batchHighest === null) break;
-
-    // A server or fake that ignores offset must not make this loop spin.
-    if (
-      highestUpdateId !== null &&
-      batchHighest <= highestUpdateId
-    ) {
-      break;
-    }
-
-    highestUpdateId = batchHighest;
-
-    // The next getUpdates call confirms the batch we just evaluated.
-    offset = batchHighest + 1;
   }
 
   return {
-    status: "pending",
+    status: "ok",
+    candidates: merchantNotificationPairingCandidatesFromUpdates(
+      updates.result,
+      expectedHash,
+    ),
     nextOffset:
       highestUpdateId === null ? null : highestUpdateId + 1,
+    isFullPage: updates.result.length === limit,
   };
 }
 

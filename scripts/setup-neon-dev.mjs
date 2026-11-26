@@ -628,6 +628,9 @@ const MERCHANT_NOTIFICATION_BOT_CONSTRAINTS = [
   "merchant_notification_bot_pairing_state_check",
   "merchant_notification_bot_pairing_hash_format_check",
   "merchant_notification_bot_pairing_update_offset_check",
+  "merchant_notification_bot_pairing_candidates_array_check",
+  "merchant_notification_bot_pairing_failure_code_check",
+  "merchant_notification_bot_pairing_failure_state_check",
   "merchant_notification_bot_verified_requires_destination_check",
   "merchant_notification_bot_store_id_store_id_fk",
 ];

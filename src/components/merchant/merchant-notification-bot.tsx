@@ -200,13 +200,16 @@ export function MerchantNotificationBot({
     });
   }
 
+  const pairingAmbiguous = state?.pairingFailureCode === "ambiguous";
   const statusLabel = !state
     ? copy.statusUnpaired
     : state.destinationChatId
       ? copy.statusConnected
       : state.pairingActive
         ? copy.statusPairing
-        : copy.statusUnpaired;
+        : pairingAmbiguous
+          ? copy.statusPairingFailed
+          : copy.statusUnpaired;
 
   const destination = state ? destinationLabel(state) : null;
   const verified = Boolean(state?.verifiedAt && state.destinationChatId);
@@ -421,6 +424,27 @@ export function MerchantNotificationBot({
               data-testid="merchant-notification-bot-pairing-expired"
             >
               <p>{copy.errors.PAIRING_EXPIRED}</p>
+              <Button
+                type="button"
+                variant="outline"
+                className="min-h-11"
+                disabled={disabled}
+                onClick={handleNewPairingLink}
+                data-testid="merchant-notification-bot-new-link"
+              >
+                <RefreshCw className="size-4" aria-hidden="true" />
+                {copy.newPairingLink}
+              </Button>
+            </div>
+          ) : null}
+
+          {pairingAmbiguous ? (
+            <div
+              className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-300"
+              data-testid="merchant-notification-bot-pairing-ambiguous"
+            >
+              <p className="font-medium">{copy.pairingAmbiguousTitle}</p>
+              <p>{copy.errors.PAIRING_AMBIGUOUS}</p>
               <Button
                 type="button"
                 variant="outline"

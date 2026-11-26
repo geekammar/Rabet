@@ -12,6 +12,8 @@ CREATE TABLE "merchant_notification_bot" (
 	"pairing_code_hash" text,
 	"pairing_expires_at" timestamp with time zone,
 	"pairing_update_offset" bigint,
+	"pairing_candidates" jsonb,
+	"pairing_failure_code" text,
 	"config_epoch" uuid DEFAULT gen_random_uuid() NOT NULL,
 	"verified_at" timestamp with time zone,
 	"last_test_at" timestamp with time zone,
@@ -31,6 +33,14 @@ CREATE TABLE "merchant_notification_bot" (
       )),
 	CONSTRAINT "merchant_notification_bot_pairing_hash_format_check" CHECK ("merchant_notification_bot"."pairing_code_hash" IS NULL OR "merchant_notification_bot"."pairing_code_hash" ~ '^[0-9a-f]{64}$'),
 	CONSTRAINT "merchant_notification_bot_pairing_update_offset_check" CHECK ("merchant_notification_bot"."pairing_update_offset" IS NULL OR "merchant_notification_bot"."pairing_update_offset" >= 1),
+	CONSTRAINT "merchant_notification_bot_pairing_candidates_array_check" CHECK ("merchant_notification_bot"."pairing_candidates" IS NULL OR jsonb_typeof("merchant_notification_bot"."pairing_candidates") = 'array'),
+	CONSTRAINT "merchant_notification_bot_pairing_failure_code_check" CHECK ("merchant_notification_bot"."pairing_failure_code" IS NULL OR "merchant_notification_bot"."pairing_failure_code" = 'ambiguous'),
+	CONSTRAINT "merchant_notification_bot_pairing_failure_state_check" CHECK ("merchant_notification_bot"."pairing_failure_code" IS NULL OR (
+        "merchant_notification_bot"."pairing_code_hash" IS NULL
+        AND "merchant_notification_bot"."pairing_expires_at" IS NULL
+        AND "merchant_notification_bot"."pairing_candidates" IS NULL
+        AND "merchant_notification_bot"."pairing_update_offset" IS NULL
+      )),
 	CONSTRAINT "merchant_notification_bot_verified_requires_destination_check" CHECK ("merchant_notification_bot"."verified_at" IS NULL OR "merchant_notification_bot"."destination_chat_id" IS NOT NULL)
 );
 --> statement-breakpoint

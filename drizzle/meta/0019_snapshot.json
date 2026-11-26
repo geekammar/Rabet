@@ -1,5 +1,5 @@
 {
-  "id": "0c349086-0475-4640-82b8-b60f8d862c1a",
+  "id": "d41cf619-09a6-4223-a738-fa603f5a02f9",
   "prevId": "f9eeb339-d8e2-4316-ae8c-95de89995717",
   "version": "7",
   "dialect": "postgresql",
@@ -3102,6 +3102,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "pairing_candidates": {
+          "name": "pairing_candidates",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pairing_failure_code": {
+          "name": "pairing_failure_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "config_epoch": {
           "name": "config_epoch",
           "type": "uuid",
@@ -3218,6 +3230,18 @@
         "merchant_notification_bot_pairing_update_offset_check": {
           "name": "merchant_notification_bot_pairing_update_offset_check",
           "value": "\"merchant_notification_bot\".\"pairing_update_offset\" IS NULL OR \"merchant_notification_bot\".\"pairing_update_offset\" >= 1"
+        },
+        "merchant_notification_bot_pairing_candidates_array_check": {
+          "name": "merchant_notification_bot_pairing_candidates_array_check",
+          "value": "\"merchant_notification_bot\".\"pairing_candidates\" IS NULL OR jsonb_typeof(\"merchant_notification_bot\".\"pairing_candidates\") = 'array'"
+        },
+        "merchant_notification_bot_pairing_failure_code_check": {
+          "name": "merchant_notification_bot_pairing_failure_code_check",
+          "value": "\"merchant_notification_bot\".\"pairing_failure_code\" IS NULL OR \"merchant_notification_bot\".\"pairing_failure_code\" = 'ambiguous'"
+        },
+        "merchant_notification_bot_pairing_failure_state_check": {
+          "name": "merchant_notification_bot_pairing_failure_state_check",
+          "value": "\"merchant_notification_bot\".\"pairing_failure_code\" IS NULL OR (\n        \"merchant_notification_bot\".\"pairing_code_hash\" IS NULL\n        AND \"merchant_notification_bot\".\"pairing_expires_at\" IS NULL\n        AND \"merchant_notification_bot\".\"pairing_candidates\" IS NULL\n        AND \"merchant_notification_bot\".\"pairing_update_offset\" IS NULL\n      )"
         },
         "merchant_notification_bot_verified_requires_destination_check": {
           "name": "merchant_notification_bot_verified_requires_destination_check",

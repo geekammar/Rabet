@@ -8,10 +8,11 @@ import {
   buildMerchantNotificationTestMessage,
   findMerchantNotificationPairingMatch,
   hashMerchantNotificationPairingCode,
+  merchantNotificationPairingCandidatesFromUpdates,
   merchantNotificationPairingPayloadFromText,
   normalizeMerchantNotificationBotToken,
   readMerchantNotificationBotIdentity,
-  readMerchantNotificationBotPairing,
+  readMerchantNotificationBotPairingPage,
   sendMerchantNotificationBotTest,
 } from "@/lib/telegram/merchant-notification-bot";
 import { createFakeTelegramTransport } from "@/lib/telegram/transport";
@@ -219,71 +220,79 @@ describe("merchant notification bot — token and pairing helpers", () => {
     ).toEqual({ status: "pending" });
   });
 
-  it("finds a valid Start after more than 100 backlogged updates", async () => {
-    const code = "pairing_code_backlog_1234";
+  it("extracts one candidate per distinct private chat", () => {
+    const code = "pairing_code_candidates_1234";
     const hash = hashMerchantNotificationPairingCode(code);
-    const all = [
-      ...Array.from({ length: 250 }, (_, index) =>
-        textUpdate(index + 1),
-      ),
-      startUpdate(`/start ${code}`, 5550001, "private", false, 251),
-    ];
-    const { api, offsets } = pagedBotApi(all);
+    const candidates = merchantNotificationPairingCandidatesFromUpdates(
+      [
+        startUpdate(`/start ${code}`, 5550001, "private", false, 1),
+        startUpdate(`/start ${code}`, 5550001, "private", false, 2),
+        startUpdate(`/start ${code}`, 5550002, "private", false, 3),
+        startUpdate(`/start ${code}`, 5550003, "group", false, 4),
+        startUpdate(`/start ${code}`, 5550004, "private", true, 5),
+      ],
+      hash,
+    );
 
-    const result = await readMerchantNotificationBotPairing(TOKEN, hash, {
-      api,
-      maxBatches: 10,
-    });
-
-    expect(result).toMatchObject({
-      status: "paired",
-      nextOffset: 252,
-      chat: { chatId: "5550001" },
-    });
-    expect(offsets[0]).toBeUndefined();
-    expect(offsets).toContain(101);
+    expect(candidates.map((candidate) => candidate.chatId).sort()).toEqual([
+      "5550001",
+      "5550002",
+    ]);
   });
 
-  it("makes bounded progress across repeated checks", async () => {
-    const code = "pairing_code_progress_1234";
+  it("reports a full page containing a candidate as not complete", async () => {
+    const code = "pairing_code_full_page_1234";
     const hash = hashMerchantNotificationPairingCode(code);
     const all = [
-      ...Array.from({ length: 150 }, (_, index) =>
-        textUpdate(index + 1),
+      startUpdate(`/start ${code}`, 5550001, "private", false, 1),
+      ...Array.from({ length: 99 }, (_, index) =>
+        textUpdate(index + 2),
       ),
-      startUpdate(`/start ${code}`, 5550001, "private", false, 151),
+      startUpdate(`/start ${code}`, 5550001, "private", false, 101),
     ];
 
     const first = pagedBotApi(all);
-    const firstResult = await readMerchantNotificationBotPairing(
+    const page = await readMerchantNotificationBotPairingPage(
       TOKEN,
       hash,
-      { api: first.api, maxBatches: 1 },
+      { api: first.api, limit: 100 },
     );
 
-    expect(firstResult.status).toBe("pending");
-    if (firstResult.status !== "pending") {
-      throw new Error("Expected a pending pairing result");
-    }
-    expect(firstResult.nextOffset).toBe(101);
+    expect(page.status).toBe("ok");
+    if (page.status !== "ok") throw new Error("Expected a page");
 
-    const second = pagedBotApi(all);
-    const secondResult = await readMerchantNotificationBotPairing(
+    expect(page.candidates).toHaveLength(1);
+    expect(page.candidates[0].chatId).toBe("5550001");
+    expect(page.isFullPage).toBe(true);
+    expect(page.nextOffset).toBe(101);
+    expect(first.offsets).toEqual([undefined]);
+  });
+
+  it("uses the supplied offset for the next page", async () => {
+    const code = "pairing_code_next_page_1234";
+    const hash = hashMerchantNotificationPairingCode(code);
+    const all = [
+      ...Array.from({ length: 100 }, (_, index) =>
+        textUpdate(index + 1),
+      ),
+      startUpdate(`/start ${code}`, 5550001, "private", false, 101),
+    ];
+
+    const paged = pagedBotApi(all);
+    const page = await readMerchantNotificationBotPairingPage(
       TOKEN,
       hash,
-      {
-        api: second.api,
-        maxBatches: 1,
-        offset: firstResult.nextOffset,
-      },
+      { api: paged.api, offset: 101, limit: 100 },
     );
 
-    expect(secondResult).toMatchObject({
-      status: "paired",
-      nextOffset: 152,
-      chat: { chatId: "5550001" },
-    });
-    expect(second.offsets).toEqual([101]);
+    expect(page.status).toBe("ok");
+    if (page.status !== "ok") throw new Error("Expected a page");
+
+    expect(page.candidates).toHaveLength(1);
+    expect(page.candidates[0].chatId).toBe("5550001");
+    expect(page.isFullPage).toBe(false);
+    expect(page.nextOffset).toBe(102);
+    expect(paged.offsets).toEqual([101]);
   });
 
   it("maps getMe and getUpdates failures to allowlisted codes", async () => {
@@ -324,27 +333,36 @@ describe("merchant notification bot — token and pairing helpers", () => {
     });
     expect(notBot).toEqual({ ok: false, code: "INVALID_TOKEN" });
 
-    const webhook = await readMerchantNotificationBotPairing(TOKEN, "a".repeat(64), {
-      api: botApi([], {
-        getUpdates: vi.fn(async () => ({
-          ok: false as const,
-          error: "Conflict: can't use getUpdates method while webhook is active",
-          httpStatus: 409,
-        })),
-      }),
-    });
+    const webhook = await readMerchantNotificationBotPairingPage(
+      TOKEN,
+      "a".repeat(64),
+      {
+        api: botApi([], {
+          getUpdates: vi.fn(async () => ({
+            ok: false as const,
+            error:
+              "Conflict: can't use getUpdates method while webhook is active",
+            httpStatus: 409,
+          })),
+        }),
+      },
+    );
     expect(webhook).toEqual({ status: "error", code: "WEBHOOK_ACTIVE" });
 
-    const limited = await readMerchantNotificationBotPairing(TOKEN, "a".repeat(64), {
-      api: botApi([], {
-        getUpdates: vi.fn(async () => ({
-          ok: false as const,
-          error: "Too Many Requests",
-          errorKind: "rate_limited" as const,
-          retryAfterSeconds: 9,
-        })),
-      }),
-    });
+    const limited = await readMerchantNotificationBotPairingPage(
+      TOKEN,
+      "a".repeat(64),
+      {
+        api: botApi([], {
+          getUpdates: vi.fn(async () => ({
+            ok: false as const,
+            error: "Too Many Requests",
+            errorKind: "rate_limited" as const,
+            retryAfterSeconds: 9,
+          })),
+        }),
+      },
+    );
     expect(limited).toEqual({
       status: "error",
       code: "RATE_LIMITED",

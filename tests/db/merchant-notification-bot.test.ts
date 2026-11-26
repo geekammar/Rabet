@@ -15,6 +15,8 @@ import {
 import { resolveMerchantAccess } from "@/lib/auth/merchant-session";
 import {
   confirmMerchantNotificationBotPairing,
+  markMerchantNotificationBotPairingAmbiguous,
+  mergeMerchantNotificationBotPairingCandidates,
   readMerchantNotificationBotSecret,
   readMerchantNotificationBotState,
   recordMerchantNotificationBotTestSuccess,
@@ -394,7 +396,7 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
     expect(state?.destinationChatId).toBeNull();
   });
 
-  it("pairs a Start after more than 100 backlogged updates", async () => {
+  it("pairs a match found after a full unrelated page", async () => {
     const access = await accessFor(fixture.userAId);
     const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
 
@@ -445,7 +447,7 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
     const first = pagedBotApi(1001, "StoreOneAlertsBot", backlog);
     const pending = await checkMerchantNotificationBotPairing(db(), access, {
       api: first.api,
-      pairingMaxBatches: 1,
+      pairingMaxPages: 1,
     });
 
     expect(pending).toEqual({ ok: false, error: "PAIRING_PENDING" });
@@ -460,7 +462,7 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
     const second = pagedBotApi(1001, "StoreOneAlertsBot", backlog);
     const paired = await checkMerchantNotificationBotPairing(db(), access, {
       api: second.api,
-      pairingMaxBatches: 1,
+      pairingMaxPages: 1,
     });
 
     expect(paired.ok).toBe(true);
@@ -473,6 +475,415 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
     expect(afterSecond?.pairingUpdateOffset).toBeNull();
     expect(afterSecond?.pairingCodeHash).toBeNull();
     expect(afterSecond?.destinationChatId).toBe("5550001");
+  });
+
+  it("rejects a challenge when two distinct chats match across pages", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const code = codeFromLink(connected.pairing.deepLink);
+    const pageOne: TelegramBotUpdate[] = [
+      startUpdate(code, 5550001, { updateId: 1, username: "owner_a" }),
+      ...Array.from({ length: 99 }, (_, index) =>
+        startUpdate("unused", 5550001, {
+          updateId: index + 2,
+          text: "old message",
+        }),
+      ),
+    ];
+    const pageTwo: TelegramBotUpdate[] = [
+      startUpdate(code, 5550002, { updateId: 101, username: "owner_b" }),
+    ];
+
+    const { api } = pagedBotApi(1001, "StoreOneAlertsBot", [
+      ...pageOne,
+      ...pageTwo,
+    ]);
+    const ambiguous = await checkMerchantNotificationBotPairing(db(), access, {
+      api,
+    });
+
+    expect(ambiguous).toEqual({ ok: false, error: "PAIRING_AMBIGUOUS" });
+
+    const secret = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(secret?.pairingFailureCode).toBe("ambiguous");
+    expect(secret?.pairingCodeHash).toBeNull();
+    expect(secret?.pairingCandidates).toBeNull();
+    expect(secret?.destinationChatId).toBeNull();
+
+    const getUpdates = vi.fn(async () => ({
+      ok: true as const,
+      result: [] as TelegramBotUpdate[],
+    }));
+    const recheckApi = botApi(1001, "StoreOneAlertsBot", [], { getUpdates });
+    const recheck = await checkMerchantNotificationBotPairing(db(), access, {
+      api: recheckApi,
+    });
+
+    expect(recheck).toEqual({ ok: false, error: "PAIRING_AMBIGUOUS" });
+    expect(getUpdates).not.toHaveBeenCalled();
+
+    const fresh = await startMerchantNotificationBotPairing(db(), access);
+    expect(fresh.ok).toBe(true);
+    if (!fresh.ok || !fresh.pairing) throw new Error("Expected fresh pairing");
+
+    const freshCode = codeFromLink(fresh.pairing.deepLink);
+    const paired = await checkMerchantNotificationBotPairing(db(), access, {
+      api: botApi(1001, "StoreOneAlertsBot", [
+        startUpdate(freshCode, 5550001, { updateId: 201 }),
+      ]),
+    });
+
+    expect(paired.ok).toBe(true);
+
+    const state = await readMerchantNotificationBotState(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(state?.destinationChatId).toBe("5550001");
+    expect(state?.pairingFailureCode).toBeNull();
+  });
+
+  it("counts repeated messages from the same chat as one candidate", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const code = codeFromLink(connected.pairing.deepLink);
+    const pageOne: TelegramBotUpdate[] = [
+      startUpdate(code, 5550001, { updateId: 1, username: "owner" }),
+      startUpdate(code, 5550001, { updateId: 2, username: "owner" }),
+      ...Array.from({ length: 98 }, (_, index) =>
+        startUpdate("unused", 5550001, {
+          updateId: index + 3,
+          text: "old message",
+        }),
+      ),
+    ];
+
+    const { api } = pagedBotApi(1001, "StoreOneAlertsBot", pageOne);
+    const paired = await checkMerchantNotificationBotPairing(db(), access, {
+      api,
+    });
+
+    expect(paired.ok).toBe(true);
+
+    const state = await readMerchantNotificationBotState(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(state?.destinationChatId).toBe("5550001");
+  });
+
+  it("retains a candidate across a page-budget retry", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const code = codeFromLink(connected.pairing.deepLink);
+    const pageOne: TelegramBotUpdate[] = [
+      startUpdate(code, 5550001, { updateId: 1 }),
+      ...Array.from({ length: 99 }, (_, index) =>
+        startUpdate("unused", 5550001, {
+          updateId: index + 2,
+          text: "old message",
+        }),
+      ),
+    ];
+
+    const first = pagedBotApi(1001, "StoreOneAlertsBot", pageOne);
+    const pending = await checkMerchantNotificationBotPairing(db(), access, {
+      api: first.api,
+      pairingMaxPages: 1,
+    });
+
+    expect(pending).toEqual({ ok: false, error: "PAIRING_PENDING" });
+
+    const afterFirst = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(afterFirst?.pairingCandidates?.map((candidate) => candidate.chatId)).toEqual([
+      "5550001",
+    ]);
+    expect(afterFirst?.pairingUpdateOffset).toBe(101);
+
+    const second = pagedBotApi(1001, "StoreOneAlertsBot", pageOne);
+    const paired = await checkMerchantNotificationBotPairing(db(), access, {
+      api: second.api,
+      pairingMaxPages: 10,
+    });
+
+    expect(paired.ok).toBe(true);
+    expect(second.offsets).toEqual([101]);
+  });
+
+  it("retains a candidate across a page error", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const code = codeFromLink(connected.pairing.deepLink);
+    const pageOne: TelegramBotUpdate[] = [
+      startUpdate(code, 5550001, { updateId: 1 }),
+      ...Array.from({ length: 99 }, (_, index) =>
+        startUpdate("unused", 5550001, {
+          updateId: index + 2,
+          text: "old message",
+        }),
+      ),
+    ];
+
+    const getUpdates = vi.fn(
+      async (input?: { offset?: number; limit?: number }) => {
+        if (!input?.offset) {
+          return {
+            ok: true as const,
+            result: pageOne.slice(0, input?.limit ?? 100),
+          };
+        }
+
+        return {
+          ok: false as const,
+          error: "Network error",
+          errorKind: "network_error" as const,
+        };
+      },
+    );
+    const brokenApi = botApi(1001, "StoreOneAlertsBot", [], { getUpdates });
+    const failed = await checkMerchantNotificationBotPairing(db(), access, {
+      api: brokenApi,
+    });
+
+    expect(failed).toEqual({ ok: false, error: "TELEGRAM_UNAVAILABLE" });
+
+    const afterFailure = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(afterFailure?.pairingCandidates?.map((candidate) => candidate.chatId)).toEqual([
+      "5550001",
+    ]);
+    expect(afterFailure?.pairingUpdateOffset).toBe(101);
+
+    const second = pagedBotApi(1001, "StoreOneAlertsBot", pageOne);
+    const paired = await checkMerchantNotificationBotPairing(db(), access, {
+      api: second.api,
+    });
+
+    expect(paired.ok).toBe(true);
+  });
+
+  it("atomically merges concurrent candidates and refuses a two-chat confirm", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const secret = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    const pairingCodeHash = secret?.pairingCodeHash;
+
+    if (!pairingCodeHash) throw new Error("Expected an active challenge");
+
+    const candidateA = {
+      chatId: "5550001",
+      title: "Owner A",
+      username: "owner_a",
+      date: 1,
+    };
+    const candidateB = {
+      chatId: "5550002",
+      title: "Owner B",
+      username: "owner_b",
+      date: 2,
+    };
+
+    const first = await mergeMerchantNotificationBotPairingCandidates(
+      asAppDb(db()),
+      {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        candidates: [candidateA],
+        nextOffset: 101,
+      },
+    );
+
+    expect(first?.candidates.map((candidate) => candidate.chatId)).toEqual([
+      "5550001",
+    ]);
+
+    const second = await mergeMerchantNotificationBotPairingCandidates(
+      asAppDb(db()),
+      {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        candidates: [candidateB],
+        nextOffset: 201,
+      },
+    );
+
+    expect(
+      second?.candidates.map((candidate) => candidate.chatId).sort(),
+    ).toEqual(["5550001", "5550002"]);
+
+    expect(
+      await confirmMerchantNotificationBotPairing(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        chatId: candidateA.chatId,
+        chatTitle: candidateA.title,
+        chatUsername: candidateA.username,
+      }),
+    ).toBe(false);
+
+    expect(
+      await markMerchantNotificationBotPairingAmbiguous(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+      }),
+    ).toBe(true);
+
+    const after = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(after?.pairingFailureCode).toBe("ambiguous");
+    expect(after?.pairingCodeHash).toBeNull();
+
+    expect(
+      await mergeMerchantNotificationBotPairingCandidates(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        candidates: [candidateA],
+        nextOffset: 301,
+      }),
+    ).toBeNull();
+  });
+
+  it("does not let an old challenge overwrite a replacement", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const before = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    const oldHash = before?.pairingCodeHash;
+
+    if (!oldHash) throw new Error("Expected an active challenge");
+
+    const candidateA = {
+      chatId: "5550001",
+      title: "Owner A",
+      username: "owner_a",
+      date: 1,
+    };
+    const candidateB = {
+      chatId: "5550002",
+      title: "Owner B",
+      username: "owner_b",
+      date: 2,
+    };
+
+    await mergeMerchantNotificationBotPairingCandidates(asAppDb(db()), {
+      storeId: fixture.storeAId,
+      pairingCodeHash: oldHash,
+      candidates: [candidateA],
+      nextOffset: 101,
+    });
+
+    const fresh = await startMerchantNotificationBotPairing(db(), access);
+    expect(fresh.ok).toBe(true);
+
+    const afterStart = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(afterStart?.pairingCodeHash).not.toBe(oldHash);
+    expect(afterStart?.pairingCandidates).toBeNull();
+
+    expect(
+      await mergeMerchantNotificationBotPairingCandidates(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash: oldHash,
+        candidates: [candidateB],
+        nextOffset: 201,
+      }),
+    ).toBeNull();
+
+    expect(
+      await confirmMerchantNotificationBotPairing(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash: oldHash,
+        chatId: candidateA.chatId,
+        chatTitle: candidateA.title,
+        chatUsername: candidateA.username,
+      }),
+    ).toBe(false);
+
+    const still = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(still?.pairingCodeHash).toBe(afterStart?.pairingCodeHash);
+    expect(still?.pairingCandidates).toBeNull();
+    expect(still?.pairingFailureCode).toBeNull();
+  });
+
+  it("disconnect invalidates pending pairing writes", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const secret = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    const pairingCodeHash = secret?.pairingCodeHash;
+
+    if (!pairingCodeHash) throw new Error("Expected an active challenge");
+
+    const candidate = {
+      chatId: "5550001",
+      title: "Owner A",
+      username: "owner_a",
+      date: 1,
+    };
+
+    await disconnectMerchantNotificationBot(db(), access);
+
+    expect(
+      await mergeMerchantNotificationBotPairingCandidates(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        candidates: [candidate],
+        nextOffset: 101,
+      }),
+    ).toBeNull();
+
+    expect(
+      await confirmMerchantNotificationBotPairing(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        chatId: candidate.chatId,
+        chatTitle: candidate.title,
+        chatUsername: candidate.username,
+      }),
+    ).toBe(false);
   });
 
   it("rejects an expired pairing challenge and can issue a new one", async () => {
@@ -495,6 +906,30 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
       api: botApi(1001, "StoreOneAlertsBot", []),
     });
     expect(expired).toEqual({ ok: false, error: "PAIRING_EXPIRED" });
+
+    const expiredSecret = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    const expiredHash = expiredSecret?.pairingCodeHash;
+
+    if (!expiredHash) throw new Error("Expected an expired challenge");
+
+    expect(
+      await mergeMerchantNotificationBotPairingCandidates(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash: expiredHash,
+        candidates: [
+          {
+            chatId: "5550001",
+            title: "Owner",
+            username: "owner",
+            date: 1,
+          },
+        ],
+        nextOffset: 101,
+      }),
+    ).toBeNull();
 
     const fresh = await startMerchantNotificationBotPairing(db(), access);
     expect(fresh.ok).toBe(true);

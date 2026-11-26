@@ -1,10 +1,11 @@
 import "server-only";
 
 import crypto from "node:crypto";
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import { merchantNotificationBot } from "@/db/schema";
+import type { MerchantNotificationPairingCandidate } from "@/db/schema/merchant-notification-bot";
 import { mapDatabaseError, RabetDataError } from "./errors";
 import { validatePrivateChatId } from "./seller-notifications";
 
@@ -33,6 +34,7 @@ export type MerchantNotificationBotState = {
   destinationChatTitle: string | null;
   pairingActive: boolean;
   pairingExpiresAt: string | null;
+  pairingFailureCode: string | null;
   verifiedAt: string | null;
   lastTestAt: string | null;
 };
@@ -50,6 +52,8 @@ export type MerchantNotificationBotSecret = {
   pairingCodeHash: string | null;
   pairingExpiresAt: Date | null;
   pairingUpdateOffset: number | null;
+  pairingCandidates: MerchantNotificationPairingCandidate[] | null;
+  pairingFailureCode: string | null;
   configEpoch: string;
   verifiedAt: Date | null;
   lastTestAt: Date | null;
@@ -111,6 +115,7 @@ export async function readMerchantNotificationBotState(
         destinationChatId: merchantNotificationBot.destinationChatId,
         destinationChatTitle: merchantNotificationBot.destinationChatTitle,
         pairingExpiresAt: merchantNotificationBot.pairingExpiresAt,
+        pairingFailureCode: merchantNotificationBot.pairingFailureCode,
         verifiedAt: merchantNotificationBot.verifiedAt,
         lastTestAt: merchantNotificationBot.lastTestAt,
       })
@@ -130,6 +135,7 @@ export async function readMerchantNotificationBotState(
         row.pairingExpiresAt !== null &&
         row.pairingExpiresAt.getTime() > now.getTime(),
       pairingExpiresAt: row.pairingExpiresAt?.toISOString() ?? null,
+      pairingFailureCode: row.pairingFailureCode,
       verifiedAt: row.verifiedAt?.toISOString() ?? null,
       lastTestAt: row.lastTestAt?.toISOString() ?? null,
     };
@@ -163,6 +169,8 @@ export async function readMerchantNotificationBotSecret(
         pairingCodeHash: merchantNotificationBot.pairingCodeHash,
         pairingExpiresAt: merchantNotificationBot.pairingExpiresAt,
         pairingUpdateOffset: merchantNotificationBot.pairingUpdateOffset,
+        pairingCandidates: merchantNotificationBot.pairingCandidates,
+        pairingFailureCode: merchantNotificationBot.pairingFailureCode,
         configEpoch: merchantNotificationBot.configEpoch,
         verifiedAt: merchantNotificationBot.verifiedAt,
         lastTestAt: merchantNotificationBot.lastTestAt,
@@ -213,6 +221,8 @@ export async function saveMerchantNotificationBotToken(
         pairingCodeHash: input.pairingCodeHash,
         pairingExpiresAt: input.pairingExpiresAt,
         pairingUpdateOffset: null,
+        pairingCandidates: null,
+        pairingFailureCode: null,
         configEpoch: crypto.randomUUID(),
         updatedAt: now,
       })
@@ -230,6 +240,8 @@ export async function saveMerchantNotificationBotToken(
           pairingCodeHash: input.pairingCodeHash,
           pairingExpiresAt: input.pairingExpiresAt,
           pairingUpdateOffset: null,
+          pairingCandidates: null,
+          pairingFailureCode: null,
           configEpoch: crypto.randomUUID(),
           verifiedAt: null,
           lastTestAt: null,
@@ -265,6 +277,8 @@ export async function startMerchantNotificationBotPairing(
         pairingCodeHash: input.pairingCodeHash,
         pairingExpiresAt: input.pairingExpiresAt,
         pairingUpdateOffset: null,
+        pairingCandidates: null,
+        pairingFailureCode: null,
         configEpoch: crypto.randomUUID(),
         destinationChatId: null,
         destinationChatTitle: null,
@@ -287,6 +301,71 @@ export async function startMerchantNotificationBotPairing(
   }
 }
 
+function normalizePairingCandidate(
+  value: unknown,
+): MerchantNotificationPairingCandidate | null {
+  if (typeof value !== "object" || value === null) return null;
+
+  const candidate = value as Record<string, unknown>;
+  const chatId =
+    typeof candidate.chatId === "string" ? candidate.chatId : null;
+
+  if (!chatId || !validatePrivateChatId(chatId)) return null;
+
+  const date = Number(candidate.date);
+
+  if (!Number.isSafeInteger(date) || date < 0) return null;
+
+  return {
+    chatId,
+    title:
+      typeof candidate.title === "string"
+        ? candidate.title.slice(0, 200)
+        : null,
+    username:
+      typeof candidate.username === "string"
+        ? candidate.username.slice(0, 64)
+        : null,
+    date,
+  };
+}
+
+function normalizePairingCandidates(
+  values: unknown,
+): MerchantNotificationPairingCandidate[] {
+  if (!Array.isArray(values)) return [];
+
+  const byChat = new Map<string, MerchantNotificationPairingCandidate>();
+
+  for (const value of values) {
+    const candidate = normalizePairingCandidate(value);
+
+    if (!candidate) continue;
+
+    const current = byChat.get(candidate.chatId);
+
+    if (!current || candidate.date >= current.date) {
+      byChat.set(candidate.chatId, candidate);
+    }
+  }
+
+  return [...byChat.values()];
+}
+
+function parsePairingCandidates(
+  value: unknown,
+): MerchantNotificationPairingCandidate[] {
+  if (typeof value === "string") {
+    try {
+      return normalizePairingCandidates(JSON.parse(value));
+    } catch {
+      return [];
+    }
+  }
+
+  return normalizePairingCandidates(value);
+}
+
 export type ConfirmMerchantNotificationBotPairingInput = {
   storeId: string;
   pairingCodeHash: string;
@@ -297,9 +376,11 @@ export type ConfirmMerchantNotificationBotPairingInput = {
 };
 
 /**
- * Confirms the chat that sent the current pairing payload. The conditional
- * update matches both the store and the unexpired digest, so a stale or
- * cross-store pairing request can never write a destination.
+ * Confirms the chat that sent the current pairing payload only when the same
+ * unexpired challenge still has exactly that one retained candidate.
+ *
+ * A concurrent check that merged a second chat makes the candidate-length
+ * condition fail, so an ambiguous attempt can never be finalized as a pairing.
  */
 export async function confirmMerchantNotificationBotPairing(
   db: Database,
@@ -324,6 +405,8 @@ export async function confirmMerchantNotificationBotPairing(
         pairingCodeHash: null,
         pairingExpiresAt: null,
         pairingUpdateOffset: null,
+        pairingCandidates: null,
+        pairingFailureCode: null,
         configEpoch: crypto.randomUUID(),
         verifiedAt: null,
         lastTestAt: null,
@@ -334,6 +417,9 @@ export async function confirmMerchantNotificationBotPairing(
           eq(merchantNotificationBot.storeId, input.storeId),
           eq(merchantNotificationBot.pairingCodeHash, input.pairingCodeHash),
           gt(merchantNotificationBot.pairingExpiresAt, now),
+          isNull(merchantNotificationBot.pairingFailureCode),
+          sql`jsonb_array_length(coalesce(${merchantNotificationBot.pairingCandidates}, '[]'::jsonb)) = 1`,
+          sql`${merchantNotificationBot.pairingCandidates}->0->>'chatId' = ${input.chatId}`,
         ),
       )
       .returning({ id: merchantNotificationBot.id });
@@ -344,22 +430,31 @@ export async function confirmMerchantNotificationBotPairing(
   }
 }
 
-export type RecordMerchantNotificationBotPairingProgressInput = {
+export type MergeMerchantNotificationBotPairingCandidatesInput = {
   storeId: string;
   pairingCodeHash: string;
+  candidates: MerchantNotificationPairingCandidate[];
   nextOffset: number;
   now?: Date;
 };
 
+export type MerchantNotificationBotPairingCandidates = {
+  candidates: MerchantNotificationPairingCandidate[];
+  nextOffset: number;
+};
+
 /**
- * Advances the pairing queue cursor only while the same unexpired challenge is
- * still current. Telegram confirms the previous batch on the next request, so
- * progress never drops an update before this check has evaluated it.
+ * Atomically merges one evaluated page's candidates into the retained set and
+ * advances the cursor for the same unexpired challenge.
+ *
+ * The merge runs inside the UPDATE, so two concurrent checks cannot overwrite
+ * each other's candidate. The caller persists this page before asking Telegram
+ * for the next one, which is what confirms the page on Telegram's side.
  */
-export async function recordMerchantNotificationBotPairingProgress(
+export async function mergeMerchantNotificationBotPairingCandidates(
   db: Database,
-  input: RecordMerchantNotificationBotPairingProgressInput,
-): Promise<boolean> {
+  input: MergeMerchantNotificationBotPairingCandidatesInput,
+): Promise<MerchantNotificationBotPairingCandidates | null> {
   if (
     !Number.isSafeInteger(input.nextOffset) ||
     input.nextOffset < 1
@@ -370,13 +465,88 @@ export async function recordMerchantNotificationBotPairingProgress(
     );
   }
 
+  const candidates = normalizePairingCandidates(input.candidates);
+  const now = input.now ?? new Date();
+
+  try {
+    const result = await db.execute<Record<string, unknown>>(sql`
+      UPDATE "merchant_notification_bot"
+      SET
+        "pairing_candidates" = COALESCE((
+          SELECT jsonb_agg(candidate ORDER BY candidate->>'chatId')
+          FROM (
+            SELECT DISTINCT ON (candidate->>'chatId') candidate
+            FROM (
+              SELECT
+                candidate,
+                COALESCE((candidate->>'date')::bigint, 0) AS candidate_date,
+                0 AS source_order
+              FROM jsonb_array_elements(
+                COALESCE("pairing_candidates", '[]'::jsonb)
+              ) AS existing(candidate)
+              UNION ALL
+              SELECT
+                candidate,
+                COALESCE((candidate->>'date')::bigint, 0) AS candidate_date,
+                1 AS source_order
+              FROM jsonb_array_elements(
+                ${JSON.stringify(candidates)}::jsonb
+              ) AS incoming(candidate)
+            ) AS all_candidates
+            ORDER BY
+              candidate->>'chatId',
+              candidate_date DESC,
+              source_order DESC
+          ) AS deduped
+        ), '[]'::jsonb),
+        "pairing_update_offset" = ${input.nextOffset},
+        "updated_at" = now()
+      WHERE "store_id" = ${input.storeId}
+        AND "pairing_code_hash" = ${input.pairingCodeHash}
+        AND "pairing_expires_at" > ${now.toISOString()}::timestamptz
+        AND "pairing_failure_code" IS NULL
+      RETURNING "pairing_candidates", "pairing_update_offset"
+    `);
+    const [row] = rowsFrom<Record<string, unknown>>(result);
+
+    if (!row) return null;
+
+    return {
+      candidates: parsePairingCandidates(
+        row.pairing_candidates ?? row.pairingCandidates,
+      ),
+      nextOffset: input.nextOffset,
+    };
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+export type MarkMerchantNotificationBotPairingAmbiguousInput = {
+  storeId: string;
+  pairingCodeHash: string;
+  now?: Date;
+};
+
+/**
+ * Terminally rejects the current challenge for ambiguity and clears every
+ * pairing field. A later confirm can only match a new challenge.
+ */
+export async function markMerchantNotificationBotPairingAmbiguous(
+  db: Database,
+  input: MarkMerchantNotificationBotPairingAmbiguousInput,
+): Promise<boolean> {
   const now = input.now ?? new Date();
 
   try {
     const [updated] = await db
       .update(merchantNotificationBot)
       .set({
-        pairingUpdateOffset: input.nextOffset,
+        pairingFailureCode: "ambiguous",
+        pairingCodeHash: null,
+        pairingExpiresAt: null,
+        pairingUpdateOffset: null,
+        pairingCandidates: null,
         updatedAt: now,
       })
       .where(
@@ -384,6 +554,7 @@ export async function recordMerchantNotificationBotPairingProgress(
           eq(merchantNotificationBot.storeId, input.storeId),
           eq(merchantNotificationBot.pairingCodeHash, input.pairingCodeHash),
           gt(merchantNotificationBot.pairingExpiresAt, now),
+          isNull(merchantNotificationBot.pairingFailureCode),
         ),
       )
       .returning({ id: merchantNotificationBot.id });

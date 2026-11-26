@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   bigint,
   check,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -32,12 +33,26 @@ import { store } from "./tenant";
  * - Pairing is short-lived: only the SHA-256 digest of a random code is
  *   stored, together with an expiry. A successful pairing clears the digest.
  * - `pairing_update_offset` is the next Telegram update id to request. It
- *   lets repeated checks move through a backlog in bounded batches without
+ *   lets repeated checks move through a backlog in bounded pages without
  *   dropping an update before it has been evaluated for the active challenge.
+ * - `pairing_candidates` retains every distinct private chat that matched the
+ *   current challenge while the scan spans pages or retries. Repeated
+ *   messages from one chat collapse to one candidate; two chats make the
+ *   challenge ambiguous and unusable.
+ * - `pairing_failure_code` records a terminal pairing failure (currently only
+ *   `ambiguous`). The challenge hash, expiry, candidates and cursor are cleared
+ *   together, so no later confirm can turn the failed attempt into a pairing.
  * - `config_epoch` changes on every token save and pairing change. A test
  *   send records its epoch and can only persist verification while that exact
  *   configuration is still current, even if the bot and chat ids are unchanged.
  */
+
+export type MerchantNotificationPairingCandidate = {
+  chatId: string;
+  title: string | null;
+  username: string | null;
+  date: number;
+};
 
 export const merchantNotificationBot = pgTable(
   "merchant_notification_bot",
@@ -60,6 +75,10 @@ export const merchantNotificationBot = pgTable(
       mode: "date",
     }),
     pairingUpdateOffset: bigint("pairing_update_offset", { mode: "number" }),
+    pairingCandidates: jsonb("pairing_candidates").$type<
+      MerchantNotificationPairingCandidate[]
+    >(),
+    pairingFailureCode: text("pairing_failure_code"),
     configEpoch: uuid("config_epoch").notNull().defaultRandom(),
     verifiedAt: timestamp("verified_at", { withTimezone: true, mode: "date" }),
     lastTestAt: timestamp("last_test_at", {
@@ -113,6 +132,23 @@ export const merchantNotificationBot = pgTable(
     check(
       "merchant_notification_bot_pairing_update_offset_check",
       sql`${table.pairingUpdateOffset} IS NULL OR ${table.pairingUpdateOffset} >= 1`,
+    ),
+    check(
+      "merchant_notification_bot_pairing_candidates_array_check",
+      sql`${table.pairingCandidates} IS NULL OR jsonb_typeof(${table.pairingCandidates}) = 'array'`,
+    ),
+    check(
+      "merchant_notification_bot_pairing_failure_code_check",
+      sql`${table.pairingFailureCode} IS NULL OR ${table.pairingFailureCode} = 'ambiguous'`,
+    ),
+    check(
+      "merchant_notification_bot_pairing_failure_state_check",
+      sql`${table.pairingFailureCode} IS NULL OR (
+        ${table.pairingCodeHash} IS NULL
+        AND ${table.pairingExpiresAt} IS NULL
+        AND ${table.pairingCandidates} IS NULL
+        AND ${table.pairingUpdateOffset} IS NULL
+      )`,
     ),
     check(
       "merchant_notification_bot_verified_requires_destination_check",

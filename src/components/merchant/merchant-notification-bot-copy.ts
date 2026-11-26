@@ -21,6 +21,7 @@ type Copy = {
   checkingPairing: string;
   pairedTitle: string;
   pairedBody: string;
+  pairingAmbiguousTitle: string;
   destinationLabel: string;
   testTitle: string;
   testBody: string;
@@ -37,6 +38,7 @@ type Copy = {
   disconnected: string;
   statusConnected: string;
   statusPairing: string;
+  statusPairingFailed: string;
   statusUnpaired: string;
   readOnly: string;
   unsupported: string;
@@ -74,6 +76,7 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
     checkPairing: "تحقق من الربط",
     checkingPairing: "جارٍ التحقق من الرسائل…",
     pairedTitle: "محادثة الاستلام جاهزة",
+    pairingAmbiguousTitle: "تعذّر تأكيد محادثة الاستلام",
     pairedBody:
       "أرسل إشعارًا تجريبيًا الآن للتأكد من أن تيليجرام يسلّم رسائل هذا البوت إلى المحادثة الصحيحة.",
     destinationLabel: "المحادثة المرتبطة",
@@ -93,6 +96,7 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
     disconnected: "تم فصل بوت الإشعارات وحذف رمزه.",
     statusConnected: "مرتبط",
     statusPairing: "بانتظار تأكيد المحادثة",
+    statusPairingFailed: "تحتاج جلسة الربط إلى رابط جديد",
     statusUnpaired: "غير مرتبط",
     readOnly:
       "المتجر موقوف مؤقتًا؛ لا يمكن تعديل إعدادات الإشعارات الآن.",
@@ -109,7 +113,7 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
       TELEGRAM_UNAVAILABLE:
         "تعذّر الوصول إلى تيليجرام الآن. أعد المحاولة بعد قليل.",
       PAIRING_PENDING:
-        "لم نستلم رمز الربط بعد. افتح البوت واضغط Start من حسابك ثم أعد التحقق.",
+        "ما زلنا نفحص رسائل البوت، أو لم يصل رمز الربط بعد. افتح البوت واضغط Start من حسابك ثم أعد التحقق.",
       PAIRING_EXPIRED:
         "انتهت صلاحية رابط الربط. أنشئ رابطًا جديدًا ثم أعد المحاولة.",
       PAIRING_AMBIGUOUS:
@@ -164,6 +168,7 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
     checkPairing: "Check pairing",
     checkingPairing: "Checking messages…",
     pairedTitle: "Receiving chat is ready",
+    pairingAmbiguousTitle: "Chat confirmation failed",
     pairedBody:
       "Send a test notification now to confirm Telegram delivers this bot's messages to the correct chat.",
     destinationLabel: "Connected chat",
@@ -184,6 +189,7 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
     disconnected: "Notification bot disconnected and its token removed.",
     statusConnected: "Connected",
     statusPairing: "Waiting for chat confirmation",
+    statusPairingFailed: "Pairing needs a fresh link",
     statusUnpaired: "Not connected",
     readOnly:
       "This store is suspended; notification settings cannot be changed right now.",
@@ -201,7 +207,7 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
       TELEGRAM_UNAVAILABLE:
         "Telegram could not be reached right now. Try again shortly.",
       PAIRING_PENDING:
-        "We have not received the pairing code yet. Open the bot, press Start from your account, then check again.",
+        "We are still checking the bot's messages, or the Start message has not arrived yet. Open the bot, press Start from your account, then check again.",
       PAIRING_EXPIRED:
         "The pairing link expired. Generate a new link and try again.",
       PAIRING_AMBIGUOUS:
