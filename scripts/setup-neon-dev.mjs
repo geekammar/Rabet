@@ -137,6 +137,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0014_sparkling_captain_stacy",
   "0015_cod_shipping_delivery_collection",
   "0016_buyer_language_support",
+  "0017_store_telegram_support",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -539,14 +540,20 @@ export const CRITICAL_CONSTRAINTS_V14 = [
   "order_payment_collection_state_check",
 ];
 
-/** CHECK, foreign-key and domain constraints the current chain requires. */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, foreign-key and domain constraints present through 0016 (buyer language). */
+export const CRITICAL_CONSTRAINTS_V15 = [
   ...CRITICAL_CONSTRAINTS_V14,
   "buyer_language_preference_telegram_user_positive_check",
   "buyer_language_preference_locale_check",
   "buyer_language_preference_store_id_store_id_fk",
   "store_language_setting_locale_check",
   "store_language_setting_store_id_store_id_fk",
+];
+
+/** CHECK, foreign-key and domain constraints the current chain requires. */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V15,
+  "store_telegram_support_username_format_check",
 ];
 
 /** Notification update triggers created by migration 0003. */
