@@ -12,7 +12,10 @@ import {
   handMerchantOrderToShipping,
   markMerchantOrderDelivered,
   prepareMerchantOrder,
+  rejectVodafoneCashTransfer,
+  verifyVodafoneCashTransfer,
   type MerchantOrderMutationResult,
+  type MerchantTransferDecisionResult,
 } from "@/lib/commerce/orders";
 import { normalizeCancellationReason } from "@/lib/commerce/order-state";
 
@@ -29,6 +32,9 @@ export type MerchantOrderActionCode =
   | "HANDED_TO_SHIPPING"
   | "DELIVERED"
   | "COLLECTED"
+  | "TRANSFER_VERIFIED"
+  | "TRANSFER_REJECTED"
+  | "INVALID_NOTE"
   | "CANCELLED"
   | "DATABASE_ERROR";
 
@@ -41,6 +47,7 @@ export type MerchantOrderActionState = {
   paymentStatus?: string;
   releasedQuantity?: number;
   shippedQuantity?: number;
+  claimStatus?: string;
 };
 
 const ORDER_ID_PATTERN =
@@ -112,6 +119,49 @@ function actionStateFromResult(
 
 function readOrderId(value: unknown): string | null {
   return typeof value === "string" && ORDER_ID_PATTERN.test(value) ? value : null;
+}
+
+function transferDecisionState(
+  result: MerchantTransferDecisionResult,
+  successCode: "TRANSFER_VERIFIED" | "TRANSFER_REJECTED",
+): MerchantOrderActionState {
+  switch (result.status) {
+    case "verified":
+    case "rejected": {
+      return {
+        success: true,
+        code: successCode,
+        orderId: result.orderId,
+        status: result.orderStatus,
+        fulfillmentStatus: result.fulfillmentStatus,
+        paymentStatus: result.paymentStatus,
+        releasedQuantity: result.releasedQuantity,
+        claimStatus: result.claimStatus,
+      };
+    }
+    case "already_applied":
+      return {
+        success: true,
+        code: "ALREADY_APPLIED",
+        orderId: result.orderId,
+        status: result.orderStatus,
+        fulfillmentStatus: result.fulfillmentStatus,
+        paymentStatus: result.paymentStatus,
+        releasedQuantity: result.releasedQuantity,
+        claimStatus: result.claimStatus,
+      };
+    case "not_found":
+      return { success: false, code: "NOT_FOUND" };
+    case "invalid_transition":
+      return {
+        success: false,
+        code: "INVALID_TRANSITION",
+        status: result.currentStatus,
+        paymentStatus: result.paymentStatus,
+      };
+    case "invalid_note":
+      return { success: false, code: "INVALID_NOTE" };
+  }
 }
 
 function refreshOrdersPage(): void {
@@ -295,6 +345,68 @@ export async function cancelMerchantOrderAction(
       { orderId, reason: submitted.reason },
     );
     const state = actionStateFromResult(result, "CANCELLED");
+    if (state.success) refreshOrdersPage();
+    return state;
+  } catch {
+    return { success: false, code: "DATABASE_ERROR" };
+  }
+}
+
+export async function verifyVodafoneCashTransferAction(
+  orderIdInput: unknown,
+): Promise<MerchantOrderActionState> {
+  if (!isMerchantAppEnabled()) {
+    return { success: false, code: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+  if (!access || access.readOnly) {
+    return { success: false, code: "DENIED" };
+  }
+
+  const orderId = readOrderId(orderIdInput);
+  if (!orderId) return { success: false, code: "INVALID_INPUT" };
+
+  try {
+    const result = await verifyVodafoneCashTransfer(
+      getTransactionDb(),
+      access.scope,
+      { orderId, actorUserId: access.userId },
+    );
+    const state = transferDecisionState(result, "TRANSFER_VERIFIED");
+    if (state.success) refreshOrdersPage();
+    return state;
+  } catch {
+    return { success: false, code: "DATABASE_ERROR" };
+  }
+}
+
+export async function rejectVodafoneCashTransferAction(
+  input: unknown,
+): Promise<MerchantOrderActionState> {
+  if (!isMerchantAppEnabled()) {
+    return { success: false, code: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+  if (!access || access.readOnly) {
+    return { success: false, code: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+  const orderId = readOrderId(submitted.orderId);
+  if (!orderId) return { success: false, code: "INVALID_INPUT" };
+
+  try {
+    const result = await rejectVodafoneCashTransfer(
+      getTransactionDb(),
+      access.scope,
+      { orderId, actorUserId: access.userId, note: submitted.note },
+    );
+    const state = transferDecisionState(result, "TRANSFER_REJECTED");
     if (state.success) refreshOrdersPage();
     return state;
   } catch {

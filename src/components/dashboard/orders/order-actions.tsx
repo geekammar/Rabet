@@ -22,6 +22,8 @@ import {
   handMerchantOrderToShippingAction,
   markMerchantOrderDeliveredAction,
   prepareMerchantOrderAction,
+  rejectVodafoneCashTransferAction,
+  verifyVodafoneCashTransferAction,
   type MerchantOrderActionCode,
   type MerchantOrderActionState,
 } from "@/app/actions/merchant-orders";
@@ -66,6 +68,30 @@ type Copy = {
   keepOrder: string;
   reasonRequired: string;
   readOnlyNote: string;
+  transferTitle: string;
+  transferAwaitingLabel: string;
+  transferReferenceLabel: string;
+  transferSubmittedAtLabel: string;
+  transferDecidedAtLabel: string;
+  transferDecidedByLabel: string;
+  transferVerify: string;
+  transferReject: string;
+  transferWorking: string;
+  transferVerifyTitle: string;
+  transferVerifyHint: string;
+  transferConfirmVerify: string;
+  transferKeepPending: string;
+  transferRejectTitle: string;
+  transferRejectHint: string;
+  transferConfirmReject: string;
+  transferKeepClaim: string;
+  transferNoteLabel: string;
+  transferNotePlaceholder: string;
+  transferNoteHint: string;
+  transferWaiting: string;
+  transferVerifiedNote: string;
+  transferRejectedNote: string;
+  transferClaimStatus: Record<string, string>;
   localisation: Record<MerchantOrderActionCode | "NETWORK", string>;
 };
 
@@ -105,12 +131,47 @@ const COPY: Record<MerchantLocale, Copy> = {
     reasonRequired: "اكتب سببًا من ٣ إلى ٣٠٠ حرف.",
     readOnlyNote:
       "يمكنك مراجعة الطلب فقط. القبول والتجهيز والشحن والتوصيل والتحصيل والإلغاء غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
+    transferTitle: "تحويل فودافون كاش",
+    transferAwaitingLabel: "تحويل بانتظار المراجعة",
+    transferReferenceLabel: "مرجع التحويل من العميل",
+    transferSubmittedAtLabel: "وقت الإبلاغ",
+    transferDecidedAtLabel: "وقت القرار",
+    transferDecidedByLabel: "اتخذ القرار",
+    transferVerify: "تأكيد استلام التحويل",
+    transferReject: "رفض التحويل",
+    transferWorking: "جارٍ حفظ القرار…",
+    transferVerifyTitle: "تأكيد التحقق من التحويل",
+    transferVerifyHint:
+      "راجع محفظتك أولًا وتأكد من وصول المبلغ والمرجع. التأكيد يغيّر حالة الدفع فقط ويبقي المخزون محجوزًا حتى الشحن.",
+    transferConfirmVerify: "تأكيد التحقق",
+    transferKeepPending: "ليس الآن",
+    transferRejectTitle: "رفض ادعاء التحويل",
+    transferRejectHint:
+      "سيُسجّل الرفض باسمك ووقته، ويُلغى الطلب وتُحرَّر الكمية المحجوزة مرة واحدة. لا يمكن التراجع.",
+    transferConfirmReject: "تأكيد الرفض",
+    transferKeepClaim: "الاحتفاظ بالمراجعة",
+    transferNoteLabel: "ملاحظة القرار (اختياري)",
+    transferNotePlaceholder: "مثال: لم يصل المبلغ إلى المحفظة",
+    transferNoteHint: "حتى ٣٠٠ حرف.",
+    transferWaiting:
+      "بانتظار أن يرسل العميل مرجع التحويل. لن يُسجّل الدفع تلقائيًا.",
+    transferVerifiedNote: "تم التحقق من التحويل يدويًا. المخزون ما زال محجوزًا حتى الشحن.",
+    transferRejectedNote: "تم رفض التحويل وإلغاء الطلب وتحرير الحجز.",
+    transferClaimStatus: {
+      pending: "قيد المراجعة",
+      approved: "تم التحقق",
+      rejected: "مرفوض",
+      cancelled: "ملغي",
+    },
     localisation: {
       ACCEPTED: "تم قبول الطلب.",
       PREPARED: "تم تحويل الطلب إلى قيد التجهيز.",
       HANDED_TO_SHIPPING: "تم تسليم الطلب للشحن وتثبيت المخزون مرة واحدة.",
       DELIVERED: "تم تسجيل توصيل الطلب.",
       COLLECTED: "تم تسجيل تحصيل الدفع عند الاستلام.",
+      TRANSFER_VERIFIED: "تم تأكيد التحقق من التحويل اليدوي.",
+      TRANSFER_REJECTED: "تم رفض التحويل وإلغاء الطلب وتحرير الحجز.",
+      INVALID_NOTE: "ملاحظة القرار طويلة جدًا.",
       CANCELLED: "تم إلغاء الطلب وتحرير الحجز مرة واحدة.",
       ALREADY_APPLIED: "تمت هذه الخطوة مسبقًا؛ لم يتغير شيء.",
       INVALID_TRANSITION:
@@ -159,6 +220,40 @@ const COPY: Record<MerchantLocale, Copy> = {
     reasonRequired: "Enter a reason of 3–300 characters.",
     readOnlyNote:
       "You can review this order only. Accept, prepare, shipping, delivery, collection and cancel are unavailable until a platform administrator reactivates the store.",
+    transferTitle: "Vodafone Cash transfer",
+    transferAwaitingLabel: "Transfer awaiting review",
+    transferReferenceLabel: "Buyer transfer reference",
+    transferSubmittedAtLabel: "Reported at",
+    transferDecidedAtLabel: "Decided at",
+    transferDecidedByLabel: "Decided by",
+    transferVerify: "Verify transfer received",
+    transferReject: "Reject transfer",
+    transferWorking: "Saving decision…",
+    transferVerifyTitle: "Confirm the transfer was verified",
+    transferVerifyHint:
+      "Check your own wallet first and match the amount and reference. Verification changes payment state only; stock stays reserved until shipping.",
+    transferConfirmVerify: "Confirm verification",
+    transferKeepPending: "Not yet",
+    transferRejectTitle: "Reject the transfer claim",
+    transferRejectHint:
+      "The rejection records you and the time, cancels the order and releases the held stock once. This cannot be undone.",
+    transferConfirmReject: "Confirm rejection",
+    transferKeepClaim: "Keep claim open",
+    transferNoteLabel: "Decision note (optional)",
+    transferNotePlaceholder: "e.g. the amount is not in the wallet",
+    transferNoteHint: "Up to 300 characters.",
+    transferWaiting:
+      "Waiting for the buyer to submit a transfer reference. Nothing is marked paid automatically.",
+    transferVerifiedNote:
+      "The transfer was verified manually. Stock stays reserved until shipping.",
+    transferRejectedNote:
+      "The transfer was rejected, the order cancelled and the reservation released.",
+    transferClaimStatus: {
+      pending: "pending review",
+      approved: "verified",
+      rejected: "rejected",
+      cancelled: "cancelled",
+    },
     localisation: {
       ACCEPTED: "Order accepted.",
       PREPARED: "Order marked as preparing.",
@@ -166,6 +261,10 @@ const COPY: Record<MerchantLocale, Copy> = {
         "Order handed to shipping and stock committed exactly once.",
       DELIVERED: "Order delivery recorded.",
       COLLECTED: "Cash-on-delivery collection recorded.",
+      TRANSFER_VERIFIED: "Manual transfer verified.",
+      TRANSFER_REJECTED:
+        "Transfer rejected, order cancelled and the reservation released once.",
+      INVALID_NOTE: "The decision note is too long.",
       CANCELLED: "Order cancelled and the reservation released once.",
       ALREADY_APPLIED: "This step was already completed; nothing changed.",
       INVALID_TRANSITION:
@@ -186,13 +285,87 @@ type Feedback = {
   text: string;
 };
 
-type PendingAction = MerchantOrderNextAction | "cancel" | null;
-type Confirmation = "hand_to_shipping" | "collect_cod" | null;
+type PendingAction =
+  | MerchantOrderNextAction
+  | "cancel"
+  | "verify_transfer"
+  | "reject_transfer"
+  | null;
+type Confirmation =
+  | "hand_to_shipping"
+  | "collect_cod"
+  | "verify_transfer"
+  | "reject_transfer"
+  | null;
+
+export type MerchantOrderTransferClaimView = {
+  reference: string;
+  status: string;
+  submittedAtLabel: string;
+  decidedAtLabel: string | null;
+  decidedByEmail: string | null;
+};
+
+function TransferClaimDetails({
+  copy,
+  claim,
+  total,
+  currency,
+}: {
+  copy: Copy;
+  claim: MerchantOrderTransferClaimView;
+  total: string;
+  currency: string;
+}) {
+  return (
+    <div
+      className="space-y-2 rounded-lg border border-border bg-muted/40 p-3 text-sm"
+      data-testid="merchant-order-transfer-claim"
+      data-claim-status={claim.status}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-medium">{copy.transferReferenceLabel}</p>
+        <span
+          className="rounded-full border border-border bg-background px-2 py-0.5 text-xs font-medium"
+          data-testid="merchant-order-transfer-status"
+          data-value={claim.status}
+        >
+          {copy.transferClaimStatus[claim.status] ?? claim.status}
+        </span>
+      </div>
+      <p className="break-all font-semibold" dir="ltr">
+        {claim.reference}
+      </p>
+      <p className="text-sm font-semibold">
+        {total} {currency}
+      </p>
+      <dl className="grid gap-1 text-xs text-muted-foreground">
+        <div className="flex flex-wrap justify-between gap-2">
+          <dt>{copy.transferSubmittedAtLabel}</dt>
+          <dd className="font-medium">{claim.submittedAtLabel}</dd>
+        </div>
+        {claim.decidedAtLabel ? (
+          <div className="flex flex-wrap justify-between gap-2">
+            <dt>{copy.transferDecidedAtLabel}</dt>
+            <dd className="font-medium">{claim.decidedAtLabel}</dd>
+          </div>
+        ) : null}
+        {claim.decidedByEmail ? (
+          <div className="flex flex-wrap justify-between gap-2">
+            <dt>{copy.transferDecidedByLabel}</dt>
+            <dd className="break-all font-medium">{claim.decidedByEmail}</dd>
+          </div>
+        ) : null}
+      </dl>
+    </div>
+  );
+}
 
 export function MerchantOrderActions({
   orderId,
   status,
   fulfillmentStatus,
+  paymentMethod,
   paymentStatus,
   orderReference,
   cancellationReason,
@@ -200,10 +373,12 @@ export function MerchantOrderActions({
   currency,
   locale,
   readOnly,
+  transferClaim,
 }: {
   orderId: string;
   status: string;
   fulfillmentStatus: string;
+  paymentMethod: string;
   paymentStatus: string;
   orderReference: string;
   cancellationReason: string | null;
@@ -211,6 +386,7 @@ export function MerchantOrderActions({
   currency: string;
   locale: MerchantLocale;
   readOnly: boolean;
+  transferClaim: MerchantOrderTransferClaimView | null;
 }) {
   const copy = COPY[locale];
   const reasonId = useId();
@@ -222,12 +398,14 @@ export function MerchantOrderActions({
   const [isCancelOpen, setIsCancelOpen] = useState(false);
   const [reason, setReason] = useState("");
   const [reasonError, setReasonError] = useState<string | null>(null);
+  const [decisionNote, setDecisionNote] = useState("");
   const [actionCompletion, setActionCompletion] = useState(0);
 
   const nextAction = nextMerchantOrderAction(
     status,
     fulfillmentStatus,
     paymentStatus,
+    paymentMethod,
   );
   const canCancel = canCancelMerchantOrder(status, fulfillmentStatus);
 
@@ -276,6 +454,14 @@ export function MerchantOrderActions({
             <p className="break-words font-medium">{cancellationReason}</p>
           </div>
         ) : null}
+        {paymentMethod === "vodafone_cash" && transferClaim ? (
+          <TransferClaimDetails
+            copy={copy}
+            claim={transferClaim}
+            total={total}
+            currency={currency}
+          />
+        ) : null}
         <p
           className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground"
           data-testid="merchant-order-readonly-note"
@@ -318,6 +504,7 @@ export function MerchantOrderActions({
     }
 
     setConfirmation(null);
+    setDecisionNote("");
     setActionCompletion((value) => value + 1);
     return true;
   }
@@ -341,7 +528,14 @@ export function MerchantOrderActions({
                   ? await markMerchantOrderDeliveredAction(orderId)
                   : action === "collect_cod"
                     ? await collectMerchantOrderPaymentAction(orderId)
-                    : await cancelMerchantOrderAction({ orderId, reason });
+                    : action === "verify_transfer"
+                      ? await verifyVodafoneCashTransferAction(orderId)
+                      : action === "reject_transfer"
+                        ? await rejectVodafoneCashTransferAction({
+                            orderId,
+                            note: decisionNote,
+                          })
+                        : await cancelMerchantOrderAction({ orderId, reason });
         applyResult(result, action === "cancel");
       } catch {
         setFeedback({ tone: "error", text: copy.localisation.NETWORK });
@@ -360,6 +554,13 @@ export function MerchantOrderActions({
     }
 
     runAction(action);
+  }
+
+  function chooseTransferAction(action: "verify_transfer" | "reject_transfer") {
+    setFeedback(null);
+    setIsCancelOpen(false);
+    setDecisionNote("");
+    setConfirmation(action);
   }
 
   function submitCancellation(event: FormEvent<HTMLFormElement>) {
@@ -392,7 +593,12 @@ export function MerchantOrderActions({
     : null;
 
   const stateNote =
-    status === "cancelled"
+    paymentMethod === "vodafone_cash" && paymentStatus === "transfer_rejected"
+      ? copy.transferRejectedNote
+      : paymentMethod === "vodafone_cash" &&
+          paymentStatus === "transfer_verified"
+        ? copy.transferVerifiedNote
+        : status === "cancelled"
       ? copy.cancelledNote
       : fulfillmentStatus === "handed_to_shipping"
         ? copy.shippedNote
@@ -538,6 +744,182 @@ export function MerchantOrderActions({
             </Button>
           </div>
         </div>
+      ) : null}
+
+      {paymentMethod === "vodafone_cash" ? (
+        <section
+          className="space-y-3 rounded-lg border border-border bg-background p-3"
+          data-testid="merchant-order-transfer"
+          data-claim-status={transferClaim?.status ?? "none"}
+          data-payment-status={paymentStatus}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-medium">{copy.transferTitle}</p>
+            {transferClaim?.status === "pending" ? (
+              <span
+                className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:text-amber-300"
+                data-testid="merchant-order-transfer-awaiting-review"
+              >
+                {copy.transferAwaitingLabel}
+              </span>
+            ) : null}
+          </div>
+
+          {transferClaim ? (
+            <TransferClaimDetails
+              copy={copy}
+              claim={transferClaim}
+              total={total}
+              currency={currency}
+            />
+          ) : paymentStatus === "awaiting_transfer" &&
+            status !== "cancelled" ? (
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="merchant-order-transfer-waiting"
+            >
+              {copy.transferWaiting}
+            </p>
+          ) : null}
+
+          {transferClaim?.status === "pending" &&
+          confirmation === null &&
+          !readOnly ? (
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                type="button"
+                className="min-h-11 w-full touch-manipulation gap-2 sm:w-auto"
+                onClick={() => chooseTransferAction("verify_transfer")}
+                disabled={isPending}
+                data-testid="merchant-order-transfer-verify"
+              >
+                <CheckCircle2 className="size-4" />
+                {copy.transferVerify}
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                className="min-h-11 w-full touch-manipulation gap-2 sm:w-auto"
+                onClick={() => chooseTransferAction("reject_transfer")}
+                disabled={isPending}
+                data-testid="merchant-order-transfer-reject"
+              >
+                <XCircle className="size-4" />
+                {copy.transferReject}
+              </Button>
+            </div>
+          ) : null}
+
+          {confirmation === "verify_transfer" ? (
+            <div
+              className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-3"
+              data-testid="merchant-order-transfer-verify-confirm"
+            >
+              <div className="space-y-1">
+                <p className="text-sm font-medium">
+                  {copy.transferVerifyTitle}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {copy.transferVerifyHint}
+                </p>
+                <p className="text-sm font-semibold">
+                  {total} {currency}
+                </p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button
+                  type="button"
+                  className="min-h-11 w-full touch-manipulation gap-2 sm:w-auto"
+                  onClick={() => runAction("verify_transfer")}
+                  disabled={isPending}
+                  data-testid="merchant-order-transfer-verify-submit"
+                >
+                  {isPending && pendingAction === "verify_transfer" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="size-4" />
+                  )}
+                  {isPending && pendingAction === "verify_transfer"
+                    ? copy.transferWorking
+                    : copy.transferConfirmVerify}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-h-11 w-full touch-manipulation sm:w-auto"
+                  onClick={() => setConfirmation(null)}
+                  disabled={isPending}
+                  data-testid="merchant-order-transfer-verify-cancel"
+                >
+                  {copy.transferKeepPending}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
+          {confirmation === "reject_transfer" ? (
+            <div
+              className="space-y-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3"
+              data-testid="merchant-order-transfer-reject-confirm"
+            >
+              <div className="space-y-1">
+                <p className="text-sm font-medium">
+                  {copy.transferRejectTitle}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {copy.transferRejectHint}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  {copy.transferNoteLabel}
+                  <textarea
+                    rows={2}
+                    maxLength={300}
+                    value={decisionNote}
+                    onChange={(event) => setDecisionNote(event.target.value)}
+                    placeholder={copy.transferNotePlaceholder}
+                    disabled={isPending}
+                    className="mt-1 w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                    data-testid="merchant-order-transfer-reject-note"
+                  />
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {copy.transferNoteHint}
+                </p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button
+                  type="button"
+                  variant="destructive"
+                  className="min-h-11 w-full touch-manipulation gap-2 sm:w-auto"
+                  onClick={() => runAction("reject_transfer")}
+                  disabled={isPending}
+                  data-testid="merchant-order-transfer-reject-submit"
+                >
+                  {isPending && pendingAction === "reject_transfer" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <XCircle className="size-4" />
+                  )}
+                  {isPending && pendingAction === "reject_transfer"
+                    ? copy.transferWorking
+                    : copy.transferConfirmReject}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-h-11 w-full touch-manipulation sm:w-auto"
+                  onClick={() => setConfirmation(null)}
+                  disabled={isPending}
+                  data-testid="merchant-order-transfer-reject-cancel"
+                >
+                  {copy.transferKeepClaim}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </section>
       ) : null}
 
       {canCancel && !isCancelOpen && confirmation === null ? (

@@ -38,19 +38,30 @@ export function nextMerchantOrderAction(
   status: string,
   fulfillmentStatus: string,
   paymentStatus = "awaiting_collection",
+  paymentMethod = "cod",
 ): MerchantOrderNextAction | null {
   if (status === "cancelled" || fulfillmentStatus === "cancelled") return null;
 
   if (fulfillmentStatus === "unfulfilled") {
     if (status === "placed") return "accept";
     if (status === "accepted") return "prepare";
-    if (status === "preparing") return "hand_to_shipping";
+    if (
+      status === "preparing" &&
+      canHandMerchantOrderToShipping(
+        status,
+        fulfillmentStatus,
+        paymentMethod,
+        paymentStatus,
+      )
+    ) {
+      return "hand_to_shipping";
+    }
     return null;
   }
 
   if (fulfillmentStatus === "handed_to_shipping") return "deliver";
 
-  if (fulfillmentStatus === "delivered") {
+  if (fulfillmentStatus === "delivered" && paymentMethod === "cod") {
     return paymentStatus === "awaiting_collection" ? "collect_cod" : null;
   }
 
@@ -71,11 +82,39 @@ export function canCancelMerchantOrder(
   );
 }
 
+/**
+ * Handoff is the commit point for stock, so a manual-transfer order may only
+ * be shipped after the merchant has verified the transfer. COD keeps its
+ * existing pre-collection handoff behaviour.
+ */
 export function canHandMerchantOrderToShipping(
   status: string,
   fulfillmentStatus: string,
+  paymentMethod = "cod",
+  paymentStatus = "awaiting_collection",
 ): boolean {
-  return status === "preparing" && fulfillmentStatus === "unfulfilled";
+  if (status !== "preparing" || fulfillmentStatus !== "unfulfilled") {
+    return false;
+  }
+
+  return (
+    paymentMethod === "cod" || paymentStatus === "transfer_verified"
+  );
+}
+
+/**
+ * Clear, channel-independent state for a buyer-reported transfer that still
+ * needs a merchant decision. A future Needs Attention integration can consume
+ * this without depending on Telegram or any provider automation.
+ */
+export function isTransferAwaitingReview(
+  paymentStatus: string,
+  paymentMethod = "vodafone_cash",
+): boolean {
+  return (
+    paymentMethod === "vodafone_cash" &&
+    paymentStatus === "transfer_awaiting_review"
+  );
 }
 
 export function canMarkMerchantOrderDelivered(

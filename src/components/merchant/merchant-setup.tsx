@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition, type FormEvent } from "react";
-import { Languages, Loader2, Package, Send } from "lucide-react";
+import { Languages, Loader2, Package, Send, Wallet } from "lucide-react";
 
 import {
   saveMerchantStoreLanguageAction,
   saveMerchantTelegramSupportAction,
+  saveMerchantVodafoneCashAction,
 } from "@/app/actions/merchant-settings";
 
 import { Logo } from "@/components/brand/logo";
@@ -24,6 +25,7 @@ import { MerchantTelegramConnection } from "@/components/merchant/merchant-teleg
 import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
 import type { StoreStatus } from "@/db/schema/tenant";
+import type { VodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
 import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 
 type Copy = {
@@ -63,6 +65,23 @@ type Copy = {
   supportRemoved: string;
   supportInvalid: string;
   supportError: string;
+  vodafoneTitle: string;
+  vodafoneBody: string;
+  vodafoneEnabledLabel: string;
+  vodafoneEnabledHint: string;
+  vodafoneNumberLabel: string;
+  vodafoneNumberPlaceholder: string;
+  vodafoneAccountLabel: string;
+  vodafoneAccountPlaceholder: string;
+  vodafoneInstructionsArLabel: string;
+  vodafoneInstructionsEnLabel: string;
+  vodafoneInstructionsHint: string;
+  vodafoneSave: string;
+  vodafoneSaving: string;
+  vodafoneSaved: string;
+  vodafoneInvalid: string;
+  vodafoneError: string;
+  vodafoneNotConfigured: string;
   suspendedTitle: string;
   suspendedBody: string;
   pendingBody: string;
@@ -114,6 +133,28 @@ const COPY: Record<MerchantLocale, Copy> = {
     supportInvalid:
       "أدخل @username صالحًا أو رابط https://t.me/username.",
     supportError: "تعذّر حفظ حساب الدعم. حاول مرة أخرى.",
+    vodafoneTitle: "فودافون كاش — تحويل يدوي",
+    vodafoneBody:
+      "اسمح للعملاء بالتحويل إلى محفظتك ثم راجع كل تحويل من صفحة الطلبات قبل تأكيد الدفع. لا يتم تأكيد أي طلب تلقائيًا.",
+    vodafoneEnabledLabel: "إظهار فودافون كاش عند إتمام الطلب",
+    vodafoneEnabledHint:
+      "لن يظهر الخيار للعملاء إلا بعد حفظ الرقم واسم المستلم وتعليمات التحويل.",
+    vodafoneNumberLabel: "رقم محفظة فودافون كاش",
+    vodafoneNumberPlaceholder: "01xxxxxxxxx",
+    vodafoneAccountLabel: "اسم مستلم التحويل",
+    vodafoneAccountPlaceholder: "الاسم الظاهر في المحفظة",
+    vodafoneInstructionsArLabel: "تعليمات التحويل بالعربية",
+    vodafoneInstructionsEnLabel: "تعليمات التحويل بالإنجليزية",
+    vodafoneInstructionsHint:
+      "اكتب تعليمات واضحة على الأقل بلغة واحدة. ستظهر تعليمات لغة العميل إن توفرت، وإلا ستُستخدم اللغة الأخرى.",
+    vodafoneSave: "حفظ إعدادات فودافون كاش",
+    vodafoneSaving: "جارٍ الحفظ…",
+    vodafoneSaved: "تم حفظ إعدادات فودافون كاش.",
+    vodafoneInvalid:
+      "راجع الرقم واسم المستلم والتعليمات. عند التفعيل يجب إدخال رقم واسم مستلم وتعليمات بلغة واحدة على الأقل.",
+    vodafoneError: "تعذّر حفظ إعدادات فودافون كاش. حاول مرة أخرى.",
+    vodafoneNotConfigured:
+      "إعدادات الدفع للمتجر غير مكتملة. فعّل إعدادات التجارة أولًا.",
     suspendedTitle: "المتجر موقوف مؤقتًا.",
     suspendedBody:
       "يمكنك الاطلاع على حالة المتجر فقط. التعديلات غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
@@ -164,6 +205,28 @@ const COPY: Record<MerchantLocale, Copy> = {
     supportRemoved: "Support account removed.",
     supportInvalid: "Enter a valid @username or https://t.me/username link.",
     supportError: "The support account could not be saved. Try again.",
+    vodafoneTitle: "Vodafone Cash — manual transfer",
+    vodafoneBody:
+      "Let buyers transfer to your wallet, then review each transfer in Orders before confirming payment. Nothing is marked paid automatically.",
+    vodafoneEnabledLabel: "Show Vodafone Cash at checkout",
+    vodafoneEnabledHint:
+      "Buyers see this option only after you save a wallet number, an account name and transfer instructions.",
+    vodafoneNumberLabel: "Vodafone Cash wallet number",
+    vodafoneNumberPlaceholder: "01xxxxxxxxx",
+    vodafoneAccountLabel: "Transfer recipient name",
+    vodafoneAccountPlaceholder: "The name shown on the wallet",
+    vodafoneInstructionsArLabel: "Transfer instructions in Arabic",
+    vodafoneInstructionsEnLabel: "Transfer instructions in English",
+    vodafoneInstructionsHint:
+      "Write clear instructions in at least one language. Buyers see their UI language when available, otherwise the other language.",
+    vodafoneSave: "Save Vodafone Cash settings",
+    vodafoneSaving: "Saving…",
+    vodafoneSaved: "Vodafone Cash settings saved.",
+    vodafoneInvalid:
+      "Check the number, account name and instructions. When enabled, a number, account name and at least one instruction language are required.",
+    vodafoneError: "The Vodafone Cash settings could not be saved. Try again.",
+    vodafoneNotConfigured:
+      "Store commerce settings are incomplete. Configure commerce before enabling this method.",
     suspendedTitle: "This store is suspended.",
     suspendedBody:
       "You can review the store status only. Editing is unavailable until a platform administrator reactivates the store.",
@@ -192,6 +255,7 @@ export function MerchantSetup({
   codOrdersEnabled,
   needsAttentionOrders,
   needsAttentionTotal,
+  vodafoneCashSetting,
   storeDefaultLanguageCode,
   telegramSupportUsername,
 }: {
@@ -206,6 +270,7 @@ export function MerchantSetup({
   codOrdersEnabled: boolean;
   needsAttentionOrders: MerchantNeedsAttentionOrder[];
   needsAttentionTotal: number;
+  vodafoneCashSetting: VodafoneCashSetting | null;
   storeDefaultLanguageCode: "ar" | "en";
   telegramSupportUsername: string | null;
 }) {
@@ -230,6 +295,26 @@ export function MerchantSetup({
     text: string;
   } | null>(null);
   const [isSavingSupport, startSavingSupport] = useTransition();
+  const [vodafoneEnabled, setVodafoneEnabled] = useState(
+    vodafoneCashSetting?.enabled ?? false,
+  );
+  const [vodafoneNumber, setVodafoneNumber] = useState(
+    vodafoneCashSetting?.number ?? "",
+  );
+  const [vodafoneAccountName, setVodafoneAccountName] = useState(
+    vodafoneCashSetting?.accountName ?? "",
+  );
+  const [vodafoneInstructionsAr, setVodafoneInstructionsAr] = useState(
+    vodafoneCashSetting?.instructionsAr ?? "",
+  );
+  const [vodafoneInstructionsEn, setVodafoneInstructionsEn] = useState(
+    vodafoneCashSetting?.instructionsEn ?? "",
+  );
+  const [vodafoneMessage, setVodafoneMessage] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const [isSavingVodafone, startSavingVodafone] = useTransition();
 
   function saveStoreLanguage() {
     setLanguageMessage(null);
@@ -244,6 +329,37 @@ export function MerchantSetup({
       } else {
         setLanguageMessage({ ok: false, text: copy.languageError });
       }
+    });
+  }
+
+  function saveVodafoneCash(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setVodafoneMessage(null);
+
+    startSavingVodafone(async () => {
+      const result = await saveMerchantVodafoneCashAction({
+        enabled: vodafoneEnabled,
+        number: vodafoneNumber,
+        accountName: vodafoneAccountName,
+        instructionsAr: vodafoneInstructionsAr,
+        instructionsEn: vodafoneInstructionsEn,
+      });
+
+      if (result.ok) {
+        setVodafoneMessage({ ok: true, text: copy.vodafoneSaved });
+        router.refresh();
+        return;
+      }
+
+      setVodafoneMessage({
+        ok: false,
+        text:
+          result.error === "COMMERCE_NOT_CONFIGURED"
+            ? copy.vodafoneNotConfigured
+            : result.error === "INVALID_CONFIG"
+              ? copy.vodafoneInvalid
+              : copy.vodafoneError,
+      });
     });
   }
 
@@ -527,6 +643,176 @@ export function MerchantSetup({
           </form>
         </section>
 
+        <section className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Wallet className="size-5" aria-hidden="true" />
+            </div>
+            <div className="space-y-1">
+              <h2 className="font-heading text-lg font-semibold">
+                {copy.vodafoneTitle}
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                {copy.vodafoneBody}
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={saveVodafoneCash} className="space-y-3" noValidate>
+            <label className="flex items-start gap-3 rounded-lg border border-input bg-background p-3 text-sm">
+              <input
+                type="checkbox"
+                checked={vodafoneEnabled}
+                onChange={(event) => {
+                  setVodafoneEnabled(event.target.checked);
+                  if (vodafoneMessage) setVodafoneMessage(null);
+                }}
+                disabled={readOnly || isSavingVodafone}
+                className="mt-0.5 size-4 accent-primary"
+                data-testid="merchant-vodafone-enabled"
+              />
+              <span className="space-y-1">
+                <span className="block font-medium">
+                  {copy.vodafoneEnabledLabel}
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  {copy.vodafoneEnabledHint}
+                </span>
+              </span>
+            </label>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="merchant-vodafone-number"
+                  className="text-sm font-medium"
+                >
+                  {copy.vodafoneNumberLabel}
+                </label>
+                <input
+                  id="merchant-vodafone-number"
+                  type="tel"
+                  dir="ltr"
+                  inputMode="tel"
+                  autoComplete="off"
+                  maxLength={32}
+                  value={vodafoneNumber}
+                  onChange={(event) => {
+                    setVodafoneNumber(event.target.value);
+                    if (vodafoneMessage) setVodafoneMessage(null);
+                  }}
+                  disabled={readOnly || isSavingVodafone}
+                  placeholder={copy.vodafoneNumberPlaceholder}
+                  data-testid="merchant-vodafone-number"
+                  className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-base text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:text-sm"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="merchant-vodafone-account"
+                  className="text-sm font-medium"
+                >
+                  {copy.vodafoneAccountLabel}
+                </label>
+                <input
+                  id="merchant-vodafone-account"
+                  type="text"
+                  maxLength={120}
+                  value={vodafoneAccountName}
+                  onChange={(event) => {
+                    setVodafoneAccountName(event.target.value);
+                    if (vodafoneMessage) setVodafoneMessage(null);
+                  }}
+                  disabled={readOnly || isSavingVodafone}
+                  placeholder={copy.vodafoneAccountPlaceholder}
+                  data-testid="merchant-vodafone-account"
+                  className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-base text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="merchant-vodafone-instructions-ar"
+                  className="text-sm font-medium"
+                >
+                  {copy.vodafoneInstructionsArLabel}
+                </label>
+                <textarea
+                  id="merchant-vodafone-instructions-ar"
+                  dir="rtl"
+                  rows={4}
+                  maxLength={1000}
+                  value={vodafoneInstructionsAr}
+                  onChange={(event) => {
+                    setVodafoneInstructionsAr(event.target.value);
+                    if (vodafoneMessage) setVodafoneMessage(null);
+                  }}
+                  disabled={readOnly || isSavingVodafone}
+                  data-testid="merchant-vodafone-instructions-ar"
+                  className="w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-base shadow-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:text-sm"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="merchant-vodafone-instructions-en"
+                  className="text-sm font-medium"
+                >
+                  {copy.vodafoneInstructionsEnLabel}
+                </label>
+                <textarea
+                  id="merchant-vodafone-instructions-en"
+                  dir="ltr"
+                  rows={4}
+                  maxLength={1000}
+                  value={vodafoneInstructionsEn}
+                  onChange={(event) => {
+                    setVodafoneInstructionsEn(event.target.value);
+                    if (vodafoneMessage) setVodafoneMessage(null);
+                  }}
+                  disabled={readOnly || isSavingVodafone}
+                  data-testid="merchant-vodafone-instructions-en"
+                  className="w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-base shadow-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:text-sm"
+                />
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              {copy.vodafoneInstructionsHint}
+            </p>
+
+            {vodafoneMessage ? (
+              <p
+                role="status"
+                className={`text-sm font-medium ${
+                  vodafoneMessage.ok
+                    ? "text-emerald-700 dark:text-emerald-300"
+                    : "text-destructive"
+                }`}
+              >
+                {vodafoneMessage.text}
+              </p>
+            ) : null}
+
+            <Button
+              type="submit"
+              disabled={readOnly || isSavingVodafone}
+              className="min-h-11 w-full gap-2 sm:w-auto"
+              data-testid="merchant-vodafone-save"
+            >
+              {isSavingVodafone ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Wallet className="size-4" aria-hidden="true" />
+              )}
+              {isSavingVodafone ? copy.vodafoneSaving : copy.vodafoneSave}
+            </Button>
+          </form>
+        </section>
+
         <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
@@ -546,7 +832,7 @@ export function MerchantSetup({
           </div>
         </section>
 
-        {codOrdersEnabled ? (
+        {codOrdersEnabled || vodafoneCashSetting?.enabled ? (
           <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="space-y-1">

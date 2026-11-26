@@ -16,7 +16,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { product } from "./catalog";
-import { store } from "./tenant";
+import { appUser, store } from "./tenant";
 import { telegramConnection } from "./telegram-connections";
 
 /**
@@ -33,6 +33,12 @@ import { telegramConnection } from "./telegram-connections";
  * COD is disabled by default. A store must have an explicit
  * `store_commerce_setting` row with `cod_enabled = true`, and the deployment
  * must opt in through `RABET_COD_ORDERS_ENABLED`.
+ *
+ * Manual Vodafone Cash transfers are a second, independent payment method on
+ * the same order lifecycle. They are disabled by default and require both
+ * `vodafone_cash_enabled = true` on the store row and the deployment opt-in
+ * `RABET_MANUAL_TRANSFER_ENABLED`. A buyer's transfer claim is recorded in
+ * `order_payment_claim`; it never changes payment state by itself.
  */
 
 const CURRENCIES = sql`currency IN ('SAR', 'USD', 'AED', 'EGP')`;
@@ -49,6 +55,13 @@ export const storeCommerceSetting = pgTable(
       .notNull()
       .default("0.00"),
     codEnabled: boolean("cod_enabled").notNull().default(false),
+    vodafoneCashEnabled: boolean("vodafone_cash_enabled")
+      .notNull()
+      .default(false),
+    vodafoneCashNumber: text("vodafone_cash_number"),
+    vodafoneCashAccountName: text("vodafone_cash_account_name"),
+    vodafoneCashInstructionsAr: text("vodafone_cash_instructions_ar"),
+    vodafoneCashInstructionsEn: text("vodafone_cash_instructions_en"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
@@ -61,6 +74,42 @@ export const storeCommerceSetting = pgTable(
     check(
       "store_commerce_setting_delivery_fee_nonnegative_check",
       sql`${table.deliveryFee} >= 0`,
+    ),
+    check(
+      "store_commerce_setting_vodafone_cash_config_check",
+      sql`(
+        ${table.vodafoneCashEnabled} = false
+        OR (
+          ${table.vodafoneCashNumber} IS NOT NULL
+          AND btrim(${table.vodafoneCashNumber}) <> ''
+          AND ${table.vodafoneCashAccountName} IS NOT NULL
+          AND btrim(${table.vodafoneCashAccountName}) <> ''
+          AND (
+            (${table.vodafoneCashInstructionsAr} IS NOT NULL
+              AND btrim(${table.vodafoneCashInstructionsAr}) <> '')
+            OR
+            (${table.vodafoneCashInstructionsEn} IS NOT NULL
+              AND btrim(${table.vodafoneCashInstructionsEn}) <> '')
+          )
+        )
+      )`,
+    ),
+    check(
+      "store_commerce_setting_vodafone_cash_number_length_check",
+      sql`${table.vodafoneCashNumber} IS NULL
+        OR char_length(${table.vodafoneCashNumber}) <= 32`,
+    ),
+    check(
+      "store_commerce_setting_vodafone_cash_account_name_length_check",
+      sql`${table.vodafoneCashAccountName} IS NULL
+        OR char_length(${table.vodafoneCashAccountName}) <= 120`,
+    ),
+    check(
+      "store_commerce_setting_vodafone_cash_instructions_length_check",
+      sql`(${table.vodafoneCashInstructionsAr} IS NULL
+          OR char_length(${table.vodafoneCashInstructionsAr}) <= 1000)
+        AND (${table.vodafoneCashInstructionsEn} IS NULL
+          OR char_length(${table.vodafoneCashInstructionsEn}) <= 1000)`,
     ),
   ],
 );
@@ -115,6 +164,7 @@ export const cart = pgTable(
     telegramChatId: bigint("telegram_chat_id", { mode: "number" }).notNull(),
     status: text("status").notNull().default("open"),
     checkoutState: text("checkout_state").notNull().default("cart"),
+    paymentMethod: text("payment_method").notNull().default("cod"),
     checkoutKey: uuid("checkout_key"),
     customerName: text("customer_name"),
     customerPhone: text("customer_phone"),
@@ -147,6 +197,10 @@ export const cart = pgTable(
     check(
       "cart_checkout_state_check",
       sql`${table.checkoutState} IN ('cart', 'awaiting_phone', 'awaiting_address', 'review')`,
+    ),
+    check(
+      "cart_payment_method_check",
+      sql`${table.paymentMethod} IN ('cod', 'vodafone_cash')`,
     ),
     check("cart_telegram_user_positive_check", sql`${table.telegramUserId} > 0`),
     check("cart_telegram_chat_positive_check", sql`${table.telegramChatId} > 0`),
@@ -212,7 +266,20 @@ export type OrderStatus =
   | "accepted"
   | "preparing"
   | "cancelled";
-export type PaymentStatus = "awaiting_collection" | "collected" | "failed";
+export type PaymentMethod = "cod" | "vodafone_cash";
+export type PaymentStatus =
+  | "awaiting_collection"
+  | "collected"
+  | "failed"
+  | "awaiting_transfer"
+  | "transfer_awaiting_review"
+  | "transfer_verified"
+  | "transfer_rejected";
+export type TransferClaimStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "cancelled";
 export type FulfillmentStatus =
   | "unfulfilled"
   | "handed_to_shipping"
@@ -258,6 +325,15 @@ export const order = pgTable(
       withTimezone: true,
       mode: "date",
     }),
+    transferReferenceRequestedAt: timestamp("transfer_reference_requested_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    transferPromptMessageId: bigint("transfer_prompt_message_id", {
+      mode: "number",
+    }),
+    transferPromptToken: uuid("transfer_prompt_token"),
+    transferSnapshot: jsonb("transfer_snapshot"),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true, mode: "date" }),
     cancellationReason: text("cancellation_reason"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
@@ -315,10 +391,60 @@ export const order = pgTable(
       sql`${table.cancellationReason} IS NULL
         OR char_length(${table.cancellationReason}) BETWEEN 3 AND 300`,
     ),
-    check("order_payment_method_check", sql`${table.paymentMethod} = 'cod'`),
+    check(
+      "order_payment_method_check",
+      sql`${table.paymentMethod} IN ('cod', 'vodafone_cash')`,
+    ),
     check(
       "order_payment_status_check",
-      sql`${table.paymentStatus} IN ('awaiting_collection', 'collected', 'failed')`,
+      sql`${table.paymentStatus} IN (
+        'awaiting_collection',
+        'collected',
+        'failed',
+        'awaiting_transfer',
+        'transfer_awaiting_review',
+        'transfer_verified',
+        'transfer_rejected'
+      )`,
+    ),
+    check(
+      "order_payment_method_status_check",
+      sql`(
+        (${table.paymentMethod} = 'cod'
+          AND ${table.paymentStatus} IN ('awaiting_collection', 'collected', 'failed'))
+        OR
+        (${table.paymentMethod} = 'vodafone_cash'
+          AND ${table.paymentStatus} IN (
+            'awaiting_transfer',
+            'transfer_awaiting_review',
+            'transfer_verified',
+            'transfer_rejected'
+          ))
+      )`,
+    ),
+    check(
+      "order_transfer_reference_request_state_check",
+      sql`(
+        (${table.transferReferenceRequestedAt} IS NULL
+          OR ${table.paymentMethod} = 'vodafone_cash')
+        AND
+        (${table.transferPromptMessageId} IS NULL
+          OR (${table.paymentMethod} = 'vodafone_cash'
+            AND ${table.transferPromptMessageId} > 0))
+        AND
+        (${table.transferPromptToken} IS NULL
+          OR ${table.paymentMethod} = 'vodafone_cash')
+      )`,
+    ),
+    check(
+      "order_transfer_snapshot_state_check",
+      sql`(
+        (${table.paymentMethod} = 'vodafone_cash'
+          AND ${table.transferSnapshot} IS NOT NULL)
+        OR
+        (${table.paymentMethod} = 'cod'
+          AND ${table.transferSnapshot} IS NULL)
+      )`,
     ),
     check(
       "order_fulfillment_status_check",
@@ -467,6 +593,98 @@ export const inventoryReservation = pgTable(
     check(
       "inventory_reservation_status_check",
       sql`${table.status} IN ('reserved', 'committed', 'released')`,
+    ),
+  ],
+);
+
+/**
+ * Buyer-reported manual transfer claims for one order.
+ *
+ * A claim is evidence supplied by the buyer, not a payment. Submitting it only
+ * moves the order to `transfer_awaiting_review`; an authorized merchant must
+ * verify the transfer against their own wallet before the order becomes
+ * `transfer_verified`. Rejection releases the reservation and cancels the
+ * order in the same transaction, so stock can never stay held for a payment
+ * that will not arrive.
+ *
+ * The unique order id makes a repeated submission idempotent. The store/reference
+ * unique index prevents the same transfer reference from being claimed against
+ * two orders in one store. `decided_by` records the authenticated merchant user
+ * as the decision actor.
+ */
+export const orderPaymentClaim = pgTable(
+  "order_payment_claim",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    orderId: uuid("order_id")
+      .notNull()
+      .references(() => order.id, { onDelete: "restrict" }),
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "restrict" }),
+    method: text("method").notNull().default("vodafone_cash"),
+    reference: text("reference").notNull(),
+    status: text("status").notNull().default("pending"),
+    submittedAt: timestamp("submitted_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true, mode: "date" }),
+    decidedBy: uuid("decided_by").references(() => appUser.id, {
+      onDelete: "restrict",
+    }),
+    decisionNote: text("decision_note"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("order_payment_claim_order_unique").on(table.orderId),
+    uniqueIndex("order_payment_claim_store_reference_unique").on(
+      table.storeId,
+      table.reference,
+    ),
+    index("order_payment_claim_store_status_idx").on(
+      table.storeId,
+      table.status,
+    ),
+    check(
+      "order_payment_claim_method_check",
+      sql`${table.method} = 'vodafone_cash'`,
+    ),
+    check(
+      "order_payment_claim_status_check",
+      sql`${table.status} IN ('pending', 'approved', 'rejected', 'cancelled')`,
+    ),
+    check(
+      "order_payment_claim_reference_length_check",
+      sql`char_length(${table.reference}) BETWEEN 3 AND 80`,
+    ),
+    check(
+      "order_payment_claim_decision_state_check",
+      sql`(
+        (${table.status} = 'pending'
+          AND ${table.decidedAt} IS NULL
+          AND ${table.decidedBy} IS NULL)
+        OR
+        (${table.status} IN ('approved', 'rejected')
+          AND ${table.decidedAt} IS NOT NULL
+          AND ${table.decidedBy} IS NOT NULL)
+        OR
+        (${table.status} = 'cancelled'
+          AND ${table.decidedAt} IS NOT NULL
+          AND ${table.decidedBy} IS NULL)
+      )`,
+    ),
+    check(
+      "order_payment_claim_decision_note_length_check",
+      sql`${table.decisionNote} IS NULL
+        OR char_length(${table.decisionNote}) <= 300`,
     ),
   ],
 );

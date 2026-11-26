@@ -84,7 +84,7 @@ import {
   CRITICAL_CONSTRAINTS_V12,
   CRITICAL_CONSTRAINTS_V13,
   CRITICAL_CONSTRAINTS_V14,
-  CRITICAL_CONSTRAINTS_V15,
+  CRITICAL_CONSTRAINTS_V16,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
@@ -96,6 +96,7 @@ import {
   EXPECTED_INDEXES_V8,
   EXPECTED_INDEXES_V9,
   EXPECTED_INDEXES_V10,
+  EXPECTED_INDEXES_V16,
   EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
@@ -109,6 +110,7 @@ import {
   EXPECTED_TABLES_V9,
   EXPECTED_TABLES_V10,
   EXPECTED_TABLES_V11,
+  EXPECTED_TABLES_V16,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -1413,9 +1415,9 @@ export async function runProdActions({
       ) {
         header("Validating prior release schema on target (read-only)");
         const validated = await validateTarget(ctx, {
-          expectedTables: EXPECTED_TABLES,
-          expectedIndexes: EXPECTED_INDEXES,
-          expectedConstraints: CRITICAL_CONSTRAINTS_V15,
+          expectedTables: EXPECTED_TABLES_V16,
+          expectedIndexes: EXPECTED_INDEXES_V16,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V16,
           expectedHashes: ctx.committedHashes.slice(0, 17).map((e) => e.hash),
         });
         if (!validated) {
@@ -1436,7 +1438,7 @@ export async function runProdActions({
         header("Validating prior release schema on target (read-only)");
         const validated = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V11,
-          expectedIndexes: EXPECTED_INDEXES,
+          expectedIndexes: EXPECTED_INDEXES_V16,
           expectedConstraints: CRITICAL_CONSTRAINTS_V14,
           expectedHashes: ctx.committedHashes.slice(0, 16).map((e) => e.hash),
         });
@@ -1458,7 +1460,7 @@ export async function runProdActions({
         header("Validating prior release schema on target (read-only)");
         const validated = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V11,
-          expectedIndexes: EXPECTED_INDEXES,
+          expectedIndexes: EXPECTED_INDEXES_V16,
           expectedConstraints: CRITICAL_CONSTRAINTS_V13,
           expectedHashes: ctx.committedHashes.slice(0, 15).map((e) => e.hash),
         });
@@ -1480,7 +1482,7 @@ export async function runProdActions({
         header("Validating prior release schema on target (read-only)");
         const validated = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V11,
-          expectedIndexes: EXPECTED_INDEXES,
+          expectedIndexes: EXPECTED_INDEXES_V16,
           expectedConstraints: CRITICAL_CONSTRAINTS_V12,
           expectedHashes: ctx.committedHashes.slice(0, 14).map((e) => e.hash),
         });
@@ -1790,6 +1792,9 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV17 =
+        inspected.state.appliedCount === 18 &&
+        inspected.state.pending[0] === "0018_sparkling_morlun";
       const isKnownPriorReleaseV16 =
         inspected.state.appliedCount === 17 &&
         inspected.state.pending[0] === "0017_store_telegram_support";
@@ -1839,12 +1844,38 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV16) {
+      if (isKnownPriorReleaseV17) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
-          expectedTables: EXPECTED_TABLES,
-          expectedIndexes: EXPECTED_INDEXES,
-          expectedConstraints: CRITICAL_CONSTRAINTS_V15,
+          expectedTables: EXPECTED_TABLES_V16,
+          expectedIndexes: EXPECTED_INDEXES_V16,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V16,
+          expectedHashes: ctx.committedHashes.slice(0, 18).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0017_store_telegram_support). " +
+              "Proceeding with migration to 0018_sparkling_morlun.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV16) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V16,
+          expectedIndexes: EXPECTED_INDEXES_V16,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V16,
           expectedHashes: ctx.committedHashes.slice(0, 17).map((e) => e.hash),
         });
 
@@ -1853,7 +1884,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0016_buyer_language_support). " +
-              "Proceeding with migration to 0017_store_telegram_support.",
+              "Proceeding with migration to 0018_sparkling_morlun.",
           );
         } else {
           io.line("");
@@ -1869,7 +1900,7 @@ export async function runProdActions({
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V11,
-          expectedIndexes: EXPECTED_INDEXES,
+          expectedIndexes: EXPECTED_INDEXES_V16,
           expectedConstraints: CRITICAL_CONSTRAINTS_V14,
           expectedHashes: ctx.committedHashes.slice(0, 16).map((e) => e.hash),
         });
@@ -1895,7 +1926,7 @@ export async function runProdActions({
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V11,
-          expectedIndexes: EXPECTED_INDEXES,
+          expectedIndexes: EXPECTED_INDEXES_V16,
           expectedConstraints: CRITICAL_CONSTRAINTS_V13,
           expectedHashes: ctx.committedHashes.slice(0, 15).map((e) => e.hash),
         });
@@ -1921,7 +1952,7 @@ export async function runProdActions({
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V11,
-          expectedIndexes: EXPECTED_INDEXES,
+          expectedIndexes: EXPECTED_INDEXES_V16,
           expectedConstraints: CRITICAL_CONSTRAINTS_V12,
           expectedHashes: ctx.committedHashes.slice(0, 14).map((e) => e.hash),
         });

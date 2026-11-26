@@ -369,6 +369,7 @@ export function createFetchTelegramTransport(
 
 export interface FakeSentMessage {
   chatId: number | string;
+  messageId: number;
   text: string;
   replyMarkup?: TelegramReplyMarkup;
 }
@@ -485,7 +486,7 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
         return check;
       }
       nextMessageId += 1;
-      sentMessages.push({ chatId, text, replyMarkup });
+      sentMessages.push({ chatId, messageId: nextMessageId, text, replyMarkup });
       return { ok: true, messageId: nextMessageId };
     },
 

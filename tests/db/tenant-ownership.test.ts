@@ -71,6 +71,7 @@ const ALL_STORE_ID_TABLES = [
   "product_inventory",
   "cart",
   "order",
+  "order_payment_claim",
   "inventory_reservation",
   "buyer_language_preference",
   "store_language_setting",
@@ -396,13 +397,13 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
     const journal = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from drizzle.__drizzle_migrations
     `);
-    expect(journal[0].count).toBe(18);
+    expect(journal[0].count).toBe(19);
 
     const tables = await testDb!.db.execute<{ count: number }>(sql`
       select count(*)::int as count from information_schema.tables
       where table_schema = 'public'
     `);
-    expect(tables[0].count).toBe(37);
+    expect(tables[0].count).toBe(38);
 
     const columns = await testDb!.db.execute<{
       table_name: string;
@@ -429,6 +430,7 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
           column.table_name === "product_inventory" ||
           column.table_name === "cart" ||
           column.table_name === "order" ||
+          column.table_name === "order_payment_claim" ||
           column.table_name === "inventory_reservation" ||
           column.table_name === "buyer_language_preference" ||
           column.table_name === "store_language_setting"

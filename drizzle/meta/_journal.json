@@ -127,6 +127,13 @@
       "when": 1795653620539,
       "tag": "0017_store_telegram_support",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795700484723,
+      "tag": "0018_sparkling_morlun",
+      "breakpoints": true
     }
   ]
 }

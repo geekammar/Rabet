@@ -47,6 +47,32 @@ export type CommerceCopy = {
   deliveryFee: string;
   total: string;
   cashOnDelivery: string;
+  vodafoneCash: string;
+  payWithVodafoneCash: string;
+  transferInstructionsTitle: string;
+  transferTo: string;
+  transferAccount: string;
+  transferInstructions: string;
+  transferInstructionsGuidance: string;
+  transferReferenceButton: string;
+  transferReferencePrompt: string;
+  transferReferencePlaceholder: string;
+  transferReferenceInvalid: string;
+  transferReferenceLabel: string;
+  transferSubmittedTitle: string;
+  transferAwaitingReview: string;
+  transferAlreadySubmitted: string;
+  transferVerifiedTitle: string;
+  transferVerifiedBody: string;
+  transferRejectedTitle: string;
+  transferRejectedBody: string;
+  transferCancelledTitle: string;
+  transferCancelledBody: string;
+  transferRecoveryButton: string;
+  transferRecoveryTitle: string;
+  transferRecoveryHint: string;
+  transferRecoveryEmpty: string;
+  transferAmountLabel: string;
   reviewTitle: string;
   reviewInstruction: string;
   confirmButton: string;
@@ -107,6 +133,40 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     deliveryFee: "Delivery fee",
     total: "Total",
     cashOnDelivery: "Cash on delivery",
+    vodafoneCash: "Vodafone Cash",
+    payWithVodafoneCash: "Transfer with Vodafone Cash",
+    transferInstructionsTitle: "Vodafone Cash transfer",
+    transferTo: "Transfer to",
+    transferAccount: "Recipient name",
+    transferInstructions: "Transfer instructions",
+    transferInstructionsGuidance:
+      "Tap “I have transferred — submit reference” below, then reply to the next message with the reference from your receipt.",
+    transferReferenceButton: "I have transferred — submit reference",
+    transferReferencePrompt:
+      "Reply to this message with the transfer reference from your Vodafone Cash receipt.",
+    transferReferencePlaceholder: "Transfer reference",
+    transferReferenceInvalid:
+      "That reference is invalid. Reply to the prompt with the reference exactly as shown in your receipt (3–80 characters).",
+    transferReferenceLabel: "Reference",
+    transferSubmittedTitle: "Transfer reference received",
+    transferAwaitingReview:
+      "Awaiting merchant verification. The order is not marked paid until the merchant checks the wallet and verifies the transfer.",
+    transferAlreadySubmitted:
+      "A transfer reference is already recorded for this order and is awaiting merchant review.",
+    transferVerifiedTitle: "Transfer verified",
+    transferVerifiedBody:
+      "The merchant verified this transfer. The order is paid; stock remains reserved until shipping.",
+    transferRejectedTitle: "Transfer rejected",
+    transferRejectedBody:
+      "The merchant rejected this transfer claim. The order was cancelled and the stock reservation was released.",
+    transferCancelledTitle: "Order cancelled",
+    transferCancelledBody:
+      "This transfer order was cancelled. No further transfer reference is needed.",
+    transferRecoveryButton: "Vodafone transfers",
+    transferRecoveryTitle: "Outstanding Vodafone Cash transfers",
+    transferRecoveryHint: "Choose the order reference to reopen its instructions.",
+    transferRecoveryEmpty: "There are no outstanding Vodafone Cash transfers for this chat.",
+    transferAmountLabel: "Exact amount",
     reviewTitle: "Review your order",
     reviewInstruction:
       "Confirm only if these details, prices and the delivery fee are correct.",
@@ -169,6 +229,40 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     deliveryFee: "رسوم التوصيل",
     total: "الإجمالي",
     cashOnDelivery: "الدفع عند الاستلام",
+    vodafoneCash: "فودافون كاش",
+    payWithVodafoneCash: "التحويل عبر فودافون كاش",
+    transferInstructionsTitle: "تحويل فودافون كاش",
+    transferTo: "حوّل إلى",
+    transferAccount: "اسم المستلم",
+    transferInstructions: "تعليمات التحويل",
+    transferInstructionsGuidance:
+      "اضغط «لقد حوّلت — إرسال المرجع» بالأسفل، ثم أرسل ردًا على الرسالة التالية يحتوي المرجع الموجود في الإيصال.",
+    transferReferenceButton: "لقد حوّلت — إرسال المرجع",
+    transferReferencePrompt:
+      "أرسل ردًا على هذه الرسالة يحتوي مرجع التحويل الموجود في إيصال فودافون كاش.",
+    transferReferencePlaceholder: "مرجع التحويل",
+    transferReferenceInvalid:
+      "المرجع غير صالح. أرسل ردًا على الرسالة يحتوي المرجع كما يظهر في الإيصال (٣–٨٠ حرفًا).",
+    transferReferenceLabel: "المرجع",
+    transferSubmittedTitle: "تم استلام مرجع التحويل",
+    transferAwaitingReview:
+      "بانتظار مراجعة التاجر. لا يُعد الطلب مدفوعًا حتى يتحقق التاجر من المحفظة ويؤكد التحويل.",
+    transferAlreadySubmitted:
+      "يوجد مرجع تحويل مسجل لهذا الطلب وهو بانتظار مراجعة التاجر.",
+    transferVerifiedTitle: "تم التحقق من التحويل",
+    transferVerifiedBody:
+      "تحقق التاجر من هذا التحويل. الطلب مدفوع، ويبقى المخزون محجوزًا حتى الشحن.",
+    transferRejectedTitle: "تم رفض التحويل",
+    transferRejectedBody:
+      "رفض التاجر ادعاء التحويل. أُلغي الطلب وحُرر حجز المخزون.",
+    transferCancelledTitle: "تم إلغاء الطلب",
+    transferCancelledBody:
+      "أُلغي طلب التحويل هذا. لا حاجة إلى إرسال مرجع تحويل آخر.",
+    transferRecoveryButton: "تحويلات فودافون كاش",
+    transferRecoveryTitle: "تحويلات فودافون كاش المعلقة",
+    transferRecoveryHint: "اختر مرجع الطلب لإعادة فتح تعليماته.",
+    transferRecoveryEmpty: "لا توجد تحويلات فودافون كاش معلقة لهذه المحادثة.",
+    transferAmountLabel: "المبلغ بالضبط",
     reviewTitle: "راجع طلبك",
     reviewInstruction:
       "أكّد فقط إذا كانت هذه التفاصيل والأسعار ورسوم التوصيل صحيحة.",

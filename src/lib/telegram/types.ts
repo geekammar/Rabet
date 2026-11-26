@@ -36,6 +36,10 @@ export interface TelegramMessage {
   text?: string;
   contact?: TelegramContact;
   reply_markup?: TelegramInlineKeyboardMarkup;
+  reply_to_message?: {
+    message_id: number;
+    chat?: TelegramChat;
+  };
 }
 
 export interface TelegramCallbackQuery {
@@ -76,9 +80,16 @@ export interface TelegramReplyKeyboardMarkup {
   input_field_placeholder?: string;
 }
 
+export interface TelegramForceReplyMarkup {
+  force_reply: true;
+  input_field_placeholder?: string;
+  selective?: boolean;
+}
+
 export type TelegramReplyMarkup =
   | TelegramInlineKeyboardMarkup
   | TelegramReplyKeyboardMarkup
+  | TelegramForceReplyMarkup
   | { remove_keyboard: true };
 
 export type TelegramErrorKind =

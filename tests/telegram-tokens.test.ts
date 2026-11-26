@@ -65,7 +65,12 @@ describe("telegram tokens", () => {
     expect(tokens.cartRemove(uuid)).toBe(`cr:${uuid}`);
     expect(tokens.checkout(uuid)).toBe(`co:${uuid}`);
     expect(tokens.confirmCod(uuid, 7)).toBe(`cc:${uuid}:7`);
+    expect(tokens.confirmVodafoneCash(uuid, 7)).toBe(`cv:${uuid}:7`);
     expect(tokens.backToCart(uuid)).toBe(`cb:${uuid}`);
+    expect(tokens.transferReference(uuid)).toBe(`tr:${uuid}`);
+    expect(tokens.transferList()).toBe("tfl");
+    expect(tokens.transferOrder(uuid)).toBe(`tfo:${uuid}`);
+    expect(tokens.languages(`to:${uuid}`)).toBe(`langs:to:${uuid}`);
 
     // All must be well below 64 bytes
     for (const token of [
@@ -94,7 +99,12 @@ describe("telegram tokens", () => {
       tokens.cartRemove(uuid),
       tokens.checkout(uuid),
       tokens.confirmCod(uuid, 99999),
+      tokens.confirmVodafoneCash(uuid, 99999),
       tokens.backToCart(uuid),
+      tokens.transferReference(uuid),
+      tokens.transferList(),
+      tokens.transferOrder(uuid),
+      tokens.languages(`to:${uuid}`),
     ]) {
       expect(Buffer.byteLength(token, "utf8")).toBeLessThanOrEqual(
         TELEGRAM_MAX_CALLBACK_DATA_BYTES,
@@ -132,7 +142,17 @@ describe("telegram tokens", () => {
     expect(() => tokens.checkout("bad-id")).toThrow(/Invalid cart UUID/);
     expect(() => tokens.confirmCod("bad-id", 1)).toThrow(/Invalid cart UUID/);
     expect(() => tokens.confirmCod(uuid, 0)).toThrow(/Invalid quote version/);
+    expect(() => tokens.confirmVodafoneCash("bad-id", 1)).toThrow(
+      /Invalid cart UUID/,
+    );
+    expect(() => tokens.confirmVodafoneCash(uuid, 0)).toThrow(
+      /Invalid quote version/,
+    );
     expect(() => tokens.backToCart("bad-id")).toThrow(/Invalid cart UUID/);
+    expect(() => tokens.transferReference("bad-id")).toThrow(
+      /Invalid order UUID/,
+    );
+    expect(() => tokens.transferOrder("bad-id")).toThrow(/Invalid order UUID/);
   });
 
   it("parses tokens deterministically", () => {
@@ -157,6 +177,10 @@ describe("telegram tokens", () => {
     expect(parseToken("langs:pd:550e8400-e29b-41d4-a716-446655440000")).toEqual({
       type: "languages",
       context: "pd:550e8400-e29b-41d4-a716-446655440000",
+    });
+    expect(parseToken(`langs:to:${uuid}`)).toEqual({
+      type: "languages",
+      context: `to:${uuid}`,
     });
     expect(parseToken("support")).toEqual({ type: "support" });
     expect(parseToken("myinq")).toEqual({ type: "myInquiries", page: 1 });
@@ -240,9 +264,23 @@ describe("telegram tokens", () => {
       cartId: uuid,
       quoteVersion: 4,
     });
+    expect(parseToken(`cv:${uuid}:4`)).toEqual({
+      type: "confirmVodafoneCash",
+      cartId: uuid,
+      quoteVersion: 4,
+    });
     expect(parseToken(`cb:${uuid}`)).toEqual({
       type: "backToCart",
       cartId: uuid,
+    });
+    expect(parseToken(`tr:${uuid}`)).toEqual({
+      type: "transferReference",
+      orderId: uuid,
+    });
+    expect(parseToken("tfl")).toEqual({ type: "transferList" });
+    expect(parseToken(`tfo:${uuid}`)).toEqual({
+      type: "transferOrder",
+      orderId: uuid,
     });
     expect(parseToken("unknown:token")).toEqual({
       type: "unknown",
