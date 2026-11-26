@@ -31,6 +31,8 @@ export type CommerceCopy = {
   languageEnglish: string;
   languageSaved: string;
   invalidLanguage: string;
+  askSellerOnTelegram: string;
+  telegramSupportDraft: (productName: string) => string;
   welcome: (storeName: string) => string;
   empty: string;
   noCategories: string;
@@ -87,6 +89,9 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     languageSaved: "Language updated.",
     invalidLanguage:
       "That language is not available. Choose Arabic or English.",
+    askSellerOnTelegram: "Ask the seller on Telegram",
+    telegramSupportDraft: (productName) =>
+      `Hi, I have a question about ${productName}: `,
     welcome: (storeName) => `Welcome to ${storeName}.`,
     empty: "No products are available in this store yet.",
     noCategories: "No categories are available in this store yet.",
@@ -146,6 +151,9 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     languageEnglish: "English",
     languageSaved: "تم تحديث اللغة.",
     invalidLanguage: "هذه اللغة غير متاحة. اختر العربية أو الإنجليزية.",
+    askSellerOnTelegram: "اسأل البائع على Telegram",
+    telegramSupportDraft: (productName) =>
+      `مرحبًا، عندي سؤال عن ${productName}: `,
     welcome: (storeName) => `مرحبًا بك في ${storeName}.`,
     empty: "لا توجد منتجات متاحة في هذا المتجر بعد.",
     noCategories: "لا توجد أقسام متاحة في هذا المتجر بعد.",

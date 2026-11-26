@@ -9,6 +9,10 @@ import {
   saveMerchantStoreLanguage,
   type MerchantStoreLanguageResult,
 } from "@/lib/merchant/store-language";
+import {
+  saveMerchantTelegramSupport,
+  type MerchantTelegramSupportResult,
+} from "@/lib/merchant/store-telegram-contact";
 
 /**
  * Saves the signed-in merchant's default buyer language for their own store.
@@ -39,6 +43,46 @@ export async function saveMerchantStoreLanguageAction(
   const result = await saveMerchantStoreLanguage(getTransactionDb(), access, {
     code: submitted.code,
   });
+
+  if (result.ok) {
+    revalidatePath("/app/setup");
+    refresh();
+  }
+
+  return result;
+}
+
+/**
+ * Saves or clears the signed-in merchant's Telegram support account.
+ *
+ * The store comes from the verified session scope, never from the submitted
+ * payload. The enablement gate, eligibility and read-only status are re-read on
+ * every call, and the write layer repeats the same checks inside its
+ * transaction before updating the row.
+ */
+export async function saveMerchantTelegramSupportAction(
+  input: unknown,
+): Promise<MerchantTelegramSupportResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+
+  const result = await saveMerchantTelegramSupport(
+    getTransactionDb(),
+    access,
+    { username: submitted.username },
+  );
 
   if (result.ok) {
     revalidatePath("/app/setup");

@@ -1,0 +1,2 @@
+ALTER TABLE "store" ADD COLUMN "telegram_support_username" text;--> statement-breakpoint
+ALTER TABLE "store" ADD CONSTRAINT "store_telegram_support_username_format_check" CHECK ("store"."telegram_support_username" IS NULL OR "store"."telegram_support_username" ~ '^[A-Za-z][A-Za-z0-9_]{4,31}$');

@@ -2,10 +2,13 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
-import { Languages, Loader2, Package } from "lucide-react";
+import { useState, useTransition, type FormEvent } from "react";
+import { Languages, Loader2, Package, Send } from "lucide-react";
 
-import { saveMerchantStoreLanguageAction } from "@/app/actions/merchant-settings";
+import {
+  saveMerchantStoreLanguageAction,
+  saveMerchantTelegramSupportAction,
+} from "@/app/actions/merchant-settings";
 
 import { Logo } from "@/components/brand/logo";
 import {
@@ -47,6 +50,19 @@ type Copy = {
   savingLanguage: string;
   languageSaved: string;
   languageError: string;
+  supportTitle: string;
+  supportBody: string;
+  supportLabel: string;
+  supportPlaceholder: string;
+  supportHint: string;
+  supportExampleTitle: string;
+  supportExample: string;
+  supportSave: string;
+  supportSaving: string;
+  supportSaved: string;
+  supportRemoved: string;
+  supportInvalid: string;
+  supportError: string;
   suspendedTitle: string;
   suspendedBody: string;
   pendingBody: string;
@@ -82,6 +98,22 @@ const COPY: Record<MerchantLocale, Copy> = {
     savingLanguage: "جارٍ الحفظ...",
     languageSaved: "تم حفظ لغة المتجر.",
     languageError: "تعذّر حفظ اللغة. حاول مرة أخرى.",
+    supportTitle: "حساب دعم تيليجرام",
+    supportBody:
+      "أضف حسابًا واحدًا ليتمكن العملاء من فتح محادثة مباشرة معك من صفحة المنتج.",
+    supportLabel: "اسم مستخدم حساب الدعم",
+    supportPlaceholder: "@store_support أو https://t.me/store_support",
+    supportHint:
+      "أدخل @username أو رابط https://t.me/username. اتركه فارغًا لإزالة الحساب.",
+    supportExampleTitle: "مثال رسالة المسودة",
+    supportExample: "مرحبًا، عندي سؤال عن {productName}: ",
+    supportSave: "حفظ حساب الدعم",
+    supportSaving: "جارٍ الحفظ...",
+    supportSaved: "تم حفظ حساب الدعم.",
+    supportRemoved: "تمت إزالة حساب الدعم.",
+    supportInvalid:
+      "أدخل @username صالحًا أو رابط https://t.me/username.",
+    supportError: "تعذّر حفظ حساب الدعم. حاول مرة أخرى.",
     suspendedTitle: "المتجر موقوف مؤقتًا.",
     suspendedBody:
       "يمكنك الاطلاع على حالة المتجر فقط. التعديلات غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
@@ -117,6 +149,21 @@ const COPY: Record<MerchantLocale, Copy> = {
     savingLanguage: "Saving...",
     languageSaved: "Store language saved.",
     languageError: "The language could not be saved. Try again.",
+    supportTitle: "Telegram support account",
+    supportBody:
+      "Add one account so buyers can open a direct chat with you from a product page.",
+    supportLabel: "Support account username",
+    supportPlaceholder: "@store_support or https://t.me/store_support",
+    supportHint:
+      "Enter @username or an https://t.me/username link. Leave it empty to remove the account.",
+    supportExampleTitle: "Example draft message",
+    supportExample: "Hi, I have a question about {productName}: ",
+    supportSave: "Save support account",
+    supportSaving: "Saving...",
+    supportSaved: "Support account saved.",
+    supportRemoved: "Support account removed.",
+    supportInvalid: "Enter a valid @username or https://t.me/username link.",
+    supportError: "The support account could not be saved. Try again.",
     suspendedTitle: "This store is suspended.",
     suspendedBody:
       "You can review the store status only. Editing is unavailable until a platform administrator reactivates the store.",
@@ -145,6 +192,7 @@ export function MerchantSetup({
   codOrdersEnabled,
   needsAttentionOrders,
   storeDefaultLanguageCode,
+  telegramSupportUsername,
 }: {
   storeName: string;
   email: string;
@@ -157,6 +205,7 @@ export function MerchantSetup({
   codOrdersEnabled: boolean;
   needsAttentionOrders: MerchantNeedsAttentionOrder[];
   storeDefaultLanguageCode: "ar" | "en";
+  telegramSupportUsername: string | null;
 }) {
   const [locale, setLocale] = useMerchantLocale(initialLocale, "setup");
   const copy = COPY[locale];
@@ -171,6 +220,14 @@ export function MerchantSetup({
     text: string;
   } | null>(null);
   const [isSavingLanguage, startSavingLanguage] = useTransition();
+  const [supportUsername, setSupportUsername] = useState(
+    telegramSupportUsername ?? "",
+  );
+  const [supportMessage, setSupportMessage] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const [isSavingSupport, startSavingSupport] = useTransition();
 
   function saveStoreLanguage() {
     setLanguageMessage(null);
@@ -185,6 +242,35 @@ export function MerchantSetup({
       } else {
         setLanguageMessage({ ok: false, text: copy.languageError });
       }
+    });
+  }
+
+  function saveTelegramSupport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSupportMessage(null);
+
+    startSavingSupport(async () => {
+      const result = await saveMerchantTelegramSupportAction({
+        username: supportUsername,
+      });
+
+      if (result.ok) {
+        setSupportUsername(result.username ?? "");
+        setSupportMessage({
+          ok: true,
+          text: result.username ? copy.supportSaved : copy.supportRemoved,
+        });
+        router.refresh();
+        return;
+      }
+
+      setSupportMessage({
+        ok: false,
+        text:
+          result.error === "INVALID_USERNAME"
+            ? copy.supportInvalid
+            : copy.supportError,
+      });
     });
   }
 
@@ -347,6 +433,95 @@ export function MerchantSetup({
             )}
             {isSavingLanguage ? copy.savingLanguage : copy.saveLanguage}
           </Button>
+        </section>
+
+        <section className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Send className="size-5" aria-hidden="true" />
+            </div>
+            <div className="space-y-1">
+              <h2 className="font-heading text-lg font-semibold">
+                {copy.supportTitle}
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                {copy.supportBody}
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={saveTelegramSupport} className="space-y-3" noValidate>
+            <div className="space-y-1.5">
+              <label
+                htmlFor="merchant-telegram-support"
+                className="text-sm font-medium text-foreground"
+              >
+                {copy.supportLabel}
+              </label>
+              <input
+                id="merchant-telegram-support"
+                name="telegramSupportUsername"
+                type="text"
+                dir="ltr"
+                inputMode="text"
+                autoCapitalize="none"
+                autoComplete="off"
+                spellCheck={false}
+                maxLength={80}
+                value={supportUsername}
+                onChange={(event) => {
+                  setSupportUsername(event.target.value);
+                  if (supportMessage) setSupportMessage(null);
+                }}
+                disabled={readOnly || isSavingSupport}
+                placeholder={copy.supportPlaceholder}
+                aria-describedby="merchant-telegram-support-hint"
+                data-testid="merchant-telegram-support-input"
+                className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-base text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:text-sm"
+              />
+              <p
+                id="merchant-telegram-support-hint"
+                className="text-xs text-muted-foreground"
+              >
+                {copy.supportHint}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm">
+              <p className="font-medium text-foreground">
+                {copy.supportExampleTitle}
+              </p>
+              <p dir="auto" className="mt-1 break-words text-muted-foreground">
+                {copy.supportExample}
+              </p>
+            </div>
+
+            {supportMessage ? (
+              <p
+                role="status"
+                className={`text-sm font-medium ${
+                  supportMessage.ok
+                    ? "text-emerald-700 dark:text-emerald-300"
+                    : "text-destructive"
+                }`}
+              >
+                {supportMessage.text}
+              </p>
+            ) : null}
+
+            <Button
+              type="submit"
+              disabled={readOnly || isSavingSupport}
+              className="min-h-11 w-full gap-2 sm:w-auto"
+            >
+              {isSavingSupport ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Send className="size-4" aria-hidden="true" />
+              )}
+              {isSavingSupport ? copy.supportSaving : copy.supportSave}
+            </Button>
+          </form>
         </section>
 
         <section className="rounded-xl border border-border bg-card p-5 shadow-sm">

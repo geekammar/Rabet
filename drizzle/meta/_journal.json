@@ -120,6 +120,13 @@
       "when": 1795633679616,
       "tag": "0016_buyer_language_support",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1795653620539,
+      "tag": "0017_store_telegram_support",
+      "breakpoints": true
     }
   ]
 }

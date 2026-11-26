@@ -13,6 +13,7 @@ import {
   listMerchantOrdersAwaitingAcceptance,
 } from "@/lib/commerce/orders";
 import { readStoreDefaultLanguage } from "@/lib/data/store-language";
+import { readStoreTelegramSupportUsername } from "@/lib/data/store-telegram-contact";
 import { trustedApplicationOrigin } from "@/lib/http/request-origin";
 import {
   readMerchantLocale,
@@ -43,6 +44,7 @@ export default async function MerchantSetupPage() {
     telegramConnection,
     codAvailability,
     storeDefaultLanguage,
+    telegramSupportUsername,
     needsAttentionOrders,
   ] = await Promise.all([
     readMerchantTelegramConnectionState(db, {
@@ -51,6 +53,7 @@ export default async function MerchantSetupPage() {
     }),
     isCodAvailable(db, access.scope),
     readStoreDefaultLanguage(db, access.store.id),
+    readStoreTelegramSupportUsername(db, access.store.id),
     listMerchantOrdersAwaitingAcceptance(db, access.scope),
   ]);
 
@@ -67,6 +70,7 @@ export default async function MerchantSetupPage() {
       codOrdersEnabled={codAvailability.enabled}
       needsAttentionOrders={needsAttentionOrders}
       storeDefaultLanguageCode={storeDefaultLanguage?.code === "ar" ? "ar" : "en"}
+      telegramSupportUsername={telegramSupportUsername}
     />
   );
 }

@@ -52,6 +52,10 @@ export const store = pgTable(
     name: text("name").notNull(),
     slug: text("slug").notNull().unique(),
     status: text("status").notNull().default("onboarding"),
+    // Optional direct-contact account for the managed storefront. `NULL` means
+    // the merchant has not configured (or explicitly cleared) the contact, so
+    // every existing store remains valid without a backfill.
+    telegramSupportUsername: text("telegram_support_username"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
@@ -68,6 +72,10 @@ export const store = pgTable(
     check(
       "store_status_check",
       sql`${table.status} IN ('onboarding', 'active', 'suspended')`,
+    ),
+    check(
+      "store_telegram_support_username_format_check",
+      sql`${table.telegramSupportUsername} IS NULL OR ${table.telegramSupportUsername} ~ '^[A-Za-z][A-Za-z0-9_]{4,31}$'`,
     ),
   ],
 );
