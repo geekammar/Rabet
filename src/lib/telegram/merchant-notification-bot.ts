@@ -373,7 +373,6 @@ export async function readMerchantNotificationBotPairing(
   const maxBatches = boundedBatchCount(deps?.maxBatches);
   let offset = validOffset(deps?.offset);
 
-  const evaluated: TelegramBotUpdate[] = [];
   let highestUpdateId: number | null = null;
 
   for (let batch = 0; batch < maxBatches; batch++) {
@@ -392,14 +391,29 @@ export async function readMerchantNotificationBotPairing(
     let batchHighest: number | null = null;
 
     for (const update of updates.result) {
-      evaluated.push(update);
-
       if (Number.isSafeInteger(update.update_id)) {
         batchHighest =
           batchHighest === null
             ? update.update_id
             : Math.max(batchHighest, update.update_id);
       }
+    }
+
+    const batchNextOffset =
+      batchHighest === null ? null : batchHighest + 1;
+
+    // Evaluate the whole batch before any later request can confirm it.
+    const match = findMerchantNotificationPairingMatch(
+      updates.result,
+      expectedHash,
+    );
+
+    if (match.status === "paired") {
+      return { ...match, nextOffset: batchNextOffset };
+    }
+
+    if (match.status === "ambiguous") {
+      return { ...match, nextOffset: batchNextOffset };
     }
 
     if (batchHighest === null) break;
@@ -418,21 +432,11 @@ export async function readMerchantNotificationBotPairing(
     offset = batchHighest + 1;
   }
 
-  const nextOffset = highestUpdateId === null ? null : highestUpdateId + 1;
-  const match = findMerchantNotificationPairingMatch(
-    evaluated,
-    expectedHash,
-  );
-
-  if (match.status === "paired") {
-    return { ...match, nextOffset };
-  }
-
-  if (match.status === "ambiguous") {
-    return { ...match, nextOffset };
-  }
-
-  return { status: "pending", nextOffset };
+  return {
+    status: "pending",
+    nextOffset:
+      highestUpdateId === null ? null : highestUpdateId + 1,
+  };
 }
 
 export type MerchantNotificationTestFailureCode =
