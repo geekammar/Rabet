@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 
+vi.mock("@/auth-merchant", () => ({
+  auth: vi.fn(async () => null),
+}));
+
 import {
   appUser,
   merchantNotificationBot,

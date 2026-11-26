@@ -65,6 +65,7 @@ const ALL_STORE_ID_TABLES = [
   ...OWNERSHIP_TABLES,
   "store_membership",
   "merchant_invitation",
+  "merchant_notification_bot",
   "telegram_connection",
   "telegram_link_attempt",
   "store_commerce_setting",
@@ -424,6 +425,7 @@ describe.skipIf(!shouldRun)("S1.2 tenant ownership schema", () => {
       expect(column.is_nullable).toBe(
         column.table_name === "store_membership" ||
           column.table_name === "merchant_invitation" ||
+          column.table_name === "merchant_notification_bot" ||
           column.table_name === "telegram_connection" ||
           column.table_name === "telegram_link_attempt" ||
           column.table_name === "store_commerce_setting" ||

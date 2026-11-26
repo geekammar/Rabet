@@ -103,6 +103,57 @@ function logFailure(phase: string, error: unknown): void {
   });
 }
 
+/**
+ * Finds a typed data error even when the database transaction wrapper has
+ * placed it on the cause chain. The wrapper's own message is never inspected.
+ */
+function hasDataErrorCode(error: unknown, code: string): boolean {
+  let current: unknown = error;
+
+  for (
+    let depth = 0;
+    depth < 8 && current !== null && typeof current === "object";
+    depth++
+  ) {
+    if (current instanceof RabetDataError && current.code === code) {
+      return true;
+    }
+
+    current =
+      "cause" in current
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+  }
+
+  return false;
+}
+
+/** Detects a unique-key conflict even when the driver error is unwrapped. */
+function isUniqueViolation(error: unknown): boolean {
+  let current: unknown = error;
+
+  for (
+    let depth = 0;
+    depth < 8 && current !== null && typeof current === "object";
+    depth++
+  ) {
+    if (current instanceof RabetDataError && current.code === "CONFLICT") {
+      return true;
+    }
+
+    if ((current as { code?: unknown }).code === "23505") {
+      return true;
+    }
+
+    current =
+      "cause" in current
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+  }
+
+  return false;
+}
+
 async function recheckMerchantAccess(
   tx: unknown,
   access: MerchantAccess,
@@ -220,6 +271,10 @@ export async function connectMerchantNotificationBot(
 
     if (!outcome.ok) return outcome;
   } catch (error) {
+    if (isUniqueViolation(error)) {
+      return { ok: false, error: "BOT_ALREADY_CONNECTED" };
+    }
+
     logFailure("connect_write", error);
     return { ok: false, error: "OPERATION_FAILED" };
   }
@@ -294,6 +349,10 @@ export async function startMerchantNotificationBotPairing(
 
     if (!outcome.ok) return outcome;
   } catch (error) {
+    if (hasDataErrorCode(error, "NOT_FOUND")) {
+      return { ok: false, error: "NOT_CONNECTED" };
+    }
+
     logFailure("pairing_start_write", error);
     return { ok: false, error: "OPERATION_FAILED" };
   }
@@ -510,6 +569,10 @@ export async function sendMerchantNotificationBotTest(
 
     if (!outcome.ok) return outcome;
   } catch (error) {
+    if (hasDataErrorCode(error, "CONFIGURATION_CHANGED")) {
+      return { ok: false, error: "CONFIGURATION_CHANGED" };
+    }
+
     logFailure("test_verify_write", error);
     return { ok: false, error: "OPERATION_FAILED" };
   }
