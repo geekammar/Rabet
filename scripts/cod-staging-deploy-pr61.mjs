@@ -340,7 +340,11 @@ async function main() {
   if (String(service.name) !== EXPECTED_SERVICE_NAME) {
     fail(`Unexpected service name ${String(service.name)}`);
   }
-  if (String(service.suspended ?? "").length > 0 && service.suspended !== false) {
+  const suspendedState = String(service.suspended ?? "").trim().toLowerCase();
+  if (
+    suspendedState.length > 0 &&
+    !["false", "no", "not_suspended"].includes(suspendedState)
+  ) {
     fail(`Service is suspended: ${String(service.suspended)}`);
   }
 
