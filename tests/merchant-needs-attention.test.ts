@@ -23,6 +23,7 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("@/app/actions/merchant-settings", () => ({
   saveMerchantStoreLanguageAction: vi.fn(),
+  saveMerchantTelegramSupportAction: vi.fn(),
 }));
 
 vi.mock("@/components/merchant/merchant-logout-button", () => ({
@@ -128,6 +129,7 @@ describe("Merchant setup entry point", () => {
         codOrdersEnabled: true,
         needsAttentionOrders: orders,
         storeDefaultLanguageCode: "en",
+        telegramSupportUsername: null,
         ...overrides,
       }),
     );
