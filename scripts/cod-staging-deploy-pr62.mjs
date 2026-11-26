@@ -19,6 +19,7 @@ const QA_INSTRUCTIONS_AR =
 const QA_INSTRUCTIONS_EN =
   "Synthetic QA only: transfer the exact amount to the test wallet, then submit the reference.";
 const TARGET_ORDER_REFERENCE = "ORD-X2EZD9";
+const PRESERVED_ORDER_REFERENCES = ["ORD-X2EZD9", "ORD-FYJA23"];
 const EXPECTED_LEDGER_COUNT = 19;
 const EXPECTED_LEDGER_HASH =
   "868ba439a60f6a3870a5535e032ad55ab0d38c69aced7cf1532e465c632dc339";
@@ -513,12 +514,28 @@ async function main() {
   let museOrder;
   let dbBefore;
   let dbAfter;
+  let preservedOrdersBefore;
 
   try {
     const migrationBeforeDeploy = await assertApplied0018(
       db,
       "pre-deploy",
     );
+
+    preservedOrdersBefore = await db`
+      select reference, status, payment_status, fulfillment_status,
+        payment_method, total, updated_at
+      from "order"
+      where reference in ${db(PRESERVED_ORDER_REFERENCES)}
+      order by reference
+    `;
+    if (
+      !PRESERVED_ORDER_REFERENCES.every((reference) =>
+        preservedOrdersBefore.some((row) => row.reference === reference),
+      )
+    ) {
+      fail("A preserved Staging order reference is missing before deploy");
+    }
 
     await db.begin(async (tx) => {
       await tx`set transaction read only`;
@@ -788,6 +805,19 @@ async function main() {
       db,
       "post-deploy",
     );
+    const preservedOrdersAfter = await db`
+      select reference, status, payment_status, fulfillment_status,
+        payment_method, total, updated_at
+      from "order"
+      where reference in ${db(PRESERVED_ORDER_REFERENCES)}
+      order by reference
+    `;
+    if (
+      JSON.stringify(preservedOrdersBefore) !==
+      JSON.stringify(preservedOrdersAfter)
+    ) {
+      fail("A preserved Staging order changed during the deploy/smoke window");
+    }
     if (
       dbBefore.counts.orders !== dbAfter.counts.orders ||
       dbBefore.counts.carts !== dbAfter.counts.carts ||
@@ -864,6 +894,7 @@ async function main() {
               total: targetOrder.total,
             }
           : null,
+        preservedOrders: preservedOrdersAfter,
         qaFixture,
       },
       museOrder: museOrder
