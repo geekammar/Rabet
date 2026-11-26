@@ -1,6 +1,6 @@
 {
-  "id": "d41cf619-09a6-4223-a738-fa603f5a02f9",
-  "prevId": "f9eeb339-d8e2-4316-ae8c-95de89995717",
+  "id": "49c80121-2c4c-4024-a27a-17a1c998e001",
+  "prevId": "cdc5f4e9-5edd-40da-8377-7de22ebc9fff",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1114,6 +1114,13 @@
           "notNull": true,
           "default": "'cart'"
         },
+        "payment_method": {
+          "name": "payment_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'cod'"
+        },
         "checkout_key": {
           "name": "checkout_key",
           "type": "uuid",
@@ -1304,6 +1311,10 @@
         "cart_checkout_state_check": {
           "name": "cart_checkout_state_check",
           "value": "\"cart\".\"checkout_state\" IN ('cart', 'awaiting_phone', 'awaiting_address', 'review')"
+        },
+        "cart_payment_method_check": {
+          "name": "cart_payment_method_check",
+          "value": "\"cart\".\"payment_method\" IN ('cod', 'vodafone_cash')"
         },
         "cart_telegram_user_positive_check": {
           "name": "cart_telegram_user_positive_check",
@@ -1843,6 +1854,30 @@
           "primaryKey": false,
           "notNull": false
         },
+        "transfer_reference_requested_at": {
+          "name": "transfer_reference_requested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "transfer_prompt_message_id": {
+          "name": "transfer_prompt_message_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "transfer_prompt_token": {
+          "name": "transfer_prompt_token",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "transfer_snapshot": {
+          "name": "transfer_snapshot",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "cancelled_at": {
           "name": "cancelled_at",
           "type": "timestamp with time zone",
@@ -1991,11 +2026,23 @@
         },
         "order_payment_method_check": {
           "name": "order_payment_method_check",
-          "value": "\"order\".\"payment_method\" = 'cod'"
+          "value": "\"order\".\"payment_method\" IN ('cod', 'vodafone_cash')"
         },
         "order_payment_status_check": {
           "name": "order_payment_status_check",
-          "value": "\"order\".\"payment_status\" IN ('awaiting_collection', 'collected', 'failed')"
+          "value": "\"order\".\"payment_status\" IN (\n        'awaiting_collection',\n        'collected',\n        'failed',\n        'awaiting_transfer',\n        'transfer_awaiting_review',\n        'transfer_verified',\n        'transfer_rejected'\n      )"
+        },
+        "order_payment_method_status_check": {
+          "name": "order_payment_method_status_check",
+          "value": "(\n        (\"order\".\"payment_method\" = 'cod'\n          AND \"order\".\"payment_status\" IN ('awaiting_collection', 'collected', 'failed'))\n        OR\n        (\"order\".\"payment_method\" = 'vodafone_cash'\n          AND \"order\".\"payment_status\" IN (\n            'awaiting_transfer',\n            'transfer_awaiting_review',\n            'transfer_verified',\n            'transfer_rejected'\n          ))\n      )"
+        },
+        "order_transfer_reference_request_state_check": {
+          "name": "order_transfer_reference_request_state_check",
+          "value": "(\n        (\"order\".\"transfer_reference_requested_at\" IS NULL\n          OR \"order\".\"payment_method\" = 'vodafone_cash')\n        AND\n        (\"order\".\"transfer_prompt_message_id\" IS NULL\n          OR (\"order\".\"payment_method\" = 'vodafone_cash'\n            AND \"order\".\"transfer_prompt_message_id\" > 0))\n        AND\n        (\"order\".\"transfer_prompt_token\" IS NULL\n          OR \"order\".\"payment_method\" = 'vodafone_cash')\n      )"
+        },
+        "order_transfer_snapshot_state_check": {
+          "name": "order_transfer_snapshot_state_check",
+          "value": "(\n        (\"order\".\"payment_method\" = 'vodafone_cash'\n          AND \"order\".\"transfer_snapshot\" IS NOT NULL)\n        OR\n        (\"order\".\"payment_method\" = 'cod'\n          AND \"order\".\"transfer_snapshot\" IS NULL)\n      )"
         },
         "order_fulfillment_status_check": {
           "name": "order_fulfillment_status_check",
@@ -2194,6 +2241,216 @@
       },
       "isRLSEnabled": false
     },
+    "public.order_payment_claim": {
+      "name": "order_payment_claim",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "order_id": {
+          "name": "order_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "store_id": {
+          "name": "store_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "method": {
+          "name": "method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'vodafone_cash'"
+        },
+        "reference": {
+          "name": "reference",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "submitted_at": {
+          "name": "submitted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "decided_at": {
+          "name": "decided_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decided_by": {
+          "name": "decided_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decision_note": {
+          "name": "decision_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "order_payment_claim_order_unique": {
+          "name": "order_payment_claim_order_unique",
+          "columns": [
+            {
+              "expression": "order_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "order_payment_claim_store_reference_unique": {
+          "name": "order_payment_claim_store_reference_unique",
+          "columns": [
+            {
+              "expression": "store_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "reference",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "order_payment_claim_store_status_idx": {
+          "name": "order_payment_claim_store_status_idx",
+          "columns": [
+            {
+              "expression": "store_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "order_payment_claim_order_id_order_id_fk": {
+          "name": "order_payment_claim_order_id_order_id_fk",
+          "tableFrom": "order_payment_claim",
+          "tableTo": "order",
+          "columnsFrom": [
+            "order_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "order_payment_claim_store_id_store_id_fk": {
+          "name": "order_payment_claim_store_id_store_id_fk",
+          "tableFrom": "order_payment_claim",
+          "tableTo": "store",
+          "columnsFrom": [
+            "store_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "order_payment_claim_decided_by_app_user_id_fk": {
+          "name": "order_payment_claim_decided_by_app_user_id_fk",
+          "tableFrom": "order_payment_claim",
+          "tableTo": "app_user",
+          "columnsFrom": [
+            "decided_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "order_payment_claim_method_check": {
+          "name": "order_payment_claim_method_check",
+          "value": "\"order_payment_claim\".\"method\" = 'vodafone_cash'"
+        },
+        "order_payment_claim_status_check": {
+          "name": "order_payment_claim_status_check",
+          "value": "\"order_payment_claim\".\"status\" IN ('pending', 'approved', 'rejected', 'cancelled')"
+        },
+        "order_payment_claim_reference_length_check": {
+          "name": "order_payment_claim_reference_length_check",
+          "value": "char_length(\"order_payment_claim\".\"reference\") BETWEEN 3 AND 80"
+        },
+        "order_payment_claim_decision_state_check": {
+          "name": "order_payment_claim_decision_state_check",
+          "value": "(\n        (\"order_payment_claim\".\"status\" = 'pending'\n          AND \"order_payment_claim\".\"decided_at\" IS NULL\n          AND \"order_payment_claim\".\"decided_by\" IS NULL)\n        OR\n        (\"order_payment_claim\".\"status\" IN ('approved', 'rejected')\n          AND \"order_payment_claim\".\"decided_at\" IS NOT NULL\n          AND \"order_payment_claim\".\"decided_by\" IS NOT NULL)\n        OR\n        (\"order_payment_claim\".\"status\" = 'cancelled'\n          AND \"order_payment_claim\".\"decided_at\" IS NOT NULL\n          AND \"order_payment_claim\".\"decided_by\" IS NULL)\n      )"
+        },
+        "order_payment_claim_decision_note_length_check": {
+          "name": "order_payment_claim_decision_note_length_check",
+          "value": "\"order_payment_claim\".\"decision_note\" IS NULL\n        OR char_length(\"order_payment_claim\".\"decision_note\") <= 300"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.product_inventory": {
       "name": "product_inventory",
       "schema": "",
@@ -2333,6 +2590,37 @@
           "notNull": true,
           "default": false
         },
+        "vodafone_cash_enabled": {
+          "name": "vodafone_cash_enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "vodafone_cash_number": {
+          "name": "vodafone_cash_number",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vodafone_cash_account_name": {
+          "name": "vodafone_cash_account_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vodafone_cash_instructions_ar": {
+          "name": "vodafone_cash_instructions_ar",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vodafone_cash_instructions_en": {
+          "name": "vodafone_cash_instructions_en",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2375,6 +2663,22 @@
         "store_commerce_setting_delivery_fee_nonnegative_check": {
           "name": "store_commerce_setting_delivery_fee_nonnegative_check",
           "value": "\"store_commerce_setting\".\"delivery_fee\" >= 0"
+        },
+        "store_commerce_setting_vodafone_cash_config_check": {
+          "name": "store_commerce_setting_vodafone_cash_config_check",
+          "value": "(\n        \"store_commerce_setting\".\"vodafone_cash_enabled\" = false\n        OR (\n          \"store_commerce_setting\".\"vodafone_cash_number\" IS NOT NULL\n          AND btrim(\"store_commerce_setting\".\"vodafone_cash_number\") <> ''\n          AND \"store_commerce_setting\".\"vodafone_cash_account_name\" IS NOT NULL\n          AND btrim(\"store_commerce_setting\".\"vodafone_cash_account_name\") <> ''\n          AND (\n            (\"store_commerce_setting\".\"vodafone_cash_instructions_ar\" IS NOT NULL\n              AND btrim(\"store_commerce_setting\".\"vodafone_cash_instructions_ar\") <> '')\n            OR\n            (\"store_commerce_setting\".\"vodafone_cash_instructions_en\" IS NOT NULL\n              AND btrim(\"store_commerce_setting\".\"vodafone_cash_instructions_en\") <> '')\n          )\n        )\n      )"
+        },
+        "store_commerce_setting_vodafone_cash_number_length_check": {
+          "name": "store_commerce_setting_vodafone_cash_number_length_check",
+          "value": "\"store_commerce_setting\".\"vodafone_cash_number\" IS NULL\n        OR char_length(\"store_commerce_setting\".\"vodafone_cash_number\") <= 32"
+        },
+        "store_commerce_setting_vodafone_cash_account_name_length_check": {
+          "name": "store_commerce_setting_vodafone_cash_account_name_length_check",
+          "value": "\"store_commerce_setting\".\"vodafone_cash_account_name\" IS NULL\n        OR char_length(\"store_commerce_setting\".\"vodafone_cash_account_name\") <= 120"
+        },
+        "store_commerce_setting_vodafone_cash_instructions_length_check": {
+          "name": "store_commerce_setting_vodafone_cash_instructions_length_check",
+          "value": "(\"store_commerce_setting\".\"vodafone_cash_instructions_ar\" IS NULL\n          OR char_length(\"store_commerce_setting\".\"vodafone_cash_instructions_ar\") <= 1000)\n        AND (\"store_commerce_setting\".\"vodafone_cash_instructions_en\" IS NULL\n          OR char_length(\"store_commerce_setting\".\"vodafone_cash_instructions_en\") <= 1000)"
         }
       },
       "isRLSEnabled": false

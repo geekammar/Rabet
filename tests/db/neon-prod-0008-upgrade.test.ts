@@ -269,7 +269,7 @@ describe.skipIf(!shouldRun)("real production runner 0008 to 0010 upgrade", () =>
       const ledger = await setupPool!`
         select count(*)::int as count from drizzle.__drizzle_migrations
       `;
-      expect(ledger[0].count).toBe(19);
+      expect(ledger[0].count).toBe(20);
     },
     120_000,
   );
