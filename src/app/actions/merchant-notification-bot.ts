@@ -333,6 +333,7 @@ export async function checkMerchantNotificationBotManagedAction(): Promise<Merch
       {
         storeId: access.store.id,
         merchantUserId: access.userId,
+        sessionVersion: access.sessionVersion,
       },
       {
         managerApi: createTelegramBotApiClient(config.token),
@@ -362,6 +363,10 @@ export async function checkMerchantNotificationBotManagedAction(): Promise<Merch
 
     if (result.status === "expired") {
       return { ok: false, error: "EXPIRED" };
+    }
+
+    if (result.status === "superseded") {
+      return { ok: false, error: "SUPERSEDED" };
     }
 
     if (

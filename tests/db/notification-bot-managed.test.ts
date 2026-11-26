@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 
 import {
   appUser,
@@ -11,6 +11,7 @@ import {
 } from "@/db/schema";
 import type { MerchantAccess } from "@/lib/auth/merchant-session";
 import {
+  connectMerchantNotificationBot,
   disconnectMerchantNotificationBot,
   sendMerchantNotificationBotTest,
 } from "@/lib/merchant/notification-bot";
@@ -47,6 +48,7 @@ let testDb: TestDatabase | null = null;
 let storeAId: string;
 let storeBId: string;
 let userAId: string;
+let userBId: string;
 
 beforeAll(async () => {
   if (!shouldRun) return;
@@ -82,6 +84,7 @@ beforeAll(async () => {
   storeAId = storeA.id;
   storeBId = storeB.id;
   userAId = userA.id;
+  userBId = userB.id;
 });
 
 afterAll(async () => {
@@ -93,6 +96,10 @@ afterAll(async () => {
 
 beforeEach(async () => {
   if (!testDb) return;
+  await testDb.db
+    .update(appUser)
+    .set({ sessionVersion: 0 })
+    .where(inArray(appUser.id, [userAId, userBId]));
   await testDb.db.execute(sql`
     truncate table
       "merchant_notification_bot",
@@ -438,6 +445,7 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
       {
         storeId: storeAId,
         merchantUserId: userAId,
+        sessionVersion: 0,
         attemptId: ensured.attemptId,
       },
       {
@@ -489,6 +497,7 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
       {
         storeId: storeAId,
         merchantUserId: userAId,
+        sessionVersion: 0,
         attemptId: ensured.attemptId,
       },
       {
@@ -505,6 +514,145 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
     const disconnected = await disconnectMerchantNotificationBot(db(), access);
     expect(disconnected.ok).toBe(true);
     expect(await db().select().from(merchantNotificationBot)).toHaveLength(0);
+  });
+
+  it("persists nothing and sends no confirmation when the session is revoked in flight", async () => {
+    const { ensured, nonce } = await prepareNotificationProposal({
+      storeId: storeAId,
+      merchantUserId: userAId,
+      telegramUserId: 700001,
+      botId: 800004,
+      botUsername: "RevokedSessionBot",
+    });
+
+    const manager = managerApi();
+    const bot = notificationBotApi(800004, "RevokedSessionBot", [], {
+      getUpdates: vi.fn(async () => {
+        await db()
+          .update(appUser)
+          .set({ sessionVersion: 1 })
+          .where(eq(appUser.id, userAId));
+        return { ok: true as const, result: [startMessage(1, 700001, nonce)] };
+      }),
+    });
+    const confirmationTransport = createFakeTelegramTransport();
+
+    const result = await verifyManagedNotificationBotStart(
+      db(),
+      {
+        storeId: storeAId,
+        merchantUserId: userAId,
+        sessionVersion: 0,
+        attemptId: ensured.attemptId,
+      },
+      {
+        managerApi: manager,
+        createBotApi: () => bot,
+        transport: confirmationTransport,
+        webhookOrigin: "https://app.example.test",
+      },
+    );
+
+    expect(result.status).toBe("conflict");
+    expect(await db().select().from(merchantNotificationBot)).toHaveLength(0);
+    expect(confirmationTransport.sentMessages).toHaveLength(0);
+
+    const [attempt] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+    expect(attempt.status).toBe("provisioning");
+  });
+
+  it("lets a manual setup that completes in flight win over the stale managed attempt", async () => {
+    const { ensured, nonce } = await prepareNotificationProposal({
+      storeId: storeAId,
+      merchantUserId: userAId,
+      telegramUserId: 700001,
+      botId: 800005,
+      botUsername: "StaleManagedBot",
+    });
+
+    const access = await merchantAccess(
+      storeAId,
+      userAId,
+      "managed.notify.a@example.test",
+    );
+    const manualApi = {
+      getMe: vi.fn(async () => ({
+        ok: true as const,
+        result: {
+          id: 900009,
+          is_bot: true,
+          first_name: "Manual Notify",
+          username: "ManualNotifyBot",
+        },
+      })),
+      getManagedBotToken: vi.fn(async () => ({
+        ok: false as const,
+        error: "not used",
+      })),
+      setWebhook: vi.fn(async () => ({ ok: true as const, result: true as const })),
+      getWebhookInfo: vi.fn(async () => ({
+        ok: true as const,
+        result: { url: "" },
+      })),
+      deleteWebhook: vi.fn(async () => ({
+        ok: true as const,
+        result: true as const,
+      })),
+      getUpdates: vi.fn(async () => ({ ok: true as const, result: [] })),
+    } as TelegramBotApiClient;
+
+    const manager = managerApi();
+    const confirmationTransport = createFakeTelegramTransport();
+    const bot = notificationBotApi(800005, "StaleManagedBot", [], {
+      getUpdates: vi.fn(async () => {
+        const manual = await connectMerchantNotificationBot(
+          db(),
+          access,
+          { token: "900009:AA-manual-token-abcdefghijklmnop" },
+          { api: manualApi },
+        );
+        expect(manual.ok).toBe(true);
+        return { ok: true as const, result: [startMessage(1, 700001, nonce)] };
+      }),
+    });
+
+    const result = await verifyManagedNotificationBotStart(
+      db(),
+      {
+        storeId: storeAId,
+        merchantUserId: userAId,
+        sessionVersion: 0,
+        attemptId: ensured.attemptId,
+      },
+      {
+        managerApi: manager,
+        createBotApi: () => bot,
+        transport: confirmationTransport,
+        webhookOrigin: "https://app.example.test",
+      },
+    );
+
+    expect(result.status).toBe("superseded");
+    expect(confirmationTransport.sentMessages).toHaveLength(0);
+
+    const [saved] = await db().select().from(merchantNotificationBot);
+    expect(saved.botId).toBe(900009);
+    expect(saved.botUsername).toBe("ManualNotifyBot");
+    expect(saved.destinationChatId).toBeNull();
+    expect(saved.pairingCodeHash).not.toBeNull();
+    expect(
+      decryptConnectionSecret(saved.tokenCiphertext, saved.tokenKeyId),
+    ).toBe("900009:AA-manual-token-abcdefghijklmnop");
+
+    const [attempt] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+    expect(attempt.status).toBe("cancelled");
+    expect(attempt.failureCode).toBe("superseded_by_manual");
   });
 
   it("rejects an expired attempt before fetching a token", async () => {
@@ -529,6 +677,7 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
       {
         storeId: storeAId,
         merchantUserId: userAId,
+        sessionVersion: 0,
         attemptId: ensured.attemptId,
       },
       {
@@ -570,6 +719,7 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
       {
         storeId: storeAId,
         merchantUserId: userAId,
+        sessionVersion: 0,
         attemptId: ensured.attemptId,
       },
       {
@@ -603,6 +753,7 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
       {
         storeId: storeAId,
         merchantUserId: userAId,
+        sessionVersion: 0,
         attemptId: ensured.attemptId,
       },
       {

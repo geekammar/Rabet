@@ -170,6 +170,8 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
       EXPIRED: "انتهت صلاحية المحاولة. ابدأ محاولة جديدة.",
       CONFLICT:
         "تعذّر إكمال الربط لأن البوت أو المحاولة مرتبطة بحالة أخرى.",
+      SUPERSEDED:
+        "تغيّرت إعدادات الإشعارات أثناء التحقق من تيليجرام. راجع الإعدادات الحالية وابدأ من جديد إذا لزم.",
       RETRYABLE: "تيليجرام غير متاح الآن. أعد المحاولة.",
       REVIEW:
         "هذا البوت مرتبط بـ Webhook أو حالة تحتاج مراجعة. استخدم الخيار المتقدم أو بوتًا آخر.",
@@ -290,6 +292,8 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
       EXPIRED: "The attempt expired. Start a new attempt.",
       CONFLICT:
         "The connection could not be completed because the bot or attempt is in another state.",
+      SUPERSEDED:
+        "Notification settings changed while Telegram was verifying. Review the current settings and start again if needed.",
       RETRYABLE: "Telegram is unavailable right now. Try again.",
       REVIEW:
         "This bot has a webhook or needs operator review. Use the advanced option or another bot.",

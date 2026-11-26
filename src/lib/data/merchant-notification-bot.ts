@@ -1,10 +1,10 @@
 import "server-only";
 
 import crypto from "node:crypto";
-import { and, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
-import { merchantNotificationBot } from "@/db/schema";
+import { merchantNotificationBot, telegramLinkAttempt } from "@/db/schema";
 import type { MerchantNotificationPairingCandidate } from "@/db/schema/merchant-notification-bot";
 import { mapDatabaseError, RabetDataError } from "./errors";
 import { validatePrivateChatId } from "./seller-notifications";
@@ -731,6 +731,69 @@ export async function saveManagedMerchantNotificationBot(
           updatedAt: now,
         },
       });
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+
+const ACTIVE_NOTIFICATION_BOT_ATTEMPT_STATUSES = [
+  "pending",
+  "provisioning",
+  "awaiting_confirmation",
+] as const;
+
+/**
+ * Serializes the managed final write with manual connect/pair/disconnect.
+ * The lock key is the same one used by the managed attempt and never includes
+ * a browser-supplied value.
+ */
+export async function lockNotificationBotOnboarding(
+  db: Database,
+  storeId: string,
+): Promise<void> {
+  await db.execute(sql`
+    select pg_advisory_xact_lock(
+      hashtext(${`telegram-link-attempt:${storeId}:notification_bot`})
+    )
+  `);
+}
+
+/**
+ * Cancels any in-flight managed notification-bot attempt because a manual
+ * action has become the newer intention. The managed final transaction will
+ * then fail closed instead of overwriting the manual configuration.
+ */
+export async function cancelActiveNotificationBotManagedAttempts(
+  db: Database,
+  input: {
+    storeId: string;
+    failureCode?: string;
+    now?: Date;
+  },
+): Promise<number> {
+  const now = input.now ?? new Date();
+
+  try {
+    const rows = await db
+      .update(telegramLinkAttempt)
+      .set({
+        status: "cancelled",
+        failureCode: input.failureCode ?? "superseded_by_manual",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(telegramLinkAttempt.storeId, input.storeId),
+          eq(telegramLinkAttempt.purpose, "notification_bot"),
+          inArray(telegramLinkAttempt.status, [
+            ...ACTIVE_NOTIFICATION_BOT_ATTEMPT_STATUSES,
+          ]),
+        ),
+      )
+      .returning({ id: telegramLinkAttempt.id });
+
+    return rows.length;
   } catch (error) {
     throw mapDatabaseError(error);
   }

@@ -18,7 +18,6 @@ import {
 import type { Database } from "@/db/client";
 import type { TransactionDatabase } from "@/db/transaction-client";
 import {
-  appUser,
   merchantNotificationBot,
   store,
   telegramConnection,
@@ -31,7 +30,10 @@ import {
 } from "@/db/transaction-client";
 import type { StoreScope } from "@/lib/data/store-scope";
 import { mapDatabaseError, RabetDataError } from "@/lib/data/errors";
-import { saveManagedMerchantNotificationBot } from "@/lib/data/merchant-notification-bot";
+import {
+  lockNotificationBotOnboarding,
+  saveManagedMerchantNotificationBot,
+} from "@/lib/data/merchant-notification-bot";
 import { resolveMerchantEligibility } from "@/lib/merchant/eligibility";
 import {
   decryptConnectionSecret,
@@ -2519,6 +2521,7 @@ export type VerifyManagedNotificationBotResult =
         | "not_found"
         | "expired"
         | "conflict"
+        | "superseded"
         | "bot_bound_elsewhere"
         | "bot_review";
     }
@@ -2536,6 +2539,7 @@ export async function verifyManagedNotificationBotStart(
   input: {
     storeId: string;
     merchantUserId: string;
+    sessionVersion: number;
     attemptId?: string | null;
   },
   deps: ManagedBotStartVerificationDependencies,
@@ -2792,6 +2796,7 @@ export async function verifyManagedNotificationBotStart(
         status:
           | "expired"
           | "conflict"
+          | "superseded"
           | "bot_bound_elsewhere"
           | "bot_review";
       };
@@ -2802,19 +2807,16 @@ export async function verifyManagedNotificationBotStart(
     persisted = await db.transaction(async (tx): Promise<PersistResult> => {
       const effectiveNow = deps.now ?? new Date();
 
-      const [user] = await tx
-        .select({ sessionVersion: appUser.sessionVersion })
-        .from(appUser)
-        .where(eq(appUser.id, input.merchantUserId))
-        .limit(1);
-
-      if (!user) return { status: "conflict" };
+      await lockNotificationBotOnboarding(
+        tx as unknown as Database,
+        input.storeId,
+      );
 
       const eligibility = await resolveMerchantEligibility(
         tx as unknown as TransactionDatabase,
         {
           userId: input.merchantUserId,
-          sessionVersion: user.sessionVersion,
+          sessionVersion: input.sessionVersion,
         },
       );
 
@@ -2848,6 +2850,13 @@ export async function verifyManagedNotificationBotStart(
         .limit(1);
 
       if (!current) return { status: "conflict" };
+
+      if (
+        current.status === "cancelled" ||
+        current.failureCode === "superseded_by_manual"
+      ) {
+        return { status: "superseded" };
+      }
 
       if (
         current.status !== "provisioning" ||

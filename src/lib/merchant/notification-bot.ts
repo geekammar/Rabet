@@ -4,8 +4,10 @@ import type { Database } from "@/db/client";
 import type { TransactionDatabase } from "@/db/transaction-client";
 import type { MerchantAccess } from "@/lib/auth/merchant-session";
 import {
+  cancelActiveNotificationBotManagedAttempts,
   confirmMerchantNotificationBotPairing,
   disconnectMerchantNotificationBot as deleteMerchantNotificationBot,
+  lockNotificationBotOnboarding,
   markMerchantNotificationBotPairingAmbiguous,
   mergeMerchantNotificationBotPairingCandidates,
   readMerchantNotificationBotSecret,
@@ -71,6 +73,7 @@ export type MerchantNotificationBotErrorCode =
   | "BOT_START_PENDING"
   | "EXPIRED"
   | "CONFLICT"
+  | "SUPERSEDED"
   | "RETRYABLE"
   | "REVIEW"
   | "NOT_FOUND"
@@ -271,6 +274,11 @@ async function mergePairingPage(
 > {
   try {
     const outcome = await db.transaction(async (tx) => {
+      await lockNotificationBotOnboarding(
+        tx as unknown as Database,
+        access.scope.storeId,
+      );
+
       if (!(await recheckMerchantAccess(tx, access))) {
         return { status: "denied" } as const;
       }
@@ -285,9 +293,14 @@ async function mergePairingPage(
         },
       );
 
-      return merged
-        ? ({ status: "merged", merged } as const)
-        : ({ status: "stale" } as const);
+      if (!merged) return { status: "stale" } as const;
+
+      await cancelActiveNotificationBotManagedAttempts(
+        tx as unknown as Database,
+        { storeId: access.scope.storeId },
+      );
+
+      return { status: "merged", merged } as const;
     });
 
     if (outcome.status === "denied") {
@@ -316,6 +329,11 @@ async function markPairingAmbiguous(
 ): Promise<MerchantNotificationBotResult> {
   try {
     const outcome = await db.transaction(async (tx) => {
+      await lockNotificationBotOnboarding(
+        tx as unknown as Database,
+        access.scope.storeId,
+      );
+
       if (!(await recheckMerchantAccess(tx, access))) {
         return "denied" as const;
       }
@@ -328,7 +346,14 @@ async function markPairingAmbiguous(
         },
       );
 
-      return marked ? ("marked" as const) : ("stale" as const);
+      if (!marked) return "stale" as const;
+
+      await cancelActiveNotificationBotManagedAttempts(
+        tx as unknown as Database,
+        { storeId: access.scope.storeId },
+      );
+
+      return "marked" as const;
     });
 
     if (outcome === "denied") {
@@ -354,6 +379,11 @@ async function confirmPairingCandidate(
 ): Promise<MerchantNotificationBotResult> {
   try {
     const outcome = await db.transaction(async (tx) => {
+      await lockNotificationBotOnboarding(
+        tx as unknown as Database,
+        access.scope.storeId,
+      );
+
       if (!(await recheckMerchantAccess(tx, access))) {
         return { status: "denied" } as const;
       }
@@ -369,7 +399,13 @@ async function confirmPairingCandidate(
         },
       );
 
-      if (confirmed) return { status: "confirmed" } as const;
+      if (confirmed) {
+        await cancelActiveNotificationBotManagedAttempts(
+          tx as unknown as Database,
+          { storeId: access.scope.storeId },
+        );
+        return { status: "confirmed" } as const;
+      }
 
       const current = await readMerchantNotificationBotSecret(
         tx as unknown as Database,
@@ -382,13 +418,20 @@ async function confirmPairingCandidate(
         current.pairingFailureCode === "ambiguous" ||
         (current.pairingCandidates?.length ?? 0) > 1
       ) {
-        await markMerchantNotificationBotPairingAmbiguous(
+        const marked = await markMerchantNotificationBotPairingAmbiguous(
           tx as unknown as Database,
           {
             storeId: access.scope.storeId,
             pairingCodeHash,
           },
         );
+
+        if (marked) {
+          await cancelActiveNotificationBotManagedAttempts(
+            tx as unknown as Database,
+            { storeId: access.scope.storeId },
+          );
+        }
 
         return { status: "ambiguous" } as const;
       }
@@ -475,6 +518,11 @@ export async function connectMerchantNotificationBot(
 
   try {
     const outcome = await db.transaction(async (tx) => {
+      await lockNotificationBotOnboarding(
+        tx as unknown as Database,
+        access.scope.storeId,
+      );
+
       if (!(await recheckMerchantAccess(tx, access))) {
         return { ok: false, error: "DENIED" } as const;
       }
@@ -501,6 +549,11 @@ export async function connectMerchantNotificationBot(
 
         throw error;
       }
+
+      await cancelActiveNotificationBotManagedAttempts(
+        tx as unknown as Database,
+        { storeId: access.scope.storeId, now },
+      );
 
       return { ok: true } as const;
     });
@@ -555,6 +608,11 @@ export async function startMerchantNotificationBotPairing(
 
   try {
     const outcome = await db.transaction(async (tx) => {
+      await lockNotificationBotOnboarding(
+        tx as unknown as Database,
+        access.scope.storeId,
+      );
+
       if (!(await recheckMerchantAccess(tx, access))) {
         return { ok: false, error: "DENIED" } as const;
       }
@@ -579,6 +637,11 @@ export async function startMerchantNotificationBotPairing(
 
         throw error;
       }
+
+      await cancelActiveNotificationBotManagedAttempts(
+        tx as unknown as Database,
+        { storeId: access.scope.storeId, now },
+      );
 
       return { ok: true } as const;
     });
@@ -932,6 +995,11 @@ export async function disconnectMerchantNotificationBot(
 
   try {
     const outcome = await db.transaction(async (tx) => {
+      await lockNotificationBotOnboarding(
+        tx as unknown as Database,
+        access.scope.storeId,
+      );
+
       if (!(await recheckMerchantAccess(tx, access))) {
         return { ok: false, error: "DENIED" } as const;
       }
@@ -939,6 +1007,11 @@ export async function disconnectMerchantNotificationBot(
       await deleteMerchantNotificationBot(
         tx as unknown as Database,
         access.scope.storeId,
+      );
+
+      await cancelActiveNotificationBotManagedAttempts(
+        tx as unknown as Database,
+        { storeId: access.scope.storeId },
       );
 
       return { ok: true } as const;
