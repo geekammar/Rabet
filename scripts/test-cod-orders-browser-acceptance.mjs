@@ -41,6 +41,7 @@ const SESSION_SALT = "rabet-merchant.session-token";
 const REVIEW_DIR =
   process.env.RABET_COD_SCREENSHOT_DIR ??
   path.resolve(process.cwd(), "docs/review/cod-order-operations");
+const TEST_REFERENCE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 
 let appServer = null;
 let chromeProcess = null;
@@ -62,6 +63,20 @@ function fail(message) {
 
 function assert(condition, message) {
   if (!condition) fail(message);
+}
+
+function testOrderReference(prefix, index) {
+  let remaining = index;
+  let suffix = "";
+
+  for (let position = 0; position < 4; position += 1) {
+    suffix =
+      TEST_REFERENCE_ALPHABET[remaining % TEST_REFERENCE_ALPHABET.length] +
+      suffix;
+    remaining = Math.floor(remaining / TEST_REFERENCE_ALPHABET.length);
+  }
+
+  return `ORD-${prefix}${suffix}`;
 }
 
 function sleep(ms) {
@@ -505,6 +520,40 @@ async function main() {
     ordersLinkText === "View orders",
     `Expected English Orders link, saw ${JSON.stringify(ordersLinkText)}`,
   );
+  const attentionBefore = await cdp.evaluate(`(() => {
+    const section = document.querySelector('[data-testid="merchant-needs-attention"]');
+    const link = section?.querySelector('[data-testid="merchant-needs-attention-link"]');
+    return {
+      count: section?.getAttribute('data-pending-count') ?? null,
+      previewCount: section?.getAttribute('data-preview-count') ?? null,
+      previewNote: Boolean(section?.querySelector('[data-testid="merchant-needs-attention-preview-note"]')),
+      text: section?.innerText ?? '',
+      href: link?.getAttribute('href') ?? null,
+      overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+    };
+  })()`);
+  assert(
+    attentionBefore.count === "1" && attentionBefore.previewCount === "1",
+    `Expected one order awaiting acceptance with a one-row preview, saw ${JSON.stringify(attentionBefore)}`,
+  );
+  assert(
+    !attentionBefore.previewNote,
+    `A bounded-preview note must not appear when every pending order fits, saw ${JSON.stringify(attentionBefore)}`,
+  );
+  assert(
+    attentionBefore.text.includes("ORD-ABC234") &&
+      attentionBefore.text.includes("37.00 SAR"),
+    `Needs Attention must show the pending order reference and total, saw ${JSON.stringify(attentionBefore)}`,
+  );
+  assert(
+    attentionBefore.href ===
+      `/app/orders?order=${order.id}#merchant-order-${order.id}`,
+    `Needs Attention must use a validated order selector plus the existing card anchor, saw ${JSON.stringify(attentionBefore.href)}`,
+  );
+  assert(
+    attentionBefore.overflow <= 361,
+    `Expected no horizontal scroll on the merchant entry point at 360 px, saw ${attentionBefore.overflow}`,
+  );
   const clicked = await cdp.evaluate(`(() => {
     const link = document.querySelector('[data-testid="merchant-orders-link"]');
     if (!link) return false;
@@ -675,6 +724,24 @@ async function main() {
     "acceptance feedback",
   );
   await capturePhoneScreenshot("02-order-accepted-360.png");
+
+  await navigate(`${BASE_URL}/app/setup`, "merchant setup after acceptance");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-needs-attention\"]')?.getAttribute('data-pending-count') === '0'",
+    "needs attention queue emptied after acceptance",
+  );
+  const afterAcceptanceSetupBody = await cdp.evaluate("document.body.innerText");
+  assert(
+    !afterAcceptanceSetupBody.includes("ORD-ABC234"),
+    "An accepted order must leave the Needs Attention queue on reload",
+  );
+  await navigate(`${BASE_URL}/app/orders`, "merchant orders after acceptance");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-prepare\"]'))",
+    "Start preparing action after acceptance reload",
+  );
 
   await clickTestId("merchant-order-action-prepare");
   await waitFor(
@@ -1320,6 +1387,18 @@ async function main() {
 
   await capturePhoneScreenshot("11-cancelled-360.png");
 
+  await navigate(`${BASE_URL}/app/setup`, "merchant setup after cancellation");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-needs-attention\"]')?.getAttribute('data-pending-count') === '0'",
+    "needs attention queue emptied after cancellation",
+  );
+  const afterCancellationSetupBody = await cdp.evaluate("document.body.innerText");
+  assert(
+    !afterCancellationSetupBody.includes("ORD-CAN234"),
+    "A cancelled order must leave the Needs Attention queue on reload",
+  );
+
   const [cancelledInventory] = await pgClient`
     select on_hand, reserved
     from product_inventory
@@ -1924,6 +2003,242 @@ async function main() {
       } catch {}
     }
   }
+
+  log("Seeding 27 more pending orders (28 total) and an older selected order...");
+  await pgClient`
+    update "store"
+    set status = 'active'
+    where id = ${store.id}
+  `;
+
+  const attentionNow = Date.now();
+  const fillerPlacedAt = new Date(attentionNow - 60 * 60 * 1000);
+  const fillerAcceptedAt = new Date(attentionNow - 30 * 60 * 1000);
+  for (let index = 0; index < 101; index += 1) {
+    await pgClient`
+      insert into "order" (
+        "store_id", "connection_id", "telegram_user_id", "telegram_chat_id",
+        "reference", "checkout_key", "status", "payment_method", "payment_status",
+        "fulfillment_status", "currency", "subtotal", "delivery_fee", "total",
+        "customer_name", "customer_phone", "delivery_address",
+        "placed_at", "accepted_at", "created_at", "updated_at"
+      )
+      values (
+        ${store.id}, ${connection.id}, ${94000 + index}, ${94000 + index},
+        ${testOrderReference("ZZ", index)}, ${crypto.randomUUID()}, 'accepted', 'cod',
+        'awaiting_collection', 'unfulfilled', 'SAR', 11.00, 0.00, 11.00,
+        'Accepted Filler Buyer', '+15550000100', '100 Filler Street',
+        ${fillerPlacedAt}, ${fillerAcceptedAt}, ${fillerPlacedAt}, ${fillerPlacedAt}
+      )
+    `;
+  }
+
+  const pendingAttentionOrders = [];
+  const pendingBase = attentionNow - 10 * 24 * 60 * 60 * 1000;
+  for (let index = 0; index < 27; index += 1) {
+    const placedAt = new Date(pendingBase + index * 60 * 1000);
+    const [pendingOrder] = await pgClient`
+      insert into "order" (
+        "store_id", "connection_id", "telegram_user_id", "telegram_chat_id",
+        "reference", "checkout_key", "status", "payment_method", "payment_status",
+        "fulfillment_status", "currency", "subtotal", "delivery_fee", "total",
+        "customer_name", "customer_phone", "delivery_address",
+        "placed_at", "created_at", "updated_at"
+      )
+      values (
+        ${store.id}, ${connection.id}, ${94500 + index}, ${94500 + index},
+        ${testOrderReference("PN", index)}, ${crypto.randomUUID()}, 'placed', 'cod',
+        'awaiting_collection', 'unfulfilled', 'SAR', 11.00, 15.00, 26.00,
+        'Pending Attention Buyer', '+15550000101', '200 Pending Street',
+        ${placedAt}, ${placedAt}, ${placedAt}
+      )
+      returning id, reference
+    `;
+    pendingAttentionOrders.push(pendingOrder);
+  }
+
+  const selectedAttentionOrder =
+    pendingAttentionOrders[pendingAttentionOrders.length - 1];
+
+  await cdp.send("Network.setCookie", {
+    name: "rabet-merchant-locale",
+    value: "en",
+    domain: "127.0.0.1",
+    path: "/",
+  });
+  await navigate(`${BASE_URL}/app/setup`, "merchant setup with bounded preview");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-needs-attention\"]')?.getAttribute('data-pending-count') === '28'",
+    "total pending count of 28",
+  );
+  const attentionPreview = await cdp.evaluate(`(() => {
+    const section = document.querySelector('[data-testid="merchant-needs-attention"]');
+    const links = [...(section?.querySelectorAll('[data-testid="merchant-needs-attention-link"]') ?? [])];
+    const target = links.find(
+      (link) => link.getAttribute('data-order-id') === ${JSON.stringify(selectedAttentionOrder.id)},
+    );
+    return {
+      count: section?.getAttribute('data-pending-count') ?? null,
+      previewCount: section?.getAttribute('data-preview-count') ?? null,
+      note: section?.querySelector('[data-testid="merchant-needs-attention-preview-note"]')?.textContent?.trim() ?? null,
+      linkCount: links.length,
+      targetHref: target?.getAttribute('href') ?? null,
+      overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+    };
+  })()`);
+  assert(
+    attentionPreview.count === "28" && attentionPreview.previewCount === "20",
+    `Expected 28 pending with a 20-row preview, saw ${JSON.stringify(attentionPreview)}`,
+  );
+  assert(
+    attentionPreview.note === "Showing the first 20 of 28.",
+    `Expected an explicit bounded-preview note, saw ${JSON.stringify(attentionPreview.note)}`,
+  );
+  assert(
+    attentionPreview.linkCount === 20,
+    `Expected only 20 preview links, saw ${JSON.stringify(attentionPreview.linkCount)}`,
+  );
+  assert(
+    attentionPreview.targetHref ===
+      `/app/orders?order=${selectedAttentionOrder.id}#merchant-order-${selectedAttentionOrder.id}`,
+    `Expected the selected order selector and card anchor, saw ${JSON.stringify(attentionPreview.targetHref)}`,
+  );
+  assert(
+    attentionPreview.overflow <= 361,
+    `Expected no horizontal scroll with the bounded preview at 360 px, saw ${attentionPreview.overflow}`,
+  );
+
+  const attentionClicked = await cdp.evaluate(`(() => {
+    const link = document.querySelector(
+      '[data-testid="merchant-needs-attention-link"][data-order-id="${selectedAttentionOrder.id}"]',
+    );
+    if (!link) return false;
+    link.click();
+    return true;
+  })()`);
+  assert(attentionClicked, "The selected pending order link should be clickable");
+  await waitFor(
+    cdp,
+    `window.location.pathname === '/app/orders' && new URLSearchParams(window.location.search).get('order') === ${JSON.stringify(selectedAttentionOrder.id)}`,
+    "selected order on the Orders page",
+  );
+  await waitFor(
+    cdp,
+    `Boolean(document.getElementById('merchant-order-${selectedAttentionOrder.id}'))`,
+    "selected order card",
+  );
+  await waitFor(
+    cdp,
+    `(() => {
+      const card = document.getElementById('merchant-order-${selectedAttentionOrder.id}');
+      if (!card) return false;
+      const rect = card.getBoundingClientRect();
+      return rect.top >= -1 && rect.top < window.innerHeight;
+    })()`,
+    "selected order card in view",
+  );
+
+  const selectedAttentionView = await cdp.evaluate(`(() => {
+    const id = 'merchant-order-${selectedAttentionOrder.id}';
+    const card = document.getElementById(id);
+    const cards = [...document.querySelectorAll('[data-testid="merchant-order-card"]')];
+    return {
+      id: card?.id ?? null,
+      reference: card?.querySelector('h2')?.textContent?.trim() ?? null,
+      hash: window.location.hash,
+      occurrences: cards.filter((candidate) => candidate.id === id).length,
+      cardCount: cards.length,
+      acceptAction: Boolean(
+        card?.querySelector('[data-testid="merchant-order-action-accept"]'),
+      ),
+      overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+    };
+  })()`);
+  assert(
+    selectedAttentionView.id === `merchant-order-${selectedAttentionOrder.id}` &&
+      selectedAttentionView.reference === selectedAttentionOrder.reference,
+    `Expected the exact selected order card, saw ${JSON.stringify(selectedAttentionView)}`,
+  );
+  assert(
+    selectedAttentionView.hash ===
+      `#merchant-order-${selectedAttentionOrder.id}`,
+    `Expected the selected card anchor in the URL, saw ${JSON.stringify(selectedAttentionView.hash)}`,
+  );
+  assert(
+    selectedAttentionView.occurrences === 1 &&
+      selectedAttentionView.cardCount === 101,
+    `Expected the older order once after the 100-order list, saw ${JSON.stringify(selectedAttentionView)}`,
+  );
+  assert(
+    selectedAttentionView.acceptAction,
+    "The selected pending order must keep its existing Accept action",
+  );
+  assert(
+    selectedAttentionView.overflow <= 361,
+    `Expected no horizontal scroll on the selected older order, saw ${selectedAttentionView.overflow}`,
+  );
+
+  log("Checking an order selector from another store exposes no order data...");
+  const [foreignAttentionStore] = await pgClient`
+    insert into "store" ("name", "slug", "status")
+    values (
+      'Foreign Attention Store',
+      ${`foreign-attention-${Date.now()}`},
+      'active'
+    )
+    returning id
+  `;
+  const foreignAttentionReference = "ORD-XYZ234";
+  const [foreignAttentionOrder] = await pgClient`
+    insert into "order" (
+      "store_id", "connection_id", "telegram_user_id", "telegram_chat_id",
+      "reference", "checkout_key", "status", "payment_method", "payment_status",
+      "fulfillment_status", "currency", "subtotal", "delivery_fee", "total",
+      "customer_name", "customer_phone", "delivery_address"
+    )
+    values (
+      ${foreignAttentionStore.id}, ${connection.id}, 94700, 94700,
+      ${foreignAttentionReference}, ${crypto.randomUUID()}, 'placed', 'cod',
+      'awaiting_collection', 'unfulfilled', 'SAR', 11.00, 15.00, 26.00,
+      'Foreign Buyer', '+15550000102', '300 Foreign Street'
+    )
+    returning id
+  `;
+  await navigate(
+    `${BASE_URL}/app/orders?order=${foreignAttentionOrder.id}#merchant-order-${foreignAttentionOrder.id}`,
+    "Orders with another store's selector",
+  );
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-orders-page\"]'))",
+    "Orders page after another store's selector",
+  );
+  const foreignAttentionView = await cdp.evaluate(`(() => {
+    const cards = [...document.querySelectorAll('[data-testid="merchant-order-card"]')];
+    return {
+      foreignCard: Boolean(
+        document.getElementById('merchant-order-${foreignAttentionOrder.id}'),
+      ),
+      foreignText: document.body.innerText.includes(
+        ${JSON.stringify(foreignAttentionReference)},
+      ),
+      cardCount: cards.length,
+      overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+    };
+  })()`);
+  assert(
+    !foreignAttentionView.foreignCard && !foreignAttentionView.foreignText,
+    `Another store's order must never be rendered, saw ${JSON.stringify(foreignAttentionView)}`,
+  );
+  assert(
+    foreignAttentionView.cardCount === 100,
+    `The normal 100-order list must remain when another store's id is ignored, saw ${JSON.stringify(foreignAttentionView)}`,
+  );
+  assert(
+    foreignAttentionView.overflow <= 361,
+    `Expected no horizontal scroll after another store's selector, saw ${foreignAttentionView.overflow}`,
+  );
 
   log("ALL COD ORDERS BROWSER ACCEPTANCE CHECKS PASSED");
   await cleanup();

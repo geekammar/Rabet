@@ -16,6 +16,10 @@ import {
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
 import { MerchantLogoutButton } from "@/components/merchant/merchant-logout-button";
+import {
+  MerchantNeedsAttention,
+  type MerchantNeedsAttentionOrder,
+} from "@/components/merchant/merchant-needs-attention";
 import { MerchantTelegramConnection } from "@/components/merchant/merchant-telegram-connection";
 import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
@@ -186,6 +190,8 @@ export function MerchantSetup({
   isAndroidTelegramLaunch,
   telegramLaunchOrigin,
   codOrdersEnabled,
+  needsAttentionOrders,
+  needsAttentionTotal,
   storeDefaultLanguageCode,
   telegramSupportUsername,
 }: {
@@ -198,6 +204,8 @@ export function MerchantSetup({
   isAndroidTelegramLaunch: boolean;
   telegramLaunchOrigin: string | null;
   codOrdersEnabled: boolean;
+  needsAttentionOrders: MerchantNeedsAttentionOrder[];
+  needsAttentionTotal: number;
   storeDefaultLanguageCode: "ar" | "en";
   telegramSupportUsername: string | null;
 }) {
@@ -337,6 +345,14 @@ export function MerchantSetup({
             </div>
           </dl>
         </section>
+
+        {codOrdersEnabled || needsAttentionTotal > 0 ? (
+          <MerchantNeedsAttention
+            locale={locale}
+            orders={needsAttentionOrders}
+            totalPending={needsAttentionTotal}
+          />
+        ) : null}
 
         <MerchantTelegramConnection
           state={telegramConnection}

@@ -116,6 +116,7 @@ function readOrderId(value: unknown): string | null {
 
 function refreshOrdersPage(): void {
   revalidatePath("/app/orders");
+  revalidatePath("/app/setup");
   refresh();
 }
 

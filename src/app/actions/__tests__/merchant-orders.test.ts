@@ -216,6 +216,7 @@ describe("merchant order actions — successful transitions", () => {
       ORDER_ID,
     );
     expect(state.revalidatePath).toHaveBeenCalledWith("/app/orders");
+    expect(state.revalidatePath).toHaveBeenCalledWith("/app/setup");
     expect(state.refresh).toHaveBeenCalledTimes(1);
   });
 
@@ -272,6 +273,7 @@ describe("merchant order actions — successful transitions", () => {
       { orderId: ORDER_ID, reason: "  Customer changed mind  " },
     );
     expect(state.revalidatePath).toHaveBeenCalledWith("/app/orders");
+    expect(state.revalidatePath).toHaveBeenCalledWith("/app/setup");
     expect(state.refresh).toHaveBeenCalledTimes(1);
   });
 
@@ -305,6 +307,7 @@ describe("merchant order actions — successful transitions", () => {
       ORDER_ID,
     );
     expect(state.revalidatePath).toHaveBeenCalledWith("/app/orders");
+    expect(state.revalidatePath).toHaveBeenCalledWith("/app/setup");
     expect(state.refresh).toHaveBeenCalledTimes(1);
   });
 
