@@ -1,0 +1,65 @@
+name: COD Staging Deploy PR61
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DEPLOY_PR61_COD_STAGING to authorize the exact-SHA deploy to permanent COD Staging.'
+        type: string
+        default: ""
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-staging-deploy-pr61
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy PR61 and verify permanent COD Staging
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 45
+
+    steps:
+      - name: Validate confirmation
+        env:
+          RABET_CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "${RABET_CONFIRM}" != "DEPLOY_PR61_COD_STAGING" ]; then
+            echo "Confirmation must equal DEPLOY_PR61_COD_STAGING." >&2
+            exit 1
+          fi
+
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy reviewed PR61 SHA and verify Staging
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 134d25205cb55fee565667e622e14513b6849cf2
+          DEPLOY_CONFIRM: ${{ inputs.confirm }}
+        run: node scripts/cod-staging-deploy-pr61.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-pr61-summary
+          path: /tmp/cod-staging-pr61-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
