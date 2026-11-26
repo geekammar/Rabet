@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { AlertCircle, ArrowRight, CheckCircle2 } from "lucide-react";
+import { AlertCircle, ArrowRight, CheckCircle2, Wallet } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type { MerchantLocale } from "@/lib/merchant/locale";
@@ -16,6 +16,12 @@ type Copy = {
   viewAll: string;
   reference: string;
   total: string;
+  transferTitle: string;
+  transferBody: string;
+  transferBadge: string;
+  transferWaiting: (count: number) => string;
+  transferShowingFirst: (shown: number, total: number) => string;
+  transferReview: string;
 };
 
 const COPY: Record<MerchantLocale, Copy> = {
@@ -31,6 +37,14 @@ const COPY: Record<MerchantLocale, Copy> = {
     viewAll: "عرض كل الطلبات",
     reference: "مرجع الطلب",
     total: "الإجمالي",
+    transferTitle: "تحويلات فودافون كاش",
+    transferBody:
+      "تحويلات فودافون كاش التي أبلغ عنها العملاء وتنتظر قرارك تظهر هنا.",
+    transferBadge: "فودافون كاش",
+    transferWaiting: (count) => `بانتظار المراجعة: ${count}`,
+    transferShowingFirst: (shown, total) =>
+      `يتم عرض أول ${shown} من ${total} تحويل.`,
+    transferReview: "مراجعة التحويل",
   },
   en: {
     dir: "ltr",
@@ -44,6 +58,14 @@ const COPY: Record<MerchantLocale, Copy> = {
     viewAll: "View all orders",
     reference: "Order reference",
     total: "Total",
+    transferTitle: "Vodafone Cash transfers",
+    transferBody:
+      "Buyer-reported Vodafone Cash transfers waiting for your payment decision appear here.",
+    transferBadge: "Vodafone Cash",
+    transferWaiting: (count) => `${count} awaiting review`,
+    transferShowingFirst: (shown, total) =>
+      `Showing the first ${shown} of ${total} transfers.`,
+    transferReview: "Review transfer",
   },
 };
 
@@ -58,13 +80,18 @@ export function MerchantNeedsAttention({
   locale,
   orders,
   totalPending,
+  transferOrders = [],
+  totalTransfersPending = 0,
 }: {
   locale: MerchantLocale;
   orders: MerchantNeedsAttentionOrder[];
   totalPending: number;
+  transferOrders?: MerchantNeedsAttentionOrder[];
+  totalTransfersPending?: number;
 }) {
   const copy = COPY[locale];
   const hasMore = orders.length < totalPending;
+  const hasMoreTransfers = transferOrders.length < totalTransfersPending;
 
   return (
     <section
@@ -159,6 +186,96 @@ export function MerchantNeedsAttention({
           ))}
         </ul>
       )}
+
+      {totalTransfersPending > 0 ? (
+        <div
+          className="space-y-3 border-t border-amber-300/60 pt-4 dark:border-amber-900/50"
+          aria-labelledby="merchant-needs-attention-transfers-title"
+          data-testid="merchant-needs-attention-transfers"
+          data-pending-count={totalTransfersPending}
+          data-preview-count={transferOrders.length}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="flex min-w-0 items-start gap-2">
+              <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                <Wallet className="size-4" aria-hidden="true" />
+              </div>
+              <div className="min-w-0 space-y-0.5">
+                <h3
+                  id="merchant-needs-attention-transfers-title"
+                  className="font-heading text-base font-semibold"
+                >
+                  {copy.transferTitle}
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  {copy.transferBody}
+                </p>
+              </div>
+            </div>
+            <span
+              className="inline-flex min-h-7 items-center rounded-full border border-amber-300 bg-background px-2.5 text-xs font-medium text-amber-800 dark:border-amber-900/60 dark:text-amber-200"
+              data-testid="merchant-needs-attention-transfer-count"
+            >
+              {copy.transferWaiting(totalTransfersPending)}
+            </span>
+          </div>
+
+          {hasMoreTransfers ? (
+            <p
+              className="text-xs font-medium text-amber-800 dark:text-amber-200"
+              data-testid="merchant-needs-attention-transfer-preview-note"
+            >
+              {copy.transferShowingFirst(
+                transferOrders.length,
+                totalTransfersPending,
+              )}
+            </p>
+          ) : null}
+
+          <ul
+            className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-background"
+            data-testid="merchant-needs-attention-transfer-list"
+          >
+            {transferOrders.map((order) => (
+              <li
+                key={order.id}
+                data-testid="merchant-needs-attention-transfer"
+              >
+                <Link
+                  href={`/app/orders?order=${order.id}#merchant-order-${order.id}`}
+                  className="flex min-h-11 flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2.5 outline-none transition-colors hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50"
+                  data-testid="merchant-needs-attention-transfer-link"
+                  data-order-id={order.id}
+                >
+                  <span className="min-w-0 space-y-0.5">
+                    <span className="block break-all font-medium" dir="ltr">
+                      <span className="sr-only">{copy.reference}: </span>
+                      {order.reference}
+                    </span>
+                    <span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                      <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-medium text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+                        {copy.transferBadge}
+                      </span>
+                      {copy.transferReview}
+                      <ArrowRight
+                        className="size-3.5 rtl:rotate-180"
+                        aria-hidden="true"
+                      />
+                    </span>
+                  </span>
+                  <span
+                    className="shrink-0 font-heading text-sm font-semibold tabular-nums"
+                    dir="ltr"
+                  >
+                    <span className="sr-only">{copy.total}: </span>
+                    {order.total} {order.currency}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap gap-2">
         <Button asChild variant="outline" className="min-h-11 w-full sm:w-auto">
