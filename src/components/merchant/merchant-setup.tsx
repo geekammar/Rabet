@@ -21,10 +21,12 @@ import {
   MerchantNeedsAttention,
   type MerchantNeedsAttentionOrder,
 } from "@/components/merchant/merchant-needs-attention";
+import { MerchantNotificationBot } from "@/components/merchant/merchant-notification-bot";
 import { MerchantTelegramConnection } from "@/components/merchant/merchant-telegram-connection";
 import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
 import type { StoreStatus } from "@/db/schema/tenant";
+import type { MerchantNotificationBotState } from "@/lib/data/merchant-notification-bot";
 import type { VodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
 import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 
@@ -258,6 +260,7 @@ export function MerchantSetup({
   vodafoneCashSetting,
   storeDefaultLanguageCode,
   telegramSupportUsername,
+  notificationBot,
 }: {
   storeName: string;
   email: string;
@@ -273,6 +276,10 @@ export function MerchantSetup({
   vodafoneCashSetting: VodafoneCashSetting | null;
   storeDefaultLanguageCode: "ar" | "en";
   telegramSupportUsername: string | null;
+  notificationBot: {
+    supported: boolean;
+    state: MerchantNotificationBotState | null;
+  };
 }) {
   const [locale, setLocale] = useMerchantLocale(initialLocale, "setup");
   const copy = COPY[locale];
@@ -477,6 +484,13 @@ export function MerchantSetup({
           readOnly={readOnly}
           isAndroidTelegramLaunch={isAndroidTelegramLaunch}
           telegramLaunchOrigin={telegramLaunchOrigin}
+        />
+
+        <MerchantNotificationBot
+          state={notificationBot.state}
+          supported={notificationBot.supported}
+          locale={locale}
+          readOnly={readOnly}
         />
 
         <section className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm">

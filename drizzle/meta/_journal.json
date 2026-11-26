@@ -134,6 +134,13 @@
       "when": 1795700484723,
       "tag": "0018_sparkling_morlun",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795695416144,
+      "tag": "0019_merchant_notification_bot",
+      "breakpoints": true
     }
   ]
 }

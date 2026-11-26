@@ -13,7 +13,10 @@ import {
   isCodAvailable,
   listMerchantOrdersAwaitingAcceptance,
 } from "@/lib/commerce/orders";
-import { readVodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
+import {
+  checkMerchantNotificationBotCapability,
+  readMerchantNotificationBotState,
+} from "@/lib/data/merchant-notification-bot";
 import { readStoreDefaultLanguage } from "@/lib/data/store-language";
 import { readStoreTelegramSupportUsername } from "@/lib/data/store-telegram-contact";
 import { trustedApplicationOrigin } from "@/lib/http/request-origin";
@@ -21,6 +24,7 @@ import {
   readMerchantLocale,
   merchantPageMetadata,
 } from "@/lib/merchant/locale-server";
+import { readVodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
 import { readMerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -50,6 +54,7 @@ export default async function MerchantSetupPage() {
     needsAttentionOrders,
     needsAttentionTotal,
     vodafoneCashSetting,
+    notificationBotCapability,
   ] = await Promise.all([
     readMerchantTelegramConnectionState(db, {
       scope: access.scope,
@@ -61,7 +66,12 @@ export default async function MerchantSetupPage() {
     listMerchantOrdersAwaitingAcceptance(db, access.scope),
     countMerchantOrdersAwaitingAcceptance(db, access.scope),
     readVodafoneCashSetting(db, access.scope),
+    checkMerchantNotificationBotCapability(db),
   ]);
+
+  const notificationBotState = notificationBotCapability.supported
+    ? await readMerchantNotificationBotState(db, access.store.id)
+    : null;
 
   return (
     <MerchantSetup
@@ -79,6 +89,10 @@ export default async function MerchantSetupPage() {
       vodafoneCashSetting={vodafoneCashSetting}
       storeDefaultLanguageCode={storeDefaultLanguage?.code === "ar" ? "ar" : "en"}
       telegramSupportUsername={telegramSupportUsername}
+      notificationBot={{
+        supported: notificationBotCapability.supported,
+        state: notificationBotState,
+      }}
     />
   );
 }

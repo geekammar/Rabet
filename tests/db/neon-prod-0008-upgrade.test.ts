@@ -223,6 +223,7 @@ describe.skipIf(!shouldRun)("real production runner 0008 to 0010 upgrade", () =>
         "0016_buyer_language_support",
         "0017_store_telegram_support",
         "0018_sparkling_morlun",
+        "0019_merchant_notification_bot",
       ]);
       expect(output()).toContain(
         "Verified healthy prior release (0008_merchant_invitations_and_credentials)",

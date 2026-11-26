@@ -47,6 +47,7 @@ export * from "./customer";
 export * from "./errors";
 export * from "./inquiry";
 export * from "./languages";
+export * from "./merchant-notification-bot";
 export * from "./payment-methods";
 export * from "./seller-notifications";
 export * from "./settings";

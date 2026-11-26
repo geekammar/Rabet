@@ -1134,6 +1134,7 @@ describe("production runner flows and execution", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
     expect(output()).toContain("0005_tenant_identity_foundation");
@@ -1198,6 +1199,7 @@ describe("production runner flows and execution", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1245,6 +1247,7 @@ describe("production runner flows and execution", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1293,6 +1296,7 @@ describe("production runner flows and execution", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0007_admin_login_throttle)",
@@ -1399,6 +1403,7 @@ describe("production runner flows and execution", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(output()).toContain("Validating prior release schema on target");
   });
@@ -1504,6 +1509,7 @@ describe("production runner flows and execution", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0005_tenant_identity_foundation)",
@@ -1576,6 +1582,7 @@ describe("production runner flows and execution", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(output()).toContain(
       "Verified healthy prior release (0006_tenant_ownership_expansion)",
@@ -2175,6 +2182,7 @@ describe("production runner 0008 to 0010 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2287,6 +2295,7 @@ describe("production runner 0009 to 0010 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(output()).toContain("Validating prior release schema on target");
@@ -2330,6 +2339,7 @@ describe("production runner 0009 to 0010 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2437,6 +2447,7 @@ describe("production runner 0010 to 0011 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(output()).toContain("Validating prior release schema on target");
@@ -2479,6 +2490,7 @@ describe("production runner 0010 to 0011 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2602,6 +2614,7 @@ describe("production runner 0011 to 0012 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(output()).toContain("Validating prior release schema on target");
@@ -2643,6 +2656,7 @@ describe("production runner 0011 to 0012 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -2693,6 +2707,7 @@ describe("production runner 0012 to 0013 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(output()).toContain("0012_mushy_scream");
   });
@@ -2731,6 +2746,7 @@ describe("production runner 0012 to 0013 upgrade", () => {
       "0016_buyer_language_support",
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
+      "0019_merchant_notification_bot",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
