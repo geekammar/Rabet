@@ -1,15 +1,17 @@
 import "server-only";
 
 import crypto from "node:crypto";
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
+  appUser,
   cart,
   cartItem,
   inventoryReservation,
   order as orderTable,
   orderItem,
+  orderPaymentClaim,
   productInventory,
   store,
   storeCommerceSetting,
@@ -25,7 +27,11 @@ import {
   type StoreScope,
 } from "@/lib/data/store-scope";
 import { lockConnectionStoreShared } from "@/lib/telegram/connection-locks";
-import { isCodOrdersDeploymentEnabled } from "./feature";
+import {
+  isCodOrdersDeploymentEnabled,
+  isCommerceDeploymentEnabled,
+  isManualTransferDeploymentEnabled,
+} from "./feature";
 import {
   canCancelMerchantOrder,
   canHandMerchantOrderToShipping,
@@ -58,11 +64,25 @@ const ORDER_REFERENCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MAX_LINE_QUANTITY = 99;
 const ACTIVE_CART_STATUSES = ["open", "checkout"] as const;
 
+export type PaymentMethod = "cod" | "vodafone_cash";
+
 export type CommerceSetting = {
   storeId: string;
   currency: string;
   deliveryFee: string;
   codEnabled: boolean;
+  vodafoneCashEnabled: boolean;
+  vodafoneCashNumber: string | null;
+  vodafoneCashAccountName: string | null;
+  vodafoneCashInstructionsAr: string | null;
+  vodafoneCashInstructionsEn: string | null;
+};
+
+export type CheckoutAvailability = {
+  enabled: boolean;
+  codEnabled: boolean;
+  vodafoneCashEnabled: boolean;
+  setting: CommerceSetting | null;
 };
 
 export type CartLine = {
@@ -113,6 +133,7 @@ type OrderReceipt = {
   deliveryFee: string;
   total: string;
   currency: string;
+  paymentMethod: PaymentMethod;
 };
 
 export type ConfirmOrderResult =
@@ -125,7 +146,8 @@ export type ConfirmOrderResult =
   | { status: "missing_details"; missing: "name" | "phone" | "address" }
   | { status: "invalid_state" }
   | { status: "not_found" }
-  | { status: "cod_unavailable" };
+  | { status: "cod_unavailable" }
+  | { status: "transfer_unavailable" };
 
 export type MerchantOrderItem = {
   productId: string;
@@ -136,6 +158,17 @@ export type MerchantOrderItem = {
   snapshot: unknown;
 };
 
+export type MerchantTransferClaim = {
+  id: string;
+  reference: string;
+  status: string;
+  submittedAt: Date;
+  decidedAt: Date | null;
+  decidedBy: string | null;
+  decidedByEmail: string | null;
+  decisionNote: string | null;
+};
+
 export type MerchantOrder = {
   id: string;
   reference: string;
@@ -144,6 +177,9 @@ export type MerchantOrder = {
   paymentMethod: string;
   paymentStatus: string;
   fulfillmentStatus: string;
+  transferReferenceRequestedAt: Date | null;
+  transferClaim: MerchantTransferClaim | null;
+  transferAwaitingReview: boolean;
   currency: string;
   subtotal: string;
   deliveryFee: string;
@@ -362,6 +398,13 @@ export async function readCommerceSetting(
       currency: storeCommerceSetting.currency,
       deliveryFee: storeCommerceSetting.deliveryFee,
       codEnabled: storeCommerceSetting.codEnabled,
+      vodafoneCashEnabled: storeCommerceSetting.vodafoneCashEnabled,
+      vodafoneCashNumber: storeCommerceSetting.vodafoneCashNumber,
+      vodafoneCashAccountName: storeCommerceSetting.vodafoneCashAccountName,
+      vodafoneCashInstructionsAr:
+        storeCommerceSetting.vodafoneCashInstructionsAr,
+      vodafoneCashInstructionsEn:
+        storeCommerceSetting.vodafoneCashInstructionsEn,
     })
     .from(storeCommerceSetting)
     .where(eq(storeCommerceSetting.storeId, scope.storeId))
@@ -369,6 +412,54 @@ export async function readCommerceSetting(
 
   const row = rows[0];
   return row ? { ...row } : null;
+}
+
+/**
+ * The methods this store can actually offer at checkout. COD and manual
+ * transfer have independent deployment switches and independent store flags.
+ * A configured-but-disabled method is never advertised.
+ */
+export function paymentMethodsForSetting(
+  setting: CommerceSetting | null,
+): { cod: boolean; vodafoneCash: boolean } {
+  if (!setting) return { cod: false, vodafoneCash: false };
+
+  return {
+    cod: setting.codEnabled && isCodOrdersDeploymentEnabled(),
+    vodafoneCash:
+      setting.vodafoneCashEnabled &&
+      isManualTransferDeploymentEnabled() &&
+      Boolean(setting.vodafoneCashNumber?.trim()) &&
+      Boolean(setting.vodafoneCashAccountName?.trim()) &&
+      Boolean(
+        setting.vodafoneCashInstructionsAr?.trim() ||
+          setting.vodafoneCashInstructionsEn?.trim(),
+      ),
+  };
+}
+
+export async function readCheckoutAvailability(
+  db: CommerceQueryDatabase,
+  scope: StoreScope,
+): Promise<CheckoutAvailability> {
+  if (!isCommerceDeploymentEnabled()) {
+    return {
+      enabled: false,
+      codEnabled: false,
+      vodafoneCashEnabled: false,
+      setting: null,
+    };
+  }
+
+  const setting = await readCommerceSetting(db, scope);
+  const methods = paymentMethodsForSetting(setting);
+
+  return {
+    enabled: methods.cod || methods.vodafoneCash,
+    codEnabled: methods.cod,
+    vodafoneCashEnabled: methods.vodafoneCash,
+    setting,
+  };
 }
 
 export async function isCodAvailable(
@@ -383,6 +474,22 @@ export async function isCodAvailable(
 
   return {
     enabled: Boolean(setting?.codEnabled),
+    setting,
+  };
+}
+
+export async function isVodafoneCashAvailable(
+  db: CommerceQueryDatabase,
+  scope: StoreScope,
+): Promise<{ enabled: boolean; setting: CommerceSetting | null }> {
+  if (!isManualTransferDeploymentEnabled()) {
+    return { enabled: false, setting: null };
+  }
+
+  const setting = await readCommerceSetting(db, scope);
+
+  return {
+    enabled: paymentMethodsForSetting(setting).vodafoneCash,
     setting,
   };
 }
@@ -547,12 +654,25 @@ async function loadSettingOrFail(
   scope: StoreScope,
 ): Promise<CommerceSetting> {
   const setting = await readCommerceSetting(db, scope);
+  const methods = paymentMethodsForSetting(setting);
 
-  if (!setting || !setting.codEnabled || !isCodOrdersDeploymentEnabled()) {
-    throw new Error("COD is not enabled for this store");
+  if (!setting || (!methods.cod && !methods.vodafoneCash)) {
+    throw new Error("Checkout is not enabled for this store");
   }
 
   return setting;
+}
+
+/**
+ * A method-specific guard at the confirmation boundary. Browsing can be open
+ * while one method is disabled; only the requested method is required here.
+ */
+function paymentMethodIsAvailable(
+  setting: CommerceSetting,
+  method: PaymentMethod,
+): boolean {
+  const methods = paymentMethodsForSetting(setting);
+  return method === "cod" ? methods.cod : methods.vodafoneCash;
 }
 
 async function loadCartLines(
@@ -794,7 +914,8 @@ export async function addToCart(
     }
 
     const setting = await readCommerceSetting(tx, scope);
-    if (!setting?.codEnabled || !isCodOrdersDeploymentEnabled()) {
+    const methods = paymentMethodsForSetting(setting);
+    if (!methods.cod && !methods.vodafoneCash) {
       return { status: "cod_unavailable" };
     }
 
@@ -1302,16 +1423,28 @@ export async function refreshReview(
   });
 }
 
-export async function confirmCodOrder(
+type ConfirmOrderInput = {
+  cartId: string;
+  connectionId: string;
+  telegramUserId: number;
+  telegramChatId: number;
+  expectedQuoteVersion: number;
+};
+
+/**
+ * Shared confirmation transaction for both payment methods.
+ *
+ * COD and manual transfer deliberately share the cart, quote, inventory lock
+ * and order snapshot. The only differences are the method-specific guard and
+ * the initial payment state: COD waits for collection, while a Vodafone Cash
+ * order waits for the buyer's transfer reference and then for merchant
+ * verification. In both cases the reservation is created exactly once, here.
+ */
+async function confirmOrder(
   db: TransactionDatabase,
   scope: StoreScope,
-  input: {
-    cartId: string;
-    connectionId: string;
-    telegramUserId: number;
-    telegramChatId: number;
-    expectedQuoteVersion: number;
-  },
+  input: ConfirmOrderInput,
+  method: PaymentMethod,
   catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<ConfirmOrderResult> {
   assertStoreScope(scope);
@@ -1338,10 +1471,15 @@ export async function confirmCodOrder(
     if (!cartRow) return { status: "not_found" };
 
     if (cartRow.status === "converted") {
-      const existing = await findOrderByCheckoutKey(tx, scope, cartRow.checkoutKey);
-      return existing
+      const existing = await findOrderByCheckoutKey(
+        tx,
+        scope,
+        cartRow.checkoutKey,
+      );
+
+      return existing && existing.paymentMethod === method
         ? { ...existing, status: "already_placed" as const }
-        : { status: "not_found" };
+        : { status: "invalid_state" };
     }
 
     if (cartRow.status !== "checkout" || cartRow.checkoutState !== "review") {
@@ -1361,7 +1499,10 @@ export async function confirmCodOrder(
     } catch (error) {
       if (error instanceof CartQuoteError) {
         if (error.reason === "cod_unavailable") {
-          return { status: "cod_unavailable" };
+          return {
+            status:
+              method === "cod" ? "cod_unavailable" : "transfer_unavailable",
+          };
         }
         if (error.reason === "insufficient_stock") {
           return {
@@ -1375,6 +1516,12 @@ export async function confirmCodOrder(
         };
       }
       throw error;
+    }
+
+    if (!paymentMethodIsAvailable(quoted.setting, method)) {
+      return {
+        status: method === "cod" ? "cod_unavailable" : "transfer_unavailable",
+      };
     }
 
     const expectedVersion = Number.isInteger(input.expectedQuoteVersion)
@@ -1450,11 +1597,12 @@ export async function confirmCodOrder(
       review: quoted.review,
       scope,
       chatId: input.telegramChatId,
+      method,
     });
 
     if (!inserted) {
       const existing = await findOrderByCheckoutKey(tx, scope, checkoutKey);
-      if (existing) {
+      if (existing && existing.paymentMethod === method) {
         return { ...existing, status: "already_placed" as const };
       }
       throw new Error("Order could not be created");
@@ -1513,6 +1661,7 @@ export async function confirmCodOrder(
       .update(cart)
       .set({
         status: "converted",
+        paymentMethod: method,
         checkoutKey,
       })
       .where(eq(cart.id, cartRow.id));
@@ -1525,8 +1674,27 @@ export async function confirmCodOrder(
       deliveryFee: quoted.review.deliveryFee,
       total: quoted.review.total,
       currency: quoted.review.currency,
+      paymentMethod: method,
     };
   });
+}
+
+export async function confirmCodOrder(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  input: ConfirmOrderInput,
+  catalogContentPlan?: ManagedCatalogContentPlan,
+): Promise<ConfirmOrderResult> {
+  return confirmOrder(db, scope, input, "cod", catalogContentPlan);
+}
+
+export async function confirmVodafoneCashOrder(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  input: ConfirmOrderInput,
+  catalogContentPlan?: ManagedCatalogContentPlan,
+): Promise<ConfirmOrderResult> {
+  return confirmOrder(db, scope, input, "vodafone_cash", catalogContentPlan);
 }
 
 async function insertOrderWithReference(
@@ -1537,6 +1705,7 @@ async function insertOrderWithReference(
     review: CheckoutReview;
     scope: StoreScope;
     chatId: number;
+    method: PaymentMethod;
   },
 ): Promise<{ orderId: string; reference: string } | null> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -1551,8 +1720,9 @@ async function insertOrderWithReference(
         reference,
         checkoutKey: input.checkoutKey,
         status: "placed",
-        paymentMethod: "cod",
-        paymentStatus: "awaiting_collection",
+        paymentMethod: input.method,
+        paymentStatus:
+          input.method === "cod" ? "awaiting_collection" : "awaiting_transfer",
         fulfillmentStatus: "unfulfilled",
         currency: input.review.currency,
         subtotal: input.review.subtotal,
@@ -1586,6 +1756,7 @@ async function findOrderByCheckoutKey(
       deliveryFee: orderTable.deliveryFee,
       total: orderTable.total,
       currency: orderTable.currency,
+      paymentMethod: orderTable.paymentMethod,
     })
     .from(orderTable)
     .where(
@@ -1596,7 +1767,9 @@ async function findOrderByCheckoutKey(
     )
     .limit(1);
 
-  return row ?? null;
+  return row
+    ? { ...row, paymentMethod: row.paymentMethod as PaymentMethod }
+    : null;
 }
 
 export async function readCartForBuyer(
@@ -1669,6 +1842,689 @@ export async function backToCart(
     const refreshed = await findActiveCart(tx, scope, input);
     if (!refreshed) return null;
     return buildCartView(tx, scope, refreshed);
+  });
+}
+
+
+export type VodafoneTransferOrderSummary = {
+  orderId: string;
+  reference: string;
+  total: string;
+  currency: string;
+  paymentStatus: string;
+};
+
+export type RequestTransferReferenceResult =
+  | ({ status: "prompted" } & VodafoneTransferOrderSummary)
+  | ({
+      status: "already_submitted";
+      claimStatus: string;
+    } & VodafoneTransferOrderSummary)
+  | { status: "not_found" }
+  | { status: "invalid_state"; paymentStatus: string }
+  | { status: "transfer_unavailable" };
+
+export type SubmitTransferClaimResult =
+  | ({
+      status: "submitted";
+      claimId: string;
+      claimStatus: "pending";
+      submittedAt: Date;
+    } & VodafoneTransferOrderSummary)
+  | ({
+      status: "already_submitted";
+      claimStatus: string;
+    } & VodafoneTransferOrderSummary)
+  | { status: "invalid_reference" }
+  | { status: "reference_conflict" }
+  | { status: "not_found" }
+  | { status: "invalid_state"; paymentStatus: string }
+  | { status: "transfer_unavailable" };
+
+export type MerchantTransferDecisionResult =
+  | ({
+      status: "verified" | "rejected";
+      orderId: string;
+      orderReference: string;
+      orderStatus: string;
+      paymentStatus: string;
+      fulfillmentStatus: string;
+      claimStatus: string;
+      decidedAt: Date;
+      releasedQuantity: number;
+    })
+  | ({
+      status: "already_applied";
+      orderId: string;
+      orderReference: string;
+      orderStatus: string;
+      paymentStatus: string;
+      fulfillmentStatus: string;
+      claimStatus: string;
+      releasedQuantity: number;
+    })
+  | { status: "not_found" }
+  | {
+      status: "invalid_transition";
+      currentStatus: string;
+      paymentStatus: string;
+    }
+  | { status: "invalid_note" };
+
+export function normalizeTransferReference(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.normalize("NFKC").trim();
+  if (trimmed.length < 3 || trimmed.length > 80) return null;
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return null;
+
+  return trimmed;
+}
+
+function transferSummary(
+  row: typeof orderTable.$inferSelect,
+): VodafoneTransferOrderSummary {
+  return {
+    orderId: row.id,
+    reference: row.reference,
+    total: row.total,
+    currency: row.currency,
+    paymentStatus: row.paymentStatus,
+  };
+}
+
+async function readBuyerVodafoneOrderForUpdate(
+  db: CommerceTransaction,
+  scope: StoreScope,
+  input: {
+    connectionId: string;
+    telegramUserId: number;
+    orderId?: string;
+    promptedOnly?: boolean;
+  },
+): Promise<typeof orderTable.$inferSelect | null> {
+  const conditions = [
+    eq(orderTable.storeId, scope.storeId),
+    eq(orderTable.connectionId, input.connectionId),
+    eq(orderTable.telegramUserId, input.telegramUserId),
+    eq(orderTable.paymentMethod, "vodafone_cash"),
+  ];
+
+  if (input.orderId) {
+    if (!ORDER_ID_PATTERN.test(input.orderId)) return null;
+    conditions.push(eq(orderTable.id, input.orderId));
+  } else if (input.promptedOnly) {
+    conditions.push(isNotNull(orderTable.transferReferenceRequestedAt));
+  } else {
+    return null;
+  }
+
+  const [row] = await db
+    .select()
+    .from(orderTable)
+    .where(and(...conditions))
+    .orderBy(desc(orderTable.placedAt), desc(orderTable.createdAt))
+    .limit(1)
+    .for("update");
+
+  return row ?? null;
+}
+
+async function readOrderClaimForUpdate(
+  db: CommerceTransaction,
+  scope: StoreScope,
+  orderId: string,
+): Promise<typeof orderPaymentClaim.$inferSelect | null> {
+  const [row] = await db
+    .select()
+    .from(orderPaymentClaim)
+    .where(
+      and(
+        eq(orderPaymentClaim.orderId, orderId),
+        eq(orderPaymentClaim.storeId, scope.storeId),
+      ),
+    )
+    .limit(1)
+    .for("update");
+
+  return row ?? null;
+}
+
+/**
+ * Resolves the newest Vodafone Cash order that is waiting for a buyer
+ * reference. The webhook calls this before treating a plain text message as a
+ * transfer reference, so ordinary browsing text is never consumed.
+ */
+export async function readPromptedVodafoneCashOrder(
+  db: TransactionDatabase | Database,
+  scope: StoreScope,
+  input: { connectionId: string; telegramUserId: number },
+): Promise<VodafoneTransferOrderSummary | null> {
+  assertStoreScope(scope);
+
+  const [row] = await (db as unknown as Database)
+    .select()
+    .from(orderTable)
+    .where(
+      and(
+        eq(orderTable.storeId, scope.storeId),
+        eq(orderTable.connectionId, input.connectionId),
+        eq(orderTable.telegramUserId, input.telegramUserId),
+        eq(orderTable.paymentMethod, "vodafone_cash"),
+        eq(orderTable.paymentStatus, "awaiting_transfer"),
+        isNotNull(orderTable.transferReferenceRequestedAt),
+        eq(orderTable.fulfillmentStatus, "unfulfilled"),
+      ),
+    )
+    .orderBy(desc(orderTable.placedAt), desc(orderTable.createdAt))
+    .limit(1);
+
+  return row ? transferSummary(row) : null;
+}
+
+/**
+ * Marks that the buyer asked to submit a transfer reference. It does not
+ * submit anything or change payment state; the next text message can then be
+ * interpreted as a reference by the webhook.
+ */
+export async function requestVodafoneCashTransferReference(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  input: {
+    connectionId: string;
+    telegramUserId: number;
+    orderId: string;
+  },
+): Promise<RequestTransferReferenceResult> {
+  assertStoreScope(scope);
+
+  return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "not_found" };
+    }
+
+    const availability = await readCheckoutAvailability(tx, scope);
+    if (!availability.vodafoneCashEnabled) {
+      return { status: "transfer_unavailable" };
+    }
+
+    const row = await readBuyerVodafoneOrderForUpdate(tx, scope, input);
+    if (
+      !row ||
+      row.status === "cancelled" ||
+      row.fulfillmentStatus === "cancelled"
+    ) {
+      return { status: "not_found" };
+    }
+
+    const claim = await readOrderClaimForUpdate(tx, scope, row.id);
+    if (claim) {
+      return {
+        status: "already_submitted",
+        claimStatus: claim.status,
+        ...transferSummary(row),
+      };
+    }
+
+    if (row.paymentStatus !== "awaiting_transfer") {
+      return { status: "invalid_state", paymentStatus: row.paymentStatus };
+    }
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(orderTable)
+      .set({ transferReferenceRequestedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.paymentStatus, "awaiting_transfer"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Transfer prompt could not be persisted");
+
+    return { status: "prompted", ...transferSummary(updated) };
+  });
+}
+
+/**
+ * Records the buyer's reported transfer reference.
+ *
+ * The order row is locked before the claim is written. Submitting a claim
+ * moves `payment_status` from `awaiting_transfer` to
+ * `transfer_awaiting_review` and does nothing else: stock stays reserved and
+ * the order is never marked paid. A repeated submission returns the existing
+ * claim instead of creating a second one.
+ */
+export async function submitVodafoneCashTransferClaim(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  input: {
+    connectionId: string;
+    telegramUserId: number;
+    orderId?: string;
+    reference: unknown;
+  },
+): Promise<SubmitTransferClaimResult> {
+  assertStoreScope(scope);
+
+  const reference = normalizeTransferReference(input.reference);
+  if (!reference) return { status: "invalid_reference" };
+
+  return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return { status: "not_found" };
+    }
+
+    const availability = await readCheckoutAvailability(tx, scope);
+    if (!availability.vodafoneCashEnabled) {
+      return { status: "transfer_unavailable" };
+    }
+
+    const row = await readBuyerVodafoneOrderForUpdate(tx, scope, {
+      connectionId: input.connectionId,
+      telegramUserId: input.telegramUserId,
+      orderId: input.orderId,
+      promptedOnly: !input.orderId,
+    });
+
+    if (
+      !row ||
+      row.status === "cancelled" ||
+      row.fulfillmentStatus === "cancelled"
+    ) {
+      return { status: "not_found" };
+    }
+
+    const existingClaim = await readOrderClaimForUpdate(tx, scope, row.id);
+    if (existingClaim) {
+      return {
+        status: "already_submitted",
+        claimStatus: existingClaim.status,
+        ...transferSummary(row),
+      };
+    }
+
+    if (row.paymentStatus !== "awaiting_transfer") {
+      return { status: "invalid_state", paymentStatus: row.paymentStatus };
+    }
+
+    const now = new Date();
+    const [claim] = await tx
+      .insert(orderPaymentClaim)
+      .values({
+        orderId: row.id,
+        storeId: scope.storeId,
+        method: "vodafone_cash",
+        reference,
+        status: "pending",
+        submittedAt: now,
+      })
+      .onConflictDoNothing()
+      .returning();
+
+    if (!claim) {
+      const raced = await readOrderClaimForUpdate(tx, scope, row.id);
+      if (raced) {
+        return {
+          status: "already_submitted",
+          claimStatus: raced.status,
+          ...transferSummary(row),
+        };
+      }
+      return { status: "reference_conflict" };
+    }
+
+    const [updated] = await tx
+      .update(orderTable)
+      .set({
+        paymentStatus: "transfer_awaiting_review",
+        transferReferenceRequestedAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.paymentStatus, "awaiting_transfer"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Transfer claim order update failed");
+
+    return {
+      status: "submitted",
+      claimId: claim.id,
+      claimStatus: "pending",
+      submittedAt: claim.submittedAt,
+      ...transferSummary(updated),
+    };
+  });
+}
+
+function normalizeDecisionNote(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.length > 300) return undefined;
+  return trimmed;
+}
+
+/**
+ * Merchant approval after checking their own Vodafone Cash wallet.
+ *
+ * Approval records the actor and time on the claim and moves the order to
+ * `transfer_verified`. It never touches inventory: the reservation created at
+ * order placement stays held until shipping commits it or cancellation
+ * releases it. A retry after success is idempotent; a competing rejection
+ * loses the row lock and receives `invalid_transition`.
+ */
+export async function verifyVodafoneCashTransfer(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  input: { orderId: string; actorUserId: string; note?: unknown },
+): Promise<MerchantTransferDecisionResult> {
+  assertStoreScope(scope);
+
+  const note = normalizeDecisionNote(input.note);
+  if (note === undefined) return { status: "invalid_note" };
+
+  return db.transaction(async (tx) => {
+    const row = await readMerchantOrderForUpdate(tx, scope, input.orderId);
+    if (!row) return { status: "not_found" };
+
+    if (row.paymentMethod !== "vodafone_cash") {
+      return {
+        status: "invalid_transition",
+        currentStatus: row.status,
+        paymentStatus: row.paymentStatus,
+      };
+    }
+
+    const claim = await readOrderClaimForUpdate(tx, scope, row.id);
+    if (!claim) {
+      return {
+        status: "invalid_transition",
+        currentStatus: row.status,
+        paymentStatus: row.paymentStatus,
+      };
+    }
+
+    if (claim.status === "approved") {
+      return {
+        status: "already_applied",
+        orderId: row.id,
+        orderReference: row.reference,
+        orderStatus: row.status,
+        paymentStatus: row.paymentStatus,
+        fulfillmentStatus: row.fulfillmentStatus,
+        claimStatus: claim.status,
+        releasedQuantity: 0,
+      };
+    }
+
+    if (
+      claim.status !== "pending" ||
+      row.status === "cancelled" ||
+      row.fulfillmentStatus === "cancelled" ||
+      row.paymentStatus !== "transfer_awaiting_review"
+    ) {
+      return {
+        status: "invalid_transition",
+        currentStatus: row.status,
+        paymentStatus: row.paymentStatus,
+      };
+    }
+
+    const now = new Date();
+    const [decided] = await tx
+      .update(orderPaymentClaim)
+      .set({
+        status: "approved",
+        decidedAt: now,
+        decidedBy: input.actorUserId,
+        decisionNote: note,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderPaymentClaim.id, claim.id),
+          eq(orderPaymentClaim.storeId, scope.storeId),
+          eq(orderPaymentClaim.status, "pending"),
+        ),
+      )
+      .returning();
+
+    if (!decided) throw new Error("Transfer claim approval failed");
+
+    const [updated] = await tx
+      .update(orderTable)
+      .set({
+        paymentStatus: "transfer_verified",
+        transferReferenceRequestedAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.paymentMethod, "vodafone_cash"),
+          eq(orderTable.paymentStatus, "transfer_awaiting_review"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Verified order could not be persisted");
+
+    return {
+      status: "verified",
+      orderId: updated.id,
+      orderReference: updated.reference,
+      orderStatus: updated.status,
+      paymentStatus: updated.paymentStatus,
+      fulfillmentStatus: updated.fulfillmentStatus,
+      claimStatus: decided.status,
+      decidedAt: decided.decidedAt ?? now,
+      releasedQuantity: 0,
+    };
+  });
+}
+
+/**
+ * Merchant rejection after checking their own wallet.
+ *
+ * Rejection is final for this order: the claim is recorded as rejected with
+ * the deciding merchant and time, the held reservation is released once, and
+ * the order is cancelled. `on_hand` is unchanged because nothing shipped.
+ * This prevents a rejected payment from holding stock indefinitely.
+ */
+export async function rejectVodafoneCashTransfer(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  input: { orderId: string; actorUserId: string; note?: unknown },
+): Promise<MerchantTransferDecisionResult> {
+  assertStoreScope(scope);
+
+  const note = normalizeDecisionNote(input.note);
+  if (note === undefined) return { status: "invalid_note" };
+
+  return db.transaction(async (tx) => {
+    const row = await readMerchantOrderForUpdate(tx, scope, input.orderId);
+    if (!row) return { status: "not_found" };
+
+    if (row.paymentMethod !== "vodafone_cash") {
+      return {
+        status: "invalid_transition",
+        currentStatus: row.status,
+        paymentStatus: row.paymentStatus,
+      };
+    }
+
+    const claim = await readOrderClaimForUpdate(tx, scope, row.id);
+    if (!claim) {
+      return {
+        status: "invalid_transition",
+        currentStatus: row.status,
+        paymentStatus: row.paymentStatus,
+      };
+    }
+
+    if (claim.status === "rejected") {
+      return {
+        status: "already_applied",
+        orderId: row.id,
+        orderReference: row.reference,
+        orderStatus: row.status,
+        paymentStatus: row.paymentStatus,
+        fulfillmentStatus: row.fulfillmentStatus,
+        claimStatus: claim.status,
+        releasedQuantity: 0,
+      };
+    }
+
+    if (
+      claim.status !== "pending" ||
+      row.status === "cancelled" ||
+      row.fulfillmentStatus === "cancelled" ||
+      row.paymentStatus !== "transfer_awaiting_review"
+    ) {
+      return {
+        status: "invalid_transition",
+        currentStatus: row.status,
+        paymentStatus: row.paymentStatus,
+      };
+    }
+
+    const reservations = await tx
+      .select({
+        id: inventoryReservation.id,
+        productId: inventoryReservation.productId,
+        quantity: inventoryReservation.quantity,
+        status: inventoryReservation.status,
+      })
+      .from(inventoryReservation)
+      .where(
+        and(
+          eq(inventoryReservation.orderId, row.id),
+          eq(inventoryReservation.storeId, scope.storeId),
+        ),
+      )
+      .orderBy(inventoryReservation.productId)
+      .for("update");
+
+    if (reservations.some((reservation) => reservation.status === "committed")) {
+      return {
+        status: "invalid_transition",
+        currentStatus: row.status,
+        paymentStatus: row.paymentStatus,
+      };
+    }
+
+    const now = new Date();
+    let releasedQuantity = 0;
+
+    for (const reservation of reservations) {
+      if (reservation.status !== "reserved") continue;
+
+      const [released] = await tx
+        .update(inventoryReservation)
+        .set({
+          status: "released",
+          releasedAt: now,
+          releaseReason: "transfer_rejected",
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(inventoryReservation.id, reservation.id),
+            eq(inventoryReservation.status, "reserved"),
+          ),
+        )
+        .returning({ quantity: inventoryReservation.quantity });
+
+      if (!released) {
+        throw new Error("Inventory reservation could not be released");
+      }
+
+      const [inventory] = await tx
+        .update(productInventory)
+        .set({
+          reserved: sql`${productInventory.reserved} - ${released.quantity}`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(productInventory.productId, reservation.productId),
+            eq(productInventory.storeId, scope.storeId),
+            gte(productInventory.reserved, released.quantity),
+          ),
+        )
+        .returning({ productId: productInventory.productId });
+
+      if (!inventory) {
+        throw new Error("Inventory reservation does not match held stock");
+      }
+
+      releasedQuantity += released.quantity;
+    }
+
+    const [decided] = await tx
+      .update(orderPaymentClaim)
+      .set({
+        status: "rejected",
+        decidedAt: now,
+        decidedBy: input.actorUserId,
+        decisionNote: note,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderPaymentClaim.id, claim.id),
+          eq(orderPaymentClaim.storeId, scope.storeId),
+          eq(orderPaymentClaim.status, "pending"),
+        ),
+      )
+      .returning();
+
+    if (!decided) throw new Error("Transfer claim rejection failed");
+
+    const [updated] = await tx
+      .update(orderTable)
+      .set({
+        status: "cancelled",
+        fulfillmentStatus: "cancelled",
+        paymentStatus: "transfer_rejected",
+        cancellationReason: "transfer_rejected",
+        cancelledAt: now,
+        transferReferenceRequestedAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.paymentMethod, "vodafone_cash"),
+        ),
+      )
+      .returning();
+
+    if (!updated) throw new Error("Rejected order could not be persisted");
+
+    return {
+      status: "rejected",
+      orderId: updated.id,
+      orderReference: updated.reference,
+      orderStatus: updated.status,
+      paymentStatus: updated.paymentStatus,
+      fulfillmentStatus: updated.fulfillmentStatus,
+      claimStatus: decided.status,
+      decidedAt: decided.decidedAt ?? now,
+      releasedQuantity,
+    };
   });
 }
 
@@ -1853,7 +2709,14 @@ export async function handMerchantOrderToShipping(
       return { status: "already_applied", ...orderProgress(row) };
     }
 
-    if (!canHandMerchantOrderToShipping(row.status, row.fulfillmentStatus)) {
+    if (
+      !canHandMerchantOrderToShipping(
+        row.status,
+        row.fulfillmentStatus,
+        row.paymentMethod,
+        row.paymentStatus,
+      )
+    ) {
       return invalidOrderTransition(row);
     }
 
@@ -2037,6 +2900,10 @@ export async function collectMerchantOrderPayment(
     const row = await readMerchantOrderForUpdate(tx, scope, orderId);
     if (!row) return { status: "not_found" };
 
+    if (row.paymentMethod !== "cod") {
+      return invalidOrderTransition(row);
+    }
+
     if (row.status === "cancelled" || row.fulfillmentStatus === "cancelled") {
       return invalidOrderTransition(row);
     }
@@ -2187,6 +3054,7 @@ export async function cancelMerchantOrder(
         fulfillmentStatus: "cancelled",
         cancellationReason: reason,
         cancelledAt: now,
+        transferReferenceRequestedAt: null,
         updatedAt: now,
       })
       .where(
@@ -2198,6 +3066,22 @@ export async function cancelMerchantOrder(
       .returning();
 
     if (!updated) throw new Error("Order cancellation could not be persisted");
+
+    await tx
+      .update(orderPaymentClaim)
+      .set({
+        status: "cancelled",
+        decidedAt: now,
+        decidedBy: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(orderPaymentClaim.orderId, row.id),
+          eq(orderPaymentClaim.storeId, scope.storeId),
+          eq(orderPaymentClaim.status, "pending"),
+        ),
+      );
 
     return {
       status: "cancelled",
@@ -2270,7 +3154,7 @@ async function loadMerchantOrderViews(
 
   const orderIds = orders.map((row) => row.id);
 
-  const [items, reservations] = await Promise.all([
+  const [items, reservations, claims] = await Promise.all([
     db
       .select()
       .from(orderItem)
@@ -2283,6 +3167,21 @@ async function loadMerchantOrderViews(
       })
       .from(inventoryReservation)
       .where(inArray(inventoryReservation.orderId, orderIds)),
+    db
+      .select({
+        id: orderPaymentClaim.id,
+        orderId: orderPaymentClaim.orderId,
+        reference: orderPaymentClaim.reference,
+        status: orderPaymentClaim.status,
+        submittedAt: orderPaymentClaim.submittedAt,
+        decidedAt: orderPaymentClaim.decidedAt,
+        decidedBy: orderPaymentClaim.decidedBy,
+        decidedByEmail: appUser.email,
+        decisionNote: orderPaymentClaim.decisionNote,
+      })
+      .from(orderPaymentClaim)
+      .leftJoin(appUser, eq(appUser.id, orderPaymentClaim.decidedBy))
+      .where(inArray(orderPaymentClaim.orderId, orderIds)),
   ]);
 
   const itemsByOrder = new Map<string, MerchantOrderItem[]>();
@@ -2304,6 +3203,20 @@ async function loadMerchantOrderViews(
     const list = reservationsByOrder.get(reservation.orderId) ?? [];
     list.push(reservation.status);
     reservationsByOrder.set(reservation.orderId, list);
+  }
+
+  const claimsByOrder = new Map<string, MerchantTransferClaim>();
+  for (const claim of claims) {
+    claimsByOrder.set(claim.orderId, {
+      id: claim.id,
+      reference: claim.reference,
+      status: claim.status,
+      submittedAt: claim.submittedAt,
+      decidedAt: claim.decidedAt,
+      decidedBy: claim.decidedBy,
+      decidedByEmail: claim.decidedByEmail,
+      decisionNote: claim.decisionNote,
+    });
   }
 
   return orders.map((row) => ({
@@ -2330,6 +3243,11 @@ async function loadMerchantOrderViews(
     cancellationReason: row.cancellationReason,
     items: itemsByOrder.get(row.id) ?? [],
     reservationStatuses: reservationsByOrder.get(row.id) ?? [],
+    transferReferenceRequestedAt: row.transferReferenceRequestedAt,
+    transferClaim: claimsByOrder.get(row.id) ?? null,
+    transferAwaitingReview:
+      row.paymentMethod === "vodafone_cash" &&
+      row.paymentStatus === "transfer_awaiting_review",
   }));
 }
 

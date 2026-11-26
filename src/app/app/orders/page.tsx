@@ -38,6 +38,9 @@ type Copy = {
   handedToShippingAt: string;
   deliveredAt: string;
   paymentCollectedAt: string;
+  transferSubmittedAt: string;
+  transferDecidedAt: string;
+  transferAwaitingReview: string;
   unknownTime: string;
   empty: string;
   status: string;
@@ -68,6 +71,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     handedToShippingAt: "تسليم للشحن",
     deliveredAt: "التوصيل",
     paymentCollectedAt: "تحصيل الدفع",
+    transferSubmittedAt: "إبلاغ التحويل",
+    transferDecidedAt: "قرار التحويل",
+    transferAwaitingReview: "تحويل بانتظار المراجعة",
     unknownTime: "الوقت غير معروف",
     empty: "لا توجد طلبات دفع عند الاستلام بعد.",
     status: "الحالة",
@@ -97,6 +103,9 @@ const COPY: Record<MerchantLocale, Copy> = {
     handedToShippingAt: "Handed to shipping",
     deliveredAt: "Delivered",
     paymentCollectedAt: "Cash collected",
+    transferSubmittedAt: "Transfer reported",
+    transferDecidedAt: "Transfer decision",
+    transferAwaitingReview: "Transfer awaiting review",
     unknownTime: "Time unknown",
     empty: "No cash-on-delivery orders yet.",
     status: "Status",
@@ -128,6 +137,10 @@ const STATUS_COPY: Record<
     awaiting_collection: "بانتظار التحصيل",
     collected: "تم التحصيل",
     failed: "فشل",
+    awaiting_transfer: "بانتظار التحويل",
+    transfer_awaiting_review: "تحويل بانتظار المراجعة",
+    transfer_verified: "تم التحقق من التحويل",
+    transfer_rejected: "تم رفض التحويل",
     unfulfilled: "بانتظار الشحن",
     handed_to_shipping: "تم التسليم للشحن",
     delivered: "تم التوصيل",
@@ -135,6 +148,7 @@ const STATUS_COPY: Record<
     committed: "مثبت",
     released: "محرر",
     cod: "الدفع عند الاستلام",
+    vodafone_cash: "فودافون كاش",
   },
   en: {
     placed: "placed",
@@ -144,6 +158,10 @@ const STATUS_COPY: Record<
     awaiting_collection: "awaiting collection",
     collected: "collected",
     failed: "failed",
+    awaiting_transfer: "awaiting transfer",
+    transfer_awaiting_review: "transfer awaiting review",
+    transfer_verified: "transfer verified",
+    transfer_rejected: "transfer rejected",
     unfulfilled: "awaiting handoff",
     handed_to_shipping: "handed to shipping",
     delivered: "delivered",
@@ -151,6 +169,7 @@ const STATUS_COPY: Record<
     committed: "committed",
     released: "released",
     cod: "cash on delivery",
+    vodafone_cash: "Vodafone Cash",
   },
 };
 
@@ -241,6 +260,20 @@ function buildTimeline(order: MerchantOrder, copy: Copy): TimelineEntry[] {
     });
   }
 
+  if (order.transferClaim) {
+    entries.push({
+      label: copy.transferSubmittedAt,
+      at: order.transferClaim.submittedAt,
+    });
+
+    if (order.transferClaim.decidedAt) {
+      entries.push({
+        label: copy.transferDecidedAt,
+        at: order.transferClaim.decidedAt,
+      });
+    }
+  }
+
   return entries;
 }
 
@@ -308,12 +341,21 @@ function OrderCard({
             locale={locale}
           />
         ))}
+        {order.transferAwaitingReview ? (
+          <span
+            className="inline-flex max-w-full items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:text-amber-300"
+            data-testid="merchant-order-transfer-attention"
+          >
+            {copy.transferAwaitingReview}
+          </span>
+        ) : null}
       </div>
 
       <MerchantOrderActions
         orderId={order.id}
         status={order.status}
         fulfillmentStatus={order.fulfillmentStatus}
+        paymentMethod={order.paymentMethod}
         paymentStatus={order.paymentStatus}
         orderReference={order.reference}
         cancellationReason={order.cancellationReason}
@@ -321,6 +363,19 @@ function OrderCard({
         currency={order.currency}
         locale={locale}
         readOnly={readOnly}
+        transferClaim={
+          order.transferClaim
+            ? {
+                reference: order.transferClaim.reference,
+                status: order.transferClaim.status,
+                submittedAtLabel: `${dateFormat.format(order.transferClaim.submittedAt)} UTC`,
+                decidedAtLabel: order.transferClaim.decidedAt
+                  ? `${dateFormat.format(order.transferClaim.decidedAt)} UTC`
+                  : null,
+                decidedByEmail: order.transferClaim.decidedByEmail,
+              }
+            : null
+        }
       />
 
       {timeline.length > 0 ? (

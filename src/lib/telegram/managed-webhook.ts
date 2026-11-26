@@ -19,14 +19,18 @@ import {
   backToCart,
   changeCartQuantity,
   confirmCodOrder,
-  isCodAvailable,
+  confirmVodafoneCashOrder,
   readCartForBuyer,
+  readCheckoutAvailability,
   readInventoryAvailability,
+  readPromptedVodafoneCashOrder,
   refreshReview,
   removeCartItem,
+  requestVodafoneCashTransferReference,
   saveAddressAndPrepareReview,
   savePhone,
   startCheckout,
+  submitVodafoneCashTransferClaim,
   type CartView,
   type CheckoutReview,
   type CommerceSetting,
@@ -182,6 +186,8 @@ async function renderLanguageMenu(
 
 type CodContext = {
   enabled: boolean;
+  codEnabled: boolean;
+  vodafoneCashEnabled: boolean;
   setting: CommerceSetting | null;
 };
 
@@ -296,7 +302,11 @@ function cartText(cart: CartView, copy: CommerceCopy): string {
   return lines.join("\n");
 }
 
-function reviewText(review: CheckoutReview, copy: CommerceCopy): string {
+function reviewText(
+  review: CheckoutReview,
+  copy: CommerceCopy,
+  vodafoneCashEnabled = false,
+): string {
   const lines = [
     copy.reviewTitle,
     "",
@@ -308,7 +318,9 @@ function reviewText(review: CheckoutReview, copy: CommerceCopy): string {
     `${copy.subtotal}: ${money(review.subtotal, review.currency)}`,
     `${copy.deliveryFee}: ${money(review.deliveryFee, review.currency)}`,
     `${copy.total}: ${money(review.total, review.currency)}`,
-    `${copy.paymentLabel}: ${copy.cashOnDelivery}`,
+    `${copy.paymentLabel}: ${copy.cashOnDelivery}${
+      vodafoneCashEnabled ? ` / ${copy.vodafoneCash}` : ""
+    }`,
     "",
     `${copy.nameLabel}: ${review.customerName}`,
     `${copy.phoneLabel}: ${review.customerPhone}`,
@@ -320,15 +332,35 @@ function reviewText(review: CheckoutReview, copy: CommerceCopy): string {
   return lines.join("\n");
 }
 
-function reviewKeyboard(review: CheckoutReview, copy: CommerceCopy) {
+function reviewKeyboard(
+  review: CheckoutReview,
+  copy: CommerceCopy,
+  vodafoneCashEnabled = false,
+) {
+  const paymentButtons: TelegramInlineKeyboardButton[][] = [
+    [
+      {
+        text: copy.confirmButton,
+        callback_data: tokens.confirmCod(review.cartId, review.quoteVersion),
+      },
+    ],
+  ];
+
+  if (vodafoneCashEnabled) {
+    paymentButtons.push([
+      {
+        text: copy.payWithVodafoneCash,
+        callback_data: tokens.confirmVodafoneCash(
+          review.cartId,
+          review.quoteVersion,
+        ),
+      },
+    ]);
+  }
+
   return {
     inline_keyboard: [
-      [
-        {
-          text: copy.confirmButton,
-          callback_data: tokens.confirmCod(review.cartId, review.quoteVersion),
-        },
-      ],
+      ...paymentButtons,
       [
         {
           text: copy.backToCart,
@@ -400,11 +432,12 @@ async function renderReviewView(
   messageId: number | undefined,
   review: CheckoutReview,
   copy: CommerceCopy,
+  vodafoneCashEnabled = false,
 ): Promise<void> {
   const params = {
     chatId,
-    text: reviewText(review, copy),
-    replyMarkup: reviewKeyboard(review, copy),
+    text: reviewText(review, copy, vodafoneCashEnabled),
+    replyMarkup: reviewKeyboard(review, copy, vodafoneCashEnabled),
   };
 
   if (messageId) {
@@ -487,6 +520,156 @@ async function renderPlacedOrder(
     `${copy.deliveryFee}: ${money(result.deliveryFee, result.currency)}`,
     `${copy.total}: ${money(result.total, result.currency)}`,
     copy.awaitingCollection,
+    "",
+    copy.reservedNote,
+  ].join("\n");
+
+  const params = {
+    chatId,
+    text,
+    replyMarkup: {
+      inline_keyboard: [
+        [{ text: copy.home, callback_data: tokens.homeNew() }],
+      ],
+    },
+  };
+
+  if (messageId) {
+    await editOrThrow(transport, { ...params, messageId });
+  } else {
+    await sendOrThrow(transport, params);
+  }
+}
+
+function transferInstructionsFor(
+  setting: CommerceSetting | null,
+  locale: ManagedCommerceLocale,
+): string | null {
+  if (!setting) return null;
+
+  const requested =
+    locale === "ar"
+      ? setting.vodafoneCashInstructionsAr
+      : setting.vodafoneCashInstructionsEn;
+  const fallback =
+    locale === "ar"
+      ? setting.vodafoneCashInstructionsEn
+      : setting.vodafoneCashInstructionsAr;
+
+  return requested?.trim() || fallback?.trim() || null;
+}
+
+function transferInstructionsText(
+  order: {
+    reference: string;
+    total: string;
+    currency: string;
+  },
+  setting: CommerceSetting | null,
+  locale: ManagedCommerceLocale,
+  copy: CommerceCopy,
+): string {
+  const instructions = transferInstructionsFor(setting, locale);
+
+  return [
+    copy.transferInstructionsTitle,
+    "",
+    copy.orderPlaced(order.reference),
+    `${copy.transferAmountLabel}: ${money(order.total, order.currency)}`,
+    "",
+    `${copy.transferTo}: ${setting?.vodafoneCashNumber ?? ""}`,
+    `${copy.transferAccount}: ${setting?.vodafoneCashAccountName ?? ""}`,
+    instructions ? `${copy.transferInstructions}:\n${instructions}` : "",
+    "",
+    copy.reservedNote,
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+}
+
+async function renderTransferInstructions(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number | undefined,
+  order: {
+    orderId: string;
+    reference: string;
+    total: string;
+    currency: string;
+  },
+  setting: CommerceSetting | null,
+  locale: ManagedCommerceLocale,
+  copy: CommerceCopy,
+): Promise<void> {
+  const params = {
+    chatId,
+    text: transferInstructionsText(order, setting, locale, copy),
+    replyMarkup: {
+      inline_keyboard: [
+        [
+          {
+            text: copy.transferReferenceButton,
+            callback_data: tokens.transferReference(order.orderId),
+          },
+        ],
+        [
+          { text: copy.cart, callback_data: tokens.cart() },
+          { text: copy.languageButton, callback_data: tokens.languages() },
+          { text: copy.home, callback_data: tokens.home() },
+        ],
+      ],
+    },
+  };
+
+  if (messageId) {
+    await editOrThrow(transport, { ...params, messageId });
+  } else {
+    await sendOrThrow(transport, params);
+  }
+}
+
+async function sendTransferReferencePrompt(
+  transport: TelegramTransport,
+  chatId: number,
+  copy: CommerceCopy,
+  text = copy.transferReferencePrompt,
+): Promise<void> {
+  await sendOrThrow(transport, {
+    chatId,
+    text,
+    replyMarkup: {
+      inline_keyboard: [
+        [
+          { text: copy.cart, callback_data: tokens.cart() },
+          { text: copy.languageButton, callback_data: tokens.languages() },
+          { text: copy.home, callback_data: tokens.home() },
+        ],
+      ],
+    },
+  });
+}
+
+async function renderTransferSubmitted(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number | undefined,
+  order: {
+    reference: string;
+    total: string;
+    currency: string;
+  },
+  copy: CommerceCopy,
+  alreadySubmitted = false,
+): Promise<void> {
+  const text = [
+    copy.transferSubmittedTitle,
+    "",
+    copy.orderPlaced(order.reference),
+    `${copy.total}: ${money(order.total, order.currency)}`,
+    "",
+    alreadySubmitted
+      ? copy.transferAlreadySubmitted
+      : copy.transferAwaitingReview,
     "",
     copy.reservedNote,
   ].join("\n");
@@ -1128,6 +1311,7 @@ async function dispatchMessage(
             undefined,
             await localizeReview(db, scope, result.review, plan, copy),
             copy,
+            cod.vodafoneCashEnabled,
           );
           return;
         }
@@ -1165,6 +1349,57 @@ async function dispatchMessage(
         });
         return;
       }
+    }
+  }
+
+  if (cod.vodafoneCashEnabled && commerceDb) {
+    const prompted = await readPromptedVodafoneCashOrder(commerceDb, scope, {
+      connectionId,
+      telegramUserId: buyerId,
+    });
+
+    if (prompted) {
+      const claim = await submitVodafoneCashTransferClaim(commerceDb, scope, {
+        connectionId,
+        telegramUserId: buyerId,
+        orderId: prompted.orderId,
+        reference: text,
+      });
+
+      if (
+        claim.status === "submitted" ||
+        claim.status === "already_submitted"
+      ) {
+        await renderTransferSubmitted(
+          transport,
+          message.chat.id,
+          undefined,
+          claim,
+          copy,
+          claim.status === "already_submitted",
+        );
+        return;
+      }
+
+      if (
+        claim.status === "invalid_reference" ||
+        claim.status === "reference_conflict"
+      ) {
+        await sendTransferReferencePrompt(
+          transport,
+          message.chat.id,
+          copy,
+          copy.transferReferenceInvalid,
+        );
+        return;
+      }
+
+      await sendOrThrow(transport, {
+        chatId: message.chat.id,
+        text: copy.genericUnavailable,
+        replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+      });
+      return;
     }
   }
 
@@ -1242,6 +1477,7 @@ async function renderAfterLanguageChange(
               messageId,
               await localizeReview(db, scope, refreshed.review, plan, copy),
               copy,
+              cod.vodafoneCashEnabled,
             );
             return;
           }
@@ -1682,6 +1918,7 @@ async function dispatchCallback(
           messageId,
           await localizeReview(db, scope, result.review, plan, copy),
           copy,
+          cod.vodafoneCashEnabled,
         );
         return;
       }
@@ -1737,6 +1974,126 @@ async function dispatchCallback(
         messageId,
         text:
           result.status === "cod_unavailable"
+            ? copy.notOrderable
+            : copy.genericUnavailable,
+        replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+      });
+      return;
+    }
+
+    if (parsedToken.type === "confirmVodafoneCash") {
+      const result = await confirmVodafoneCashOrder(commerceDb, scope, {
+        cartId: parsedToken.cartId,
+        connectionId,
+        telegramUserId: buyerId,
+        telegramChatId: chatId,
+        expectedQuoteVersion: parsedToken.quoteVersion,
+      }, plan);
+
+      if (result.status === "placed" || result.status === "already_placed") {
+        await renderTransferInstructions(
+          transport,
+          chatId,
+          messageId,
+          result,
+          cod.setting,
+          context.language.locale,
+          copy,
+        );
+        return;
+      }
+
+      if (result.status === "stale_quote") {
+        await renderReviewView(
+          transport,
+          chatId,
+          messageId,
+          await localizeReview(db, scope, result.review, plan, copy),
+          copy,
+          cod.vodafoneCashEnabled,
+        );
+        return;
+      }
+
+      if (result.status === "missing_details") {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: copy.checkoutNeedsDetails,
+          replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+        });
+        return;
+      }
+
+      if (
+        result.status === "insufficient_stock" ||
+        result.status === "item_unavailable"
+      ) {
+        const cart = await readCartForBuyer(db, scope, {
+          connectionId,
+          telegramUserId: buyerId,
+          cartId: parsedToken.cartId,
+        });
+
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: cartAvailabilityMessage(cart, copy),
+          replyMarkup: {
+            inline_keyboard: [
+              [{ text: copy.cart, callback_data: tokens.cart() }],
+              ...homeKeyboard(copy),
+            ],
+          },
+        });
+        return;
+      }
+
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text:
+          result.status === "transfer_unavailable"
+            ? copy.notOrderable
+            : copy.genericUnavailable,
+        replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+      });
+      return;
+    }
+
+    if (parsedToken.type === "transferReference") {
+      const result = await requestVodafoneCashTransferReference(
+        commerceDb,
+        scope,
+        {
+          connectionId,
+          telegramUserId: buyerId,
+          orderId: parsedToken.orderId,
+        },
+      );
+
+      if (result.status === "prompted") {
+        await sendTransferReferencePrompt(transport, chatId, copy);
+        return;
+      }
+
+      if (result.status === "already_submitted") {
+        await renderTransferSubmitted(
+          transport,
+          chatId,
+          messageId,
+          result,
+          copy,
+          true,
+        );
+        return;
+      }
+
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text:
+          result.status === "transfer_unavailable"
             ? copy.notOrderable
             : copy.genericUnavailable,
         replyMarkup: { inline_keyboard: homeKeyboard(copy) },
@@ -1964,7 +2321,13 @@ export async function handleManagedTelegramWebhookRequest(
       connection.storeId,
     );
 
-    let cod = await isCodAvailable(db, scope);
+    const availability = await readCheckoutAvailability(db, scope);
+    let cod: CodContext = {
+      enabled: availability.enabled,
+      codEnabled: availability.codEnabled,
+      vodafoneCashEnabled: availability.vodafoneCashEnabled,
+      setting: availability.setting,
+    };
     let commerceDb: TransactionDatabase | null = null;
 
     if (cod.enabled) {
@@ -1973,7 +2336,7 @@ export async function handleManagedTelegramWebhookRequest(
       } catch {
         // A deployment without the transaction client keeps browsing intact
         // and simply does not offer cart/checkout.
-        cod = { enabled: false, setting: cod.setting };
+        cod = { ...cod, enabled: false };
       }
     }
 

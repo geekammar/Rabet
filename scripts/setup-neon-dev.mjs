@@ -77,7 +77,7 @@ import postgres from "postgres";
 
 const WIZARD = "rabet db:setup:dev";
 
-/** The thirty-seven domain tables created by the committed chain. */
+/** The thirty-eight domain tables created by the committed chain. */
 export const EXPECTED_TABLES = [
   "admin_login_throttle",
   "app_user",
@@ -99,6 +99,7 @@ export const EXPECTED_TABLES = [
   "message_translation",
   "order",
   "order_item",
+  "order_payment_claim",
   "payment_method",
   "payment_method_translation",
   "product",
@@ -138,6 +139,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0015_cod_shipping_delivery_collection",
   "0016_buyer_language_support",
   "0017_store_telegram_support",
+  "0018_sparkling_morlun",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -157,6 +159,7 @@ const COMMERCE_TABLES = new Set([
   "inventory_reservation",
   "order",
   "order_item",
+  "order_payment_claim",
   "product_inventory",
   "store_commerce_setting",
 ]);
@@ -220,6 +223,11 @@ export const EXPECTED_TABLES_V10 = EXPECTED_TABLES.filter(
 /** The thirty-five-table inventory through 0013 (COD tables included). */
 export const EXPECTED_TABLES_V11 = EXPECTED_TABLES.filter(
   (t) => !LANGUAGE_PREFERENCE_TABLES.has(t),
+);
+
+/** The thirty-seven-table inventory through 0017 (current baseline before 0018). */
+export const EXPECTED_TABLES_V16 = EXPECTED_TABLES.filter(
+  (t) => t !== "order_payment_claim",
 );
 
 /** The eighteen domain tables created by the 0000..0004 schema (prior release baseline). */
@@ -341,6 +349,12 @@ export const EXPECTED_INDEXES_V10 = [
 /** Indexes present through 0012 (0012 adds no index). */
 export const EXPECTED_INDEXES_V11 = [...EXPECTED_INDEXES_V10];
 
+const VODAFONE_CASH_INDEXES = [
+  "order_payment_claim_order_unique",
+  "order_payment_claim_store_reference_unique",
+  "order_payment_claim_store_status_idx",
+];
+
 /** Indexes the current chain requires (0013 adds the COD indexes). */
 export const EXPECTED_INDEXES = [
   ...EXPECTED_INDEXES_V11,
@@ -362,7 +376,13 @@ export const EXPECTED_INDEXES = [
   "order_item_order_product_unique",
   "order_item_order_idx",
   "product_inventory_store_idx",
+  ...VODAFONE_CASH_INDEXES,
 ];
+
+/** Indexes present through 0017 (current production baseline, before 0018). */
+export const EXPECTED_INDEXES_V16 = EXPECTED_INDEXES.filter(
+  (name) => !VODAFONE_CASH_INDEXES.includes(name),
+);
 
 /** CHECK constraints present in 0000..0002 schema (Phase 11 baseline). */
 export const CRITICAL_CONSTRAINTS_V2 = [
@@ -550,10 +570,34 @@ export const CRITICAL_CONSTRAINTS_V15 = [
   "store_language_setting_store_id_store_id_fk",
 ];
 
-/** CHECK, foreign-key and domain constraints the current chain requires. */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, foreign-key and domain constraints present through 0017. */
+export const CRITICAL_CONSTRAINTS_V16 = [
   ...CRITICAL_CONSTRAINTS_V15,
   "store_telegram_support_username_format_check",
+];
+
+const VODAFONE_CASH_CONSTRAINTS = [
+  "store_commerce_setting_vodafone_cash_config_check",
+  "store_commerce_setting_vodafone_cash_number_length_check",
+  "store_commerce_setting_vodafone_cash_account_name_length_check",
+  "store_commerce_setting_vodafone_cash_instructions_length_check",
+  "cart_payment_method_check",
+  "order_payment_method_status_check",
+  "order_transfer_reference_request_state_check",
+  "order_payment_claim_order_id_order_id_fk",
+  "order_payment_claim_store_id_store_id_fk",
+  "order_payment_claim_decided_by_app_user_id_fk",
+  "order_payment_claim_method_check",
+  "order_payment_claim_status_check",
+  "order_payment_claim_reference_length_check",
+  "order_payment_claim_decision_state_check",
+  "order_payment_claim_decision_note_length_check",
+];
+
+/** CHECK, foreign-key and domain constraints the current chain requires. */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V16,
+  ...VODAFONE_CASH_CONSTRAINTS,
 ];
 
 /** Notification update triggers created by migration 0003. */

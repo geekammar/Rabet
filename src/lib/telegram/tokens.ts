@@ -107,6 +107,21 @@ export const tokens = {
     }
     return assertValidCallbackData(`cb:${cartId}`);
   },
+  confirmVodafoneCash: (cartId: string, quoteVersion: number): string => {
+    if (!UUID_REGEX.test(cartId)) {
+      throw new Error(`Invalid cart UUID: "${cartId}"`);
+    }
+    if (!Number.isInteger(quoteVersion) || quoteVersion < 1 || quoteVersion > 99999) {
+      throw new Error(`Invalid quote version: ${quoteVersion}`);
+    }
+    return assertValidCallbackData(`cv:${cartId}:${quoteVersion}`);
+  },
+  transferReference: (orderId: string): string => {
+    if (!UUID_REGEX.test(orderId)) {
+      throw new Error(`Invalid order UUID: "${orderId}"`);
+    }
+    return assertValidCallbackData(`tr:${orderId}`);
+  },
   products: (page?: number): string => {
     if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
       throw new Error(`Invalid page number: ${page}`);
@@ -206,7 +221,9 @@ export type ParsedToken =
   | { type: "cartRemove"; productId: string }
   | { type: "checkout"; cartId: string }
   | { type: "confirmCod"; cartId: string; quoteVersion: number }
+  | { type: "confirmVodafoneCash"; cartId: string; quoteVersion: number }
   | { type: "backToCart"; cartId: string }
+  | { type: "transferReference"; orderId: string }
   | { type: "products"; page: number }
   | { type: "languages"; context: string | null }
   | { type: "support" }
@@ -304,10 +321,33 @@ export function parseToken(data?: string): ParsedToken {
     return { type: "unknown", raw: data };
   }
 
+  if (data.startsWith("cv:")) {
+    const parts = data.slice(3).split(":");
+    if (
+      parts.length === 2 &&
+      UUID_REGEX.test(parts[0]) &&
+      PAGE_REGEX.test(parts[1])
+    ) {
+      return {
+        type: "confirmVodafoneCash",
+        cartId: parts[0],
+        quoteVersion: parseInt(parts[1], 10),
+      };
+    }
+    return { type: "unknown", raw: data };
+  }
+
   if (data.startsWith("cb:")) {
     const cartId = data.slice(3);
     return UUID_REGEX.test(cartId)
       ? { type: "backToCart", cartId }
+      : { type: "unknown", raw: data };
+  }
+
+  if (data.startsWith("tr:")) {
+    const orderId = data.slice(3);
+    return UUID_REGEX.test(orderId)
+      ? { type: "transferReference", orderId }
       : { type: "unknown", raw: data };
   }
 

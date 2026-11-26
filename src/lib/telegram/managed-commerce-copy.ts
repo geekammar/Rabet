@@ -47,6 +47,19 @@ export type CommerceCopy = {
   deliveryFee: string;
   total: string;
   cashOnDelivery: string;
+  vodafoneCash: string;
+  payWithVodafoneCash: string;
+  transferInstructionsTitle: string;
+  transferTo: string;
+  transferAccount: string;
+  transferInstructions: string;
+  transferReferenceButton: string;
+  transferReferencePrompt: string;
+  transferReferenceInvalid: string;
+  transferSubmittedTitle: string;
+  transferAwaitingReview: string;
+  transferAlreadySubmitted: string;
+  transferAmountLabel: string;
   reviewTitle: string;
   reviewInstruction: string;
   confirmButton: string;
@@ -107,6 +120,23 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     deliveryFee: "Delivery fee",
     total: "Total",
     cashOnDelivery: "Cash on delivery",
+    vodafoneCash: "Vodafone Cash",
+    payWithVodafoneCash: "Transfer with Vodafone Cash",
+    transferInstructionsTitle: "Vodafone Cash transfer",
+    transferTo: "Transfer to",
+    transferAccount: "Recipient name",
+    transferInstructions: "Transfer instructions",
+    transferReferenceButton: "I have transferred — submit reference",
+    transferReferencePrompt:
+      "Send the transfer reference from your Vodafone Cash receipt as one text message.",
+    transferReferenceInvalid:
+      "That reference is invalid. Send the reference exactly as shown in your receipt (3–80 characters).",
+    transferSubmittedTitle: "Transfer reference received",
+    transferAwaitingReview:
+      "Awaiting merchant verification. The order is not marked paid until the merchant checks the wallet and verifies the transfer.",
+    transferAlreadySubmitted:
+      "A transfer reference is already recorded for this order and is awaiting merchant review.",
+    transferAmountLabel: "Exact amount",
     reviewTitle: "Review your order",
     reviewInstruction:
       "Confirm only if these details, prices and the delivery fee are correct.",
@@ -169,6 +199,23 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     deliveryFee: "رسوم التوصيل",
     total: "الإجمالي",
     cashOnDelivery: "الدفع عند الاستلام",
+    vodafoneCash: "فودافون كاش",
+    payWithVodafoneCash: "التحويل عبر فودافون كاش",
+    transferInstructionsTitle: "تحويل فودافون كاش",
+    transferTo: "حوّل إلى",
+    transferAccount: "اسم المستلم",
+    transferInstructions: "تعليمات التحويل",
+    transferReferenceButton: "لقد حوّلت — إرسال المرجع",
+    transferReferencePrompt:
+      "أرسل مرجع التحويل الموجود في إيصال فودافون كاش في رسالة نصية واحدة.",
+    transferReferenceInvalid:
+      "المرجع غير صالح. أرسل المرجع كما يظهر في الإيصال (٣–٨٠ حرفًا).",
+    transferSubmittedTitle: "تم استلام مرجع التحويل",
+    transferAwaitingReview:
+      "بانتظار مراجعة التاجر. لا يُعد الطلب مدفوعًا حتى يتحقق التاجر من المحفظة ويؤكد التحويل.",
+    transferAlreadySubmitted:
+      "يوجد مرجع تحويل مسجل لهذا الطلب وهو بانتظار مراجعة التاجر.",
+    transferAmountLabel: "المبلغ بالضبط",
     reviewTitle: "راجع طلبك",
     reviewInstruction:
       "أكّد فقط إذا كانت هذه التفاصيل والأسعار ورسوم التوصيل صحيحة.",
