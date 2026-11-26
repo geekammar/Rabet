@@ -63,7 +63,7 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
           APP_URL: https://nokmel-cod-staging.onrender.com
-          CANDIDATE_SHA: 86cda9845a293936f3324148ffc580864ebfd738
+          CANDIDATE_SHA: 880d15f868aaac0c6d5a10422889afce543152f8
           DEPLOY_CONFIRM: DEPLOY_PR62_COD_STAGING
         run: node scripts/cod-staging-deploy-pr62.mjs
 

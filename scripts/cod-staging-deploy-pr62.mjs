@@ -19,6 +19,10 @@ const QA_INSTRUCTIONS_AR =
 const QA_INSTRUCTIONS_EN =
   "Synthetic QA only: transfer the exact amount to the test wallet, then submit the reference.";
 const TARGET_ORDER_REFERENCE = "ORD-X2EZD9";
+const EXPECTED_LEDGER_COUNT = 19;
+const EXPECTED_LEDGER_HASH =
+  "868ba439a60f6a3870a5535e032ad55ab0d38c69aced7cf1532e465c632dc339";
+const EXPECTED_MIGRATION_TAG = "0018_sparkling_morlun";
 const SUMMARY_PATH = "/tmp/cod-staging-pr62-summary.json";
 
 function log(message) {
@@ -265,6 +269,28 @@ async function readMerchantForStore(db, storeId) {
   return rows[0] ?? null;
 }
 
+async function assertApplied0018(db, label) {
+  const [rows] = await db`
+    select count(*)::int as count
+    from drizzle.__drizzle_migrations
+  `;
+  const [last] = await db`
+    select hash
+    from drizzle.__drizzle_migrations
+    order by id desc
+    limit 1
+  `;
+  const count = Number(rows?.count ?? -1);
+  const lastHash = String(last?.hash ?? "");
+  if (count !== EXPECTED_LEDGER_COUNT) {
+    fail(`${label}: expected ledger ${EXPECTED_LEDGER_COUNT}, found ${count}`);
+  }
+  if (lastHash !== EXPECTED_LEDGER_HASH) {
+    fail(`${label}: applied migration hash is not ${EXPECTED_MIGRATION_TAG}`);
+  }
+  return { count, lastHash, tag: EXPECTED_MIGRATION_TAG };
+}
+
 async function applyVodafoneQaFixture(db) {
   const [store] = await db`
     select id, name, slug, status
@@ -489,6 +515,11 @@ async function main() {
   let dbAfter;
 
   try {
+    const migrationBeforeDeploy = await assertApplied0018(
+      db,
+      "pre-deploy",
+    );
+
     await db.begin(async (tx) => {
       await tx`set transaction read only`;
       orderCandidates = await readOrderCandidates(tx);
@@ -753,6 +784,10 @@ async function main() {
     ) {
       fail("Migration ledger changed during the deploy/smoke window");
     }
+    const migrationAfterDeploy = await assertApplied0018(
+      db,
+      "post-deploy",
+    );
     if (
       dbBefore.counts.orders !== dbAfter.counts.orders ||
       dbBefore.counts.carts !== dbAfter.counts.carts ||
@@ -797,6 +832,14 @@ async function main() {
         nonLabelFingerprintStable: true,
       },
       database: {
+        migration: {
+          expectedTag: EXPECTED_MIGRATION_TAG,
+          expectedCount: EXPECTED_LEDGER_COUNT,
+          expectedHash: EXPECTED_LEDGER_HASH,
+          beforeDeploy: migrationBeforeDeploy,
+          afterDeploy: migrationAfterDeploy,
+          noNewMigrationApplied: true,
+        },
         ledgerBefore: dbBefore.ledger,
         ledgerAfter: dbAfter.ledger,
         countsBefore: dbBefore.counts,
