@@ -505,6 +505,33 @@ async function main() {
     ordersLinkText === "View orders",
     `Expected English Orders link, saw ${JSON.stringify(ordersLinkText)}`,
   );
+  const attentionBefore = await cdp.evaluate(`(() => {
+    const section = document.querySelector('[data-testid="merchant-needs-attention"]');
+    const link = section?.querySelector('[data-testid="merchant-needs-attention-link"]');
+    return {
+      count: section?.getAttribute('data-pending-count') ?? null,
+      text: section?.innerText ?? '',
+      href: link?.getAttribute('href') ?? null,
+      overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+    };
+  })()`);
+  assert(
+    attentionBefore.count === "1",
+    `Expected one order awaiting acceptance, saw ${JSON.stringify(attentionBefore)}`,
+  );
+  assert(
+    attentionBefore.text.includes("ORD-ABC234") &&
+      attentionBefore.text.includes("37.00 SAR"),
+    `Needs Attention must show the pending order reference and total, saw ${JSON.stringify(attentionBefore)}`,
+  );
+  assert(
+    attentionBefore.href === `/app/orders#merchant-order-${order.id}`,
+    `Needs Attention must deep-link to the existing order card, saw ${JSON.stringify(attentionBefore.href)}`,
+  );
+  assert(
+    attentionBefore.overflow <= 361,
+    `Expected no horizontal scroll on the merchant entry point at 360 px, saw ${attentionBefore.overflow}`,
+  );
   const clicked = await cdp.evaluate(`(() => {
     const link = document.querySelector('[data-testid="merchant-orders-link"]');
     if (!link) return false;
@@ -675,6 +702,24 @@ async function main() {
     "acceptance feedback",
   );
   await capturePhoneScreenshot("02-order-accepted-360.png");
+
+  await navigate(`${BASE_URL}/app/setup`, "merchant setup after acceptance");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-needs-attention\"]')?.getAttribute('data-pending-count') === '0'",
+    "needs attention queue emptied after acceptance",
+  );
+  const afterAcceptanceSetupBody = await cdp.evaluate("document.body.innerText");
+  assert(
+    !afterAcceptanceSetupBody.includes("ORD-ABC234"),
+    "An accepted order must leave the Needs Attention queue on reload",
+  );
+  await navigate(`${BASE_URL}/app/orders`, "merchant orders after acceptance");
+  await waitFor(
+    cdp,
+    "Boolean(document.querySelector('[data-testid=\"merchant-order-action-prepare\"]'))",
+    "Start preparing action after acceptance reload",
+  );
 
   await clickTestId("merchant-order-action-prepare");
   await waitFor(
@@ -1319,6 +1364,18 @@ async function main() {
   }
 
   await capturePhoneScreenshot("11-cancelled-360.png");
+
+  await navigate(`${BASE_URL}/app/setup`, "merchant setup after cancellation");
+  await waitFor(
+    cdp,
+    "document.querySelector('[data-testid=\"merchant-needs-attention\"]')?.getAttribute('data-pending-count') === '0'",
+    "needs attention queue emptied after cancellation",
+  );
+  const afterCancellationSetupBody = await cdp.evaluate("document.body.innerText");
+  assert(
+    !afterCancellationSetupBody.includes("ORD-CAN234"),
+    "A cancelled order must leave the Needs Attention queue on reload",
+  );
 
   const [cancelledInventory] = await pgClient`
     select on_hand, reserved
