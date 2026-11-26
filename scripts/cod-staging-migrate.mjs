@@ -20,10 +20,10 @@ const MIGRATE_SUMMARY = "/tmp/cod-staging-migrate-summary.json";
 const EXPECTED_HOST = "ep-tiny-star-b4dpybus.c-6.us-east-2.aws.neon.tech";
 const EXPECTED_DB = "rabet_cod_pr56";
 const EXPECTED_ROLE = "rabet_cod_pr56";
-const PRE_LEDGER_COUNT = 14;
-const PRE_LEDGER_HASH = "022792f758b8584245085624a43aba20137f1c2f89702ecac0ae302db8044eba";
-const POST_LEDGER_COUNT = 17;
-const POST_LEDGER_HASH = "0987aaa6cbfbf9d4ae83a35b0ddb8a9797742940beb5380f670a40dfe96a314e";
+const PRE_LEDGER_COUNT = 17;
+const PRE_LEDGER_HASH = "0987aaa6cbfbf9d4ae83a35b0ddb8a9797742940beb5380f670a40dfe96a314e";
+const POST_LEDGER_COUNT = 18;
+const POST_LEDGER_HASH = "b870cde776593f11fceb72e3322e1a67a2fc9c2a3be69b982491929aabc26048";
 
 const secrets = [RENDER_API_KEY];
 
@@ -138,13 +138,13 @@ async function assertPreLedger(sql, label) {
     fail(`${label}: expected ledger ${PRE_LEDGER_COUNT}, found ${ledger.count}`);
   }
   if (ledger.lastHash !== PRE_LEDGER_HASH) {
-    fail(`${label}: last ledger hash does not match the 0013 baseline`);
+    fail(`${label}: last ledger hash does not match the 0016 baseline`);
   }
   if (ledger.journalCount !== POST_LEDGER_COUNT) {
-    fail(`${label}: candidate journal does not contain 17 migrations`);
+    fail(`${label}: candidate journal does not contain 18 migrations`);
   }
-  if (ledger.pending !== 3 || ledger.lastJournalTag !== "0016_buyer_language_support") {
-    fail(`${label}: expected exactly 0014, 0015 and 0016 pending`);
+  if (ledger.pending !== 1 || ledger.lastJournalTag !== "0017_store_telegram_support") {
+    fail(`${label}: expected exactly 0017_store_telegram_support pending`);
   }
   return ledger;
 }
@@ -316,6 +316,22 @@ function assertSchema(sql) {
     if (!tables?.store_language_setting) fail("store_language_setting is missing after 0016");
     if (!tables?.buyer_language_preference) fail("buyer_language_preference is missing after 0016");
 
+    const [support] = await sql`
+      select
+        exists (
+          select 1 from information_schema.columns
+          where table_schema = 'public' and table_name = 'store'
+            and column_name = 'telegram_support_username'
+        ) as support_column,
+        exists (
+          select 1 from pg_constraint
+          where conrelid = 'public.store'::regclass
+            and conname = 'store_telegram_support_username_format_check'
+        ) as support_constraint
+    `;
+    if (!support?.support_column) fail("store.telegram_support_username is missing after 0017");
+    if (!support?.support_constraint) fail("store_telegram_support_username_format_check is missing after 0017");
+
     const columns = await sql`
       select column_name from information_schema.columns
       where table_schema = 'public' and table_name = 'order'
@@ -431,7 +447,7 @@ async function migrate() {
       fail(`expected ledger ${POST_LEDGER_COUNT} after migration, found ${ledgerAfter.count}`);
     }
     if (ledgerAfter.lastHash !== POST_LEDGER_HASH) {
-      fail("post-migration ledger hash does not match 0016_buyer_language_support");
+      fail("post-migration ledger hash does not match 0017_store_telegram_support");
     }
     if (ledgerAfter.pending !== 0) fail(`expected zero pending migrations, found ${ledgerAfter.pending}`);
     await assertSchema(sql);
@@ -458,6 +474,8 @@ async function migrate() {
       schemaVerified: {
         storeLanguageSetting: true,
         buyerLanguagePreference: true,
+        telegramSupportUsernameColumn: true,
+        telegramSupportUsernameConstraint: true,
         orderLifecycleAndShippingColumns: true,
         dbCheck: true,
       },

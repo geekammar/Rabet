@@ -1,4 +1,4 @@
-name: COD Staging migrate to PR59
+name: COD Staging migrate to PR60 Ask Seller
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch candidate branch
-        run: git fetch origin feat/buyer-language-simple-checkout
+        run: git fetch origin feat/ask-seller-telegram
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
@@ -42,7 +42,7 @@ jobs:
       - name: Create exact candidate worktree
         run: |
           set -euo pipefail
-          CANDIDATE_SHA="9542b7c38ac7bacd7fd8287c2ce3936e284256f6"
+          CANDIDATE_SHA="a716a129f65981f4e42d0e2da20d01eb63afa04b"
           git worktree add --detach /tmp/rabet-candidate "${CANDIDATE_SHA}"
           test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${CANDIDATE_SHA}"
 
@@ -55,7 +55,7 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
           APP_URL: https://nokmel-cod-staging.onrender.com
-          CANDIDATE_SHA: 9542b7c38ac7bacd7fd8287c2ce3936e284256f6
+          CANDIDATE_SHA: a716a129f65981f4e42d0e2da20d01eb63afa04b
           RABET_CODE_ROOT: /tmp/rabet-candidate
         run: node scripts/cod-staging-migrate.mjs recovery
 
@@ -71,7 +71,7 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
           APP_URL: https://nokmel-cod-staging.onrender.com
-          CANDIDATE_SHA: 9542b7c38ac7bacd7fd8287c2ce3936e284256f6
+          CANDIDATE_SHA: a716a129f65981f4e42d0e2da20d01eb63afa04b
           RABET_CODE_ROOT: /tmp/rabet-candidate
         run: node scripts/cod-staging-migrate.mjs migrate
 
