@@ -130,7 +130,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     keepOrder: "الاحتفاظ بالطلب",
     reasonRequired: "اكتب سببًا من ٣ إلى ٣٠٠ حرف.",
     readOnlyNote:
-      "يمكنك مراجعة الطلب فقط. القبول والتجهيز والشحن والتوصيل والتحصيل والإلغاء وقرارات التحويل غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
+      "يمكنك مراجعة الطلب فقط. القبول والتجهيز والشحن والتوصيل والتحصيل والإلغاء غير متاحة حتى يعيد مسؤول المنصة تفعيل المتجر.",
     transferTitle: "تحويل فودافون كاش",
     transferAwaitingLabel: "تحويل بانتظار المراجعة",
     transferReferenceLabel: "مرجع التحويل من العميل",
@@ -219,7 +219,7 @@ const COPY: Record<MerchantLocale, Copy> = {
     keepOrder: "Keep order",
     reasonRequired: "Enter a reason of 3–300 characters.",
     readOnlyNote:
-      "You can review this order only. Accept, prepare, shipping, delivery, collection, cancel and transfer decisions are unavailable until a platform administrator reactivates the store.",
+      "You can review this order only. Accept, prepare, shipping, delivery, collection and cancel are unavailable until a platform administrator reactivates the store.",
     transferTitle: "Vodafone Cash transfer",
     transferAwaitingLabel: "Transfer awaiting review",
     transferReferenceLabel: "Buyer transfer reference",
