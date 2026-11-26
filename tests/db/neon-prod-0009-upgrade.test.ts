@@ -381,7 +381,7 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
     );
 
     const afterLedger = await ledger(baseline);
-    expect(afterLedger).toHaveLength(19);
+    expect(afterLedger).toHaveLength(20);
     expect(afterLedger.slice(0, beforeLedger.length)).toEqual(beforeLedger);
     expect(afterLedger[10].hash).toBe(
       committed.find((entry) => entry.tag === "0010_wonderful_siren")?.hash,
