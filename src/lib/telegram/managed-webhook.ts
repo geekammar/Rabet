@@ -43,6 +43,7 @@ import {
   createStoreScopeForExistingStore,
   type StoreScope,
 } from "@/lib/data/store-scope";
+import { readStoreTelegramSupportUsername } from "@/lib/data/store-telegram-contact";
 import {
   decryptConnectionSecret,
   verifyWebhookSecret,
@@ -63,6 +64,7 @@ import {
   isBuyerLocale,
 } from "@/lib/commerce/buyer-language";
 import { tokens, type ParsedToken } from "./tokens";
+import { telegramSupportChatUrl } from "./support-contact";
 import {
   classifyErrorToSafeDiagnostic,
   createFetchTelegramTransport,
@@ -895,6 +897,11 @@ async function renderProduct(
     return;
   }
 
+  const supportUsername = await readStoreTelegramSupportUsername(
+    db,
+    scope.storeId,
+  );
+
   const lines = [productRow.name];
 
   if (productRow.description && productRow.description.trim().length > 0) {
@@ -928,6 +935,18 @@ async function renderProduct(
       keyboard.push(quantityButtons);
       keyboard.push([{ text: copy.cart, callback_data: tokens.cart() }]);
     }
+  }
+
+  if (supportUsername) {
+    keyboard.push([
+      {
+        text: copy.askSellerOnTelegram,
+        url: telegramSupportChatUrl(
+          supportUsername,
+          copy.telegramSupportDraft(productRow.name),
+        ),
+      },
+    ]);
   }
 
   keyboard.push([

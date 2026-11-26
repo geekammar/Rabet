@@ -6,6 +6,7 @@ import {
   botSetting,
   buyerLanguagePreference,
   cart,
+  cartItem,
   category,
   categoryTranslation,
   inventoryReservation,
@@ -270,6 +271,7 @@ beforeEach(async () => {
   await db.execute(sql`truncate table "buyer_language_preference"`);
   await db.execute(sql`truncate table "store_language_setting"`);
   await db.execute(sql`truncate table "bot_setting"`);
+  await db.update(store).set({ telegramSupportUsername: null });
 
   await db
     .update(product)
@@ -407,9 +409,13 @@ async function call(
 
 function inlineButtons(message: {
   replyMarkup?: unknown;
-}): Array<{ text: string; callback_data?: string }> {
+}): Array<{ text: string; callback_data?: string; url?: string }> {
   const markup = message.replyMarkup as
-    | { inline_keyboard?: Array<Array<{ text: string; callback_data?: string }>> }
+    | {
+        inline_keyboard?: Array<
+          Array<{ text: string; callback_data?: string; url?: string }>
+        >;
+      }
     | undefined;
 
   return markup?.inline_keyboard?.flat() ?? [];
@@ -1151,6 +1157,81 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     );
     expect(lastText(secondProduct.transport)).toContain("منتج أ واحد");
     expect(lastText(secondProduct.transport)).toContain("وصف المنتج أ");
+  });
+
+  it("offers the saved seller contact as a localized Telegram draft without touching cart state", async () => {
+    await db()
+      .update(store)
+      .set({ telegramSupportUsername: "StoreA_Support" })
+      .where(eq(store.id, fixture.storeAId));
+
+    const { cartId } = await addAndCheckout();
+    const [cartBefore] = await db().select().from(cart).where(eq(cart.id, cartId));
+    const itemsBefore = await db()
+      .select()
+      .from(cartItem)
+      .where(eq(cartItem.cartId, cartId));
+    expect(cartBefore.status).toBe("checkout");
+    expect(cartBefore.checkoutState).toBe("awaiting_phone");
+
+    const englishProduct = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, `p:${fixture.productAId}`, "en"),
+    );
+    expect(englishProduct.status).toBe(200);
+
+    const englishButton = inlineButtons(
+      englishProduct.transport.editedMessages.at(-1)!,
+    ).find((button) => button.text === "Ask the seller on Telegram");
+    expect(englishButton?.url).toBeDefined();
+
+    const englishUrl = new URL(englishButton!.url!);
+    expect(`${englishUrl.origin}${englishUrl.pathname}`).toBe(
+      "https://t.me/StoreA_Support",
+    );
+    expect(englishUrl.searchParams.get("text")).toBe(
+      "Hi, I have a question about Bot A One: ",
+    );
+
+    const arabicProduct = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, `p:${fixture.productAId}`, "ar"),
+    );
+    expect(arabicProduct.status).toBe(200);
+
+    const arabicButton = inlineButtons(
+      arabicProduct.transport.editedMessages.at(-1)!,
+    ).find((button) => button.text === "اسأل البائع على Telegram");
+    expect(arabicButton?.url).toBeDefined();
+
+    const arabicUrl = new URL(arabicButton!.url!);
+    expect(`${arabicUrl.origin}${arabicUrl.pathname}`).toBe(
+      "https://t.me/StoreA_Support",
+    );
+    expect(arabicUrl.searchParams.get("text")).toBe(
+      "مرحبًا، عندي سؤال عن Bot A One: ",
+    );
+
+    const [cartAfter] = await db().select().from(cart).where(eq(cart.id, cartId));
+    const itemsAfter = await db()
+      .select()
+      .from(cartItem)
+      .where(eq(cartItem.cartId, cartId));
+    expect(cartAfter).toEqual(cartBefore);
+    expect(itemsAfter).toEqual(itemsBefore);
+    expect(await db().select().from(order)).toHaveLength(0);
+
+    const otherStoreProduct = await call(
+      fixture.connectionBId,
+      callbackUpdate(BUYER_B, `p:${fixture.productBId}`, "en"),
+      "bot-secret-b",
+    );
+    expect(otherStoreProduct.status).toBe(200);
+    expect(
+      inlineButtons(otherStoreProduct.transport.editedMessages.at(-1)!).some(
+        (button) => button.text === "Ask the seller on Telegram",
+      ),
+    ).toBe(false);
   });
 
   it("keeps single-language catalog records visible with a deterministic fallback", async () => {
