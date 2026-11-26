@@ -22,6 +22,7 @@ import {
   confirmVodafoneCashOrder,
   readCartForBuyer,
   bindVodafoneCashTransferPromptMessage,
+  listBuyerOutstandingVodafoneTransfers,
   readCheckoutAvailability,
   readInventoryAvailability,
   readVodafoneCashOrderByPromptReply,
@@ -34,6 +35,7 @@ import {
   startCheckout,
   submitVodafoneCashTransferClaim,
   type CartView,
+  type BuyerVodafoneTransferSummary,
   type CheckoutReview,
   type CommerceSetting,
   type TransferSnapshot,
@@ -194,6 +196,41 @@ type CodContext = {
   vodafoneCashEnabled: boolean;
   setting: CommerceSetting | null;
 };
+
+type HomeRecovery = {
+  commerceDb: TransactionDatabase;
+  connectionId: string;
+  buyerId: number;
+  chatId: number;
+  locale: ManagedCommerceLocale;
+};
+
+function homeRecoveryFor(
+  commerceDb: TransactionDatabase | null,
+  connectionId: string,
+  buyerId: number | null,
+  chatId: number,
+  locale: ManagedCommerceLocale,
+): HomeRecovery | undefined {
+  if (!commerceDb || buyerId === null) return undefined;
+  return { commerceDb, connectionId, buyerId, chatId, locale };
+}
+
+async function outstandingVodafoneTransfers(
+  recovery: HomeRecovery,
+  scope: StoreScope,
+): Promise<BuyerVodafoneTransferSummary[]> {
+  const transfers = await listBuyerOutstandingVodafoneTransfers(
+    recovery.commerceDb,
+    scope,
+    {
+      connectionId: recovery.connectionId,
+      telegramUserId: recovery.buyerId,
+      telegramChatId: recovery.chatId,
+    },
+  );
+  return transfers;
+}
 
 type LanguageContext = {
   language: ResolvedBuyerLanguage;
@@ -626,7 +663,10 @@ async function renderTransferInstructions(
         ],
         [
           { text: copy.cart, callback_data: tokens.cart() },
-          { text: copy.languageButton, callback_data: tokens.languages() },
+          {
+            text: copy.languageButton,
+            callback_data: tokens.languages(`to:${order.orderId}`),
+          },
           { text: copy.home, callback_data: tokens.home() },
         ],
       ],
@@ -764,6 +804,10 @@ async function renderVodafoneOrderState(
       inline_keyboard: [
         [
           { text: copy.cart, callback_data: tokens.cart() },
+          {
+            text: copy.languageButton,
+            callback_data: tokens.languages(`to:${state.orderId}`),
+          },
           { text: copy.home, callback_data: tokens.homeNew() },
         ],
       ],
@@ -878,6 +922,7 @@ async function renderHome(
   transport: TelegramTransport,
   chatId: number,
   messageId?: number,
+  recovery?: HomeRecovery,
 ): Promise<void> {
   const page = await listManagedProducts(
     db,
@@ -899,6 +944,18 @@ async function renderHome(
 
   if (cod.enabled) {
     keyboard.push([{ text: copy.cart, callback_data: tokens.cart() }]);
+  }
+
+  if (recovery) {
+    const transfers = await outstandingVodafoneTransfers(recovery, scope);
+    if (transfers.length > 0) {
+      keyboard.push([
+        {
+          text: copy.transferRecoveryButton,
+          callback_data: tokens.transferList(),
+        },
+      ]);
+    }
   }
 
   if (page.totalPages > 1) {
@@ -1281,6 +1338,14 @@ async function dispatchMessage(
       plan,
       transport,
       message.chat.id,
+      undefined,
+      homeRecoveryFor(
+        commerceDb,
+        connectionId,
+        buyerId,
+        message.chat.id,
+        context.language.locale,
+      ),
     );
     return;
   }
@@ -1651,6 +1716,13 @@ async function renderAfterLanguageChange(
     transport,
     chatId,
     messageId,
+    homeRecoveryFor(
+      commerceDb,
+      connectionId,
+      buyerId,
+      chatId,
+      context.language.locale,
+    ),
   );
 }
 
@@ -1665,6 +1737,7 @@ async function renderLanguageContextScreen(
   chatId: number,
   messageId: number,
   context: string | null,
+  recovery?: HomeRecovery,
 ): Promise<boolean> {
   if (!context || context === "h") {
     if (!context) return false;
@@ -1678,6 +1751,34 @@ async function renderLanguageContextScreen(
       transport,
       chatId,
       messageId,
+      recovery,
+    );
+    return true;
+  }
+
+  if (context.startsWith("to:")) {
+    if (!recovery) return false;
+
+    const state = await readVodafoneCashOrderState(
+      recovery.commerceDb,
+      scope,
+      {
+        connectionId: recovery.connectionId,
+        telegramUserId: recovery.buyerId,
+        telegramChatId: recovery.chatId,
+        orderId: context.slice(3),
+      },
+    );
+
+    if (!state) return false;
+
+    await renderVodafoneOrderState(
+      transport,
+      chatId,
+      messageId,
+      state,
+      recovery.locale,
+      copy,
     );
     return true;
   }
@@ -1853,6 +1954,13 @@ async function dispatchCallback(
         chatId,
         messageId,
         parsedToken.context,
+        homeRecoveryFor(
+          commerceDb,
+          connectionId,
+          buyerId,
+          chatId,
+          context.language.locale,
+        ),
       )
     ) {
       return;
@@ -2227,6 +2335,98 @@ async function dispatchCallback(
       return;
     }
 
+    if (parsedToken.type === "transferList") {
+      if (!commerceDb) {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: copy.genericUnavailable,
+          replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+        });
+        return;
+      }
+
+      const transfers = await listBuyerOutstandingVodafoneTransfers(
+        commerceDb,
+        scope,
+        {
+          connectionId,
+          telegramUserId: buyerId,
+          telegramChatId: chatId,
+        },
+      );
+
+      if (transfers.length === 0) {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: copy.transferRecoveryEmpty,
+          replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+        });
+        return;
+      }
+
+      const keyboard: TelegramInlineKeyboardButton[][] = transfers.map(
+        (transfer) => [
+          {
+            text: `${transfer.reference} — ${money(transfer.total, transfer.currency)}`,
+            callback_data: tokens.transferOrder(transfer.orderId),
+          },
+        ],
+      );
+      keyboard.push([
+        { text: copy.cart, callback_data: tokens.cart() },
+        { text: copy.home, callback_data: tokens.homeNew() },
+      ]);
+
+      await editOrThrow(transport, {
+        chatId,
+        messageId,
+        text: `${copy.transferRecoveryTitle}\n\n${copy.transferRecoveryHint}`,
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    if (parsedToken.type === "transferOrder") {
+      if (!commerceDb) {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: copy.genericUnavailable,
+          replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+        });
+        return;
+      }
+
+      const state = await readVodafoneCashOrderState(commerceDb, scope, {
+        connectionId,
+        telegramUserId: buyerId,
+        telegramChatId: chatId,
+        orderId: parsedToken.orderId,
+      });
+
+      if (!state) {
+        await editOrThrow(transport, {
+          chatId,
+          messageId,
+          text: copy.genericUnavailable,
+          replyMarkup: { inline_keyboard: homeKeyboard(copy) },
+        });
+        return;
+      }
+
+      await renderVodafoneOrderState(
+        transport,
+        chatId,
+        messageId,
+        state,
+        context.language.locale,
+        copy,
+      );
+      return;
+    }
+
     if (parsedToken.type === "transferReference") {
       const state = await readVodafoneCashOrderState(commerceDb, scope, {
         connectionId,
@@ -2347,6 +2547,13 @@ async function dispatchCallback(
       transport,
       chatId,
       undefined,
+      homeRecoveryFor(
+        commerceDb,
+        connectionId,
+        buyerId,
+        chatId,
+        context.language.locale,
+      ),
     );
     return;
   }
@@ -2362,6 +2569,13 @@ async function dispatchCallback(
       transport,
       chatId,
       messageId,
+      homeRecoveryFor(
+        commerceDb,
+        connectionId,
+        buyerId,
+        chatId,
+        context.language.locale,
+      ),
     );
     return;
   }

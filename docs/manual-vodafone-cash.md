@@ -30,7 +30,9 @@ own independent switch and continues to work unchanged.
    guidance line tells the buyer to tap **I have transferred — submit
    reference** and then reply to the next message with the receipt reference.
    Later merchant setting changes and retries never rewrite what the buyer was
-   told.
+   told. The language button on the instructions keeps the order context
+   (`to:<orderId>`), so EN → AR → EN returns to the same order and its
+   Submit Reference button.
 3. The buyer taps "I have transferred — submit reference". Each prompt request
    receives a fresh token; only the current token may bind its Telegram
    message id under the verified store, connection, buyer and chat context, so
@@ -44,6 +46,14 @@ own independent switch and continues to work unchanged.
    after submission remain idempotent.
 5. Submitting the claim moves the order to `transfer_awaiting_review` and shows
    "Awaiting merchant verification". The claim never changes payment to paid.
+
+Buyer Home and `/start` show a **Vodafone transfers** entry when that
+buyer/chat has outstanding transfer orders. It lists the order references
+scoped to the verified store, bot connection, buyer and chat, and reopens the
+selected order through the same state renderer and immutable snapshot. Recovery
+does not depend on new-checkout availability, so it still works after the store
+method or deployment switch is turned off; it is the recovery path when Home or
+Cart overwrites the original instructions message.
 
 A plain message, or a reply to the instructions message itself, is never a
 claim. Only a reply to the bound ForceReply prompt can submit. The bot does not

@@ -326,6 +326,17 @@ function lastButton(transport: FakeTelegramTransport, prefix: string) {
   return undefined;
 }
 
+function lastMessageButtons(transport: FakeTelegramTransport) {
+  const message =
+    transport.editedMessages.at(-1) ?? transport.sentMessages.at(-1);
+  return message ? inlineButtons(message) : [];
+}
+
+function lastSentButtons(transport: FakeTelegramTransport) {
+  const message = transport.sentMessages.at(-1);
+  return message ? inlineButtons(message) : [];
+}
+
 function lastText(transport: FakeTelegramTransport) {
   return (
     transport.editedMessages.at(-1)?.text ??
@@ -641,6 +652,276 @@ describe.skipIf(!shouldRun)("Vodafone Cash managed Telegram journey", () => {
     );
     expect(orderRow.paymentStatus).toBe("awaiting_transfer");
     expect(orderRow.status).toBe("placed");
+  });
+
+  it("keeps the same Vodafone order across EN -> AR -> EN language switches", async () => {
+    const placed = await placeVodafoneOrder(BUYER_A);
+    const reference = placed.instructions.match(/ORD-[A-Z2-9]{6}/)![0];
+
+    const languageButton = lastMessageButtons(placed.transport).find((button) =>
+      button.callback_data?.startsWith("langs:to:"),
+    );
+    expect(languageButton?.callback_data).toBeDefined();
+
+    const menu = await call(
+      callbackUpdate(
+        BUYER_A,
+        languageButton!.callback_data!,
+        placed.instructionsMessageId,
+      ),
+      placed.transport,
+    );
+    const arabicButton = lastMessageButtons(menu.transport).find((button) =>
+      button.callback_data?.startsWith("lang:ar:to:"),
+    );
+    expect(arabicButton?.callback_data).toBeDefined();
+
+    const arabic = await call(
+      callbackUpdate(
+        BUYER_A,
+        arabicButton!.callback_data!,
+        placed.instructionsMessageId,
+      ),
+      menu.transport,
+    );
+    expect(lastText(arabic.transport)).toContain("تحويل فودافون كاش");
+    expect(lastText(arabic.transport)).toContain(reference);
+    expect(lastText(arabic.transport)).toContain(
+      "اضغط «لقد حوّلت — إرسال المرجع» بالأسفل، ثم أرسل ردًا على الرسالة التالية يحتوي المرجع الموجود في الإيصال.",
+    );
+    expect(
+      lastMessageButtons(arabic.transport).some(
+        (button) => button.callback_data === `tr:${placed.orderId}`,
+      ),
+    ).toBe(true);
+
+    const arabicLanguageButton = lastMessageButtons(arabic.transport).find(
+      (button) => button.callback_data?.startsWith("langs:to:"),
+    );
+    expect(arabicLanguageButton?.callback_data).toBeDefined();
+    const secondMenu = await call(
+      callbackUpdate(
+        BUYER_A,
+        arabicLanguageButton!.callback_data!,
+        placed.instructionsMessageId,
+      ),
+      arabic.transport,
+    );
+    const englishButton = lastMessageButtons(secondMenu.transport).find(
+      (button) => button.callback_data?.startsWith("lang:en:to:"),
+    );
+    expect(englishButton?.callback_data).toBeDefined();
+
+    const english = await call(
+      callbackUpdate(
+        BUYER_A,
+        englishButton!.callback_data!,
+        placed.instructionsMessageId,
+      ),
+      secondMenu.transport,
+    );
+    expect(lastText(english.transport)).toContain(reference);
+    expect(lastText(english.transport)).toContain(
+      "Tap “I have transferred — submit reference” below, then reply to the next message with the reference from your receipt.",
+    );
+    expect(
+      lastMessageButtons(english.transport).some(
+        (button) => button.callback_data === `tr:${placed.orderId}`,
+      ),
+    ).toBe(true);
+    expect(await claimFor(placed.orderId)).toBeUndefined();
+  });
+
+  it("recovers the order after Home/Cart overwrites the instructions and selects between two pending orders", async () => {
+    const first = await placeVodafoneOrder(BUYER_A);
+    const second = await placeVodafoneOrder(BUYER_A, first.transport);
+    const firstReference = first.instructions.match(/ORD-[A-Z2-9]{6}/)![0];
+    const secondReference = second.instructions.match(/ORD-[A-Z2-9]{6}/)![0];
+
+    // Cart then Home overwrites the only instructions message.
+    const cartButton = lastMessageButtons(second.transport).find(
+      (button) => button.callback_data === "cart",
+    );
+    expect(cartButton?.callback_data).toBeDefined();
+    const cart = await call(
+      callbackUpdate(BUYER_A, "cart", second.instructionsMessageId),
+      second.transport,
+    );
+    const homeButton = lastMessageButtons(cart.transport).find(
+      (button) =>
+        button.callback_data === "home" || button.callback_data === "home:new",
+    );
+    expect(homeButton?.callback_data).toBeDefined();
+    const home = await call(
+      callbackUpdate(
+        BUYER_A,
+        homeButton!.callback_data!,
+        second.instructionsMessageId,
+      ),
+      cart.transport,
+    );
+
+    const recoveryButton = lastMessageButtons(home.transport).find(
+      (button) => button.callback_data === "tfl",
+    );
+    expect(recoveryButton?.callback_data).toBeDefined();
+
+    const list = await call(
+      callbackUpdate(
+        BUYER_A,
+        recoveryButton!.callback_data!,
+        second.instructionsMessageId,
+      ),
+      home.transport,
+    );
+    const listedButtons = lastMessageButtons(list.transport);
+    expect(listedButtons.some((button) => button.text.includes(firstReference))).toBe(
+      true,
+    );
+    expect(
+      listedButtons.some((button) => button.text.includes(secondReference)),
+    ).toBe(true);
+
+    const firstOrderButton = lastMessageButtons(list.transport).find(
+      (button) => button.callback_data === `tfo:${first.orderId}`,
+    );
+    expect(firstOrderButton?.callback_data).toBeDefined();
+    const reopened = await call(
+      callbackUpdate(
+        BUYER_A,
+        firstOrderButton!.callback_data!,
+        second.instructionsMessageId,
+      ),
+      list.transport,
+    );
+    expect(lastText(reopened.transport)).toContain(firstReference);
+    expect(lastText(reopened.transport)).not.toContain(secondReference);
+    expect(
+      lastMessageButtons(reopened.transport).some(
+        (button) => button.callback_data === `tr:${first.orderId}`,
+      ),
+    ).toBe(true);
+
+    // Submitted and verified states never reopen as a new transfer prompt.
+    const claim = await replyToPrompt(
+      BUYER_A,
+      first.promptMessageId,
+      "RECOVERY-CLAIM-REF",
+      reopened.transport,
+    );
+    expect(lastSentText(claim.transport)).toContain(
+      "Awaiting merchant verification",
+    );
+    const submitted = await call(
+      callbackUpdate(
+        BUYER_A,
+        `tfo:${first.orderId}`,
+        second.instructionsMessageId,
+      ),
+      claim.transport,
+    );
+    expect(lastText(submitted.transport)).toContain("Transfer reference received");
+    expect(lastText(submitted.transport)).not.toContain(
+      "Tap “I have transferred",
+    );
+
+    const storeScope = await scope();
+    await verifyVodafoneCashTransfer(tx(), storeScope, {
+      orderId: first.orderId,
+      actorUserId: fixture.ownerId,
+    });
+    const verified = await call(
+      callbackUpdate(
+        BUYER_A,
+        `tfo:${first.orderId}`,
+        second.instructionsMessageId,
+      ),
+      submitted.transport,
+    );
+    expect(lastText(verified.transport)).toContain("Transfer verified");
+    expect(lastText(verified.transport)).not.toContain(
+      "Tap “I have transferred",
+    );
+
+    // /start still surfaces the remaining outstanding order.
+    const start = await call(messageUpdate(BUYER_A, "/start"), verified.transport);
+    expect(
+      lastSentButtons(start.transport).some(
+        (button) => button.callback_data === "tfl",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps recovery scoped to the authorized buyer and chat", async () => {
+    const placed = await placeVodafoneOrder(BUYER_A);
+    const buyerBStart = await call(
+      messageUpdate(BUYER_B, "/start"),
+      placed.transport,
+    );
+    expect(
+      lastSentButtons(buyerBStart.transport).some(
+        (button) => button.callback_data === "tfl",
+      ),
+    ).toBe(false);
+
+    const foreign = await call(
+      callbackUpdate(BUYER_B, `tfo:${placed.orderId}`),
+      placed.transport,
+    );
+    expect(lastText(foreign.transport)).toContain("This cart is not available.");
+    expect(
+      lastMessageButtons(foreign.transport).some((button) =>
+        button.callback_data?.startsWith("tr:"),
+      ),
+    ).toBe(false);
+    expect(await claimFor(placed.orderId)).toBeUndefined();
+    expect(
+      (
+        await orderByReference(
+          placed.instructions.match(/ORD-[A-Z2-9]{6}/)![0],
+        )
+      ).paymentStatus,
+    ).toBe("awaiting_transfer");
+  });
+
+  it("keeps recovery available when new Vodafone checkouts are disabled", async () => {
+    const placed = await placeVodafoneOrder(BUYER_A);
+    const reference = placed.instructions.match(/ORD-[A-Z2-9]{6}/)![0];
+
+    await db()
+      .update(storeCommerceSetting)
+      .set({ vodafoneCashEnabled: false })
+      .where(eq(storeCommerceSetting.storeId, fixture.storeId));
+
+    const start = await call(messageUpdate(BUYER_A, "/start"), placed.transport);
+    const recoveryButton = lastSentButtons(start.transport).find(
+      (button) => button.callback_data === "tfl",
+    );
+    expect(recoveryButton?.callback_data).toBeDefined();
+
+    const list = await call(
+      callbackUpdate(BUYER_A, recoveryButton!.callback_data!),
+      start.transport,
+    );
+    expect(
+      lastMessageButtons(list.transport).some((button) =>
+        button.text.includes(reference),
+      ),
+    ).toBe(true);
+    const orderButton = lastMessageButtons(list.transport).find(
+      (button) => button.callback_data === `tfo:${placed.orderId}`,
+    );
+    expect(orderButton?.callback_data).toBeDefined();
+    const reopened = await call(
+      callbackUpdate(BUYER_A, orderButton!.callback_data!),
+      list.transport,
+    );
+    expect(lastText(reopened.transport)).toContain(reference);
+    expect(
+      lastMessageButtons(reopened.transport).some(
+        (button) => button.callback_data === `tr:${placed.orderId}`,
+      ),
+    ).toBe(true);
   });
 
   it("routes out-of-order replies to the exact order and keeps stale prompts state-aware", async () => {

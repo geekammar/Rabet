@@ -68,6 +68,10 @@ export type CommerceCopy = {
   transferRejectedBody: string;
   transferCancelledTitle: string;
   transferCancelledBody: string;
+  transferRecoveryButton: string;
+  transferRecoveryTitle: string;
+  transferRecoveryHint: string;
+  transferRecoveryEmpty: string;
   transferAmountLabel: string;
   reviewTitle: string;
   reviewInstruction: string;
@@ -158,6 +162,10 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     transferCancelledTitle: "Order cancelled",
     transferCancelledBody:
       "This transfer order was cancelled. No further transfer reference is needed.",
+    transferRecoveryButton: "Vodafone transfers",
+    transferRecoveryTitle: "Outstanding Vodafone Cash transfers",
+    transferRecoveryHint: "Choose the order reference to reopen its instructions.",
+    transferRecoveryEmpty: "There are no outstanding Vodafone Cash transfers for this chat.",
     transferAmountLabel: "Exact amount",
     reviewTitle: "Review your order",
     reviewInstruction:
@@ -250,6 +258,10 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     transferCancelledTitle: "تم إلغاء الطلب",
     transferCancelledBody:
       "أُلغي طلب التحويل هذا. لا حاجة إلى إرسال مرجع تحويل آخر.",
+    transferRecoveryButton: "تحويلات فودافون كاش",
+    transferRecoveryTitle: "تحويلات فودافون كاش المعلقة",
+    transferRecoveryHint: "اختر مرجع الطلب لإعادة فتح تعليماته.",
+    transferRecoveryEmpty: "لا توجد تحويلات فودافون كاش معلقة لهذه المحادثة.",
     transferAmountLabel: "المبلغ بالضبط",
     reviewTitle: "راجع طلبك",
     reviewInstruction:

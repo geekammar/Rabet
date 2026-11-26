@@ -27,6 +27,7 @@ import {
   confirmCodOrder,
   confirmVodafoneCashOrder,
   handMerchantOrderToShipping,
+  listBuyerOutstandingVodafoneTransfers,
   listMerchantOrders,
   markMerchantOrderDelivered,
   prepareMerchantOrder,
@@ -1373,6 +1374,72 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       transferAwaitingReview: true,
       transferClaim: { status: "pending", reference: VODAFONE_REFERENCE },
     });
+  });
+
+  it("lists outstanding buyer transfers only inside the authorized store, connection, buyer and chat", async () => {
+    const { placed } = await placeVodafoneOrder({ quantity: 1 });
+    const storeA = await scope(fixture.storeAId);
+    const storeB = await scope(fixture.storeBId);
+
+    const own = await listBuyerOutstandingVodafoneTransfers(tx(), storeA, {
+      connectionId: fixture.connectionAId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+    });
+    expect(own).toHaveLength(1);
+    expect(own[0]).toMatchObject({
+      orderId: placed.orderId,
+      paymentStatus: "awaiting_transfer",
+    });
+
+    expect(
+      await listBuyerOutstandingVodafoneTransfers(tx(), storeB, {
+        connectionId: fixture.connectionBId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+      }),
+    ).toHaveLength(0);
+
+    expect(
+      await listBuyerOutstandingVodafoneTransfers(tx(), storeA, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_B,
+        telegramChatId: BUYER_B,
+      }),
+    ).toHaveLength(0);
+
+    expect(
+      await listBuyerOutstandingVodafoneTransfers(tx(), storeA, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_B,
+      }),
+    ).toHaveLength(0);
+
+    await submitClaim(placed.orderId);
+    const stillOutstanding = await listBuyerOutstandingVodafoneTransfers(
+      tx(),
+      storeA,
+      {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+      },
+    );
+    expect(stillOutstanding).toHaveLength(1);
+    expect(stillOutstanding[0].paymentStatus).toBe("transfer_awaiting_review");
+
+    await verifyVodafoneCashTransfer(tx(), storeA, {
+      orderId: placed.orderId,
+      actorUserId: fixture.ownerAId,
+    });
+    expect(
+      await listBuyerOutstandingVodafoneTransfers(tx(), storeA, {
+        connectionId: fixture.connectionAId,
+        telegramUserId: BUYER_A,
+        telegramChatId: BUYER_A,
+      }),
+    ).toHaveLength(0);
   });
 
   it("cannot buy or claim with the method when deployment or store enablement is off", async () => {

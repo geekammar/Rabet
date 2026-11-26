@@ -12,7 +12,7 @@ export const UUID_REGEX =
 export const LANG_CODE_REGEX = /^[a-z]{2}$/;
 export const PAGE_REGEX = /^[1-9][0-9]{0,4}$/;
 const LANGUAGE_CONTEXT_PATTERN =
-  /^(?:h|p:[1-9][0-9]{0,4}|cs|c:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::[1-9][0-9]{0,4})?|pd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+  /^(?:h|p:[1-9][0-9]{0,4}|cs|c:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::[1-9][0-9]{0,4})?|pd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|to:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 function assertLanguageContext(context: string | undefined): string | null {
   if (context === undefined) return null;
@@ -122,6 +122,13 @@ export const tokens = {
     }
     return assertValidCallbackData(`tr:${orderId}`);
   },
+  transferList: (): string => assertValidCallbackData("tfl"),
+  transferOrder: (orderId: string): string => {
+    if (!UUID_REGEX.test(orderId)) {
+      throw new Error(`Invalid order UUID: "${orderId}"`);
+    }
+    return assertValidCallbackData(`tfo:${orderId}`);
+  },
   products: (page?: number): string => {
     if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
       throw new Error(`Invalid page number: ${page}`);
@@ -224,6 +231,8 @@ export type ParsedToken =
   | { type: "confirmVodafoneCash"; cartId: string; quoteVersion: number }
   | { type: "backToCart"; cartId: string }
   | { type: "transferReference"; orderId: string }
+  | { type: "transferList" }
+  | { type: "transferOrder"; orderId: string }
   | { type: "products"; page: number }
   | { type: "languages"; context: string | null }
   | { type: "support" }
@@ -348,6 +357,17 @@ export function parseToken(data?: string): ParsedToken {
     const orderId = data.slice(3);
     return UUID_REGEX.test(orderId)
       ? { type: "transferReference", orderId }
+      : { type: "unknown", raw: data };
+  }
+
+  if (data === "tfl") {
+    return { type: "transferList" };
+  }
+
+  if (data.startsWith("tfo:")) {
+    const orderId = data.slice(4);
+    return UUID_REGEX.test(orderId)
+      ? { type: "transferOrder", orderId }
       : { type: "unknown", raw: data };
   }
 

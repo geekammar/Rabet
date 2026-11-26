@@ -145,6 +145,15 @@ type OrderReceipt = {
   transferSnapshot: TransferSnapshot | null;
 };
 
+export type BuyerVodafoneTransferSummary = {
+  orderId: string;
+  reference: string;
+  total: string;
+  currency: string;
+  paymentStatus: string;
+  placedAt: Date;
+};
+
 export type VodafoneCashOrderState = {
   orderId: string;
   reference: string;
@@ -2129,6 +2138,7 @@ export async function readVodafoneCashOrderState(
   input: {
     connectionId: string;
     telegramUserId: number;
+    telegramChatId?: number;
     orderId: string;
   },
 ): Promise<VodafoneCashOrderState | null> {
@@ -2136,18 +2146,22 @@ export async function readVodafoneCashOrderState(
 
   if (!ORDER_ID_PATTERN.test(input.orderId)) return null;
 
+  const conditions = [
+    eq(orderTable.id, input.orderId),
+    eq(orderTable.storeId, scope.storeId),
+    eq(orderTable.connectionId, input.connectionId),
+    eq(orderTable.telegramUserId, input.telegramUserId),
+    eq(orderTable.paymentMethod, "vodafone_cash"),
+  ];
+
+  if (input.telegramChatId !== undefined) {
+    conditions.push(eq(orderTable.telegramChatId, input.telegramChatId));
+  }
+
   const [row] = await (db as unknown as Database)
     .select()
     .from(orderTable)
-    .where(
-      and(
-        eq(orderTable.id, input.orderId),
-        eq(orderTable.storeId, scope.storeId),
-        eq(orderTable.connectionId, input.connectionId),
-        eq(orderTable.telegramUserId, input.telegramUserId),
-        eq(orderTable.paymentMethod, "vodafone_cash"),
-      ),
-    )
+    .where(and(...conditions))
     .limit(1);
 
   if (!row) return null;
@@ -2161,6 +2175,55 @@ export async function readVodafoneCashOrderState(
  * on the order and the lookup is constrained by store, bot connection, buyer
  * and chat, so a reply can never be applied to another order or another buyer.
  */
+/**
+ * Lists outstanding Vodafone transfers for one verified buyer in one bot chat.
+ * The query never trusts a store, connection or buyer id from Telegram; it uses
+ * the server-minted scope and the verified connection/buyer context. It also
+ * does not consult new-checkout availability, so existing orders remain
+ * recoverable after the method is disabled.
+ */
+export async function listBuyerOutstandingVodafoneTransfers(
+  db: TransactionDatabase | Database,
+  scope: StoreScope,
+  input: {
+    connectionId: string;
+    telegramUserId: number;
+    telegramChatId: number;
+    limit?: number;
+  },
+): Promise<BuyerVodafoneTransferSummary[]> {
+  assertStoreScope(scope);
+
+  const rows = await (db as unknown as Database)
+    .select({
+      orderId: orderTable.id,
+      reference: orderTable.reference,
+      total: orderTable.total,
+      currency: orderTable.currency,
+      paymentStatus: orderTable.paymentStatus,
+      placedAt: orderTable.placedAt,
+    })
+    .from(orderTable)
+    .where(
+      and(
+        eq(orderTable.storeId, scope.storeId),
+        eq(orderTable.connectionId, input.connectionId),
+        eq(orderTable.telegramUserId, input.telegramUserId),
+        eq(orderTable.telegramChatId, input.telegramChatId),
+        eq(orderTable.paymentMethod, "vodafone_cash"),
+        inArray(orderTable.paymentStatus, [
+          "awaiting_transfer",
+          "transfer_awaiting_review",
+        ]),
+        eq(orderTable.fulfillmentStatus, "unfulfilled"),
+      ),
+    )
+    .orderBy(desc(orderTable.placedAt), desc(orderTable.createdAt))
+    .limit(Math.min(Math.max(1, input.limit ?? 10), 20));
+
+  return rows;
+}
+
 export async function readVodafoneCashOrderByPromptReply(
   db: TransactionDatabase | Database,
   scope: StoreScope,
