@@ -499,7 +499,10 @@ export async function mergeMerchantNotificationBotPairingCandidates(
               source_order DESC
           ) AS deduped
         ), '[]'::jsonb),
-        "pairing_update_offset" = ${input.nextOffset},
+        "pairing_update_offset" = GREATEST(
+          COALESCE("pairing_update_offset", 0),
+          ${input.nextOffset}
+        ),
         "updated_at" = now()
       WHERE "store_id" = ${input.storeId}
         AND "pairing_code_hash" = ${input.pairingCodeHash}
@@ -511,11 +514,22 @@ export async function mergeMerchantNotificationBotPairingCandidates(
 
     if (!row) return null;
 
+    const persistedCursor = Number(
+      row.pairing_update_offset ?? row.pairingUpdateOffset,
+    );
+
+    if (!Number.isSafeInteger(persistedCursor) || persistedCursor < 1) {
+      throw new RabetDataError(
+        "UNCATEGORIZED",
+        "The pairing cursor could not be read.",
+      );
+    }
+
     return {
       candidates: parsePairingCandidates(
         row.pairing_candidates ?? row.pairingCandidates,
       ),
-      nextOffset: input.nextOffset,
+      nextOffset: persistedCursor,
     };
   } catch (error) {
     throw mapDatabaseError(error);

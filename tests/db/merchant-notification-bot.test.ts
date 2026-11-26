@@ -771,6 +771,79 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
     ).toBeNull();
   });
 
+  it("keeps the pairing cursor monotonic when a delayed page proposes an older offset", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const secret = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    const pairingCodeHash = secret?.pairingCodeHash;
+
+    if (!pairingCodeHash) throw new Error("Expected an active challenge");
+
+    const candidateA = {
+      chatId: "5550001",
+      title: "Owner A",
+      username: "owner_a",
+      date: 1,
+    };
+    const candidateB = {
+      chatId: "5550002",
+      title: "Owner B",
+      username: "owner_b",
+      date: 2,
+    };
+
+    const first = await mergeMerchantNotificationBotPairingCandidates(
+      asAppDb(db()),
+      {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        candidates: [candidateA],
+        nextOffset: 201,
+      },
+    );
+
+    expect(first?.nextOffset).toBe(201);
+
+    const delayed = await mergeMerchantNotificationBotPairingCandidates(
+      asAppDb(db()),
+      {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        candidates: [candidateB],
+        nextOffset: 101,
+      },
+    );
+
+    expect(delayed?.nextOffset).toBe(201);
+    expect(
+      delayed?.candidates.map((candidate) => candidate.chatId).sort(),
+    ).toEqual(["5550001", "5550002"]);
+
+    expect(
+      await confirmMerchantNotificationBotPairing(asAppDb(db()), {
+        storeId: fixture.storeAId,
+        pairingCodeHash,
+        chatId: candidateA.chatId,
+        chatTitle: candidateA.title,
+        chatUsername: candidateA.username,
+      }),
+    ).toBe(false);
+
+    const after = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(after?.pairingUpdateOffset).toBe(201);
+    expect(after?.pairingCandidates).toHaveLength(2);
+    expect(after?.destinationChatId).toBeNull();
+  });
+
   it("does not let an old challenge overwrite a replacement", async () => {
     const access = await accessFor(fixture.userAId);
     const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
