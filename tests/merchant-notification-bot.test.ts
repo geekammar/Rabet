@@ -15,6 +15,7 @@ import {
   readMerchantNotificationBotPairingPage,
   sendMerchantNotificationBotTest,
 } from "@/lib/telegram/merchant-notification-bot";
+import { MERCHANT_NOTIFICATION_BOT_COPY } from "@/components/merchant/merchant-notification-bot-copy";
 import { createFakeTelegramTransport } from "@/lib/telegram/transport";
 
 const TOKEN = "123456789:AAHnotification_bot_token_abcdefghijklmnop";
@@ -125,6 +126,28 @@ function startUpdate(
     },
   };
 }
+
+describe("merchant notification bot — onboarding copy", () => {
+  it("offers managed creation in Arabic and English and keeps the manual fallback", () => {
+    for (const locale of ["ar", "en"] as const) {
+      const copy = MERCHANT_NOTIFICATION_BOT_COPY[locale];
+      expect(copy.managedTitle.length).toBeGreaterThan(0);
+      expect(copy.managedCreate.length).toBeGreaterThan(0);
+      expect(copy.managedCheck.length).toBeGreaterThan(0);
+      expect(copy.advancedTitle.length).toBeGreaterThan(0);
+      expect(copy.errors.BOT_START_PENDING.length).toBeGreaterThan(0);
+      expect(copy.errors.EXPIRED.length).toBeGreaterThan(0);
+    }
+
+    expect(MERCHANT_NOTIFICATION_BOT_COPY.ar.managedCreate).toContain("بوت");
+    expect(MERCHANT_NOTIFICATION_BOT_COPY.en.managedCreate.toLowerCase()).toContain(
+      "notification bot",
+    );
+    expect(MERCHANT_NOTIFICATION_BOT_COPY.en.advancedTitle.toLowerCase()).toContain(
+      "token",
+    );
+  });
+});
 
 describe("merchant notification bot — token and pairing helpers", () => {
   it("accepts only a Telegram-shaped bot token", () => {

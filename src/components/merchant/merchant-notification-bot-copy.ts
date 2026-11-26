@@ -6,6 +6,20 @@ type Copy = {
   separateNotice: string;
   setupStepsTitle: string;
   setupSteps: string[];
+  managedTitle: string;
+  managedBody: string;
+  managedCreate: string;
+  managedWaiting: string;
+  managedAwaitingStart: string;
+  managedPreparing: string;
+  managedOpenManager: string;
+  managedOpenBot: string;
+  managedCheck: string;
+  managedChecking: string;
+  managedExpired: string;
+  managedFailed: string;
+  advancedTitle: string;
+  advancedBody: string;
   tokenLabel: string;
   tokenPlaceholder: string;
   tokenHint: string;
@@ -60,6 +74,22 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
       "أكّد محادثة الاستلام من هذه الصفحة.",
       "أرسل إشعارًا تجريبيًا للتأكد من وصول الرسائل.",
     ],
+    managedTitle: "إنشاء بوت الإشعارات تلقائيًا",
+    managedBody:
+      "أنشئ بوت الإشعارات من تيليجرام دون نسخ أي رمز. سنربطه بمتجرك بعد تأكيدك في تيليجرام.",
+    managedCreate: "إنشاء بوت الإشعارات",
+    managedWaiting: "بانتظار فتح مدير البوت في تيليجرام",
+    managedAwaitingStart: "تم إنشاء البوت. افتحه واضغط Start لإثبات ملكيته.",
+    managedPreparing: "تيليجرام يعالج إنشاء البوت الآن.",
+    managedOpenManager: "فتح مدير البوت",
+    managedOpenBot: "فتح بوت الإشعارات",
+    managedCheck: "تحقق من حالة الربط",
+    managedChecking: "جارٍ التحقق…",
+    managedExpired: "انتهت صلاحية محاولة الربط. ابدأ محاولة جديدة.",
+    managedFailed: "تعذّر إكمال الربط. ابدأ محاولة جديدة.",
+    advancedTitle: "خيار متقدم: الربط برمز البوت",
+    advancedBody:
+      "إذا كان لديك بوت إشعارات جاهز، يمكنك لصق رمزه يدويًا. هذا الخيار للتجار المتقدمين.",
     tokenLabel: "رمز البوت (Bot token)",
     tokenPlaceholder: "123456789:AA…",
     tokenHint:
@@ -135,6 +165,15 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
         "رفضت تيليجرام الإشعار التجريبي. تحقق من البوت والمحادثة ثم أعد المحاولة.",
       CONFIGURATION_CHANGED:
         "تغيّرت إعدادات الإشعارات أثناء الإرسال. أعد المحاولة.",
+      BOT_START_PENDING:
+        "لم نستلم Start من البوت بعد. افتح البوت واضغط Start ثم أعد التحقق.",
+      EXPIRED: "انتهت صلاحية المحاولة. ابدأ محاولة جديدة.",
+      CONFLICT:
+        "تعذّر إكمال الربط لأن البوت أو المحاولة مرتبطة بحالة أخرى.",
+      RETRYABLE: "تيليجرام غير متاح الآن. أعد المحاولة.",
+      REVIEW:
+        "هذا البوت مرتبط بـ Webhook أو حالة تحتاج مراجعة. استخدم الخيار المتقدم أو بوتًا آخر.",
+      NOT_FOUND: "لا توجد محاولة ربط نشطة. ابدأ محاولة جديدة.",
       OPERATION_FAILED: "تعذّر إكمال العملية. أعد المحاولة.",
     },
   },
@@ -152,6 +191,22 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
       "Confirm the receiving chat on this page.",
       "Send a test notification to confirm delivery.",
     ],
+    managedTitle: "Create the notification bot automatically",
+    managedBody:
+      "Create the bot from Telegram without copying a token. We link it to your store after you confirm in Telegram.",
+    managedCreate: "Create notification bot",
+    managedWaiting: "Waiting for you to open the manager bot in Telegram",
+    managedAwaitingStart: "The bot was created. Open it and press Start to prove ownership.",
+    managedPreparing: "Telegram is preparing the bot now.",
+    managedOpenManager: "Open manager bot",
+    managedOpenBot: "Open notification bot",
+    managedCheck: "Check connection status",
+    managedChecking: "Checking…",
+    managedExpired: "The attempt expired. Start a new attempt.",
+    managedFailed: "The connection could not be completed. Start a new attempt.",
+    advancedTitle: "Advanced: connect with a bot token",
+    advancedBody:
+      "If you already have a notification bot, you can paste its token manually. This is for advanced merchants.",
     tokenLabel: "Bot token",
     tokenPlaceholder: "123456789:AA…",
     tokenHint:
@@ -230,6 +285,15 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
         "Telegram rejected the test notification. Check the bot and chat, then try again.",
       CONFIGURATION_CHANGED:
         "Notification settings changed while sending. Try again.",
+      BOT_START_PENDING:
+        "We have not received Start from the bot yet. Open the bot, press Start, then check again.",
+      EXPIRED: "The attempt expired. Start a new attempt.",
+      CONFLICT:
+        "The connection could not be completed because the bot or attempt is in another state.",
+      RETRYABLE: "Telegram is unavailable right now. Try again.",
+      REVIEW:
+        "This bot has a webhook or needs operator review. Use the advanced option or another bot.",
+      NOT_FOUND: "There is no active connection attempt. Start a new one.",
       OPERATION_FAILED: "The operation could not be completed. Try again.",
     },
   },

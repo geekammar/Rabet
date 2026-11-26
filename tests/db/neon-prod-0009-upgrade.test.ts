@@ -330,6 +330,8 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
       "0019_merchant_notification_bot",
+
+      "0020_merchant_notification_bot_managed",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(await snapshot(baseline)).toEqual(beforeSnapshot);
@@ -369,6 +371,8 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
       "0017_store_telegram_support",
       "0018_sparkling_morlun",
       "0019_merchant_notification_bot",
+
+      "0020_merchant_notification_bot_managed",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
@@ -381,7 +385,7 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
     );
 
     const afterLedger = await ledger(baseline);
-    expect(afterLedger).toHaveLength(20);
+    expect(afterLedger).toHaveLength(21);
     expect(afterLedger.slice(0, beforeLedger.length)).toEqual(beforeLedger);
     expect(afterLedger[10].hash).toBe(
       committed.find((entry) => entry.tag === "0010_wonderful_siren")?.hash,

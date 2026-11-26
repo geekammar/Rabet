@@ -142,6 +142,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0017_store_telegram_support",
   "0018_sparkling_morlun",
   "0019_merchant_notification_bot",
+  "0020_merchant_notification_bot_managed",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -367,8 +368,18 @@ const MERCHANT_NOTIFICATION_BOT_INDEXES = [
   "merchant_notification_bot_bot_id_unique",
 ];
 
-/** Indexes the current chain requires (0013 adds the COD indexes). */
-export const EXPECTED_INDEXES = [
+const TELEGRAM_LINK_LEGACY_INDEXES = [
+  "telegram_link_attempt_one_active_per_store_idx",
+  "telegram_link_attempt_one_active_per_user_idx",
+];
+
+const TELEGRAM_LINK_PURPOSE_INDEXES = [
+  "telegram_link_attempt_one_active_per_store_purpose_idx",
+  "telegram_link_attempt_one_active_per_user_purpose_idx",
+];
+
+/** Indexes present through 0019, before the 0020 purpose indexes. */
+const EXPECTED_INDEXES_THROUGH_0019 = [
   ...EXPECTED_INDEXES_V11,
   "cart_one_active_per_store_buyer_idx",
   "cart_store_idx",
@@ -392,8 +403,19 @@ export const EXPECTED_INDEXES = [
   ...MERCHANT_NOTIFICATION_BOT_INDEXES,
 ];
 
+/** Indexes the current chain requires (0013 COD, 0018 Vodafone, 0019 bot, 0020 purpose). */
+export const EXPECTED_INDEXES = [
+  ...EXPECTED_INDEXES_THROUGH_0019.filter(
+    (name) => !TELEGRAM_LINK_LEGACY_INDEXES.includes(name),
+  ),
+  ...TELEGRAM_LINK_PURPOSE_INDEXES,
+];
+
+/** Indexes present through 0019 (notification bot included, legacy link indexes). */
+export const EXPECTED_INDEXES_V18 = EXPECTED_INDEXES_THROUGH_0019;
+
 /** Indexes present through 0018 (current baseline before 0019). */
-export const EXPECTED_INDEXES_V17 = EXPECTED_INDEXES.filter(
+export const EXPECTED_INDEXES_V17 = EXPECTED_INDEXES_THROUGH_0019.filter(
   (name) => !MERCHANT_NOTIFICATION_BOT_INDEXES.includes(name),
 );
 
@@ -635,10 +657,15 @@ const MERCHANT_NOTIFICATION_BOT_CONSTRAINTS = [
   "merchant_notification_bot_store_id_store_id_fk",
 ];
 
+const TELEGRAM_LINK_PURPOSE_CONSTRAINTS = [
+  "telegram_link_attempt_purpose_check",
+];
+
 /** CHECK, foreign-key and domain constraints the current chain requires. */
 export const CRITICAL_CONSTRAINTS = [
   ...CRITICAL_CONSTRAINTS_V17,
   ...MERCHANT_NOTIFICATION_BOT_CONSTRAINTS,
+  ...TELEGRAM_LINK_PURPOSE_CONSTRAINTS,
 ];
 
 /** Notification update triggers created by migration 0003. */

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import {
+  checkMerchantNotificationBotManagedAction,
   checkMerchantNotificationBotPairingAction,
   connectMerchantNotificationBotAction,
   disconnectMerchantNotificationBotAction,
@@ -28,11 +29,13 @@ import type { MerchantLocale } from "@/components/merchant/language-toggle";
 import { MERCHANT_NOTIFICATION_BOT_COPY } from "@/components/merchant/merchant-notification-bot-copy";
 import { Button } from "@/components/ui/button";
 import type { MerchantNotificationBotState } from "@/lib/data/merchant-notification-bot";
+import type { NotificationManagedAttemptState } from "@/lib/telegram/manager-provisioning";
 
 type PendingAction =
   | "connect"
   | "link"
   | "check"
+  | "managed_check"
   | "test"
   | "disconnect"
   | null;
@@ -63,11 +66,13 @@ function destinationLabel(
 export function MerchantNotificationBot({
   state,
   supported,
+  managed,
   locale,
   readOnly,
 }: {
   state: MerchantNotificationBotState | null;
   supported: boolean;
+  managed: NotificationManagedAttemptState | null;
   locale: MerchantLocale;
   readOnly: boolean;
 }) {
@@ -167,6 +172,23 @@ export function MerchantNotificationBot({
     });
   }
 
+  function handleCheckManaged() {
+    run("managed_check", async () => {
+      const result = await checkMerchantNotificationBotManagedAction();
+
+      if (!result.ok) {
+        setFeedback({
+          kind: result.error === "BOT_START_PENDING" ? "info" : "error",
+          text: errorText(result),
+        });
+        return;
+      }
+
+      setFeedback({ kind: "success", text: copy.pairedTitle });
+      router.refresh();
+    });
+  }
+
   function handleSendTest() {
     run("test", async () => {
       const result = await sendMerchantNotificationBotTestAction({ locale });
@@ -201,8 +223,24 @@ export function MerchantNotificationBot({
   }
 
   const pairingAmbiguous = state?.pairingFailureCode === "ambiguous";
+  const managedActive =
+    !state &&
+    managed !== null &&
+    (managed.state === "waiting" ||
+      managed.state === "awaiting_start" ||
+      managed.state === "preparing");
+  const managedStatusLabel =
+    managed?.state === "waiting"
+      ? copy.managedWaiting
+      : managed?.state === "awaiting_start"
+        ? copy.managedAwaitingStart
+        : managed?.state === "preparing"
+          ? copy.managedPreparing
+          : copy.statusUnpaired;
   const statusLabel = !state
-    ? copy.statusUnpaired
+    ? managedActive
+      ? managedStatusLabel
+      : copy.statusUnpaired
     : state.destinationChatId
       ? copy.statusConnected
       : state.pairingActive
@@ -264,65 +302,170 @@ export function MerchantNotificationBot({
 
       {supported && !state ? (
         <div className="space-y-4">
-          <div className="rounded-lg border border-border bg-muted/20 p-3">
-            <p className="mb-2 text-sm font-medium">{copy.setupStepsTitle}</p>
-            <ol className="list-decimal space-y-1.5 ps-5 text-sm text-muted-foreground">
-              {copy.setupSteps.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ol>
-          </div>
-
-          <form onSubmit={handleConnect} className="space-y-3" noValidate>
-            <div className="space-y-1.5">
-              <label
-                htmlFor="merchant-notification-bot-token"
-                className="text-sm font-medium"
-              >
-                {copy.tokenLabel}
-              </label>
-              <input
-                id="merchant-notification-bot-token"
-                name="notificationBotToken"
-                type="password"
-                dir="ltr"
-                autoComplete="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                maxLength={200}
-                value={token}
-                onChange={(event) => {
-                  setToken(event.target.value);
-                  if (feedback) setFeedback(null);
-                }}
-                disabled={disabled}
-                placeholder={copy.tokenPlaceholder}
-                aria-describedby="merchant-notification-bot-token-hint"
-                data-testid="merchant-notification-bot-token-input"
-                className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 font-mono text-base text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:text-sm"
-              />
-              <p
-                id="merchant-notification-bot-token-hint"
-                className="text-xs text-muted-foreground"
-              >
-                {copy.tokenHint}
+          <div
+            className="space-y-3 rounded-lg border border-primary/20 bg-primary/5 p-3"
+            data-testid="merchant-notification-bot-managed"
+          >
+            <div>
+              <p className="font-medium">{copy.managedTitle}</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {copy.managedBody}
               </p>
             </div>
 
-            <Button
-              type="submit"
-              disabled={disabled || token.trim().length === 0}
-              className="min-h-11 w-full gap-2 sm:w-auto"
-              data-testid="merchant-notification-bot-connect"
-            >
-              {pendingAction === "connect" ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <KeyRound className="size-4" aria-hidden="true" />
-              )}
-              {pendingAction === "connect" ? copy.connecting : copy.connect}
-            </Button>
-          </form>
+            {managedActive ? (
+              <div className="space-y-3">
+                <p
+                  className="text-sm font-medium"
+                  data-testid="merchant-notification-bot-managed-status"
+                >
+                  {managedStatusLabel}
+                </p>
+                {managed?.state === "waiting" ? (
+                  <Button asChild className="min-h-11">
+                    <a
+                      href={managed.deepLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      data-testid="merchant-notification-bot-managed-open"
+                    >
+                      <ExternalLink className="size-4" aria-hidden="true" />
+                      {copy.managedOpenManager}
+                    </a>
+                  </Button>
+                ) : null}
+                {managed?.state === "awaiting_start" ? (
+                  <Button asChild className="min-h-11">
+                    <a
+                      href={managed.verificationUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      data-testid="merchant-notification-bot-managed-open"
+                    >
+                      <ExternalLink className="size-4" aria-hidden="true" />
+                      {copy.managedOpenBot}
+                    </a>
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-h-11"
+                  disabled={disabled}
+                  onClick={handleCheckManaged}
+                  data-testid="merchant-notification-bot-managed-check"
+                >
+                  {pendingAction === "managed_check" ? (
+                    <Loader2
+                      className="size-4 animate-spin"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <CheckCircle2 className="size-4" aria-hidden="true" />
+                  )}
+                  {pendingAction === "managed_check"
+                    ? copy.managedChecking
+                    : copy.managedCheck}
+                </Button>
+              </div>
+            ) : (
+              <form method="post" action="/app/setup/notification-bot/start">
+                <Button
+                  type="submit"
+                  className="min-h-11"
+                  disabled={disabled}
+                  data-testid="merchant-notification-bot-managed-create"
+                >
+                  <ShieldCheck className="size-4" aria-hidden="true" />
+                  {copy.managedCreate}
+                </Button>
+              </form>
+            )}
+
+            {managed?.state === "expired" || managed?.state === "failed" ? (
+              <p
+                role="alert"
+                className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-300"
+                data-testid="merchant-notification-bot-managed-error"
+              >
+                {managed.state === "expired"
+                  ? copy.managedExpired
+                  : copy.managedFailed}
+              </p>
+            ) : null}
+          </div>
+
+          <details
+            className="rounded-lg border border-border bg-muted/10 p-3"
+            data-testid="merchant-notification-bot-advanced"
+          >
+            <summary className="cursor-pointer text-sm font-medium">
+              {copy.advancedTitle}
+            </summary>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {copy.advancedBody}
+            </p>
+
+            <div className="mt-4 rounded-lg border border-border bg-muted/20 p-3">
+              <p className="mb-2 text-sm font-medium">{copy.setupStepsTitle}</p>
+              <ol className="list-decimal space-y-1.5 ps-5 text-sm text-muted-foreground">
+                {copy.setupSteps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+            </div>
+
+            <form onSubmit={handleConnect} className="mt-4 space-y-3" noValidate>
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="merchant-notification-bot-token"
+                  className="text-sm font-medium"
+                >
+                  {copy.tokenLabel}
+                </label>
+                <input
+                  id="merchant-notification-bot-token"
+                  name="notificationBotToken"
+                  type="password"
+                  dir="ltr"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  maxLength={200}
+                  value={token}
+                  onChange={(event) => {
+                    setToken(event.target.value);
+                    if (feedback) setFeedback(null);
+                  }}
+                  disabled={disabled}
+                  placeholder={copy.tokenPlaceholder}
+                  aria-describedby="merchant-notification-bot-token-hint"
+                  data-testid="merchant-notification-bot-token-input"
+                  className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 font-mono text-base text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 sm:text-sm"
+                />
+                <p
+                  id="merchant-notification-bot-token-hint"
+                  className="text-xs text-muted-foreground"
+                >
+                  {copy.tokenHint}
+                </p>
+              </div>
+
+              <Button
+                type="submit"
+                disabled={disabled || token.trim().length === 0}
+                className="min-h-11 w-full gap-2 sm:w-auto"
+                data-testid="merchant-notification-bot-connect"
+              >
+                {pendingAction === "connect" ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <KeyRound className="size-4" aria-hidden="true" />
+                )}
+                {pendingAction === "connect" ? copy.connecting : copy.connect}
+              </Button>
+            </form>
+          </details>
         </div>
       ) : null}
 

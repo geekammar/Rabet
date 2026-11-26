@@ -25,7 +25,10 @@ import {
   merchantPageMetadata,
 } from "@/lib/merchant/locale-server";
 import { readVodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
-import { readMerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
+import {
+  readMerchantNotificationManagedAttemptState,
+  readMerchantTelegramConnectionState,
+} from "@/lib/telegram/manager-provisioning";
 
 export async function generateMetadata(): Promise<Metadata> {
   return merchantPageMetadata("setup", "Set up your Rabet store.");
@@ -73,6 +76,14 @@ export default async function MerchantSetupPage() {
     ? await readMerchantNotificationBotState(db, access.store.id)
     : null;
 
+  const notificationBotManaged =
+    notificationBotCapability.supported && !notificationBotState
+      ? await readMerchantNotificationManagedAttemptState(db, {
+          storeId: access.store.id,
+          merchantUserId: access.userId,
+        })
+      : null;
+
   return (
     <MerchantSetup
       storeName={access.store.name}
@@ -92,6 +103,7 @@ export default async function MerchantSetupPage() {
       notificationBot={{
         supported: notificationBotCapability.supported,
         state: notificationBotState,
+        managed: notificationBotManaged,
       }}
     />
   );

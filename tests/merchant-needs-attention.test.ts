@@ -158,7 +158,7 @@ describe("Merchant setup entry point", () => {
         needsAttentionTotal: orders.length,
         storeDefaultLanguageCode: "en",
         telegramSupportUsername: null,
-        notificationBot: { supported: true, state: null },
+        notificationBot: { supported: true, state: null, managed: null },
         ...overrides,
       }),
     );

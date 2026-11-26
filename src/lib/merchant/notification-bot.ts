@@ -68,12 +68,19 @@ export type MerchantNotificationBotErrorCode =
   | "TEST_NETWORK"
   | "TELEGRAM_REJECTED"
   | "CONFIGURATION_CHANGED"
+  | "BOT_START_PENDING"
+  | "EXPIRED"
+  | "CONFLICT"
+  | "RETRYABLE"
+  | "REVIEW"
+  | "NOT_FOUND"
   | "OPERATION_FAILED";
 
 export type MerchantNotificationBotResult =
   | {
       ok: true;
       pairing?: { deepLink: string; expiresAt: string };
+      managed?: { deepLink?: string; expiresAt?: string };
       messageId?: number;
     }
   | {

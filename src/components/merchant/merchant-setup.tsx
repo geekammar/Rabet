@@ -27,6 +27,7 @@ import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
 import type { StoreStatus } from "@/db/schema/tenant";
 import type { MerchantNotificationBotState } from "@/lib/data/merchant-notification-bot";
+import type { NotificationManagedAttemptState } from "@/lib/telegram/manager-provisioning";
 import type { VodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
 import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 
@@ -279,6 +280,7 @@ export function MerchantSetup({
   notificationBot: {
     supported: boolean;
     state: MerchantNotificationBotState | null;
+    managed: NotificationManagedAttemptState | null;
   };
 }) {
   const [locale, setLocale] = useMerchantLocale(initialLocale, "setup");
@@ -489,6 +491,7 @@ export function MerchantSetup({
         <MerchantNotificationBot
           state={notificationBot.state}
           supported={notificationBot.supported}
+          managed={notificationBot.managed}
           locale={locale}
           readOnly={readOnly}
         />

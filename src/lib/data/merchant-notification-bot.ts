@@ -653,3 +653,85 @@ export async function disconnectMerchantNotificationBot(
     throw mapDatabaseError(error);
   }
 }
+
+export type SaveManagedMerchantNotificationBotInput = {
+  storeId: string;
+  botId: number;
+  botUsername: string;
+  botName: string | null;
+  tokenCiphertext: string;
+  tokenKeyId: string;
+  destinationChatId: string;
+  destinationChatTitle: string | null;
+  destinationChatUsername: string | null;
+  now?: Date;
+};
+
+/**
+ * Persists a notification bot whose token and private recipient were verified
+ * through the manager-bot flow. The merchant pressed Start in the new bot from
+ * the Telegram account bound to the attempt, so the destination is already
+ * verified and no pairing challenge is created.
+ */
+export async function saveManagedMerchantNotificationBot(
+  db: Database,
+  input: SaveManagedMerchantNotificationBotInput,
+): Promise<void> {
+  if (!validatePrivateChatId(input.destinationChatId)) {
+    throw new RabetDataError(
+      "INVALID_INPUT",
+      "A numeric private Telegram chat id is required.",
+    );
+  }
+
+  const now = input.now ?? new Date();
+
+  try {
+    await db
+      .insert(merchantNotificationBot)
+      .values({
+        storeId: input.storeId,
+        botId: input.botId,
+        botUsername: input.botUsername,
+        botName: input.botName,
+        tokenCiphertext: input.tokenCiphertext,
+        tokenKeyId: input.tokenKeyId,
+        destinationChatId: input.destinationChatId,
+        destinationChatTitle: input.destinationChatTitle,
+        destinationChatUsername: input.destinationChatUsername,
+        pairingCodeHash: null,
+        pairingExpiresAt: null,
+        pairingUpdateOffset: null,
+        pairingCandidates: null,
+        pairingFailureCode: null,
+        configEpoch: crypto.randomUUID(),
+        verifiedAt: now,
+        lastTestAt: null,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: merchantNotificationBot.storeId,
+        set: {
+          botId: input.botId,
+          botUsername: input.botUsername,
+          botName: input.botName,
+          tokenCiphertext: input.tokenCiphertext,
+          tokenKeyId: input.tokenKeyId,
+          destinationChatId: input.destinationChatId,
+          destinationChatTitle: input.destinationChatTitle,
+          destinationChatUsername: input.destinationChatUsername,
+          pairingCodeHash: null,
+          pairingExpiresAt: null,
+          pairingUpdateOffset: null,
+          pairingCandidates: null,
+          pairingFailureCode: null,
+          configEpoch: crypto.randomUUID(),
+          verifiedAt: now,
+          lastTestAt: null,
+          updatedAt: now,
+        },
+      });
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}

@@ -13,6 +13,17 @@ import {
   startMerchantNotificationBotPairing,
   type MerchantNotificationBotResult,
 } from "@/lib/merchant/notification-bot";
+import {
+  ensureNotificationBotLinkAttempt,
+  merchantManagerDeepLink,
+  verifyManagedNotificationBotStart,
+} from "@/lib/telegram/manager-provisioning";
+import { createTelegramBotApiClient } from "@/lib/telegram/manager-api";
+import {
+  readManagerBotConfig,
+  resolveTrustedAppOrigin,
+} from "@/lib/telegram/manager-config";
+import { createFetchTelegramTransport } from "@/lib/telegram/transport";
 
 export type MerchantNotificationBotActionResult = MerchantNotificationBotResult;
 
@@ -207,6 +218,162 @@ export async function disconnectMerchantNotificationBotAction(): Promise<Merchan
     return result;
   } catch (error) {
     logActionFailure("disconnect", error);
+    return { ok: false, error: "OPERATION_FAILED" };
+  }
+}
+
+
+/**
+ * Starts the managed notification-bot onboarding attempt for the signed-in
+ * merchant. The manager bot username is read from Telegram; the store and
+ * merchant identity come only from the verified session.
+ */
+export async function startMerchantNotificationBotManagedAction(): Promise<MerchantNotificationBotActionResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access || access.readOnly) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  let managerConfig;
+  let managerUsername: string | null = null;
+
+  try {
+    managerConfig = readManagerBotConfig();
+    const me = await createTelegramBotApiClient(managerConfig.token).getMe();
+
+    if (
+      me.ok &&
+      me.result.is_bot === true &&
+      typeof me.result.username === "string" &&
+      me.result.username.length > 0
+    ) {
+      managerUsername = me.result.username;
+    }
+  } catch (error) {
+    logActionFailure("managed_config", error);
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  if (!managerUsername) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  try {
+    const ensured = await ensureNotificationBotLinkAttempt(getTransactionDb(), {
+      storeId: access.store.id,
+      merchantUserId: access.userId,
+      managerBotUsername: managerUsername,
+    });
+
+    revalidatePath("/app/setup");
+
+    if (ensured.status === "created" || ensured.status === "reused") {
+      return {
+        ok: true,
+        managed: {
+          deepLink: merchantManagerDeepLink(managerUsername, ensured.nonce),
+          expiresAt: ensured.expiresAt.toISOString(),
+        },
+      };
+    }
+
+    if (ensured.status === "preparing") {
+      return {
+        ok: true,
+        managed: {
+          deepLink: ensured.verificationUrl,
+          expiresAt: ensured.expiresAt.toISOString(),
+        },
+      };
+    }
+
+    if (ensured.status === "connected") return { ok: true };
+
+    return { ok: false, error: "CONFLICT" };
+  } catch (error) {
+    logActionFailure("managed_start", error);
+    return { ok: false, error: "OPERATION_FAILED" };
+  }
+}
+
+/**
+ * Verifies the managed notification bot after the merchant pressed Start in
+ * the new bot. The recipient chat and bot token are resolved server-side.
+ */
+export async function checkMerchantNotificationBotManagedAction(): Promise<MerchantNotificationBotActionResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access || access.readOnly) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  let config;
+  let origin: string;
+
+  try {
+    config = readManagerBotConfig();
+    origin = resolveTrustedAppOrigin();
+  } catch (error) {
+    logActionFailure("managed_config", error);
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  try {
+    const result = await verifyManagedNotificationBotStart(
+      getTransactionDb(),
+      {
+        storeId: access.store.id,
+        merchantUserId: access.userId,
+      },
+      {
+        managerApi: createTelegramBotApiClient(config.token),
+        transport: createFetchTelegramTransport(config.token),
+        webhookOrigin: origin,
+      },
+    );
+
+    revalidatePath("/app/setup");
+
+    if (result.status === "verified" || result.status === "already_verified") {
+      refresh();
+      return { ok: true };
+    }
+
+    if (result.status === "pending") {
+      return { ok: false, error: "BOT_START_PENDING" };
+    }
+
+    if (result.status === "retryable") {
+      return { ok: false, error: "RETRYABLE" };
+    }
+
+    if (result.status === "bot_review") {
+      return { ok: false, error: "REVIEW" };
+    }
+
+    if (result.status === "expired") {
+      return { ok: false, error: "EXPIRED" };
+    }
+
+    if (
+      result.status === "conflict" ||
+      result.status === "bot_bound_elsewhere"
+    ) {
+      return { ok: false, error: "CONFLICT" };
+    }
+
+    return { ok: false, error: "NOT_FOUND" };
+  } catch (error) {
+    logActionFailure("managed_check", error);
     return { ok: false, error: "OPERATION_FAILED" };
   }
 }
