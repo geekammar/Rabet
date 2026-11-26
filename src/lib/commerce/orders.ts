@@ -1,7 +1,7 @@
 import "server-only";
 
 import crypto from "node:crypto";
-import { and, desc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -126,6 +126,14 @@ export type CheckoutReview = {
   deliveryAddress: string;
 };
 
+export type TransferSnapshot = {
+  number: string;
+  accountName: string;
+  instructionsAr: string | null;
+  instructionsEn: string | null;
+  capturedAt: string;
+};
+
 type OrderReceipt = {
   reference: string;
   orderId: string;
@@ -134,6 +142,27 @@ type OrderReceipt = {
   total: string;
   currency: string;
   paymentMethod: PaymentMethod;
+  transferSnapshot: TransferSnapshot | null;
+};
+
+export type VodafoneCashOrderState = {
+  orderId: string;
+  reference: string;
+  total: string;
+  currency: string;
+  orderStatus: string;
+  paymentStatus: string;
+  fulfillmentStatus: string;
+  cancellationReason: string | null;
+  transferSnapshot: TransferSnapshot | null;
+  transferPromptMessageId: number | null;
+  claim: {
+    status: string;
+    reference: string;
+    submittedAt: Date;
+    decidedAt: Date | null;
+    decidedBy: string | null;
+  } | null;
 };
 
 export type ConfirmOrderResult =
@@ -435,6 +464,51 @@ export function paymentMethodsForSetting(
         setting.vodafoneCashInstructionsAr?.trim() ||
           setting.vodafoneCashInstructionsEn?.trim(),
       ),
+  };
+}
+
+function parseTransferSnapshot(value: unknown): TransferSnapshot | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+
+  if (typeof row.number !== "string" || row.number.trim().length === 0) {
+    return null;
+  }
+  if (
+    typeof row.accountName !== "string" ||
+    row.accountName.trim().length === 0
+  ) {
+    return null;
+  }
+  if (typeof row.capturedAt !== "string") return null;
+
+  return {
+    number: row.number,
+    accountName: row.accountName,
+    instructionsAr:
+      typeof row.instructionsAr === "string" ? row.instructionsAr : null,
+    instructionsEn:
+      typeof row.instructionsEn === "string" ? row.instructionsEn : null,
+    capturedAt: row.capturedAt,
+  };
+}
+
+export function transferSnapshotFor(
+  setting: CommerceSetting,
+): TransferSnapshot {
+  const number = setting.vodafoneCashNumber?.trim();
+  const accountName = setting.vodafoneCashAccountName?.trim();
+
+  if (!number || !accountName) {
+    throw new Error("Vodafone Cash configuration is incomplete");
+  }
+
+  return {
+    number,
+    accountName,
+    instructionsAr: setting.vodafoneCashInstructionsAr?.trim() || null,
+    instructionsEn: setting.vodafoneCashInstructionsEn?.trim() || null,
+    capturedAt: new Date().toISOString(),
   };
 }
 
@@ -1590,6 +1664,8 @@ async function confirmOrder(
       }
     }
 
+    const transferSnapshot =
+      method === "vodafone_cash" ? transferSnapshotFor(quoted.setting) : null;
     const checkoutKey = cartRow.checkoutKey ?? crypto.randomUUID();
     const inserted = await insertOrderWithReference(tx, {
       cartRow,
@@ -1598,6 +1674,7 @@ async function confirmOrder(
       scope,
       chatId: input.telegramChatId,
       method,
+      transferSnapshot,
     });
 
     if (!inserted) {
@@ -1675,6 +1752,7 @@ async function confirmOrder(
       total: quoted.review.total,
       currency: quoted.review.currency,
       paymentMethod: method,
+      transferSnapshot,
     };
   });
 }
@@ -1706,6 +1784,7 @@ async function insertOrderWithReference(
     scope: StoreScope;
     chatId: number;
     method: PaymentMethod;
+    transferSnapshot: TransferSnapshot | null;
   },
 ): Promise<{ orderId: string; reference: string } | null> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -1731,6 +1810,7 @@ async function insertOrderWithReference(
         customerName: input.review.customerName,
         customerPhone: input.review.customerPhone,
         deliveryAddress: input.review.deliveryAddress,
+        transferSnapshot: input.transferSnapshot,
       })
       .onConflictDoNothing({ target: orderTable.reference })
       .returning({ id: orderTable.id, reference: orderTable.reference });
@@ -1757,6 +1837,7 @@ async function findOrderByCheckoutKey(
       total: orderTable.total,
       currency: orderTable.currency,
       paymentMethod: orderTable.paymentMethod,
+      transferSnapshot: orderTable.transferSnapshot,
     })
     .from(orderTable)
     .where(
@@ -1768,7 +1849,11 @@ async function findOrderByCheckoutKey(
     .limit(1);
 
   return row
-    ? { ...row, paymentMethod: row.paymentMethod as PaymentMethod }
+    ? {
+        ...row,
+        paymentMethod: row.paymentMethod as PaymentMethod,
+        transferSnapshot: parseTransferSnapshot(row.transferSnapshot),
+      }
     : null;
 }
 
@@ -1852,6 +1937,7 @@ export type VodafoneTransferOrderSummary = {
   total: string;
   currency: string;
   paymentStatus: string;
+  transferSnapshot: TransferSnapshot | null;
 };
 
 export type RequestTransferReferenceResult =
@@ -1861,8 +1947,7 @@ export type RequestTransferReferenceResult =
       claimStatus: string;
     } & VodafoneTransferOrderSummary)
   | { status: "not_found" }
-  | { status: "invalid_state"; paymentStatus: string }
-  | { status: "transfer_unavailable" };
+  | { status: "invalid_state"; paymentStatus: string };
 
 export type SubmitTransferClaimResult =
   | ({
@@ -1878,8 +1963,7 @@ export type SubmitTransferClaimResult =
   | { status: "invalid_reference" }
   | { status: "reference_conflict" }
   | { status: "not_found" }
-  | { status: "invalid_state"; paymentStatus: string }
-  | { status: "transfer_unavailable" };
+  | { status: "invalid_state"; paymentStatus: string };
 
 export type MerchantTransferDecisionResult =
   | ({
@@ -1930,6 +2014,34 @@ function transferSummary(
     total: row.total,
     currency: row.currency,
     paymentStatus: row.paymentStatus,
+    transferSnapshot: parseTransferSnapshot(row.transferSnapshot),
+  };
+}
+
+function orderStateFor(
+  row: typeof orderTable.$inferSelect,
+  claim: typeof orderPaymentClaim.$inferSelect | null,
+): VodafoneCashOrderState {
+  return {
+    orderId: row.id,
+    reference: row.reference,
+    total: row.total,
+    currency: row.currency,
+    orderStatus: row.status,
+    paymentStatus: row.paymentStatus,
+    fulfillmentStatus: row.fulfillmentStatus,
+    cancellationReason: row.cancellationReason,
+    transferSnapshot: parseTransferSnapshot(row.transferSnapshot),
+    transferPromptMessageId: row.transferPromptMessageId,
+    claim: claim
+      ? {
+          status: claim.status,
+          reference: claim.reference,
+          submittedAt: claim.submittedAt,
+          decidedAt: claim.decidedAt,
+          decidedBy: claim.decidedBy,
+        }
+      : null,
   };
 }
 
@@ -1939,31 +2051,23 @@ async function readBuyerVodafoneOrderForUpdate(
   input: {
     connectionId: string;
     telegramUserId: number;
-    orderId?: string;
-    promptedOnly?: boolean;
+    orderId: string;
   },
 ): Promise<typeof orderTable.$inferSelect | null> {
-  const conditions = [
-    eq(orderTable.storeId, scope.storeId),
-    eq(orderTable.connectionId, input.connectionId),
-    eq(orderTable.telegramUserId, input.telegramUserId),
-    eq(orderTable.paymentMethod, "vodafone_cash"),
-  ];
-
-  if (input.orderId) {
-    if (!ORDER_ID_PATTERN.test(input.orderId)) return null;
-    conditions.push(eq(orderTable.id, input.orderId));
-  } else if (input.promptedOnly) {
-    conditions.push(isNotNull(orderTable.transferReferenceRequestedAt));
-  } else {
-    return null;
-  }
+  if (!ORDER_ID_PATTERN.test(input.orderId)) return null;
 
   const [row] = await db
     .select()
     .from(orderTable)
-    .where(and(...conditions))
-    .orderBy(desc(orderTable.placedAt), desc(orderTable.createdAt))
+    .where(
+      and(
+        eq(orderTable.id, input.orderId),
+        eq(orderTable.storeId, scope.storeId),
+        eq(orderTable.connectionId, input.connectionId),
+        eq(orderTable.telegramUserId, input.telegramUserId),
+        eq(orderTable.paymentMethod, "vodafone_cash"),
+      ),
+    )
     .limit(1)
     .for("update");
 
@@ -1990,17 +2094,87 @@ async function readOrderClaimForUpdate(
   return row ?? null;
 }
 
-/**
- * Resolves the newest Vodafone Cash order that is waiting for a buyer
- * reference. The webhook calls this before treating a plain text message as a
- * transfer reference, so ordinary browsing text is never consumed.
- */
-export async function readPromptedVodafoneCashOrder(
+async function readOrderClaim(
   db: TransactionDatabase | Database,
   scope: StoreScope,
-  input: { connectionId: string; telegramUserId: number },
-): Promise<VodafoneTransferOrderSummary | null> {
+  orderId: string,
+): Promise<typeof orderPaymentClaim.$inferSelect | null> {
+  const [row] = await (db as unknown as Database)
+    .select()
+    .from(orderPaymentClaim)
+    .where(
+      and(
+        eq(orderPaymentClaim.orderId, orderId),
+        eq(orderPaymentClaim.storeId, scope.storeId),
+      ),
+    )
+    .limit(1);
+
+  return row ?? null;
+}
+
+/**
+ * Reads a Vodafone Cash order using the verified buyer, connection and store
+ * context. It deliberately does not consult current method availability: an
+ * order created earlier must remain serviceable after the merchant disables
+ * the method or the deployment switch is turned off.
+ */
+export async function readVodafoneCashOrderState(
+  db: TransactionDatabase | Database,
+  scope: StoreScope,
+  input: {
+    connectionId: string;
+    telegramUserId: number;
+    orderId: string;
+  },
+): Promise<VodafoneCashOrderState | null> {
   assertStoreScope(scope);
+
+  if (!ORDER_ID_PATTERN.test(input.orderId)) return null;
+
+  const [row] = await (db as unknown as Database)
+    .select()
+    .from(orderTable)
+    .where(
+      and(
+        eq(orderTable.id, input.orderId),
+        eq(orderTable.storeId, scope.storeId),
+        eq(orderTable.connectionId, input.connectionId),
+        eq(orderTable.telegramUserId, input.telegramUserId),
+        eq(orderTable.paymentMethod, "vodafone_cash"),
+      ),
+    )
+    .limit(1);
+
+  if (!row) return null;
+
+  const claim = await readOrderClaim(db, scope, row.id);
+  return orderStateFor(row, claim);
+}
+
+/**
+ * Resolves the exact order a buyer replied to. The prompt message id is stored
+ * on the order and the lookup is constrained by store, bot connection, buyer
+ * and chat, so a reply can never be applied to another order or another buyer.
+ */
+export async function readVodafoneCashOrderByPromptReply(
+  db: TransactionDatabase | Database,
+  scope: StoreScope,
+  input: {
+    connectionId: string;
+    telegramUserId: number;
+    telegramChatId: number;
+    promptMessageId: number;
+  },
+): Promise<VodafoneCashOrderState | null> {
+  assertStoreScope(scope);
+
+  if (
+    !Number.isSafeInteger(input.promptMessageId) ||
+    input.promptMessageId < 1
+  ) {
+    return null;
+  }
 
   const [row] = await (db as unknown as Database)
     .select()
@@ -2010,22 +2184,23 @@ export async function readPromptedVodafoneCashOrder(
         eq(orderTable.storeId, scope.storeId),
         eq(orderTable.connectionId, input.connectionId),
         eq(orderTable.telegramUserId, input.telegramUserId),
+        eq(orderTable.telegramChatId, input.telegramChatId),
         eq(orderTable.paymentMethod, "vodafone_cash"),
-        eq(orderTable.paymentStatus, "awaiting_transfer"),
-        isNotNull(orderTable.transferReferenceRequestedAt),
-        eq(orderTable.fulfillmentStatus, "unfulfilled"),
+        eq(orderTable.transferPromptMessageId, input.promptMessageId),
       ),
     )
-    .orderBy(desc(orderTable.placedAt), desc(orderTable.createdAt))
     .limit(1);
 
-  return row ? transferSummary(row) : null;
+  if (!row) return null;
+
+  const claim = await readOrderClaim(db, scope, row.id);
+  return orderStateFor(row, claim);
 }
 
 /**
- * Marks that the buyer asked to submit a transfer reference. It does not
- * submit anything or change payment state; the next text message can then be
- * interpreted as a reference by the webhook.
+ * Marks that the buyer asked to submit a reference for one exact order. It does
+ * not submit anything or change payment state. The returned prompt must be
+ * bound to its Telegram message id so replies are routed back to this order.
  */
 export async function requestVodafoneCashTransferReference(
   db: TransactionDatabase,
@@ -2041,11 +2216,6 @@ export async function requestVodafoneCashTransferReference(
   return db.transaction(async (tx) => {
     if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
       return { status: "not_found" };
-    }
-
-    const availability = await readCheckoutAvailability(tx, scope);
-    if (!availability.vodafoneCashEnabled) {
-      return { status: "transfer_unavailable" };
     }
 
     const row = await readBuyerVodafoneOrderForUpdate(tx, scope, input);
@@ -2073,7 +2243,11 @@ export async function requestVodafoneCashTransferReference(
     const now = new Date();
     const [updated] = await tx
       .update(orderTable)
-      .set({ transferReferenceRequestedAt: now, updatedAt: now })
+      .set({
+        transferReferenceRequestedAt: now,
+        transferPromptMessageId: null,
+        updatedAt: now,
+      })
       .where(
         and(
           eq(orderTable.id, row.id),
@@ -2090,13 +2264,59 @@ export async function requestVodafoneCashTransferReference(
 }
 
 /**
- * Records the buyer's reported transfer reference.
+ * Binds the sent Telegram prompt message to the exact order. Until this is
+ * done, a text reply is ordinary browser text and cannot become a claim.
+ */
+export async function bindVodafoneCashTransferPromptMessage(
+  db: TransactionDatabase,
+  scope: StoreScope,
+  input: {
+    connectionId: string;
+    telegramUserId: number;
+    orderId: string;
+    messageId: number;
+  },
+): Promise<boolean> {
+  assertStoreScope(scope);
+
+  if (!Number.isSafeInteger(input.messageId) || input.messageId < 1) {
+    return false;
+  }
+
+  return db.transaction(async (tx) => {
+    if (!(await connectionIsCurrent(tx, scope, input.connectionId))) {
+      return false;
+    }
+
+    const row = await readBuyerVodafoneOrderForUpdate(tx, scope, input);
+    if (!row || row.paymentStatus !== "awaiting_transfer") return false;
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(orderTable)
+      .set({ transferPromptMessageId: input.messageId, updatedAt: now })
+      .where(
+        and(
+          eq(orderTable.id, row.id),
+          eq(orderTable.storeId, scope.storeId),
+          eq(orderTable.paymentStatus, "awaiting_transfer"),
+        ),
+      )
+      .returning({ id: orderTable.id });
+
+    return Boolean(updated);
+  });
+}
+
+/**
+ * Records the buyer's reported transfer reference for one exact order.
  *
  * The order row is locked before the claim is written. Submitting a claim
  * moves `payment_status` from `awaiting_transfer` to
  * `transfer_awaiting_review` and does nothing else: stock stays reserved and
  * the order is never marked paid. A repeated submission returns the existing
- * claim instead of creating a second one.
+ * claim instead of creating a second one. Current method availability is not
+ * consulted, so an existing order can always be serviced.
  */
 export async function submitVodafoneCashTransferClaim(
   db: TransactionDatabase,
@@ -2104,7 +2324,7 @@ export async function submitVodafoneCashTransferClaim(
   input: {
     connectionId: string;
     telegramUserId: number;
-    orderId?: string;
+    orderId: string;
     reference: unknown;
   },
 ): Promise<SubmitTransferClaimResult> {
@@ -2118,17 +2338,7 @@ export async function submitVodafoneCashTransferClaim(
       return { status: "not_found" };
     }
 
-    const availability = await readCheckoutAvailability(tx, scope);
-    if (!availability.vodafoneCashEnabled) {
-      return { status: "transfer_unavailable" };
-    }
-
-    const row = await readBuyerVodafoneOrderForUpdate(tx, scope, {
-      connectionId: input.connectionId,
-      telegramUserId: input.telegramUserId,
-      orderId: input.orderId,
-      promptedOnly: !input.orderId,
-    });
+    const row = await readBuyerVodafoneOrderForUpdate(tx, scope, input);
 
     if (
       !row ||

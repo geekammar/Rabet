@@ -1,5 +1,5 @@
 {
-  "id": "6fe5818c-e61f-411c-a95a-7c2ce0f34713",
+  "id": "110a17a8-276a-4a73-9e76-6325b0fe0ee5",
   "prevId": "f9eeb339-d8e2-4316-ae8c-95de89995717",
   "version": "7",
   "dialect": "postgresql",
@@ -1860,6 +1860,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "transfer_prompt_message_id": {
+          "name": "transfer_prompt_message_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "transfer_snapshot": {
+          "name": "transfer_snapshot",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "cancelled_at": {
           "name": "cancelled_at",
           "type": "timestamp with time zone",
@@ -2020,7 +2032,11 @@
         },
         "order_transfer_reference_request_state_check": {
           "name": "order_transfer_reference_request_state_check",
-          "value": "\"order\".\"transfer_reference_requested_at\" IS NULL\n        OR \"order\".\"payment_method\" = 'vodafone_cash'"
+          "value": "(\n        (\"order\".\"transfer_reference_requested_at\" IS NULL\n          OR \"order\".\"payment_method\" = 'vodafone_cash')\n        AND\n        (\"order\".\"transfer_prompt_message_id\" IS NULL\n          OR (\"order\".\"payment_method\" = 'vodafone_cash'\n            AND \"order\".\"transfer_prompt_message_id\" > 0))\n      )"
+        },
+        "order_transfer_snapshot_state_check": {
+          "name": "order_transfer_snapshot_state_check",
+          "value": "(\n        (\"order\".\"payment_method\" = 'vodafone_cash'\n          AND \"order\".\"transfer_snapshot\" IS NOT NULL)\n        OR\n        (\"order\".\"payment_method\" = 'cod'\n          AND \"order\".\"transfer_snapshot\" IS NULL)\n      )"
         },
         "order_fulfillment_status_check": {
           "name": "order_fulfillment_status_check",

@@ -584,6 +584,7 @@ const VODAFONE_CASH_CONSTRAINTS = [
   "cart_payment_method_check",
   "order_payment_method_status_check",
   "order_transfer_reference_request_state_check",
+  "order_transfer_snapshot_state_check",
   "order_payment_claim_order_id_order_id_fk",
   "order_payment_claim_store_id_store_id_fk",
   "order_payment_claim_decided_by_app_user_id_fk",

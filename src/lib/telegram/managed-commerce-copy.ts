@@ -55,10 +55,18 @@ export type CommerceCopy = {
   transferInstructions: string;
   transferReferenceButton: string;
   transferReferencePrompt: string;
+  transferReferencePlaceholder: string;
   transferReferenceInvalid: string;
+  transferReferenceLabel: string;
   transferSubmittedTitle: string;
   transferAwaitingReview: string;
   transferAlreadySubmitted: string;
+  transferVerifiedTitle: string;
+  transferVerifiedBody: string;
+  transferRejectedTitle: string;
+  transferRejectedBody: string;
+  transferCancelledTitle: string;
+  transferCancelledBody: string;
   transferAmountLabel: string;
   reviewTitle: string;
   reviewInstruction: string;
@@ -128,14 +136,25 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     transferInstructions: "Transfer instructions",
     transferReferenceButton: "I have transferred — submit reference",
     transferReferencePrompt:
-      "Send the transfer reference from your Vodafone Cash receipt as one text message.",
+      "Reply to this message with the transfer reference from your Vodafone Cash receipt.",
+    transferReferencePlaceholder: "Transfer reference",
     transferReferenceInvalid:
-      "That reference is invalid. Send the reference exactly as shown in your receipt (3–80 characters).",
+      "That reference is invalid. Reply to the prompt with the reference exactly as shown in your receipt (3–80 characters).",
+    transferReferenceLabel: "Reference",
     transferSubmittedTitle: "Transfer reference received",
     transferAwaitingReview:
       "Awaiting merchant verification. The order is not marked paid until the merchant checks the wallet and verifies the transfer.",
     transferAlreadySubmitted:
       "A transfer reference is already recorded for this order and is awaiting merchant review.",
+    transferVerifiedTitle: "Transfer verified",
+    transferVerifiedBody:
+      "The merchant verified this transfer. The order is paid; stock remains reserved until shipping.",
+    transferRejectedTitle: "Transfer rejected",
+    transferRejectedBody:
+      "The merchant rejected this transfer claim. The order was cancelled and the stock reservation was released.",
+    transferCancelledTitle: "Order cancelled",
+    transferCancelledBody:
+      "This transfer order was cancelled. No further transfer reference is needed.",
     transferAmountLabel: "Exact amount",
     reviewTitle: "Review your order",
     reviewInstruction:
@@ -207,14 +226,25 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     transferInstructions: "تعليمات التحويل",
     transferReferenceButton: "لقد حوّلت — إرسال المرجع",
     transferReferencePrompt:
-      "أرسل مرجع التحويل الموجود في إيصال فودافون كاش في رسالة نصية واحدة.",
+      "أرسل ردًا على هذه الرسالة يحتوي مرجع التحويل الموجود في إيصال فودافون كاش.",
+    transferReferencePlaceholder: "مرجع التحويل",
     transferReferenceInvalid:
-      "المرجع غير صالح. أرسل المرجع كما يظهر في الإيصال (٣–٨٠ حرفًا).",
+      "المرجع غير صالح. أرسل ردًا على الرسالة يحتوي المرجع كما يظهر في الإيصال (٣–٨٠ حرفًا).",
+    transferReferenceLabel: "المرجع",
     transferSubmittedTitle: "تم استلام مرجع التحويل",
     transferAwaitingReview:
       "بانتظار مراجعة التاجر. لا يُعد الطلب مدفوعًا حتى يتحقق التاجر من المحفظة ويؤكد التحويل.",
     transferAlreadySubmitted:
       "يوجد مرجع تحويل مسجل لهذا الطلب وهو بانتظار مراجعة التاجر.",
+    transferVerifiedTitle: "تم التحقق من التحويل",
+    transferVerifiedBody:
+      "تحقق التاجر من هذا التحويل. الطلب مدفوع، ويبقى المخزون محجوزًا حتى الشحن.",
+    transferRejectedTitle: "تم رفض التحويل",
+    transferRejectedBody:
+      "رفض التاجر ادعاء التحويل. أُلغي الطلب وحُرر حجز المخزون.",
+    transferCancelledTitle: "تم إلغاء الطلب",
+    transferCancelledBody:
+      "أُلغي طلب التحويل هذا. لا حاجة إلى إرسال مرجع تحويل آخر.",
     transferAmountLabel: "المبلغ بالضبط",
     reviewTitle: "راجع طلبك",
     reviewInstruction:

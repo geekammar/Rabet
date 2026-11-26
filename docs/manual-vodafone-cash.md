@@ -23,14 +23,28 @@ own independent switch and continues to work unchanged.
 
 1. Checkout review shows COD exactly as before and adds a Vodafone Cash button
    only when the method is enabled and configured.
-2. Selecting Vodafone Cash places the order, snapshots the price and shipping
-   fee, creates the stock reservation, and shows the **exact total**, wallet
-   number, recipient name and localized transfer instructions.
-3. The buyer taps "I have transferred — submit reference" and sends the
-   reference from the receipt as text.
-4. Submitting the claim moves the order to `transfer_awaiting_review` and shows
+2. Selecting Vodafone Cash places the order, snapshots the price, shipping fee
+   and the exact wallet number, recipient name and Arabic/English transfer
+   instructions used at that moment, creates the stock reservation, and shows
+   the **exact total** plus those snapshotted instructions. Later merchant
+   setting changes and retries never rewrite what the buyer was told.
+3. The buyer taps "I have transferred — submit reference". Nokmel sends a
+   ForceReply prompt for that exact order; the prompt message id is bound to
+   the order under the verified store, connection, buyer and chat context.
+4. The buyer replies to that prompt with the reference from the receipt.
+   Ordinary messages, replies without a bound prompt, another buyer's prompt
+   and a newer prompt for a different order cannot be assigned to the wrong
+   order. Repeated replies remain idempotent.
+5. Submitting the claim moves the order to `transfer_awaiting_review` and shows
    "Awaiting merchant verification". The claim never changes payment to paid.
-   A repeated submission with an existing claim is idempotent.
+
+Turning off the store method or `RABET_MANUAL_TRANSFER_ENABLED` stops **new**
+Vodafone Cash checkouts. It does not block an existing `awaiting_transfer`
+order from opening its prompt or submitting its reference; those operations are
+authorized by the order's store, connection and buyer, not by current method
+availability. Stale buttons and prompt replies render the order's actual state
+(`awaiting_transfer`, submitted, verified, rejected or cancelled) instead of
+starting another transfer.
 
 Payment states used by the method:
 
@@ -65,7 +79,8 @@ ids are rejected at the existing authorization boundary.
 
 - **Held:** order placement for either COD or Vodafone Cash increments
   `product_inventory.reserved` and creates one `inventory_reservation` row with
-  status `reserved`. A cart never reserves stock.
+  status `reserved`. A cart never reserves stock. An abandoned
+  `awaiting_transfer` order keeps this hold until the merchant cancels it.
 - **Unchanged by claim or verification:** submitting or approving a claim does
   not touch inventory. The hold remains until shipping or cancellation.
 - **Released:** merchant cancellation or claim rejection sets the reservation
@@ -75,6 +90,17 @@ ids are rejected at the existing authorization boundary.
   decrements both `on_hand` and `reserved` exactly once. A Vodafone Cash order
   cannot be handed to shipping before `transfer_verified`; COD keeps its
   existing handoff-before-collection rule.
+
+## Abandoned awaiting_transfer orders
+
+If a buyer places a Vodafone Cash order and never reports a transfer, the order
+stays `awaiting_transfer` and its reservation remains held. The merchant sees
+that state and the "waiting for the buyer to submit a transfer reference" note
+on `/app/orders`. The merchant resolves it with the existing **Cancel order**
+action before shipping: this writes a cancellation reason, releases the held
+reservation exactly once, closes any pending claim as cancelled, and leaves
+`on_hand` untouched. There is deliberately no automatic expiry, automatic
+cancellation, refund or provider reconciliation in this PR.
 
 ## Deliberately outside this PR
 

@@ -35,6 +35,8 @@ ALTER TABLE "order" DROP CONSTRAINT "order_payment_method_check";--> statement-b
 ALTER TABLE "order" DROP CONSTRAINT "order_payment_status_check";--> statement-breakpoint
 ALTER TABLE "cart" ADD COLUMN "payment_method" text DEFAULT 'cod' NOT NULL;--> statement-breakpoint
 ALTER TABLE "order" ADD COLUMN "transfer_reference_requested_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "order" ADD COLUMN "transfer_prompt_message_id" bigint;--> statement-breakpoint
+ALTER TABLE "order" ADD COLUMN "transfer_snapshot" jsonb;--> statement-breakpoint
 ALTER TABLE "store_commerce_setting" ADD COLUMN "vodafone_cash_enabled" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 ALTER TABLE "store_commerce_setting" ADD COLUMN "vodafone_cash_number" text;--> statement-breakpoint
 ALTER TABLE "store_commerce_setting" ADD COLUMN "vodafone_cash_account_name" text;--> statement-breakpoint
@@ -59,8 +61,21 @@ ALTER TABLE "order" ADD CONSTRAINT "order_payment_method_status_check" CHECK ((
             'transfer_rejected'
           ))
       ));--> statement-breakpoint
-ALTER TABLE "order" ADD CONSTRAINT "order_transfer_reference_request_state_check" CHECK ("order"."transfer_reference_requested_at" IS NULL
-        OR "order"."payment_method" = 'vodafone_cash');--> statement-breakpoint
+ALTER TABLE "order" ADD CONSTRAINT "order_transfer_reference_request_state_check" CHECK ((
+        ("order"."transfer_reference_requested_at" IS NULL
+          OR "order"."payment_method" = 'vodafone_cash')
+        AND
+        ("order"."transfer_prompt_message_id" IS NULL
+          OR ("order"."payment_method" = 'vodafone_cash'
+            AND "order"."transfer_prompt_message_id" > 0))
+      ));--> statement-breakpoint
+ALTER TABLE "order" ADD CONSTRAINT "order_transfer_snapshot_state_check" CHECK ((
+        ("order"."payment_method" = 'vodafone_cash'
+          AND "order"."transfer_snapshot" IS NOT NULL)
+        OR
+        ("order"."payment_method" = 'cod'
+          AND "order"."transfer_snapshot" IS NULL)
+      ));--> statement-breakpoint
 ALTER TABLE "order" ADD CONSTRAINT "order_payment_method_check" CHECK ("order"."payment_method" IN ('cod', 'vodafone_cash'));--> statement-breakpoint
 ALTER TABLE "order" ADD CONSTRAINT "order_payment_status_check" CHECK ("order"."payment_status" IN (
         'awaiting_collection',

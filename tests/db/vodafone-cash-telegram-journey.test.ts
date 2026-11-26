@@ -1,0 +1,657 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { eq, sql } from "drizzle-orm";
+
+import {
+  appUser,
+  category,
+  categoryTranslation,
+  inventoryReservation,
+  language,
+  order,
+  orderPaymentClaim,
+  product,
+  productInventory,
+  productTranslation,
+  store,
+  storeCommerceSetting,
+  storeMembership,
+  telegramConnection,
+} from "@/db/schema";
+import type { TransactionDatabase } from "@/db/transaction-client";
+import { rejectVodafoneCashTransfer, verifyVodafoneCashTransfer } from "@/lib/commerce/orders";
+import { hashWebhookSecret } from "@/lib/telegram/connection-secrets";
+import { handleManagedTelegramWebhookRequest } from "@/lib/telegram/managed-webhook";
+import {
+  createFakeTelegramTransport,
+  type FakeTelegramTransport,
+} from "@/lib/telegram/transport";
+import {
+  asAppDb,
+  createTestDatabase,
+  hasTestCluster,
+  nextOrder,
+  readStoreScopeForFixture,
+  type TestDatabase,
+} from "./helpers";
+
+const shouldRun = hasTestCluster();
+
+let testDb: TestDatabase | null = null;
+let updateId = 9000;
+
+type Fixture = {
+  storeId: string;
+  ownerId: string;
+  productId: string;
+  connectionId: string;
+};
+
+let fixture: Fixture;
+
+const BUYER_A = 94001;
+const BUYER_B = 94002;
+const BUYER_C = 94003;
+const SECRET = "vodafone-telegram-secret";
+
+beforeAll(async () => {
+  if (!shouldRun) return;
+
+  process.env.RABET_COD_ORDERS_ENABLED = "true";
+  process.env.RABET_MANUAL_TRANSFER_ENABLED = "true";
+
+  testDb = await createTestDatabase("vodafone_telegram");
+  const db = testDb.db;
+
+  const [english] = await db
+    .insert(language)
+    .values({ code: "en", label: "English", isEnabled: true })
+    .returning();
+
+  const [storeRow] = await db
+    .insert(store)
+    .values({ name: "Vodafone Bot Store", slug: "vodafone-bot-store", status: "active" })
+    .returning();
+
+  const [owner] = await db
+    .insert(appUser)
+    .values({ email: "vodafone.bot.owner@example.test" })
+    .returning();
+
+  await db.insert(storeMembership).values({
+    storeId: storeRow.id,
+    userId: owner.id,
+    role: "owner",
+    status: "active",
+  });
+
+  const [categoryRow] = await db
+    .insert(category)
+    .values({
+      storeId: storeRow.id,
+      slug: "vodafone-bot-root",
+      sortOrder: nextOrder(),
+      isActive: true,
+    })
+    .returning();
+
+  await db.insert(categoryTranslation).values({
+    categoryId: categoryRow.id,
+    languageId: english.id,
+    name: "Root",
+  });
+
+  const [productRow] = await db
+    .insert(product)
+    .values({
+      storeId: storeRow.id,
+      categoryId: categoryRow.id,
+      slug: "vodafone-bot-product",
+      price: "11.00",
+      isActive: true,
+      sortOrder: nextOrder(),
+    })
+    .returning();
+
+  await db.insert(productTranslation).values({
+    productId: productRow.id,
+    languageId: english.id,
+    name: "Bot A One",
+    description: "Synthetic product",
+  });
+
+  await db.insert(productInventory).values({
+    productId: productRow.id,
+    storeId: storeRow.id,
+    onHand: 20,
+    reserved: 0,
+  });
+
+  const [connection] = await db
+    .insert(telegramConnection)
+    .values({
+      storeId: storeRow.id,
+      botId: 894001,
+      botUsername: "VodafoneBotStore",
+      tokenCiphertext: "synthetic-ciphertext",
+      tokenKeyId: "v1",
+      webhookSecretHash: hashWebhookSecret(SECRET),
+      webhookUrl: "https://app.example.test/api/telegram/webhook/managed/vf-bot",
+      status: "ready",
+      verifiedAt: new Date(),
+    })
+    .returning();
+
+  await db.insert(storeCommerceSetting).values({
+    storeId: storeRow.id,
+    currency: "SAR",
+    deliveryFee: "15.00",
+    codEnabled: true,
+    vodafoneCashEnabled: true,
+    vodafoneCashNumber: "+201000000001",
+    vodafoneCashAccountName: "Synthetic Merchant A",
+    vodafoneCashInstructionsAr: "حوّل المبلغ ثم أرسل المرجع.",
+    vodafoneCashInstructionsEn: "Transfer the exact amount, then submit the reference.",
+  });
+
+  fixture = {
+    storeId: storeRow.id,
+    ownerId: owner.id,
+    productId: productRow.id,
+    connectionId: connection.id,
+  };
+});
+
+afterAll(async () => {
+  delete process.env.RABET_COD_ORDERS_ENABLED;
+  delete process.env.RABET_MANUAL_TRANSFER_ENABLED;
+  await testDb?.close();
+  testDb = null;
+});
+
+beforeEach(async () => {
+  if (!testDb) return;
+
+  process.env.RABET_COD_ORDERS_ENABLED = "true";
+  process.env.RABET_MANUAL_TRANSFER_ENABLED = "true";
+
+  await testDb.db.execute(sql`
+    truncate table
+      "order_payment_claim",
+      "inventory_reservation",
+      "order_item",
+      "order",
+      "cart_item",
+      "cart"
+    restart identity cascade
+  `);
+
+  await testDb.db.execute(sql`update "product_inventory" set on_hand = 20, reserved = 0`);
+  await testDb.db
+    .update(store)
+    .set({ status: "active" })
+    .where(eq(store.id, fixture.storeId));
+  await testDb.db
+    .update(storeCommerceSetting)
+    .set({
+      codEnabled: true,
+      vodafoneCashEnabled: true,
+      vodafoneCashNumber: "+201000000001",
+      vodafoneCashAccountName: "Synthetic Merchant A",
+      vodafoneCashInstructionsEn:
+        "Transfer the exact amount, then submit the reference.",
+    })
+    .where(eq(storeCommerceSetting.storeId, fixture.storeId));
+});
+
+function db() {
+  return testDb!.db;
+}
+
+function tx(): TransactionDatabase {
+  return testDb!.db as unknown as TransactionDatabase;
+}
+
+async function scope() {
+  return readStoreScopeForFixture(db(), fixture.storeId);
+}
+
+function nextUpdateId() {
+  updateId += 1;
+  return updateId;
+}
+
+function webhookRequest(body: unknown): Request {
+  return new Request("https://app.example.test/api/telegram/webhook/managed/vf-bot", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-telegram-bot-api-secret-token": SECRET,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+function messageUpdate(
+  buyerId: number,
+  text: string,
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    update_id: nextUpdateId(),
+    message: {
+      message_id: nextUpdateId(),
+      from: { id: buyerId, is_bot: false, first_name: "Buyer" },
+      chat: { id: buyerId, type: "private" },
+      date: 1,
+      text,
+      ...extra,
+    },
+  };
+}
+
+function contactUpdate(buyerId: number, phone: string) {
+  return {
+    update_id: nextUpdateId(),
+    message: {
+      message_id: nextUpdateId(),
+      from: { id: buyerId, is_bot: false, first_name: "Buyer" },
+      chat: { id: buyerId, type: "private" },
+      date: 1,
+      contact: { phone_number: phone, first_name: "Buyer", user_id: buyerId },
+    },
+  };
+}
+
+function callbackUpdate(buyerId: number, data: string, messageId?: number) {
+  return {
+    update_id: nextUpdateId(),
+    callback_query: {
+      id: `callback-${nextUpdateId()}`,
+      from: { id: buyerId, is_bot: false, first_name: "Buyer" },
+      message: {
+        message_id: messageId ?? 7000 + updateId,
+        chat: { id: buyerId, type: "private" },
+        date: 1,
+      },
+      data,
+    },
+  };
+}
+
+async function call(
+  body: unknown,
+  transport: FakeTelegramTransport = createFakeTelegramTransport(),
+) {
+  const response = await handleManagedTelegramWebhookRequest(
+    webhookRequest(body),
+    fixture.connectionId,
+    {
+      db: asAppDb(db()),
+      commerceDb: tx(),
+      transport,
+    },
+  );
+
+  return { status: response.status, transport };
+}
+
+function inlineButtons(message: { replyMarkup?: unknown }) {
+  const markup = message.replyMarkup as
+    | {
+        inline_keyboard?: Array<
+          Array<{ text: string; callback_data?: string; url?: string }>
+        >;
+      }
+    | undefined;
+  return markup?.inline_keyboard?.flat() ?? [];
+}
+
+function lastButton(transport: FakeTelegramTransport, prefix: string) {
+  const messages = [...transport.sentMessages, ...transport.editedMessages];
+  for (const message of messages.slice().reverse()) {
+    const button = inlineButtons(message).find((entry) =>
+      entry.callback_data?.startsWith(prefix),
+    );
+    if (button) return button;
+  }
+  return undefined;
+}
+
+function lastText(transport: FakeTelegramTransport) {
+  return (
+    transport.editedMessages.at(-1)?.text ??
+    transport.sentMessages.at(-1)?.text ??
+    ""
+  );
+}
+
+function lastSentText(transport: FakeTelegramTransport) {
+  return transport.sentMessages.at(-1)?.text ?? "";
+}
+
+async function reviewCart(
+  buyerId: number,
+  transport = createFakeTelegramTransport(),
+) {
+  const start = await call(messageUpdate(buyerId, "/start"), transport);
+  expect(start.status).toBe(200);
+
+  const product = await call(
+    callbackUpdate(buyerId, `p:${fixture.productId}`),
+    transport,
+  );
+  expect(product.status).toBe(200);
+
+  const added = await call(
+    callbackUpdate(buyerId, `ca:${fixture.productId}:1`),
+    transport,
+  );
+  expect(added.status).toBe(200);
+
+  const checkoutButton = lastButton(added.transport, "co:");
+  expect(checkoutButton?.callback_data).toBeDefined();
+
+  const checkout = await call(
+    callbackUpdate(buyerId, checkoutButton!.callback_data!),
+    transport,
+  );
+  expect(checkout.status).toBe(200);
+
+  const phone = await call(contactUpdate(buyerId, "+15551234567"), transport);
+  expect(phone.status).toBe(200);
+
+  const reviewed = await call(
+    messageUpdate(buyerId, "123 Synthetic Telegram Street"),
+    transport,
+  );
+  expect(reviewed.status).toBe(200);
+
+  const reviewMessage = reviewed.transport.sentMessages.at(-1);
+  expect(reviewMessage?.text).toContain("Review your order");
+  const vodafoneButton = inlineButtons(reviewMessage!).find((button) =>
+    button.callback_data?.startsWith("cv:"),
+  );
+
+  return {
+    transport: reviewed.transport,
+    reviewMessage,
+    vodafoneButton,
+    cartId: checkoutButton!.callback_data!.slice(3),
+  };
+}
+
+async function placeVodafoneOrder(
+  buyerId: number,
+  transport = createFakeTelegramTransport(),
+) {
+  const reviewed = await reviewCart(buyerId, transport);
+  expect(reviewed.vodafoneButton?.callback_data).toBeDefined();
+
+  const placed = await call(
+    callbackUpdate(buyerId, reviewed.vodafoneButton!.callback_data!),
+    reviewed.transport,
+  );
+  expect(placed.status).toBe(200);
+
+  const instructions = lastText(placed.transport);
+  expect(instructions).toContain("Vodafone Cash transfer");
+
+  const referenceButton = lastButton(placed.transport, "tr:");
+  expect(referenceButton?.callback_data).toBeDefined();
+  const orderId = referenceButton!.callback_data!.slice(3);
+
+  const prompt = await call(
+    callbackUpdate(buyerId, referenceButton!.callback_data!),
+    placed.transport,
+  );
+  expect(prompt.status).toBe(200);
+
+  const promptMessage = prompt.transport.sentMessages.at(-1);
+  expect(promptMessage?.replyMarkup).toMatchObject({ force_reply: true });
+  expect(promptMessage?.messageId).toBeGreaterThan(0);
+
+  return {
+    orderId,
+    cartId: reviewed.cartId,
+    promptMessageId: promptMessage!.messageId,
+    transport: prompt.transport,
+    instructions,
+  };
+}
+
+async function replyToPrompt(
+  buyerId: number,
+  promptMessageId: number,
+  reference: string,
+  transport: FakeTelegramTransport,
+) {
+  return call(
+    messageUpdate(buyerId, reference, {
+      reply_to_message: {
+        message_id: promptMessageId,
+        chat: { id: buyerId, type: "private" },
+      },
+    }),
+    transport,
+  );
+}
+
+async function orderByReference(reference: string) {
+  const [row] = await db()
+    .select()
+    .from(order)
+    .where(eq(order.reference, reference));
+  return row;
+}
+
+async function claimFor(orderId: string) {
+  const [row] = await db()
+    .select()
+    .from(orderPaymentClaim)
+    .where(eq(orderPaymentClaim.orderId, orderId));
+  return row;
+}
+
+describe.skipIf(!shouldRun)("Vodafone Cash managed Telegram journey", () => {
+  it("uses the placement snapshot for replays and still services an existing order after disablement", async () => {
+    const first = await placeVodafoneOrder(BUYER_A);
+    expect(first.instructions).toContain("+201000000001");
+    expect(first.instructions).toContain("Synthetic Merchant A");
+
+    const firstOrder = await orderByReference(
+      first.instructions.match(/ORD-[A-Z2-9]{6}/)![0],
+    );
+    expect(firstOrder.transferSnapshot).toMatchObject({
+      number: "+201000000001",
+      accountName: "Synthetic Merchant A",
+    });
+
+    await db()
+      .update(storeCommerceSetting)
+      .set({
+        vodafoneCashNumber: "+201999999999",
+        vodafoneCashAccountName: "Changed Merchant",
+        vodafoneCashInstructionsEn: "Changed instructions",
+      })
+      .where(eq(storeCommerceSetting.storeId, fixture.storeId));
+
+    const replay = await call(
+      callbackUpdate(BUYER_A, `cv:${first.cartId}:1`),
+      first.transport,
+    );
+    const replayText = lastText(replay.transport);
+    expect(replayText).toContain("+201000000001");
+    expect(replayText).not.toContain("+201999999999");
+
+    const second = await placeVodafoneOrder(BUYER_B);
+    expect(second.instructions).toContain("+201999999999");
+    expect(second.instructions).toContain("Changed Merchant");
+
+    await db()
+      .update(storeCommerceSetting)
+      .set({
+        vodafoneCashNumber: "+201888888888",
+        vodafoneCashAccountName: "Newest Merchant",
+        vodafoneCashInstructionsEn: "Newest instructions",
+      })
+      .where(eq(storeCommerceSetting.storeId, fixture.storeId));
+
+    const secondReplay = await call(
+      callbackUpdate(BUYER_B, `cv:${second.cartId}:1`),
+      second.transport,
+    );
+    const secondReplayText = lastText(secondReplay.transport);
+    expect(secondReplayText).toContain("+201999999999");
+    expect(secondReplayText).toContain("Changed Merchant");
+    expect(secondReplayText).not.toContain("+201888888888");
+
+    await db()
+      .update(storeCommerceSetting)
+      .set({ vodafoneCashEnabled: false })
+      .where(eq(storeCommerceSetting.storeId, fixture.storeId));
+
+    const buyerCReview = await reviewCart(BUYER_C);
+    expect(buyerCReview.vodafoneButton).toBeUndefined();
+
+    const storeDisabledReply = await replyToPrompt(
+      BUYER_A,
+      first.promptMessageId,
+      "STORE-OFF-REF",
+      first.transport,
+    );
+    expect(storeDisabledReply.status).toBe(200);
+    expect(lastSentText(storeDisabledReply.transport)).toContain(
+      "Awaiting merchant verification",
+    );
+    expect(await claimFor(first.orderId)).toMatchObject({
+      reference: "STORE-OFF-REF",
+      status: "pending",
+    });
+
+    await db()
+      .update(storeCommerceSetting)
+      .set({ vodafoneCashEnabled: true })
+      .where(eq(storeCommerceSetting.storeId, fixture.storeId));
+
+    delete process.env.RABET_MANUAL_TRANSFER_ENABLED;
+    const buyerDReview = await reviewCart(94004);
+    expect(buyerDReview.vodafoneButton).toBeUndefined();
+
+    delete process.env.RABET_COD_ORDERS_ENABLED;
+
+    const deploymentDisabledReply = await replyToPrompt(
+      BUYER_B,
+      second.promptMessageId,
+      "DEPLOYMENT-OFF-REF",
+      second.transport,
+    );
+    expect(deploymentDisabledReply.status).toBe(200);
+    expect(lastSentText(deploymentDisabledReply.transport)).toContain(
+      "Awaiting merchant verification",
+    );
+    expect(await claimFor(second.orderId)).toMatchObject({
+      reference: "DEPLOYMENT-OFF-REF",
+      status: "pending",
+    });
+
+    process.env.RABET_COD_ORDERS_ENABLED = "true";
+    process.env.RABET_MANUAL_TRANSFER_ENABLED = "true";
+  });
+
+  it("routes out-of-order replies to the exact order and keeps stale prompts state-aware", async () => {
+    const first = await placeVodafoneOrder(BUYER_A);
+    const second = await placeVodafoneOrder(BUYER_A, first.transport);
+
+    const secondReply = await replyToPrompt(
+      BUYER_A,
+      second.promptMessageId,
+      "SECOND-ORDER-REF",
+      second.transport,
+    );
+    expect(lastSentText(secondReply.transport)).toContain(
+      "Awaiting merchant verification",
+    );
+
+    const firstReply = await replyToPrompt(
+      BUYER_A,
+      first.promptMessageId,
+      "FIRST-ORDER-REF",
+      first.transport,
+    );
+    expect(lastSentText(firstReply.transport)).toContain(
+      "Awaiting merchant verification",
+    );
+
+    expect(await claimFor(first.orderId)).toMatchObject({
+      reference: "FIRST-ORDER-REF",
+    });
+    expect(await claimFor(second.orderId)).toMatchObject({
+      reference: "SECOND-ORDER-REF",
+    });
+
+    const repeated = await replyToPrompt(
+      BUYER_A,
+      first.promptMessageId,
+      "FIRST-ORDER-REF",
+      first.transport,
+    );
+    expect(lastSentText(repeated.transport)).toContain(
+      "Awaiting merchant verification",
+    );
+    expect(await claimFor(first.orderId)).toMatchObject({
+      reference: "FIRST-ORDER-REF",
+    });
+    expect(await claimFor(second.orderId)).toMatchObject({
+      reference: "SECOND-ORDER-REF",
+    });
+
+    const foreign = await replyToPrompt(
+      BUYER_B,
+      first.promptMessageId,
+      "FOREIGN-BUYER-REF",
+      first.transport,
+    );
+    expect(foreign.status).toBe(200);
+    expect(await claimFor(first.orderId)).toMatchObject({
+      reference: "FIRST-ORDER-REF",
+    });
+
+    const storeScope = await scope();
+    await verifyVodafoneCashTransfer(tx(), storeScope, {
+      orderId: second.orderId,
+      actorUserId: fixture.ownerId,
+    });
+
+    const staleVerified = await call(
+      callbackUpdate(BUYER_A, `tr:${second.orderId}`),
+      second.transport,
+    );
+    expect(lastText(staleVerified.transport)).toContain("Transfer verified");
+    expect(lastText(staleVerified.transport)).not.toContain(
+      "Reply to this message",
+    );
+
+    await rejectVodafoneCashTransfer(tx(), storeScope, {
+      orderId: first.orderId,
+      actorUserId: fixture.ownerId,
+    });
+
+    const staleRejected = await call(
+      callbackUpdate(BUYER_A, `tr:${first.orderId}`),
+      first.transport,
+    );
+    expect(lastText(staleRejected.transport)).toContain("Transfer rejected");
+    expect(lastText(staleRejected.transport)).not.toContain(
+      "Reply to this message",
+    );
+
+    expect(await claimFor(first.orderId)).toMatchObject({ status: "rejected" });
+    expect(await claimFor(second.orderId)).toMatchObject({ status: "approved" });
+    expect(
+      await db()
+        .select()
+        .from(inventoryReservation)
+        .where(eq(inventoryReservation.orderId, first.orderId)),
+    ).toMatchObject([{ status: "released" }]);
+  });
+});

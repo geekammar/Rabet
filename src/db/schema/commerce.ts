@@ -329,6 +329,10 @@ export const order = pgTable(
       withTimezone: true,
       mode: "date",
     }),
+    transferPromptMessageId: bigint("transfer_prompt_message_id", {
+      mode: "number",
+    }),
+    transferSnapshot: jsonb("transfer_snapshot"),
     cancelledAt: timestamp("cancelled_at", { withTimezone: true, mode: "date" }),
     cancellationReason: text("cancellation_reason"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
@@ -419,8 +423,24 @@ export const order = pgTable(
     ),
     check(
       "order_transfer_reference_request_state_check",
-      sql`${table.transferReferenceRequestedAt} IS NULL
-        OR ${table.paymentMethod} = 'vodafone_cash'`,
+      sql`(
+        (${table.transferReferenceRequestedAt} IS NULL
+          OR ${table.paymentMethod} = 'vodafone_cash')
+        AND
+        (${table.transferPromptMessageId} IS NULL
+          OR (${table.paymentMethod} = 'vodafone_cash'
+            AND ${table.transferPromptMessageId} > 0))
+      )`,
+    ),
+    check(
+      "order_transfer_snapshot_state_check",
+      sql`(
+        (${table.paymentMethod} = 'vodafone_cash'
+          AND ${table.transferSnapshot} IS NOT NULL)
+        OR
+        (${table.paymentMethod} = 'cod'
+          AND ${table.transferSnapshot} IS NULL)
+      )`,
     ),
     check(
       "order_fulfillment_status_check",
