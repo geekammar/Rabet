@@ -591,6 +591,8 @@ function transferInstructionsText(
     `${copy.transferAccount}: ${snapshot?.accountName ?? ""}`,
     instructions ? `${copy.transferInstructions}:\n${instructions}` : "",
     "",
+    copy.transferInstructionsGuidance,
+    "",
     copy.reservedNote,
   ]
     .filter((line) => line !== "")

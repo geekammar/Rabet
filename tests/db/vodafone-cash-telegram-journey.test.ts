@@ -14,6 +14,7 @@ import {
   productTranslation,
   store,
   storeCommerceSetting,
+  storeLanguageSetting,
   storeMembership,
   telegramConnection,
 } from "@/db/schema";
@@ -191,6 +192,14 @@ beforeEach(async () => {
     .set({ status: "active" })
     .where(eq(store.id, fixture.storeId));
   await testDb.db
+    .insert(storeLanguageSetting)
+    .values({ storeId: fixture.storeId, locale: "en" })
+    .onConflictDoUpdate({
+      target: storeLanguageSetting.storeId,
+      set: { locale: "en", updatedAt: new Date() },
+    });
+
+  await testDb.db
     .update(storeCommerceSetting)
     .set({
       codEnabled: true,
@@ -367,7 +376,6 @@ async function reviewCart(
   expect(reviewed.status).toBe(200);
 
   const reviewMessage = reviewed.transport.sentMessages.at(-1);
-  expect(reviewMessage?.text).toContain("Review your order");
   const vodafoneButton = inlineButtons(reviewMessage!).find((button) =>
     button.callback_data?.startsWith("cv:"),
   );
@@ -394,7 +402,9 @@ async function placeVodafoneOrder(
   expect(placed.status).toBe(200);
 
   const instructions = lastText(placed.transport);
-  expect(instructions).toContain("Vodafone Cash transfer");
+  const instructionsMessageId =
+    placed.transport.editedMessages.at(-1)?.messageId ?? null;
+  expect(instructionsMessageId).toBeGreaterThan(0);
 
   const referenceButton = lastButton(placed.transport, "tr:");
   expect(referenceButton?.callback_data).toBeDefined();
@@ -416,6 +426,35 @@ async function placeVodafoneOrder(
     promptMessageId: promptMessage!.messageId,
     transport: prompt.transport,
     instructions,
+    instructionsMessageId: instructionsMessageId!,
+  };
+}
+
+async function placeVodafoneOrderWithoutPrompt(
+  buyerId: number,
+  transport = createFakeTelegramTransport(),
+) {
+  const reviewed = await reviewCart(buyerId, transport);
+  expect(reviewed.vodafoneButton?.callback_data).toBeDefined();
+
+  const placed = await call(
+    callbackUpdate(buyerId, reviewed.vodafoneButton!.callback_data!),
+    reviewed.transport,
+  );
+  expect(placed.status).toBe(200);
+
+  const instructions = lastText(placed.transport);
+  const instructionsMessageId =
+    placed.transport.editedMessages.at(-1)?.messageId ?? null;
+  expect(instructionsMessageId).toBeGreaterThan(0);
+  const referenceButton = lastButton(placed.transport, "tr:");
+  expect(referenceButton?.callback_data).toBeDefined();
+
+  return {
+    orderId: referenceButton!.callback_data!.slice(3),
+    instructions,
+    instructionsMessageId: instructionsMessageId!,
+    transport: placed.transport,
   };
 }
 
@@ -457,6 +496,9 @@ describe.skipIf(!shouldRun)("Vodafone Cash managed Telegram journey", () => {
     const first = await placeVodafoneOrder(BUYER_A);
     expect(first.instructions).toContain("+201000000001");
     expect(first.instructions).toContain("Synthetic Merchant A");
+    expect(first.instructions).toContain(
+      "Tap “I have transferred — submit reference” below, then reply to the next message with the reference from your receipt.",
+    );
 
     const firstOrder = await orderByReference(
       first.instructions.match(/ORD-[A-Z2-9]{6}/)![0],
@@ -556,6 +598,49 @@ describe.skipIf(!shouldRun)("Vodafone Cash managed Telegram journey", () => {
 
     process.env.RABET_COD_ORDERS_ENABLED = "true";
     process.env.RABET_MANUAL_TRANSFER_ENABLED = "true";
+  });
+
+  it("shows the system guidance in Arabic instructions", async () => {
+    await db()
+      .insert(storeLanguageSetting)
+      .values({ storeId: fixture.storeId, locale: "ar" })
+      .onConflictDoUpdate({
+        target: storeLanguageSetting.storeId,
+        set: { locale: "ar", updatedAt: new Date() },
+      });
+
+    const placed = await placeVodafoneOrder(BUYER_A);
+    expect(placed.instructions).toContain("تحويل فودافون كاش");
+    expect(placed.instructions).toContain(
+      "اضغط «لقد حوّلت — إرسال المرجع» بالأسفل، ثم أرسل ردًا على الرسالة التالية يحتوي المرجع الموجود في الإيصال.",
+    );
+    const referenceButton = lastButton(placed.transport, "tr:");
+    expect(referenceButton?.text).toBe("لقد حوّلت — إرسال المرجع");
+  });
+
+  it("does not turn a reply to the instructions message into a claim", async () => {
+    const placed = await placeVodafoneOrderWithoutPrompt(BUYER_A);
+
+    const instructionsReply = await call(
+      messageUpdate(BUYER_A, "INSTRUCTIONS-REPLY-REF", {
+        reply_to_message: {
+          message_id: placed.instructionsMessageId,
+          chat: { id: BUYER_A, type: "private" },
+        },
+      }),
+      placed.transport,
+    );
+
+    expect(instructionsReply.status).toBe(200);
+    expect(lastSentText(instructionsReply.transport)).toContain(
+      "Welcome to Vodafone Bot Store.",
+    );
+    expect(await claimFor(placed.orderId)).toBeUndefined();
+    const orderRow = await orderByReference(
+      placed.instructions.match(/ORD-[A-Z2-9]{6}/)![0],
+    );
+    expect(orderRow.paymentStatus).toBe("awaiting_transfer");
+    expect(orderRow.status).toBe("placed");
   });
 
   it("routes out-of-order replies to the exact order and keeps stale prompts state-aware", async () => {

@@ -26,8 +26,11 @@ own independent switch and continues to work unchanged.
 2. Selecting Vodafone Cash places the order, snapshots the price, shipping fee
    and the exact wallet number, recipient name and Arabic/English transfer
    instructions used at that moment, creates the stock reservation, and shows
-   the **exact total** plus those snapshotted instructions. Later merchant
-   setting changes and retries never rewrite what the buyer was told.
+   the **exact total** plus those snapshotted instructions. A system-owned
+   guidance line tells the buyer to tap **I have transferred — submit
+   reference** and then reply to the next message with the receipt reference.
+   Later merchant setting changes and retries never rewrite what the buyer was
+   told.
 3. The buyer taps "I have transferred — submit reference". Each prompt request
    receives a fresh token; only the current token may bind its Telegram
    message id under the verified store, connection, buyer and chat context, so
@@ -41,6 +44,13 @@ own independent switch and continues to work unchanged.
    after submission remain idempotent.
 5. Submitting the claim moves the order to `transfer_awaiting_review` and shows
    "Awaiting merchant verification". The claim never changes payment to paid.
+
+A plain message, or a reply to the instructions message itself, is never a
+claim. Only a reply to the bound ForceReply prompt can submit. The bot does not
+store an instructions-message binding, so a reply to the instructions message
+currently receives the ordinary scoped welcome instead of a dedicated recovery
+message; adding one would require guessing the order or a schema change. The
+explicit tap-and-reply guidance is shown in both Arabic and English instead.
 
 Turning off the store method or `RABET_MANUAL_TRANSFER_ENABLED` stops **new**
 Vodafone Cash checkouts. It does not block an existing `awaiting_transfer`

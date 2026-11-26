@@ -53,6 +53,7 @@ export type CommerceCopy = {
   transferTo: string;
   transferAccount: string;
   transferInstructions: string;
+  transferInstructionsGuidance: string;
   transferReferenceButton: string;
   transferReferencePrompt: string;
   transferReferencePlaceholder: string;
@@ -134,6 +135,8 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     transferTo: "Transfer to",
     transferAccount: "Recipient name",
     transferInstructions: "Transfer instructions",
+    transferInstructionsGuidance:
+      "Tap “I have transferred — submit reference” below, then reply to the next message with the reference from your receipt.",
     transferReferenceButton: "I have transferred — submit reference",
     transferReferencePrompt:
       "Reply to this message with the transfer reference from your Vodafone Cash receipt.",
@@ -224,6 +227,8 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     transferTo: "حوّل إلى",
     transferAccount: "اسم المستلم",
     transferInstructions: "تعليمات التحويل",
+    transferInstructionsGuidance:
+      "اضغط «لقد حوّلت — إرسال المرجع» بالأسفل، ثم أرسل ردًا على الرسالة التالية يحتوي المرجع الموجود في الإيصال.",
     transferReferenceButton: "لقد حوّلت — إرسال المرجع",
     transferReferencePrompt:
       "أرسل ردًا على هذه الرسالة يحتوي مرجع التحويل الموجود في إيصال فودافون كاش.",
