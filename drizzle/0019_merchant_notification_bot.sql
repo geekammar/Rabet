@@ -11,6 +11,8 @@ CREATE TABLE "merchant_notification_bot" (
 	"destination_chat_username" text,
 	"pairing_code_hash" text,
 	"pairing_expires_at" timestamp with time zone,
+	"pairing_update_offset" bigint,
+	"config_epoch" uuid DEFAULT gen_random_uuid() NOT NULL,
 	"verified_at" timestamp with time zone,
 	"last_test_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -28,12 +30,15 @@ CREATE TABLE "merchant_notification_bot" (
           AND "merchant_notification_bot"."pairing_expires_at" IS NOT NULL)
       )),
 	CONSTRAINT "merchant_notification_bot_pairing_hash_format_check" CHECK ("merchant_notification_bot"."pairing_code_hash" IS NULL OR "merchant_notification_bot"."pairing_code_hash" ~ '^[0-9a-f]{64}$'),
+	CONSTRAINT "merchant_notification_bot_pairing_update_offset_check" CHECK ("merchant_notification_bot"."pairing_update_offset" IS NULL OR "merchant_notification_bot"."pairing_update_offset" >= 1),
 	CONSTRAINT "merchant_notification_bot_verified_requires_destination_check" CHECK ("merchant_notification_bot"."verified_at" IS NULL OR "merchant_notification_bot"."destination_chat_id" IS NOT NULL)
 );
 --> statement-breakpoint
 ALTER TABLE "merchant_notification_bot" ADD CONSTRAINT "merchant_notification_bot_store_id_store_id_fk" FOREIGN KEY ("store_id") REFERENCES "public"."store"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "merchant_notification_bot_store_unique" ON "merchant_notification_bot" USING btree ("store_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "merchant_notification_bot_bot_id_unique" ON "merchant_notification_bot" USING btree ("bot_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "merchant_notification_bot_bot_id_unique" ON "merchant_notification_bot" USING btree ("bot_id");
+
+--> statement-breakpoint
 DROP TRIGGER IF EXISTS merchant_notification_bot_touch_updated_at ON merchant_notification_bot;--> statement-breakpoint
 CREATE TRIGGER merchant_notification_bot_touch_updated_at
   BEFORE UPDATE ON merchant_notification_bot

@@ -31,6 +31,12 @@ import { store } from "./tenant";
  * - Only a numeric private chat id is accepted as a destination.
  * - Pairing is short-lived: only the SHA-256 digest of a random code is
  *   stored, together with an expiry. A successful pairing clears the digest.
+ * - `pairing_update_offset` is the next Telegram update id to request. It
+ *   lets repeated checks move through a backlog in bounded batches without
+ *   dropping an update before it has been evaluated for the active challenge.
+ * - `config_epoch` changes on every token save and pairing change. A test
+ *   send records its epoch and can only persist verification while that exact
+ *   configuration is still current, even if the bot and chat ids are unchanged.
  */
 
 export const merchantNotificationBot = pgTable(
@@ -53,6 +59,8 @@ export const merchantNotificationBot = pgTable(
       withTimezone: true,
       mode: "date",
     }),
+    pairingUpdateOffset: bigint("pairing_update_offset", { mode: "number" }),
+    configEpoch: uuid("config_epoch").notNull().defaultRandom(),
     verifiedAt: timestamp("verified_at", { withTimezone: true, mode: "date" }),
     lastTestAt: timestamp("last_test_at", {
       withTimezone: true,
@@ -101,6 +109,10 @@ export const merchantNotificationBot = pgTable(
     check(
       "merchant_notification_bot_pairing_hash_format_check",
       sql`${table.pairingCodeHash} IS NULL OR ${table.pairingCodeHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "merchant_notification_bot_pairing_update_offset_check",
+      sql`${table.pairingUpdateOffset} IS NULL OR ${table.pairingUpdateOffset} >= 1`,
     ),
     check(
       "merchant_notification_bot_verified_requires_destination_check",

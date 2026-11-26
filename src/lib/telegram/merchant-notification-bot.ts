@@ -271,8 +271,16 @@ export function findMerchantNotificationPairingMatch(
   };
 }
 
+type MerchantNotificationPairingProgress = {
+  /**
+   * The next Telegram update id to request, or null when the batch contained
+   * no updates. Persisted only for the same live challenge.
+   */
+  nextOffset: number | null;
+};
+
 export type MerchantNotificationBotPairingResult =
-  | MerchantNotificationPairingMatch
+  | (MerchantNotificationPairingMatch & MerchantNotificationPairingProgress)
   | {
       status: "error";
       code:
@@ -319,31 +327,112 @@ function classifyPairingFailure(result: {
   return { status: "error", code: "UNAVAILABLE" };
 }
 
+const PAIRING_UPDATE_BATCH_LIMIT = 100;
+const DEFAULT_PAIRING_MAX_BATCHES = 10;
+const MAX_PAIRING_MAX_BATCHES = 50;
+
+function boundedBatchCount(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_PAIRING_MAX_BATCHES;
+  }
+
+  return Math.min(
+    MAX_PAIRING_MAX_BATCHES,
+    Math.max(1, Math.floor(value)),
+  );
+}
+
+function validOffset(value: number | null | undefined): number | undefined {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 1
+    ? value
+    : undefined;
+}
+
 /**
- * Reads recent updates from the notification bot and looks for the pairing
- * code. The bot must not have a webhook registered; Telegram rejects
- * `getUpdates` with a conflict when one is active, which is reported as
- * `WEBHOOK_ACTIVE`.
+ * Reads update batches from the notification bot and looks for the pairing
+ * code. The persisted offset makes repeated checks advance through a backlog
+ * in bounded batches. A batch is always evaluated before the next request
+ * confirms it, so an update that may contain the active challenge is never
+ * discarded first.
+ *
+ * The bot must not have a webhook registered; Telegram rejects `getUpdates`
+ * with a conflict when one is active, which is reported as `WEBHOOK_ACTIVE`.
  */
 export async function readMerchantNotificationBotPairing(
   token: string,
   expectedHash: string,
-  deps?: { api?: TelegramBotApiClient },
+  deps?: {
+    api?: TelegramBotApiClient;
+    offset?: number | null;
+    maxBatches?: number;
+  },
 ): Promise<MerchantNotificationBotPairingResult> {
   const api = deps?.api ?? createTelegramBotApiClient(token);
-  const updates = await api.getUpdates({
-    limit: 100,
-    allowedUpdates: ["message"],
-  });
+  const maxBatches = boundedBatchCount(deps?.maxBatches);
+  let offset = validOffset(deps?.offset);
 
-  if (!updates.ok) {
-    return classifyPairingFailure(updates);
+  const evaluated: TelegramBotUpdate[] = [];
+  let highestUpdateId: number | null = null;
+
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const updates = await api.getUpdates({
+      ...(offset !== undefined ? { offset } : {}),
+      limit: PAIRING_UPDATE_BATCH_LIMIT,
+      allowedUpdates: ["message"],
+    });
+
+    if (!updates.ok) {
+      return classifyPairingFailure(updates);
+    }
+
+    if (updates.result.length === 0) break;
+
+    let batchHighest: number | null = null;
+
+    for (const update of updates.result) {
+      evaluated.push(update);
+
+      if (Number.isSafeInteger(update.update_id)) {
+        batchHighest =
+          batchHighest === null
+            ? update.update_id
+            : Math.max(batchHighest, update.update_id);
+      }
+    }
+
+    if (batchHighest === null) break;
+
+    // A server or fake that ignores offset must not make this loop spin.
+    if (
+      highestUpdateId !== null &&
+      batchHighest <= highestUpdateId
+    ) {
+      break;
+    }
+
+    highestUpdateId = batchHighest;
+
+    // The next getUpdates call confirms the batch we just evaluated.
+    offset = batchHighest + 1;
   }
 
-  return findMerchantNotificationPairingMatch(
-    updates.result,
+  const nextOffset = highestUpdateId === null ? null : highestUpdateId + 1;
+  const match = findMerchantNotificationPairingMatch(
+    evaluated,
     expectedHash,
   );
+
+  if (match.status === "paired") {
+    return { ...match, nextOffset };
+  }
+
+  if (match.status === "ambiguous") {
+    return { ...match, nextOffset };
+  }
+
+  return { status: "pending", nextOffset };
 }
 
 export type MerchantNotificationTestFailureCode =

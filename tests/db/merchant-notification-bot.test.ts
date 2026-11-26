@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 
 vi.mock("@/auth-merchant", () => ({
   auth: vi.fn(async () => null),
@@ -106,6 +106,19 @@ beforeEach(async () => {
     .update(store)
     .set({ status: "active" })
     .where(eq(store.id, fixture.storeBId));
+  await testDb.db
+    .update(appUser)
+    .set({ sessionVersion: 0 })
+    .where(inArray(appUser.id, [fixture.userAId, fixture.userBId]));
+  await testDb.db
+    .update(storeMembership)
+    .set({ status: "active" })
+    .where(
+      inArray(storeMembership.userId, [
+        fixture.userAId,
+        fixture.userBId,
+      ]),
+    );
 });
 
 function db() {
@@ -152,6 +165,33 @@ function botApi(
     getUpdates: vi.fn(async () => ({ ok: true as const, result: updates })),
     ...overrides,
   } as TelegramBotApiClient;
+}
+
+function pagedBotApi(
+  botId: number,
+  username: string,
+  allUpdates: TelegramBotUpdate[],
+) {
+  const offsets: Array<number | undefined> = [];
+  const api = botApi(botId, username, [], {
+    getUpdates: vi.fn(
+      async (input?: { offset?: number; limit?: number }) => {
+        offsets.push(input?.offset);
+
+        const offset = input?.offset ?? 0;
+        const limit = input?.limit ?? 100;
+
+        return {
+          ok: true as const,
+          result: allUpdates
+            .filter((update) => update.update_id >= offset)
+            .slice(0, limit),
+        };
+      },
+    ),
+  });
+
+  return { api, offsets };
 }
 
 function codeFromLink(link: string): string {
@@ -354,6 +394,87 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
     expect(state?.destinationChatId).toBeNull();
   });
 
+  it("pairs a Start after more than 100 backlogged updates", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const code = codeFromLink(connected.pairing.deepLink);
+    const backlog: TelegramBotUpdate[] = [
+      ...Array.from({ length: 150 }, (_, index) =>
+        startUpdate("unused", 5550001, {
+          updateId: index + 1,
+          text: "old message",
+        }),
+      ),
+      startUpdate(code, 5550001, { updateId: 151 }),
+    ];
+    const { api } = pagedBotApi(1001, "StoreOneAlertsBot", backlog);
+
+    const paired = await checkMerchantNotificationBotPairing(db(), access, {
+      api,
+    });
+
+    expect(paired.ok).toBe(true);
+
+    const state = await readMerchantNotificationBotState(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(state?.destinationChatId).toBe("5550001");
+  });
+
+  it("persists pairing progress across repeated checks", async () => {
+    const access = await accessFor(fixture.userAId);
+    const connected = await connectStore(access, 1001, "StoreOneAlertsBot");
+
+    if (!connected.ok || !connected.pairing) throw new Error("Expected pairing");
+
+    const code = codeFromLink(connected.pairing.deepLink);
+    const backlog: TelegramBotUpdate[] = [
+      ...Array.from({ length: 150 }, (_, index) =>
+        startUpdate("unused", 5550001, {
+          updateId: index + 1,
+          text: "old message",
+        }),
+      ),
+      startUpdate(code, 5550001, { updateId: 151 }),
+    ];
+
+    const first = pagedBotApi(1001, "StoreOneAlertsBot", backlog);
+    const pending = await checkMerchantNotificationBotPairing(db(), access, {
+      api: first.api,
+      pairingMaxBatches: 1,
+    });
+
+    expect(pending).toEqual({ ok: false, error: "PAIRING_PENDING" });
+
+    const afterFirst = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(afterFirst?.pairingUpdateOffset).toBe(101);
+    expect(afterFirst?.destinationChatId).toBeNull();
+
+    const second = pagedBotApi(1001, "StoreOneAlertsBot", backlog);
+    const paired = await checkMerchantNotificationBotPairing(db(), access, {
+      api: second.api,
+      pairingMaxBatches: 1,
+    });
+
+    expect(paired.ok).toBe(true);
+    expect(second.offsets).toEqual([101]);
+
+    const afterSecond = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(afterSecond?.pairingUpdateOffset).toBeNull();
+    expect(afterSecond?.pairingCodeHash).toBeNull();
+    expect(afterSecond?.destinationChatId).toBe("5550001");
+  });
+
   it("rejects an expired pairing challenge and can issue a new one", async () => {
     const access = await accessFor(fixture.userAId);
     const expiredAt = new Date(Date.now() - 60 * 60 * 1000);
@@ -459,6 +580,105 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
     expect(successTransport.sentMessages[0].text).toContain("تم ربط");
   });
 
+  it("does not call the transport when the store is suspended after access resolution", async () => {
+    const access = await accessFor(fixture.userAId);
+    await connectAndPair(access, 1001, "StoreOneAlertsBot", 5550001);
+
+    await db()
+      .update(store)
+      .set({ status: "suspended" })
+      .where(eq(store.id, fixture.storeAId));
+
+    const transport = createFakeTelegramTransport();
+    const result = await sendMerchantNotificationBotTest(
+      db(),
+      access,
+      { locale: "en" },
+      { transport },
+    );
+
+    expect(result).toEqual({ ok: false, error: "DENIED" });
+    expect(transport.sentMessages).toHaveLength(0);
+  });
+
+  it("does not call the transport when membership is revoked after access resolution", async () => {
+    const access = await accessFor(fixture.userAId);
+    await connectAndPair(access, 1001, "StoreOneAlertsBot", 5550001);
+
+    await db()
+      .update(storeMembership)
+      .set({ status: "revoked" })
+      .where(eq(storeMembership.userId, fixture.userAId));
+
+    const transport = createFakeTelegramTransport();
+    const result = await sendMerchantNotificationBotTest(
+      db(),
+      access,
+      { locale: "en" },
+      { transport },
+    );
+
+    expect(result).toEqual({ ok: false, error: "DENIED" });
+    expect(transport.sentMessages).toHaveLength(0);
+  });
+
+  it("does not verify a send when the configuration changes during delivery", async () => {
+    const access = await accessFor(fixture.userAId);
+    await connectAndPair(access, 1001, "StoreOneAlertsBot", 5550001);
+
+    const before = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+
+    if (!before) throw new Error("Expected a connected notification bot");
+
+    const transport = createFakeTelegramTransport();
+    const originalSend = transport.sendMessage.bind(transport);
+    let changed = false;
+
+    transport.sendMessage = async (params) => {
+      if (!changed) {
+        changed = true;
+
+        // Same bot id and same destination chat id: only the configuration
+        // identity changes, as a reconnect/re-pair ending in the same pair.
+        await db()
+          .update(merchantNotificationBot)
+          .set({ configEpoch: crypto.randomUUID() })
+          .where(eq(merchantNotificationBot.storeId, fixture.storeAId));
+      }
+
+      return originalSend(params);
+    };
+
+    const result = await sendMerchantNotificationBotTest(
+      db(),
+      access,
+      { locale: "en" },
+      { transport },
+    );
+
+    expect(result).toEqual({ ok: false, error: "CONFIGURATION_CHANGED" });
+    expect(transport.sentMessages).toHaveLength(1);
+
+    const after = await readMerchantNotificationBotSecret(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+
+    expect(after?.configEpoch).not.toBe(before.configEpoch);
+    expect(after?.botId).toBe(before.botId);
+    expect(after?.destinationChatId).toBe(before.destinationChatId);
+    expect(after?.verifiedAt).toBeNull();
+
+    const state = await readMerchantNotificationBotState(
+      asAppDb(db()),
+      fixture.storeAId,
+    );
+    expect(state?.verifiedAt).toBeNull();
+  });
+
   it("enforces one bot per store and isolates two stores", async () => {
     const accessA = await accessFor(fixture.userAId);
     const accessB = await accessFor(fixture.userBId);
@@ -505,6 +725,7 @@ describe.skipIf(!shouldRun)("merchant notification bot", () => {
         storeId: fixture.storeBId,
         expectedChatId: "5550001",
         expectedBotId: 1001,
+        expectedConfigEpoch: crypto.randomUUID(),
       }),
     ).rejects.toMatchObject({ code: "CONFIGURATION_CHANGED" });
 

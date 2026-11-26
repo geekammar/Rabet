@@ -7,11 +7,13 @@ import {
   confirmMerchantNotificationBotPairing,
   disconnectMerchantNotificationBot as deleteMerchantNotificationBot,
   readMerchantNotificationBotSecret,
+  recordMerchantNotificationBotPairingProgress,
   recordMerchantNotificationBotTestSuccess,
   saveMerchantNotificationBotToken,
   startMerchantNotificationBotPairing as replaceMerchantNotificationBotPairing,
 } from "@/lib/data/merchant-notification-bot";
 import { RabetDataError } from "@/lib/data/errors";
+import type { MerchantNotificationBotSecret } from "@/lib/data/merchant-notification-bot";
 import { resolveMerchantEligibility } from "@/lib/merchant/eligibility";
 import {
   decryptConnectionSecret,
@@ -81,6 +83,8 @@ export type MerchantNotificationBotDeps = {
   now?: () => Date;
   api?: TelegramBotApiClient;
   transport?: TelegramTransport;
+  /** Test seam for bounded backlog progress; production uses 10 batches. */
+  pairingMaxBatches?: number;
 };
 
 function safeCategory(error: unknown): string {
@@ -157,6 +161,7 @@ function isUniqueViolation(error: unknown): boolean {
 async function recheckMerchantAccess(
   tx: unknown,
   access: MerchantAccess,
+  expectedStoreId = access.scope.storeId,
 ): Promise<boolean> {
   const eligibility = await resolveMerchantEligibility(
     tx as unknown as TransactionDatabase,
@@ -169,7 +174,7 @@ async function recheckMerchantAccess(
   return Boolean(
     eligibility &&
       !eligibility.readOnly &&
-      eligibility.store.id === access.scope.storeId,
+      eligibility.store.id === expectedStoreId,
   );
 }
 
@@ -181,6 +186,39 @@ async function readSecret(
     db as unknown as Database,
     access.scope.storeId,
   );
+}
+
+async function advancePairingCursor(
+  db: TransactionDatabase,
+  access: MerchantAccess,
+  pairingCodeHash: string,
+  nextOffset: number | null,
+): Promise<"advanced" | "denied"> {
+  if (nextOffset === null) return "advanced";
+
+  try {
+    return await db.transaction(async (tx) => {
+      if (!(await recheckMerchantAccess(tx, access))) {
+        return "denied" as const;
+      }
+
+      await recordMerchantNotificationBotPairingProgress(
+        tx as unknown as Database,
+        {
+          storeId: access.scope.storeId,
+          pairingCodeHash,
+          nextOffset,
+        },
+      );
+
+      return "advanced" as const;
+    });
+  } catch (error) {
+    // Progress is an optimisation; the next check re-reads the same evaluated
+    // batch rather than skipping it. Access denial is still authoritative.
+    logFailure("pairing_progress_write", error);
+    return "advanced";
+  }
 }
 
 /**
@@ -414,15 +452,32 @@ export async function checkMerchantNotificationBotPairing(
   const match = await readMerchantNotificationBotPairing(
     token,
     secret.pairingCodeHash,
-    { api: deps.api },
+    {
+      api: deps.api,
+      offset: secret.pairingUpdateOffset,
+      maxBatches: deps.pairingMaxBatches,
+    },
   );
 
-  if (match.status === "pending") {
-    return { ok: false, error: "PAIRING_PENDING" };
-  }
+  if (match.status === "pending" || match.status === "ambiguous") {
+    const progress = await advancePairingCursor(
+      db,
+      access,
+      secret.pairingCodeHash,
+      match.nextOffset,
+    );
 
-  if (match.status === "ambiguous") {
-    return { ok: false, error: "PAIRING_AMBIGUOUS" };
+    if (progress === "denied") {
+      return { ok: false, error: "DENIED" };
+    }
+
+    return {
+      ok: false,
+      error:
+        match.status === "pending"
+          ? "PAIRING_PENDING"
+          : "PAIRING_AMBIGUOUS",
+    };
   }
 
   if (match.status === "error") {
@@ -476,6 +531,83 @@ export async function checkMerchantNotificationBotPairing(
  * independent of checkout, orders and payments; it only reads the notification
  * bot row and the Telegram API.
  */
+type MerchantNotificationTestSendContext = {
+  storeId: string;
+  storeName: string;
+  secret: MerchantNotificationBotSecret;
+};
+
+/**
+ * Resolves the current bot and recipient from a live eligibility check in the
+ * same transaction. This runs before any Telegram test-send side effect, so a
+ * suspended store or revoked session cannot cause a send through a stale page.
+ */
+async function resolveMerchantNotificationTestSendContext(
+  db: TransactionDatabase,
+  access: MerchantAccess,
+): Promise<
+  | { ok: true; context: MerchantNotificationTestSendContext }
+  | {
+      ok: false;
+      error: "DENIED" | "NOT_CONNECTED" | "PAIRING_REQUIRED" | "OPERATION_FAILED";
+    }
+> {
+  try {
+    return await db.transaction(async (tx) => {
+      const eligibility = await resolveMerchantEligibility(
+        tx as unknown as TransactionDatabase,
+        {
+          userId: access.userId,
+          sessionVersion: access.sessionVersion,
+        },
+      );
+
+      if (
+        !eligibility ||
+        eligibility.readOnly ||
+        eligibility.store.id !== access.scope.storeId
+      ) {
+        return { ok: false, error: "DENIED" } as const;
+      }
+
+      const secret = await readMerchantNotificationBotSecret(
+        tx as unknown as Database,
+        eligibility.store.id,
+      );
+
+      if (!secret) {
+        return { ok: false, error: "NOT_CONNECTED" } as const;
+      }
+
+      if (!secret.destinationChatId) {
+        return { ok: false, error: "PAIRING_REQUIRED" } as const;
+      }
+
+      return {
+        ok: true,
+        context: {
+          storeId: eligibility.store.id,
+          storeName: eligibility.store.name,
+          secret,
+        },
+      } as const;
+    });
+  } catch (error) {
+    logFailure("test_preflight", error);
+    return { ok: false, error: "OPERATION_FAILED" };
+  }
+}
+
+/**
+ * Sends a synthetic test notification to the paired chat. This path is
+ * independent of checkout, orders and payments; it only reads the notification
+ * bot row and the Telegram API.
+ *
+ * Eligibility, store scope, bot identity, recipient and configuration epoch
+ * are resolved immediately before the send. Verification is committed only
+ * while that exact epoch is still current, so a reconnect or re-pair to the
+ * same bot and chat cannot inherit a test sent against the old configuration.
+ */
 export async function sendMerchantNotificationBotTest(
   db: TransactionDatabase,
   access: MerchantAccess,
@@ -486,13 +618,17 @@ export async function sendMerchantNotificationBotTest(
     return { ok: false, error: "DENIED" };
   }
 
-  const secret = await readSecret(db, access);
+  const resolved = await resolveMerchantNotificationTestSendContext(db, access);
 
-  if (!secret) {
-    return { ok: false, error: "NOT_CONNECTED" };
+  if (!resolved.ok) {
+    return resolved;
   }
 
-  if (!secret.destinationChatId) {
+  const { context } = resolved;
+  const { secret } = context;
+  const chatId = secret.destinationChatId;
+
+  if (!chatId) {
     return { ok: false, error: "PAIRING_REQUIRED" };
   }
 
@@ -511,9 +647,9 @@ export async function sendMerchantNotificationBotTest(
   const locale = input.locale === "en" ? "en" : "ar";
   const delivery = await deliverMerchantNotificationBotTest({
     token,
-    chatId: secret.destinationChatId,
+    chatId,
     locale,
-    storeName: access.store.name,
+    storeName: context.storeName,
     transport: deps.transport,
   });
 
@@ -540,7 +676,7 @@ export async function sendMerchantNotificationBotTest(
 
   try {
     const outcome = await db.transaction(async (tx) => {
-      if (!(await recheckMerchantAccess(tx, access))) {
+      if (!(await recheckMerchantAccess(tx, access, context.storeId))) {
         return { ok: false, error: "DENIED" } as const;
       }
 
@@ -548,9 +684,10 @@ export async function sendMerchantNotificationBotTest(
         await recordMerchantNotificationBotTestSuccess(
           tx as unknown as Database,
           {
-            storeId: access.scope.storeId,
-            expectedChatId: secret.destinationChatId!,
+            storeId: context.storeId,
+            expectedChatId: chatId,
             expectedBotId: secret.botId,
+            expectedConfigEpoch: secret.configEpoch,
           },
         );
       } catch (error) {

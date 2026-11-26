@@ -47,14 +47,64 @@ function botApi(
   } as TelegramBotApiClient;
 }
 
+function pagedBotApi(allUpdates: TelegramBotUpdate[]) {
+  const offsets: Array<number | undefined> = [];
+  const api = botApi([], {
+    getUpdates: vi.fn(
+      async (input?: { offset?: number; limit?: number }) => {
+        offsets.push(input?.offset);
+
+        const offset = input?.offset ?? 0;
+        const limit = input?.limit ?? 100;
+
+        return {
+          ok: true as const,
+          result: allUpdates
+            .filter((update) => update.update_id >= offset)
+            .slice(0, limit),
+        };
+      },
+    ),
+  });
+
+  return { api, offsets };
+}
+
+function textUpdate(
+  updateId: number,
+  text = "old message",
+): TelegramBotUpdate {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      from: {
+        id: 5550001,
+        is_bot: false,
+        first_name: "Owner",
+        username: "owner",
+      },
+      chat: {
+        id: 5550001,
+        type: "private",
+        username: "owner",
+        first_name: "Owner",
+      },
+      date: 1,
+      text,
+    },
+  };
+}
+
 function startUpdate(
   text: string,
   chatId = 5550001,
   type = "private",
   fromIsBot = false,
+  updateId = 1,
 ): TelegramBotUpdate {
   return {
-    update_id: 1,
+    update_id: updateId,
     message: {
       message_id: 1,
       from: {
@@ -167,6 +217,73 @@ describe("merchant notification bot — token and pairing helpers", () => {
         hash,
       ),
     ).toEqual({ status: "pending" });
+  });
+
+  it("finds a valid Start after more than 100 backlogged updates", async () => {
+    const code = "pairing_code_backlog_1234";
+    const hash = hashMerchantNotificationPairingCode(code);
+    const all = [
+      ...Array.from({ length: 250 }, (_, index) =>
+        textUpdate(index + 1),
+      ),
+      startUpdate(`/start ${code}`, 5550001, "private", false, 251),
+    ];
+    const { api, offsets } = pagedBotApi(all);
+
+    const result = await readMerchantNotificationBotPairing(TOKEN, hash, {
+      api,
+      maxBatches: 10,
+    });
+
+    expect(result).toMatchObject({
+      status: "paired",
+      nextOffset: 252,
+      chat: { chatId: "5550001" },
+    });
+    expect(offsets[0]).toBeUndefined();
+    expect(offsets).toContain(101);
+  });
+
+  it("makes bounded progress across repeated checks", async () => {
+    const code = "pairing_code_progress_1234";
+    const hash = hashMerchantNotificationPairingCode(code);
+    const all = [
+      ...Array.from({ length: 150 }, (_, index) =>
+        textUpdate(index + 1),
+      ),
+      startUpdate(`/start ${code}`, 5550001, "private", false, 151),
+    ];
+
+    const first = pagedBotApi(all);
+    const firstResult = await readMerchantNotificationBotPairing(
+      TOKEN,
+      hash,
+      { api: first.api, maxBatches: 1 },
+    );
+
+    expect(firstResult.status).toBe("pending");
+    if (firstResult.status !== "pending") {
+      throw new Error("Expected a pending pairing result");
+    }
+    expect(firstResult.nextOffset).toBe(101);
+
+    const second = pagedBotApi(all);
+    const secondResult = await readMerchantNotificationBotPairing(
+      TOKEN,
+      hash,
+      {
+        api: second.api,
+        maxBatches: 1,
+        offset: firstResult.nextOffset,
+      },
+    );
+
+    expect(secondResult).toMatchObject({
+      status: "paired",
+      nextOffset: 152,
+      chat: { chatId: "5550001" },
+    });
+    expect(second.offsets).toEqual([101]);
   });
 
   it("maps getMe and getUpdates failures to allowlisted codes", async () => {

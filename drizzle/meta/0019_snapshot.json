@@ -1,5 +1,5 @@
 {
-  "id": "1e381476-22d4-45ca-a9ac-1785d74461ec",
+  "id": "0c349086-0475-4640-82b8-b60f8d862c1a",
   "prevId": "f9eeb339-d8e2-4316-ae8c-95de89995717",
   "version": "7",
   "dialect": "postgresql",
@@ -3096,6 +3096,19 @@
           "primaryKey": false,
           "notNull": false
         },
+        "pairing_update_offset": {
+          "name": "pairing_update_offset",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "config_epoch": {
+          "name": "config_epoch",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
         "verified_at": {
           "name": "verified_at",
           "type": "timestamp with time zone",
@@ -3201,6 +3214,10 @@
         "merchant_notification_bot_pairing_hash_format_check": {
           "name": "merchant_notification_bot_pairing_hash_format_check",
           "value": "\"merchant_notification_bot\".\"pairing_code_hash\" IS NULL OR \"merchant_notification_bot\".\"pairing_code_hash\" ~ '^[0-9a-f]{64}$'"
+        },
+        "merchant_notification_bot_pairing_update_offset_check": {
+          "name": "merchant_notification_bot_pairing_update_offset_check",
+          "value": "\"merchant_notification_bot\".\"pairing_update_offset\" IS NULL OR \"merchant_notification_bot\".\"pairing_update_offset\" >= 1"
         },
         "merchant_notification_bot_verified_requires_destination_check": {
           "name": "merchant_notification_bot_verified_requires_destination_check",

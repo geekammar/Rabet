@@ -1,5 +1,6 @@
 import "server-only";
 
+import crypto from "node:crypto";
 import { and, eq, gt, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
@@ -48,6 +49,8 @@ export type MerchantNotificationBotSecret = {
   destinationChatUsername: string | null;
   pairingCodeHash: string | null;
   pairingExpiresAt: Date | null;
+  pairingUpdateOffset: number | null;
+  configEpoch: string;
   verifiedAt: Date | null;
   lastTestAt: Date | null;
 };
@@ -159,6 +162,8 @@ export async function readMerchantNotificationBotSecret(
           merchantNotificationBot.destinationChatUsername,
         pairingCodeHash: merchantNotificationBot.pairingCodeHash,
         pairingExpiresAt: merchantNotificationBot.pairingExpiresAt,
+        pairingUpdateOffset: merchantNotificationBot.pairingUpdateOffset,
+        configEpoch: merchantNotificationBot.configEpoch,
         verifiedAt: merchantNotificationBot.verifiedAt,
         lastTestAt: merchantNotificationBot.lastTestAt,
       })
@@ -207,6 +212,8 @@ export async function saveMerchantNotificationBotToken(
         tokenKeyId: input.tokenKeyId,
         pairingCodeHash: input.pairingCodeHash,
         pairingExpiresAt: input.pairingExpiresAt,
+        pairingUpdateOffset: null,
+        configEpoch: crypto.randomUUID(),
         updatedAt: now,
       })
       .onConflictDoUpdate({
@@ -222,6 +229,8 @@ export async function saveMerchantNotificationBotToken(
           destinationChatUsername: null,
           pairingCodeHash: input.pairingCodeHash,
           pairingExpiresAt: input.pairingExpiresAt,
+          pairingUpdateOffset: null,
+          configEpoch: crypto.randomUUID(),
           verifiedAt: null,
           lastTestAt: null,
           updatedAt: now,
@@ -255,6 +264,8 @@ export async function startMerchantNotificationBotPairing(
       .set({
         pairingCodeHash: input.pairingCodeHash,
         pairingExpiresAt: input.pairingExpiresAt,
+        pairingUpdateOffset: null,
+        configEpoch: crypto.randomUUID(),
         destinationChatId: null,
         destinationChatTitle: null,
         destinationChatUsername: null,
@@ -312,8 +323,60 @@ export async function confirmMerchantNotificationBotPairing(
         destinationChatUsername: input.chatUsername,
         pairingCodeHash: null,
         pairingExpiresAt: null,
+        pairingUpdateOffset: null,
+        configEpoch: crypto.randomUUID(),
         verifiedAt: null,
         lastTestAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(merchantNotificationBot.storeId, input.storeId),
+          eq(merchantNotificationBot.pairingCodeHash, input.pairingCodeHash),
+          gt(merchantNotificationBot.pairingExpiresAt, now),
+        ),
+      )
+      .returning({ id: merchantNotificationBot.id });
+
+    return Boolean(updated);
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+export type RecordMerchantNotificationBotPairingProgressInput = {
+  storeId: string;
+  pairingCodeHash: string;
+  nextOffset: number;
+  now?: Date;
+};
+
+/**
+ * Advances the pairing queue cursor only while the same unexpired challenge is
+ * still current. Telegram confirms the previous batch on the next request, so
+ * progress never drops an update before this check has evaluated it.
+ */
+export async function recordMerchantNotificationBotPairingProgress(
+  db: Database,
+  input: RecordMerchantNotificationBotPairingProgressInput,
+): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(input.nextOffset) ||
+    input.nextOffset < 1
+  ) {
+    throw new RabetDataError(
+      "INVALID_INPUT",
+      "The pairing update offset is invalid.",
+    );
+  }
+
+  const now = input.now ?? new Date();
+
+  try {
+    const [updated] = await db
+      .update(merchantNotificationBot)
+      .set({
+        pairingUpdateOffset: input.nextOffset,
         updatedAt: now,
       })
       .where(
@@ -335,6 +398,7 @@ export type RecordMerchantNotificationBotTestSuccessInput = {
   storeId: string;
   expectedChatId: string;
   expectedBotId: number;
+  expectedConfigEpoch: string;
   now?: Date;
 };
 
@@ -365,6 +429,10 @@ export async function recordMerchantNotificationBotTestSuccess(
             input.expectedChatId,
           ),
           eq(merchantNotificationBot.botId, input.expectedBotId),
+          eq(
+            merchantNotificationBot.configEpoch,
+            input.expectedConfigEpoch,
+          ),
         ),
       )
       .returning({ id: merchantNotificationBot.id });
