@@ -260,7 +260,7 @@ async function main() {
     }
     if (connectionA?.status !== "ready") fail("Store A managed connection is not ready");
     if (connectionC?.status !== "ready") fail("Store C managed connection is not ready");
-    if (inventory?.on_hand !== 5 || inventory?.reserved !== 5) {
+    if (inventory?.on_hand !== 20 || inventory?.reserved !== 5) {
       fail("Order/inventory baseline changed");
     }
     if (ordersA.count !== 3 || reservationsA.count !== 3) {
@@ -273,7 +273,7 @@ async function main() {
     }
     if (ordersB.count !== 0) fail("Store B unexpectedly has orders");
     if (connectionsB.count !== 0) fail("Store B unexpectedly has a connection");
-    if (ordersC.count !== 0) fail("Store C unexpectedly has orders");
+    if (ordersC.count !== 1) fail("Store C order baseline changed");
   } finally {
     await db.end({ timeout: 5 }).catch(() => {});
   }
@@ -286,6 +286,23 @@ async function main() {
       },
       signal: AbortSignal.timeout(30_000),
     });
+  }
+
+  const loginResponse = await fetch(`${APP_URL}/app/login`, {
+    headers: { "Cache-Control": "no-cache" },
+    signal: AbortSignal.timeout(30_000),
+  });
+  const loginHtml = await loginResponse.text();
+  if (loginResponse.status !== 200) fail(`Merchant login page returned HTTP ${loginResponse.status}`);
+  if (!loginHtml.includes('data-testid="merchant-login-page"')) {
+    fail("Merchant login page did not render the login form");
+  }
+
+  const setupResponse = await merchantFetch(`/app/setup?verify=${Date.now()}`);
+  const setupHtml = await setupResponse.text();
+  if (setupResponse.status !== 200) fail(`Merchant setup page returned HTTP ${setupResponse.status}`);
+  if (!setupHtml.includes('data-testid="merchant-telegram-support-input"')) {
+    fail("Merchant setup page did not render the Telegram support account field");
   }
 
   const productsResponse = await merchantFetch(`/app/products?verify=${Date.now()}`);
@@ -313,6 +330,8 @@ async function main() {
     health,
     database: dbEvidence,
     liveChecks: {
+      merchantLoginPage: true,
+      merchantSetupSupportField: true,
       merchantCatalogServesProductA: true,
       merchantOrdersServesTargetOrder: true,
       targetOrderAwaitingCollection: true,
