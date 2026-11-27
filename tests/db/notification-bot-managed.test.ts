@@ -421,6 +421,218 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
     expect(bots).toHaveLength(0);
   });
 
+  it("ignores an expired store-bot attempt when correlating a live notification attempt", async () => {
+    const creatorUserId = 700101;
+    const staleStartedAt = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+
+    const staleStoreAttempt = await createTelegramLinkAttempt(db(), {
+      storeId: storeBId,
+      merchantUserId: userBId,
+      managerBotUsername: "RabetManagerBot",
+      now: staleStartedAt,
+    });
+    const boundStale = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: staleStoreAttempt.nonce,
+      telegramUserId: creatorUserId,
+      now: staleStartedAt,
+    });
+    expect(boundStale.status).toBe("bound");
+
+    const [staleBefore] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, staleStoreAttempt.attemptId));
+    expect(staleBefore.status).toBe("pending");
+    expect(staleBefore.expiresAt.getTime()).toBeLessThan(Date.now());
+
+    const ensured = await ensureNotificationBotLinkAttempt(db(), {
+      storeId: storeBId,
+      merchantUserId: userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    expect(ensured.status).toBe("created");
+    if (ensured.status !== "created") return;
+
+    const boundNotification = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: ensured.nonce,
+      telegramUserId: creatorUserId,
+    });
+    expect(boundNotification.status).toBe("bound");
+
+    const result = await handleManagedBotEvent(
+      db(),
+      {
+        creatorUserId,
+        botId: 800101,
+        botUsername: "StoreBNotificationBot",
+        botName: "Store B notifications",
+      },
+      {
+        managerApi: managerApi(),
+        webhookOrigin: "https://app.example.test",
+        transport: createFakeTelegramTransport(),
+      },
+    );
+
+    expect(result.status).toBe("awaiting_bot_start");
+
+    const [notificationAfter] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+    expect(notificationAfter.status).toBe("provisioning");
+    expect(notificationAfter.failureCode).toBe("awaiting_bot_start");
+    expect(notificationAfter.telegramBotId).toBe(800101);
+
+    const [staleAfter] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, staleStoreAttempt.attemptId));
+    expect(staleAfter.status).toBe("expired");
+    expect(staleAfter.failureCode).toBe("expired");
+    expect(staleAfter.telegramBotId).toBeNull();
+  });
+
+  it("keeps two genuinely live attempts for one creator ambiguous", async () => {
+    const creatorUserId = 700102;
+    const storeAttempt = await createTelegramLinkAttempt(db(), {
+      storeId: storeBId,
+      merchantUserId: userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    const notificationAttempt = await ensureNotificationBotLinkAttempt(db(), {
+      storeId: storeBId,
+      merchantUserId: userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    expect(notificationAttempt.status).toBe("created");
+    if (notificationAttempt.status !== "created") return;
+
+    expect(
+      (
+        await bindLinkAttemptToTelegramUser(db(), {
+          nonce: storeAttempt.nonce,
+          telegramUserId: creatorUserId,
+        })
+      ).status,
+    ).toBe("bound");
+    expect(
+      (
+        await bindLinkAttemptToTelegramUser(db(), {
+          nonce: notificationAttempt.nonce,
+          telegramUserId: creatorUserId,
+        })
+      ).status,
+    ).toBe("bound");
+
+    const result = await handleManagedBotEvent(
+      db(),
+      {
+        creatorUserId,
+        botId: 800102,
+        botUsername: "LiveAmbiguousBot",
+        botName: "Live ambiguous",
+      },
+      {
+        managerApi: managerApi(),
+        webhookOrigin: "https://app.example.test",
+        transport: createFakeTelegramTransport(),
+      },
+    );
+
+    expect(result.status).toBe("ambiguous");
+
+    const rows = await db()
+      .select({
+        purpose: telegramLinkAttempt.purpose,
+        status: telegramLinkAttempt.status,
+        failureCode: telegramLinkAttempt.failureCode,
+      })
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.storeId, storeBId))
+      .orderBy(telegramLinkAttempt.purpose);
+
+    expect(rows).toEqual([
+      {
+        purpose: "notification_bot",
+        status: "failed",
+        failureCode: "ambiguous_event",
+      },
+      {
+        purpose: "store_bot",
+        status: "failed",
+        failureCode: "ambiguous_event",
+      },
+    ]);
+  });
+
+  it("keeps a delayed event ambiguous when a recent expired attempt could own it", async () => {
+    const creatorUserId = 700103;
+    const recentStartedAt = new Date(Date.now() - 5 * 60 * 1000);
+
+    const staleStoreAttempt = await createTelegramLinkAttempt(db(), {
+      storeId: storeAId,
+      merchantUserId: userAId,
+      managerBotUsername: "RabetManagerBot",
+      now: recentStartedAt,
+    });
+    const boundStale = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: staleStoreAttempt.nonce,
+      telegramUserId: creatorUserId,
+      now: recentStartedAt,
+    });
+    expect(boundStale.status).toBe("bound");
+
+    await db()
+      .update(telegramLinkAttempt)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(telegramLinkAttempt.id, staleStoreAttempt.attemptId));
+
+    const ensured = await ensureNotificationBotLinkAttempt(db(), {
+      storeId: storeBId,
+      merchantUserId: userBId,
+      managerBotUsername: "RabetManagerBot",
+    });
+    expect(ensured.status).toBe("created");
+    if (ensured.status !== "created") return;
+
+    const boundNotification = await bindLinkAttemptToTelegramUser(db(), {
+      nonce: ensured.nonce,
+      telegramUserId: creatorUserId,
+    });
+    expect(boundNotification.status).toBe("bound");
+
+    const result = await handleManagedBotEvent(
+      db(),
+      {
+        creatorUserId,
+        botId: 800103,
+        botUsername: "DelayedAmbiguousBot",
+        botName: "Delayed ambiguous",
+      },
+      {
+        managerApi: managerApi(),
+        webhookOrigin: "https://app.example.test",
+        transport: createFakeTelegramTransport(),
+      },
+    );
+
+    expect(result.status).toBe("ambiguous");
+
+    const [notificationAfter] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+    expect(notificationAfter.status).toBe("pending");
+    expect(notificationAfter.telegramBotId).toBeNull();
+
+    const [staleAfter] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, staleStoreAttempt.attemptId));
+    expect(staleAfter.status).toBe("expired");
+  });
+
   it("creates a verified notification bot, sends a test, and disconnects without a webhook", async () => {
     const { ensured, nonce } = await prepareNotificationProposal({
       storeId: storeAId,

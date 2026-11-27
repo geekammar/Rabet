@@ -1121,7 +1121,45 @@ export async function handleManagedBotEvent(
         )
         .orderBy(desc(telegramLinkAttempt.createdAt));
 
-      if (active.length === 0) {
+      // The partial unique indexes reserve every attempt stored in an active
+      // status, even after its TTL has passed. Only unexpired rows are live
+      // candidates for this event; an expired row must not turn a single live
+      // attempt into an ambiguous one. A recently expired row still remains
+      // visible to the delayed-event guard below once it is marked expired.
+      const liveActive = active.filter(
+        (attempt) => attempt.expiresAt.getTime() > now.getTime(),
+      );
+      const expiredActive = active.filter(
+        (attempt) => attempt.expiresAt.getTime() <= now.getTime(),
+      );
+
+      const attempt = liveActive[0] ?? expiredActive[0];
+
+      if (attempt) {
+        const otherExpiredIds = expiredActive
+          .filter((candidate) => candidate.id !== attempt.id)
+          .map((candidate) => candidate.id);
+
+        if (otherExpiredIds.length > 0) {
+          await tx
+            .update(telegramLinkAttempt)
+            .set({
+              status: "expired",
+              failureCode: "expired",
+              updatedAt: now,
+            })
+            .where(inArray(telegramLinkAttempt.id, otherExpiredIds));
+        }
+      }
+
+      if (liveActive.length > 1) {
+        for (const liveAttempt of liveActive) {
+          await failActiveAttempt(tx, liveAttempt.id, "ambiguous_event", now);
+        }
+        return { status: "ambiguous" } as const;
+      }
+
+      if (!attempt) {
         const [completed] = await tx
           .select({
             id: telegramLinkAttempt.id,
@@ -1222,15 +1260,6 @@ export async function handleManagedBotEvent(
 
         return { status: "unmatched" } as const;
       }
-
-      if (active.length > 1) {
-        for (const attempt of active) {
-          await failActiveAttempt(tx, attempt.id, "ambiguous_event", now);
-        }
-        return { status: "ambiguous" } as const;
-      }
-
-      const attempt = active[0];
 
       // A late creation event from another store that used the same Telegram
       // account is not proof for this store. Fail closed when another recent
