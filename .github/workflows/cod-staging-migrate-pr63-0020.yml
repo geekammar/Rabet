@@ -1,0 +1,92 @@
+name: COD Staging migrate PR63 0020
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type MIGRATE_PR63_0020_COD_STAGING to authorize the guarded 0020 migration on permanent COD Staging.'
+        type: string
+        default: ""
+        required: true
+  push:
+    branches:
+      - ops/merchant-notification-staging-pr63-0020
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-staging-pr63-0020-pipeline
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Back up, migrate 0020 and verify permanent COD Staging
+    if: (github.event_name == 'workflow_dispatch' && inputs.confirm == 'MIGRATE_PR63_0020_COD_STAGING') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[migrate-cod-staging-pr63-0020]'))
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch candidate branch
+        run: git fetch origin feat/merchant-notification-bot
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install orchestration dependencies
+        run: npm ci
+
+      - name: Create exact candidate worktree
+        run: |
+          set -euo pipefail
+          CANDIDATE_SHA="48be324524fd877aa995e9c0a045cb44c9eff0e3"
+          test "$(git rev-parse origin/feat/merchant-notification-bot)" = "${CANDIDATE_SHA}"
+          git worktree add --detach /tmp/rabet-candidate "${CANDIDATE_SHA}"
+          test "$(git -C /tmp/rabet-candidate rev-parse HEAD)" = "${CANDIDATE_SHA}"
+
+      - name: Install candidate dependencies
+        working-directory: /tmp/rabet-candidate
+        run: npm ci
+
+      - name: Create staging recovery point and verify target
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 48be324524fd877aa995e9c0a045cb44c9eff0e3
+          RABET_CODE_ROOT: /tmp/rabet-candidate
+        run: node scripts/cod-staging-migrate-pr63-0020.mjs recovery
+
+      - name: Upload staging recovery point
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-pr63-0020-recovery-${{ github.run_id }}
+          path: /tmp/cod-staging-recovery/
+          retention-days: 30
+
+      - name: Apply 0020 and verify ledger, schema and preserved data
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 48be324524fd877aa995e9c0a045cb44c9eff0e3
+          RABET_CODE_ROOT: /tmp/rabet-candidate
+        run: node scripts/cod-staging-migrate-pr63-0020.mjs migrate
+
+      - name: Upload migration summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-pr63-0020-migrate-summary
+          path: /tmp/cod-staging-migrate-summary.json
+          if-no-files-found: ignore
+          retention-days: 30
