@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { Loader2, Save } from "lucide-react";
 
 import {
+  publishMerchantProduct,
   saveMerchantProductAvailability,
   saveMerchantProductPrice,
 } from "@/app/actions/merchant-catalog";
@@ -25,6 +26,8 @@ export type MerchantProductItem = {
   revision: string;
   isActive: boolean;
   categoryPathVisible: boolean;
+  imageUrl: string | null;
+  available: number;
 };
 
 type PriceDraft = {
@@ -98,6 +101,15 @@ type AvailabilityError =
   | "INVALID_INPUT"
   | "INVALID_REVISION";
 
+type PublishReason =
+  | "NAME_MISSING"
+  | "PRICE_MISSING"
+  | "CATEGORY_NOT_ELIGIBLE"
+  | "OUT_OF_STOCK"
+  | "NO_PAYMENT_METHOD"
+  | "DELIVERY_FEE_NOT_CONFIGURED"
+  | "STORE_BOT_NOT_CONNECTED";
+
 type Copy = {
   dir: "rtl" | "ltr";
   title: string;
@@ -134,6 +146,16 @@ type Copy = {
   retryMyPrice: string;
   availableInCatalog: string;
   availabilityOnCategoryHidden: string;
+  publishedStatus: string;
+  inStockLabel: string;
+  outOfStock: string;
+  preview: string;
+  edit: string;
+  publish: string;
+  publishing: string;
+  publishSaved: string;
+  publishNotReadyTitle: string;
+  publishReasons: Record<PublishReason, string>;
   makeAvailable: string;
   stopAvailability: string;
   availabilitySaved: string;
@@ -186,6 +208,26 @@ const COPY: Record<MerchantLocale, Copy> = {
     retryMyPrice: "إعادة المحاولة بسعري",
     availableInCatalog: "متاح في الكتالوج",
     availabilityOnCategoryHidden: "الإتاحة مفعّلة",
+    publishedStatus: "منشور",
+    inStockLabel: "متوفر",
+    outOfStock: "غير متوفر حاليًا",
+    preview: "معاينة",
+    edit: "تعديل",
+    publish: "نشر المنتج",
+    publishing: "جارٍ النشر…",
+    publishSaved: "تم نشر المنتج.",
+    publishNotReadyTitle: "المنتج غير جاهز للنشر بعد:",
+    publishReasons: {
+      NAME_MISSING: "اسم المنتج غير محفوظ.",
+      PRICE_MISSING: "سعر المنتج غير صالح.",
+      CATEGORY_NOT_ELIGIBLE: "القسم أو أحد أقسامه الأعلى غير متاح.",
+      OUT_OF_STOCK: "لا يوجد مخزون متاح. أضف مخزونًا من صفحة التعديل.",
+      NO_PAYMENT_METHOD:
+        "لا توجد طريقة دفع جاهزة. فعّل الدفع عند الاستلام أو فودافون كاش من إعداد المتجر.",
+      DELIVERY_FEE_NOT_CONFIGURED:
+        "لم تُحدَّد رسوم التوصيل. احفظ 0.00 للتوصيل المجاني صراحةً من إعداد المتجر.",
+      STORE_BOT_NOT_CONNECTED: "بوت المتجر غير متصل بعد.",
+    },
     makeAvailable: "إتاحة المنتج",
     stopAvailability: "إيقاف الإتاحة",
     availabilitySaved: "تم حفظ حالة الإتاحة.",
@@ -238,6 +280,27 @@ const COPY: Record<MerchantLocale, Copy> = {
     retryMyPrice: "Retry my price",
     availableInCatalog: "Available in the catalog",
     availabilityOnCategoryHidden: "Availability is on",
+    publishedStatus: "Published",
+    inStockLabel: "In stock",
+    outOfStock: "Currently out of stock",
+    preview: "Preview",
+    edit: "Edit",
+    publish: "Publish product",
+    publishing: "Publishing…",
+    publishSaved: "Product published.",
+    publishNotReadyTitle: "The product is not ready to publish yet:",
+    publishReasons: {
+      NAME_MISSING: "The product name is missing.",
+      PRICE_MISSING: "The product price is not valid.",
+      CATEGORY_NOT_ELIGIBLE:
+        "The category or one of its parent categories is unavailable.",
+      OUT_OF_STOCK: "No stock is available. Add stock from the edit page.",
+      NO_PAYMENT_METHOD:
+        "No payment method is ready. Enable cash on delivery or Vodafone Cash in Store setup.",
+      DELIVERY_FEE_NOT_CONFIGURED:
+        "The delivery fee is not configured. Save 0.00 for explicit free delivery in Store setup.",
+      STORE_BOT_NOT_CONNECTED: "The store bot is not connected yet.",
+    },
     makeAvailable: "Make product available",
     stopAvailability: "Stop availability",
     availabilitySaved: "Availability saved.",
@@ -318,6 +381,10 @@ export function MerchantProducts({
   const [availabilitySavedId, setAvailabilitySavedId] = useState<string | null>(
     null,
   );
+  const [publishReasons, setPublishReasons] = useState<
+    Record<string, PublishReason[] | undefined>
+  >({});
+  const [publishSavedId, setPublishSavedId] = useState<string | null>(null);
   const [createdNotice, setCreatedNotice] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -329,6 +396,7 @@ export function MerchantProducts({
   const copy = COPY[locale];
   const saving =
     isPending || pendingId !== null || availabilityPendingId !== null;
+  const [publishingId, setPublishingId] = useState<string | null>(null);
 
   useEffect(() => {
     let created = false;
@@ -462,6 +530,11 @@ export function MerchantProducts({
               [productId]: result.current,
             };
           });
+        } else if (result.error === "NOT_READY") {
+          setAvailabilityErrors((current) => ({
+            ...current,
+            [productId]: "UNAVAILABLE",
+          }));
         } else {
           setAvailabilityErrors((current) => ({
             ...current,
@@ -476,6 +549,71 @@ export function MerchantProducts({
       } finally {
         pendingRef.current = null;
         setAvailabilityPendingId(null);
+      }
+    });
+  }
+
+  function publishProduct(
+    product: MerchantProductItem,
+    expectedRevision: string,
+  ) {
+    if (readOnly || pendingRef.current !== null) return;
+
+    const productId = product.id;
+    pendingRef.current = productId;
+
+    setAvailabilityErrors((current) => ({
+      ...current,
+      [productId]: undefined,
+    }));
+    setAvailabilityConflicts((current) => ({
+      ...current,
+      [productId]: undefined,
+    }));
+    setPublishReasons((current) => ({ ...current, [productId]: undefined }));
+    setPublishSavedId(null);
+    setPublishingId(productId);
+
+    startTransition(async () => {
+      try {
+        const result = await publishMerchantProduct({
+          productId,
+          revision: expectedRevision,
+        });
+
+        if (result.ok) {
+          setAvailabilityOverrides((current) => ({
+            ...current,
+            [result.productId]: {
+              isActive: true,
+              revision: result.revision,
+            },
+          }));
+          setPublishSavedId(result.productId);
+        } else if (result.error === "NOT_READY") {
+          setPublishReasons((current) => ({
+            ...current,
+            [productId]: result.reasons,
+          }));
+        } else if (result.error === "CONFLICT") {
+          setAvailabilityConflicts((current) => ({
+            ...current,
+            [productId]: result.current,
+          }));
+        } else {
+          setAvailabilityErrors((current) => ({
+            ...current,
+            [productId]: result.error,
+          }));
+        }
+      } catch {
+        setAvailabilityErrors((current) => ({
+          ...current,
+          [productId]: "UNAVAILABLE",
+        }));
+      } finally {
+        pendingRef.current = null;
+        setPublishingId(null);
       }
     });
   }
@@ -642,10 +780,14 @@ export function MerchantProducts({
                 const rowSavingPrice = pendingId === product.id;
                 const rowSavingAvailability =
                   availabilityPendingId === product.id;
-                const rowSaving = rowSavingPrice || rowSavingAvailability;
+                const rowPublishing = publishingId === product.id;
+                const rowSaving =
+                  rowSavingPrice || rowSavingAvailability || rowPublishing;
                 const draft = draftViewFor(product, drafts);
-                const enableDisabled =
+                const reasons = publishReasons[product.id];
+                const publishDisabled =
                   saving ||
+                  rowPublishing ||
                   (!availabilityConflict && availability.isActive);
                 const disableDisabled =
                   saving ||
@@ -671,8 +813,8 @@ export function MerchantProducts({
                           data-testid={`merchant-product-available-${product.id}`}
                         >
                           {product.categoryPathVisible
-                            ? copy.availableInCatalog
-                            : copy.availabilityOnCategoryHidden}
+                            ? `${copy.publishedStatus} — ${copy.availableInCatalog}`
+                            : `${copy.publishedStatus} — ${copy.availabilityOnCategoryHidden}`}
                         </span>
                       ) : (
                         <Badge
@@ -683,6 +825,18 @@ export function MerchantProducts({
                           {copy.draftStatus}
                         </Badge>
                       )}
+                      <span
+                        className={
+                          product.available > 0
+                            ? "text-sm text-muted-foreground"
+                            : "text-sm font-medium text-destructive"
+                        }
+                        data-testid={`merchant-product-stock-${product.id}`}
+                      >
+                        {product.available > 0
+                          ? `${copy.inStockLabel}: ${product.available}`
+                          : copy.outOfStock}
+                      </span>
                     </div>
 
                     {product.categoryPathVisible ? null : (
@@ -862,36 +1016,29 @@ export function MerchantProducts({
                       </p>
                     ) : null}
 
+                    <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-3">
+                      <Button asChild variant="outline" className="min-h-11 w-full sm:w-auto">
+                        <Link
+                          href={`/app/products/${product.id}/preview`}
+                          data-testid={`merchant-product-preview-${product.id}`}
+                        >
+                          {copy.preview}
+                        </Link>
+                      </Button>
+                      <Button asChild variant="outline" className="min-h-11 w-full sm:w-auto">
+                        <Link
+                          href={`/app/products/${product.id}/edit`}
+                          data-testid={`merchant-product-edit-${product.id}`}
+                        >
+                          {copy.edit}
+                        </Link>
+                      </Button>
+                    </div>
+
                     {readOnly ? null : (
                       <div className="mt-3 space-y-2 border-t border-border pt-3">
                         <div className="flex flex-col gap-2 sm:flex-row">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            className="min-h-11 w-full sm:w-auto"
-                            disabled={enableDisabled}
-                            aria-busy={rowSavingAvailability}
-                            onClick={() =>
-                              saveAvailability(
-                                product,
-                                true,
-                                availability.revision,
-                              )
-                            }
-                            data-testid={`merchant-availability-enable-${product.id}`}
-                          >
-                            {rowSavingAvailability && !availability.isActive ? (
-                              <>
-                                <Loader2
-                                  className="size-4 animate-spin"
-                                  aria-hidden="true"
-                                />
-                                {copy.savingAvailability}
-                              </>
-                            ) : (
-                              copy.makeAvailable
-                            )}
-                          </Button>
+                          {availability.isActive ? (
                           <Button
                             type="button"
                             variant="outline"
@@ -919,7 +1066,48 @@ export function MerchantProducts({
                               copy.stopAvailability
                             )}
                           </Button>
+                          ) : (
+                          <Button
+                            type="button"
+                            className="min-h-11 w-full sm:w-auto"
+                            disabled={publishDisabled}
+                            aria-busy={rowPublishing}
+                            onClick={() =>
+                              publishProduct(product, availability.revision)
+                            }
+                            data-testid={`merchant-availability-enable-${product.id}`}
+                          >
+                            {rowPublishing ? (
+                              <>
+                                <Loader2
+                                  className="size-4 animate-spin"
+                                  aria-hidden="true"
+                                />
+                                {copy.publishing}
+                              </>
+                            ) : (
+                              copy.publish
+                            )}
+                          </Button>
+                          )}
                         </div>
+
+                        {reasons ? (
+                          <div
+                            role="alert"
+                            className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"
+                            data-testid={`merchant-product-publish-not-ready-${product.id}`}
+                          >
+                            <p className="font-semibold">
+                              {copy.publishNotReadyTitle}
+                            </p>
+                            <ul className="mt-1 list-inside list-disc space-y-1">
+                              {reasons.map((reason) => (
+                                <li key={reason}>{copy.publishReasons[reason]}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
 
                         {availabilityError ? (
                           <p
@@ -962,6 +1150,16 @@ export function MerchantProducts({
                             data-testid={`merchant-availability-saved-${product.id}`}
                           >
                             {copy.availabilitySaved}
+                          </p>
+                        ) : null}
+
+                        {publishSavedId === product.id ? (
+                          <p
+                            role="status"
+                            className="text-sm font-medium text-emerald-700 dark:text-emerald-300"
+                            data-testid={`merchant-product-published-${product.id}`}
+                          >
+                            {copy.publishSaved}
                           </p>
                         ) : null}
                       </div>

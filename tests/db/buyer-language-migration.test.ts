@@ -220,6 +220,6 @@ describe.skipIf(!shouldRun)("buyer language migration 0016", () => {
     const ledger = await pool.unsafe<{ count: number }>(`
       select count(*)::int as count from drizzle.__drizzle_migrations
     `);
-    expect(Number(ledger[0].count)).toBe(21);
+    expect(Number(ledger[0].count)).toBe(22);
   });
 });

@@ -8,15 +8,18 @@ import {
   categoryTranslation,
   language,
   product,
+  productInventory,
   productTranslation,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
 import type { MerchantAccess } from "@/lib/auth/merchant-session";
 import { generateCatalogSlug } from "@/lib/catalog/slug";
 import {
+  validateDescription,
   validateName,
   validatePrice,
   validateUuid,
+  type ValidationResult,
 } from "@/lib/catalog/validation";
 import {
   merchantWriteEligibilityWhere,
@@ -60,11 +63,95 @@ export async function resolveMerchantCatalogLanguage(
   };
 }
 
+export const MAX_PRODUCT_IMAGE_URL_LENGTH = 2048;
+export const MAX_PRODUCT_STOCK = 1_000_000;
+
+export function validateProductImageUrl(
+  raw: unknown,
+): ValidationResult<string | null> {
+  if (raw === undefined || raw === null) {
+    return { success: true, data: null };
+  }
+
+  if (typeof raw !== "string") {
+    return { success: false, error: "Image URL must be a string." };
+  }
+
+  const trimmed = raw.trim();
+
+  if (trimmed.length === 0) {
+    return { success: true, data: null };
+  }
+
+  if (trimmed.length > MAX_PRODUCT_IMAGE_URL_LENGTH) {
+    return {
+      success: false,
+      error: `Image URL must be ${MAX_PRODUCT_IMAGE_URL_LENGTH} characters or fewer.`,
+    };
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return {
+        success: false,
+        error: "Image URL must use the http or https scheme.",
+      };
+    }
+  } catch {
+    return { success: false, error: "Image URL must be a valid URL." };
+  }
+
+  return { success: true, data: trimmed };
+}
+
+export function validateProductStock(
+  raw: unknown,
+): ValidationResult<number | null> {
+  if (raw === undefined || raw === null) {
+    return { success: true, data: null };
+  }
+
+  if (typeof raw === "number") {
+    if (!Number.isInteger(raw) || raw < 0 || raw > MAX_PRODUCT_STOCK) {
+      return { success: false, error: "Stock must be a whole non-negative number." };
+    }
+
+    return { success: true, data: raw };
+  }
+
+  if (typeof raw !== "string") {
+    return { success: false, error: "Stock must be a whole non-negative number." };
+  }
+
+  const trimmed = raw.trim();
+
+  if (trimmed.length === 0) {
+    return { success: true, data: null };
+  }
+
+  if (!/^[0-9]{1,9}$/.test(trimmed)) {
+    return { success: false, error: "Stock must be a whole non-negative number." };
+  }
+
+  const value = Number.parseInt(trimmed, 10);
+
+  if (value > MAX_PRODUCT_STOCK) {
+    return { success: false, error: `Stock must not exceed ${MAX_PRODUCT_STOCK}.` };
+  }
+
+  return { success: true, data: value };
+}
+
 export type MerchantProductCreateInput = {
   name: unknown;
   price: unknown;
   categoryId?: unknown;
   newCategoryName?: unknown;
+  description?: unknown;
+  imageUrl?: unknown;
+  stock?: unknown;
 };
 
 export type MerchantProductCreateResult =
@@ -88,6 +175,9 @@ export type MerchantProductCreateResult =
         price?: boolean;
         category?: boolean;
         newCategoryName?: boolean;
+        description?: boolean;
+        imageUrl?: boolean;
+        stock?: boolean;
       };
     };
 
@@ -145,6 +235,9 @@ export async function createMerchantCatalogProduct(
 
   const name = validateName(input.name, "Product");
   const price = validatePrice(input.price);
+  const description = validateDescription(input.description);
+  const imageUrl = validateProductImageUrl(input.imageUrl);
+  const stock = validateProductStock(input.stock);
   const rawCategoryId = trimmedString(input.categoryId);
   const rawNewCategoryName = trimmedString(input.newCategoryName);
   const useNewCategory =
@@ -163,6 +256,9 @@ export async function createMerchantCatalogProduct(
 
   if (!name.success) fields.name = true;
   if (!price.success) fields.price = true;
+  if (!description.success) fields.description = true;
+  if (!imageUrl.success) fields.imageUrl = true;
+  if (!stock.success) fields.stock = true;
 
   if (useNewCategory) {
     if (!newCategoryName || !newCategoryName.success) {
@@ -178,6 +274,9 @@ export async function createMerchantCatalogProduct(
 
   const validatedName = name.success ? name.data : "";
   const validatedPrice = price.success ? price.data : "";
+  const validatedDescription = description.success ? description.data : null;
+  const validatedImageUrl = imageUrl.success ? imageUrl.data : null;
+  const validatedStock = stock.success ? stock.data : null;
   const validatedCategoryId =
     categoryId && categoryId.success ? categoryId.data : null;
   const validatedNewCategoryName =
@@ -243,7 +342,7 @@ export async function createMerchantCatalogProduct(
         const productSlug = generateCatalogSlug("product", validatedName);
         const insertedProduct = await tx.execute<{ id: string }>(sql`
           insert into ${product} (
-            id, store_id, category_id, slug, price, is_active, sort_order
+            id, store_id, category_id, slug, price, image_url, is_active, sort_order
           )
           select
             ${productId}::uuid,
@@ -251,6 +350,7 @@ export async function createMerchantCatalogProduct(
             owned_category.id,
             ${productSlug},
             ${validatedPrice}::numeric(18,2),
+            ${validatedImageUrl}::text,
             false,
             coalesce((
               select max(sibling.sort_order) + 1
@@ -279,7 +379,16 @@ export async function createMerchantCatalogProduct(
           productId: createdProduct.id,
           languageId: language.id,
           name: validatedName,
+          description: validatedDescription,
         });
+
+        if (validatedStock !== null && validatedStock > 0) {
+          await tx.insert(productInventory).values({
+            productId: createdProduct.id,
+            storeId: access.scope.storeId,
+            onHand: validatedStock,
+          });
+        }
 
         return {
           ok: true as const,

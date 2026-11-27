@@ -10,6 +10,9 @@ export type ProductFormDraft = {
   categoryId: string;
   newCategoryName: string;
   useNewCategory: boolean;
+  description: string;
+  imageUrl: string;
+  stock: string;
 };
 
 type StoredProductFormDraft = ProductFormDraft & {
@@ -33,6 +36,12 @@ function isString(value: unknown, maxLength: number): value is string {
 
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+function optionalString(value: unknown, maxLength: number): string | null {
+  if (value === undefined) return "";
+  if (typeof value !== "string" || value.length > maxLength) return null;
+  return value;
 }
 
 export function readProductFormDraft(
@@ -75,12 +84,23 @@ export function readProductFormDraft(
       return null;
     }
 
+    const description = optionalString(record.description, 4096);
+    const imageUrl = optionalString(record.imageUrl, 2048);
+    const stock = optionalString(record.stock, 16);
+
+    if (description === null || imageUrl === null || stock === null) {
+      return null;
+    }
+
     return {
       name: record.name,
       price: record.price,
       categoryId: record.categoryId,
       newCategoryName: record.newCategoryName,
       useNewCategory: record.useNewCategory,
+      description,
+      imageUrl,
+      stock,
     };
   } catch {
     return null;
@@ -168,6 +188,9 @@ export function restoreProductFormDraft(
       categoryId,
       newCategoryName: "",
       useNewCategory: categoryId.length === 0,
+      description: "",
+      imageUrl: "",
+      stock: "",
     };
   }
 

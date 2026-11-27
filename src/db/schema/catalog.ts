@@ -160,6 +160,9 @@ export const product = pgTable(
       .references(() => category.id, { onDelete: "restrict" }),
     slug: text("slug").notNull().unique(),
     price: numeric("price", { precision: 18, scale: 2 }).notNull(),
+    // Optional external image reference. No upload/storage pipeline exists, so
+    // this is a validated http(s) URL or NULL; it is never a publish blocker.
+    imageUrl: text("image_url"),
     isActive: boolean("is_active").notNull().default(false),
     sortOrder: integer("sort_order").notNull().default(0),
     deletedAt: timestamp("deleted_at", { withTimezone: true, mode: "date" }),
@@ -174,6 +177,12 @@ export const product = pgTable(
     index("product_store_idx").on(table.storeId),
     // A displayed price may be zero (a freebie) but never negative.
     check("product_price_nonnegative_check", sql`${table.price} >= 0`),
+    check(
+      "product_image_url_check",
+      sql`${table.imageUrl} IS NULL
+        OR (char_length(${table.imageUrl}) <= 2048
+          AND ${table.imageUrl} ~* '^https?://')`,
+    ),
     index("product_category_order_idx")
       .on(table.categoryId, table.sortOrder)
       .where(sql`deleted_at IS NULL`),
