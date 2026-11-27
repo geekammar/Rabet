@@ -81,8 +81,8 @@ Payment states used by the method:
 
 `transfer_awaiting_review` is also exposed as the boolean
 `transferAwaitingReview` on merchant order reads and by the pure
-`isTransferAwaitingReview()` helper, so a future Needs Attention integration
-can consume the state without importing checkout or Telegram code.
+`isTransferAwaitingReview()` helper, so the Needs Attention integration can
+consume the state without importing checkout or Telegram code.
 
 ## Merchant flow
 
@@ -98,6 +98,13 @@ Both actions lock the order row first. Retries return `already_applied`; two
 competing decisions serialize so exactly one payment decision and at most one
 stock effect are recorded. Read-only merchant access and all cross-store order
 ids are rejected at the existing authorization boundary.
+
+The **Needs Attention** section on **/app/setup** also lists buyer-reported
+transfers in `transfer_awaiting_review` using the same trusted store scope. It
+shows the full pending count with a bounded preview, and each row opens the
+selected order in the existing review UI on `/app/orders`. A transfer leaves
+that queue as soon as the merchant verifies or rejects it, or cancels the order.
+The separate COD acceptance queue keeps its existing behaviour.
 
 ## Reservation lifecycle
 
@@ -130,7 +137,6 @@ cancellation, refund or provider reconciliation in this PR.
 
 - Real bank/provider transfer verification or automation.
 - Telegram buyer/merchant notifications for transfers.
-- Needs Attention UI from draft #61. This PR only exposes the stable state.
 - Staging and Production changes.
 
 ## Tests

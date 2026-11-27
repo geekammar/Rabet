@@ -60,16 +60,35 @@ const orders = [
   },
 ];
 
+const transfers = [
+  {
+    id: "33333333-3333-4333-8333-333333333333",
+    reference: "ORD-VCF234",
+    total: "52.00",
+    currency: "SAR",
+  },
+  {
+    id: "44444444-4444-4444-8444-444444444444",
+    reference: "ORD-VCG345",
+    total: "18.50",
+    currency: "SAR",
+  },
+];
+
 function renderAttention(
   locale: "ar" | "en",
   items: typeof orders,
   totalPending = items.length,
+  transferItems: typeof transfers = [],
+  totalTransfersPending = transferItems.length,
 ) {
   return renderToStaticMarkup(
     createElement(MerchantNeedsAttention, {
       locale,
       orders: items,
       totalPending,
+      transferOrders: transferItems,
+      totalTransfersPending,
     }),
   );
 }
@@ -137,6 +156,55 @@ describe("Merchant Needs Attention section", () => {
     expect(html).not.toContain('data-testid="merchant-needs-attention-list"');
     expect(html).toContain('href="/app/orders"');
   });
+
+  it("lists buyer-reported Vodafone transfers with a count and bounded preview", () => {
+    const html = renderAttention("en", orders, orders.length, transfers, 28);
+
+    expect(html).toContain(
+      'data-testid="merchant-needs-attention-transfers"',
+    );
+    expect(html).toContain('data-pending-count="28"');
+    expect(html).toContain('data-preview-count="2"');
+    expect(html).toContain("Vodafone Cash transfers");
+    expect(html).toContain("28 awaiting review");
+    expect(html).toContain(
+      'data-testid="merchant-needs-attention-transfer-preview-note"',
+    );
+    expect(html).toContain("Showing the first 2 of 28 transfers.");
+    expect(html).toContain("ORD-VCF234");
+    expect(html).toContain("ORD-VCG345");
+    expect(html).toContain("52.00 SAR");
+    expect(html).toContain("Review transfer");
+    expect(html).toContain(
+      `href="/app/orders?order=${transfers[0].id}#merchant-order-${transfers[0].id}"`,
+    );
+    expect(html).toContain(
+      `href="/app/orders?order=${transfers[1].id}#merchant-order-${transfers[1].id}"`,
+    );
+    expect(html).toContain("ORD-ABC234");
+  });
+
+  it("localizes the Vodafone transfer queue in Arabic", () => {
+    const html = renderAttention("ar", orders, orders.length, transfers, 28);
+
+    expect(html).toContain("تحويلات فودافون كاش");
+    expect(html).toContain("بانتظار المراجعة: 28");
+    expect(html).toContain("يتم عرض أول 2 من 28 تحويل.");
+    expect(html).toContain("فودافون كاش");
+    expect(html).toContain("مراجعة التحويل");
+    expect(html).toContain(
+      `href="/app/orders?order=${transfers[0].id}#merchant-order-${transfers[0].id}"`,
+    );
+  });
+
+  it("omits the Vodafone transfer block when nothing awaits review", () => {
+    const html = renderAttention("en", orders, orders.length, [], 0);
+
+    expect(html).not.toContain(
+      'data-testid="merchant-needs-attention-transfers"',
+    );
+    expect(html).not.toContain("Vodafone Cash transfers");
+  });
 });
 
 describe("Merchant setup entry point", () => {
@@ -156,6 +224,8 @@ describe("Merchant setup entry point", () => {
         codOrdersEnabled: true,
         needsAttentionOrders: orders,
         needsAttentionTotal: orders.length,
+        needsAttentionTransfers: [],
+        needsAttentionTransferTotal: 0,
         storeDefaultLanguageCode: "en",
         telegramSupportUsername: null,
         notificationBot: { supported: true, state: null, managed: null },
@@ -209,5 +279,37 @@ describe("Merchant setup entry point", () => {
 
     expect(html).toContain('data-testid="merchant-needs-attention"');
     expect(html).toContain("ORD-ABC234");
+  });
+
+  it("surfaces pending Vodafone transfers on the setup entry point", () => {
+    const html = renderSetup({
+      needsAttentionTransfers: transfers,
+      needsAttentionTransferTotal: transfers.length,
+    });
+
+    expect(html).toContain(
+      'data-testid="merchant-needs-attention-transfers"',
+    );
+    expect(html).toContain("Vodafone Cash transfers");
+    expect(html).toContain("ORD-VCF234");
+    expect(html).toContain(
+      `href="/app/orders?order=${transfers[0].id}#merchant-order-${transfers[0].id}"`,
+    );
+    expect(html).toContain("ORD-ABC234");
+  });
+
+  it("keeps the section visible for a transfer-only queue after COD is disabled", () => {
+    const html = renderSetup({
+      codOrdersEnabled: false,
+      needsAttentionOrders: [],
+      needsAttentionTotal: 0,
+      needsAttentionTransfers: transfers,
+      needsAttentionTransferTotal: transfers.length,
+    });
+
+    expect(html).toContain('data-testid="merchant-needs-attention"');
+    expect(html).toContain("Vodafone Cash transfers");
+    expect(html).toContain("ORD-VCF234");
+    expect(html).toContain("No orders are waiting for acceptance.");
   });
 });

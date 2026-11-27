@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 
@@ -26,9 +27,13 @@ import {
   collectMerchantOrderPayment,
   confirmCodOrder,
   confirmVodafoneCashOrder,
+  countMerchantOrdersAwaitingAcceptance,
+  countMerchantTransfersAwaitingReview,
   handMerchantOrderToShipping,
   listBuyerOutstandingVodafoneTransfers,
   listMerchantOrders,
+  listMerchantOrdersAwaitingAcceptance,
+  listMerchantTransfersAwaitingReview,
   markMerchantOrderDelivered,
   prepareMerchantOrder,
   bindVodafoneCashTransferPromptMessage,
@@ -1374,6 +1379,235 @@ describe.skipIf(!shouldRun)("manual Vodafone Cash transfers", () => {
       transferAwaitingReview: true,
       transferClaim: { status: "pending", reference: VODAFONE_REFERENCE },
     });
+  });
+
+  it("shows a transfer only after the buyer reports it and inside the owning store", async () => {
+    const storeA = await scope(fixture.storeAId);
+    const storeB = await scope(fixture.storeBId);
+    const { placed } = await placeVodafoneOrder({ quantity: 1 });
+
+    expect(
+      await countMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toBe(0);
+    expect(
+      await listMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toEqual([]);
+
+    await submitClaim(placed.orderId, "ATTENTION-PENDING-REF");
+
+    const pending = await listMerchantTransfersAwaitingReview(
+      asAppDb(db()),
+      storeA,
+    );
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      id: placed.orderId,
+      reference: placed.reference,
+      total: placed.total,
+      currency: "SAR",
+    });
+    expect(pending[0].placedAt).toBeInstanceOf(Date);
+    expect(
+      await countMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toBe(1);
+    expect(
+      await listMerchantTransfersAwaitingReview(asAppDb(db()), storeB),
+    ).toEqual([]);
+
+    await verifyVodafoneCashTransfer(tx(), storeA, {
+      orderId: placed.orderId,
+      actorUserId: fixture.ownerAId,
+    });
+
+    expect(
+      await countMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toBe(0);
+    expect(
+      await listMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toEqual([]);
+  });
+
+  it("counts all pending transfers while bounding the preview and isolating stores", async () => {
+    const now = Date.now();
+    const referenceAlphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    const transferReference = (index: number) => {
+      let remaining = index;
+      let suffix = "";
+
+      for (let position = 0; position < 4; position += 1) {
+        suffix =
+          referenceAlphabet[remaining % referenceAlphabet.length] + suffix;
+        remaining = Math.floor(remaining / referenceAlphabet.length);
+      }
+
+      return `ORD-VA${suffix}`;
+    };
+    const transferSnapshot = {
+      number: "+201000000001",
+      accountName: "Synthetic Merchant",
+      instructionsAr: "حوّل المبلغ.",
+      instructionsEn: "Transfer the amount.",
+      capturedAt: new Date(now).toISOString(),
+    };
+
+    const storeARows = await db()
+      .insert(order)
+      .values(
+        Array.from({ length: 23 }, (_, index) => {
+          const placedAt = new Date(now - (23 - index) * 60_000);
+
+          return {
+            storeId: fixture.storeAId,
+            connectionId: fixture.connectionAId,
+            telegramUserId: 97_000 + index,
+            telegramChatId: 97_000 + index,
+            reference: transferReference(index),
+            checkoutKey: crypto.randomUUID(),
+            status: "placed",
+            paymentMethod: "vodafone_cash",
+            paymentStatus: "transfer_awaiting_review",
+            fulfillmentStatus: "unfulfilled",
+            currency: "SAR",
+            subtotal: "11.00",
+            deliveryFee: "0.00",
+            total: "11.00",
+            customerName: "Pending Transfer Buyer",
+            customerPhone: "+15550000002",
+            deliveryAddress: "789 Pending Transfer Street",
+            transferSnapshot,
+            placedAt,
+            createdAt: placedAt,
+            updatedAt: placedAt,
+          };
+        }),
+      )
+      .returning({ id: order.id, reference: order.reference });
+
+    const [storeBOrder] = await db()
+      .insert(order)
+      .values({
+        storeId: fixture.storeBId,
+        connectionId: fixture.connectionBId,
+        telegramUserId: 97_500,
+        telegramChatId: 97_500,
+        reference: "ORD-VB2345",
+        checkoutKey: crypto.randomUUID(),
+        status: "placed",
+        paymentMethod: "vodafone_cash",
+        paymentStatus: "transfer_awaiting_review",
+        fulfillmentStatus: "unfulfilled",
+        currency: "USD",
+        subtotal: "30.00",
+        deliveryFee: "0.00",
+        total: "30.00",
+        customerName: "Foreign Transfer Buyer",
+        customerPhone: "+15550000003",
+        deliveryAddress: "321 Foreign Transfer Street",
+        transferSnapshot,
+      })
+      .returning({ id: order.id, reference: order.reference });
+
+    const storeA = await scope(fixture.storeAId);
+    const storeB = await scope(fixture.storeBId);
+    const latest = storeARows[storeARows.length - 1];
+
+    expect(
+      await countMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toBe(23);
+    expect(
+      await countMerchantTransfersAwaitingReview(asAppDb(db()), storeB),
+    ).toBe(1);
+
+    const preview = await listMerchantTransfersAwaitingReview(
+      asAppDb(db()),
+      storeA,
+    );
+    expect(preview).toHaveLength(20);
+    expect(preview[0]).toMatchObject({
+      id: latest.id,
+      reference: latest.reference,
+    });
+    expect(preview.some((row) => row.id === storeBOrder.id)).toBe(false);
+
+    const storeBPreview = await listMerchantTransfersAwaitingReview(
+      asAppDb(db()),
+      storeB,
+    );
+    expect(storeBPreview.map((row) => row.id)).toEqual([storeBOrder.id]);
+  });
+
+  it("removes a transfer after verify or reject and keeps the COD queue unchanged", async () => {
+    const storeA = await scope(fixture.storeAId);
+    const codPrepared = await prepareReviewedOrder({
+      storeId: fixture.storeAId,
+      connectionId: fixture.connectionAId,
+      buyerId: BUYER_B,
+      productId: fixture.productAId,
+      quantity: 1,
+    });
+    const codPlaced = await confirmCodOrder(tx(), storeA, {
+      cartId: codPrepared.cartId,
+      connectionId: fixture.connectionAId,
+      telegramUserId: BUYER_B,
+      telegramChatId: BUYER_B,
+      expectedQuoteVersion: codPrepared.review.quoteVersion,
+    });
+    expect(codPlaced.status).toBe("placed");
+    if (codPlaced.status !== "placed") return;
+
+    const first = await placeVodafoneOrder({ buyerId: BUYER_A, quantity: 1 });
+    const second = await placeVodafoneOrder({ buyerId: BUYER_B, quantity: 1 });
+    await submitClaim(first.placed.orderId, "ATTENTION-VERIFY-REF");
+    await submitClaim(second.placed.orderId, "ATTENTION-REJECT-REF", {
+      buyerId: BUYER_B,
+    });
+
+    expect(
+      await countMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toBe(2);
+    expect(
+      await countMerchantOrdersAwaitingAcceptance(asAppDb(db()), storeA),
+    ).toBe(1);
+    expect(
+      (await listMerchantOrdersAwaitingAcceptance(asAppDb(db()), storeA)).map(
+        (row) => row.id,
+      ),
+    ).toEqual([codPlaced.orderId]);
+
+    await verifyVodafoneCashTransfer(tx(), storeA, {
+      orderId: first.placed.orderId,
+      actorUserId: fixture.ownerAId,
+    });
+
+    expect(
+      (await listMerchantTransfersAwaitingReview(asAppDb(db()), storeA)).map(
+        (row) => row.id,
+      ),
+    ).toEqual([second.placed.orderId]);
+    expect(
+      await countMerchantOrdersAwaitingAcceptance(asAppDb(db()), storeA),
+    ).toBe(1);
+
+    await rejectVodafoneCashTransfer(tx(), storeA, {
+      orderId: second.placed.orderId,
+      actorUserId: fixture.ownerAId,
+      note: "No matching transfer.",
+    });
+
+    expect(
+      await countMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toBe(0);
+    expect(
+      await listMerchantTransfersAwaitingReview(asAppDb(db()), storeA),
+    ).toEqual([]);
+    expect(
+      await countMerchantOrdersAwaitingAcceptance(asAppDb(db()), storeA),
+    ).toBe(1);
+    expect(
+      (await listMerchantOrdersAwaitingAcceptance(asAppDb(db()), storeA)).map(
+        (row) => row.id,
+      ),
+    ).toEqual([codPlaced.orderId]);
   });
 
   it("lists outstanding buyer transfers only inside the authorized store, connection, buyer and chat", async () => {

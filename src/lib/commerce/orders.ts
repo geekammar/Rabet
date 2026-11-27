@@ -1,7 +1,7 @@
 import "server-only";
 
 import crypto from "node:crypto";
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import {
@@ -3442,6 +3442,54 @@ export async function listMerchantOrdersAwaitingAcceptance(
     })
     .from(orderTable)
     .where(awaitingAcceptanceCondition(scope))
+    .orderBy(
+      desc(orderTable.placedAt),
+      desc(orderTable.createdAt),
+      desc(orderTable.id),
+    )
+    .limit(Math.min(Math.max(1, limit), 50));
+}
+
+function transfersAwaitingReviewCondition(scope: StoreScope) {
+  return and(
+    eq(orderTable.storeId, scope.storeId),
+    eq(orderTable.paymentMethod, "vodafone_cash"),
+    eq(orderTable.paymentStatus, "transfer_awaiting_review"),
+    ne(orderTable.status, "cancelled"),
+  );
+}
+
+export async function countMerchantTransfersAwaitingReview(
+  db: Database,
+  scope: StoreScope,
+): Promise<number> {
+  assertStoreScope(scope);
+
+  const [row] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(orderTable)
+    .where(transfersAwaitingReviewCondition(scope));
+
+  return row?.total ?? 0;
+}
+
+export async function listMerchantTransfersAwaitingReview(
+  db: Database,
+  scope: StoreScope,
+  limit = 20,
+): Promise<MerchantOrderAttention[]> {
+  assertStoreScope(scope);
+
+  return db
+    .select({
+      id: orderTable.id,
+      reference: orderTable.reference,
+      total: orderTable.total,
+      currency: orderTable.currency,
+      placedAt: orderTable.placedAt,
+    })
+    .from(orderTable)
+    .where(transfersAwaitingReviewCondition(scope))
     .orderBy(
       desc(orderTable.placedAt),
       desc(orderTable.createdAt),

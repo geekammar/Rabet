@@ -10,8 +10,10 @@ import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
 import {
   countMerchantOrdersAwaitingAcceptance,
+  countMerchantTransfersAwaitingReview,
   isCodAvailable,
   listMerchantOrdersAwaitingAcceptance,
+  listMerchantTransfersAwaitingReview,
 } from "@/lib/commerce/orders";
 import {
   checkMerchantNotificationBotCapability,
@@ -56,6 +58,8 @@ export default async function MerchantSetupPage() {
     telegramSupportUsername,
     needsAttentionOrders,
     needsAttentionTotal,
+    needsAttentionTransfers,
+    needsAttentionTransferTotal,
     vodafoneCashSetting,
     notificationBotCapability,
   ] = await Promise.all([
@@ -68,6 +72,8 @@ export default async function MerchantSetupPage() {
     readStoreTelegramSupportUsername(db, access.store.id),
     listMerchantOrdersAwaitingAcceptance(db, access.scope),
     countMerchantOrdersAwaitingAcceptance(db, access.scope),
+    listMerchantTransfersAwaitingReview(db, access.scope),
+    countMerchantTransfersAwaitingReview(db, access.scope),
     readVodafoneCashSetting(db, access.scope),
     checkMerchantNotificationBotCapability(db),
   ]);
@@ -97,6 +103,8 @@ export default async function MerchantSetupPage() {
       codOrdersEnabled={codAvailability.enabled}
       needsAttentionOrders={needsAttentionOrders}
       needsAttentionTotal={needsAttentionTotal}
+      needsAttentionTransfers={needsAttentionTransfers}
+      needsAttentionTransferTotal={needsAttentionTransferTotal}
       vodafoneCashSetting={vodafoneCashSetting}
       storeDefaultLanguageCode={storeDefaultLanguage?.code === "ar" ? "ar" : "en"}
       telegramSupportUsername={telegramSupportUsername}
