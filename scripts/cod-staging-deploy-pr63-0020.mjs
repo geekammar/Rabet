@@ -11,9 +11,14 @@ const RENDER_API_KEY = process.env.RENDER_API_KEY ?? "";
 const CONFIRM = process.env.DEPLOY_CONFIRM ?? "";
 const EXPECTED_CONFIRM = "DEPLOY_PR63_0020_COD_STAGING";
 const EXPECTED_SERVICE_NAME = "nokmel-cod-staging";
-const EXPECTED_CANDIDATE_SHA = "48be324524fd877aa995e9c0a045cb44c9eff0e3";
-const EXPECTED_PREVIOUS_SHA = "ef3d7e98e84de1f70931291e4dd66187f9f70660";
-const EXPECTED_PREVIOUS_DEPLOY_ID = "dep-dc4c42t6e07s73epof80";
+const EXPECTED_CANDIDATE_SHA = "fc4f791b4252ac8b0486742735e7d85289851c81";
+const EXPECTED_PREVIOUS_SHA = "48be324524fd877aa995e9c0a045cb44c9eff0e3";
+const EXPECTED_PREVIOUS_DEPLOY_ID = "dep-dc4mbeff3r2c73bufrd0";
+const REGRESSION_STORE_SLUG = "cod-pr56-store-b";
+const REGRESSION_LINK_ATTEMPT_IDS = [
+  "84a5148c-4deb-4b96-b10e-21f560bdbe5b",
+  "ca171329-0659-4fca-8faf-c8d9bd7276d8",
+];
 const QA_STORE_SLUG = "cod-pr56-store-a";
 const QA_WALLET_NUMBER = "+201000000062";
 const QA_ACCOUNT_NAME = "Synthetic Vodafone QA — Store A";
@@ -299,6 +304,22 @@ async function readPreservedClaims(db) {
   return rows;
 }
 
+async function readRegressionAttempts(db) {
+  const rows = await db`
+    select id, store_id, purpose, status, failure_code,
+      telegram_bot_id::text as telegram_bot_id, telegram_bot_username,
+      connection_id, expires_at, bound_at, verified_at, completed_at,
+      created_at, updated_at
+    from telegram_link_attempt
+    where id in ${db(REGRESSION_LINK_ATTEMPT_IDS)}
+    order by id
+  `;
+  if (rows.length !== REGRESSION_LINK_ATTEMPT_IDS.length) {
+    fail("Store B regression link-attempt fixture is missing");
+  }
+  return rows;
+}
+
 async function assertApplied0020(db, label) {
   const [rows] = await db`
     select count(*)::int as count
@@ -330,6 +351,19 @@ async function assertApplied0020(db, label) {
   }
   if (countFor(EXPECTED_PREVIOUS_LEDGER_HASH) !== 1) {
     fail(`${label}: expected exactly one 0019 migration in the ledger`);
+  }
+  const journal = JSON.parse(
+    fs.readFileSync(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"),
+  );
+  const journalEntries = Array.isArray(journal.entries) ? journal.entries : [];
+  if (journalEntries.length !== count) {
+    fail(
+      `${label}: pending migrations detected, ledger ${count} journal ${journalEntries.length}`,
+    );
+  }
+  const lastTag = journalEntries[journalEntries.length - 1]?.tag;
+  if (lastTag !== EXPECTED_MIGRATION_TAG) {
+    fail(`${label}: last journal tag ${String(lastTag)} is not ${EXPECTED_MIGRATION_TAG}`);
   }
   return { count, lastHash, tag: EXPECTED_MIGRATION_TAG };
 }
@@ -497,6 +531,9 @@ async function deployExactCommit() {
 
 async function main() {
   if (!/^[0-9a-f]{40}$/.test(CANDIDATE_SHA)) fail("Invalid CANDIDATE_SHA");
+  if (CANDIDATE_SHA !== EXPECTED_CANDIDATE_SHA) {
+    fail(`CANDIDATE_SHA ${CANDIDATE_SHA} does not match reviewed ${EXPECTED_CANDIDATE_SHA}`);
+  }
   if (!/^srv-[a-z0-9]+$/i.test(SERVICE_ID)) fail("Invalid RENDER_SERVICE_ID");
   if (!RENDER_API_KEY) fail("RENDER_API_KEY is missing");
   if (!APP_URL.startsWith("https://")) fail("APP_URL must use https://");
@@ -579,12 +616,16 @@ async function main() {
   let dbAfter;
   let preservedOrdersBefore;
   let preservedClaimsBefore;
+  let regressionAttemptsBefore;
+  let regressionAttemptsAfter;
 
   try {
     const migrationBeforeDeploy = await assertApplied0020(
       db,
       "pre-deploy",
     );
+
+    regressionAttemptsBefore = await readRegressionAttempts(db);
 
     preservedOrdersBefore = await db`
       select reference, status, payment_status, fulfillment_status,
@@ -610,6 +651,36 @@ async function main() {
     const stores = await db`
       select id, name, slug, status from store order by slug
     `;
+    const regressionStore = stores.find(
+      (store) => store.slug === REGRESSION_STORE_SLUG,
+    );
+    if (!regressionStore) {
+      fail(`Regression store ${REGRESSION_STORE_SLUG} is missing`);
+    }
+    const pendingStorefrontAttempt = regressionAttemptsBefore.find(
+      (row) => row.id === REGRESSION_LINK_ATTEMPT_IDS[0],
+    );
+    const failedNotificationAttempt = regressionAttemptsBefore.find(
+      (row) => row.id === REGRESSION_LINK_ATTEMPT_IDS[1],
+    );
+    if (
+      !pendingStorefrontAttempt ||
+      pendingStorefrontAttempt.store_id !== regressionStore.id ||
+      pendingStorefrontAttempt.purpose !== "store_bot" ||
+      pendingStorefrontAttempt.status !== "pending" ||
+      new Date(pendingStorefrontAttempt.expires_at).getTime() >= Date.now()
+    ) {
+      fail("Store B expired-but-pending storefront attempt is not the expected regression fixture");
+    }
+    if (
+      !failedNotificationAttempt ||
+      failedNotificationAttempt.store_id !== regressionStore.id ||
+      failedNotificationAttempt.purpose !== "notification_bot" ||
+      failedNotificationAttempt.status !== "failed" ||
+      failedNotificationAttempt.failure_code !== "ambiguous_event"
+    ) {
+      fail("Store B failed notification attempt is not the expected regression fixture");
+    }
     const pendingOrders = orderCandidates.filter(
       (order) =>
         order.status === "placed" && order.fulfillment_status === "unfulfilled",
@@ -654,28 +725,14 @@ async function main() {
     const storesWithNotificationBot = new Set(
       notificationBotStoreRows.map((row) => row.store_id),
     );
-    if (!storesWithNotificationBot.has(selectedStore.id)) {
-      managedStore = selectedStore;
-      managedMerchant = merchant;
-    } else {
-      for (const store of stores) {
-        if (
-          store.id === selectedStore.id ||
-          storesWithNotificationBot.has(store.id)
-        ) {
-          continue;
-        }
-        const candidate = await readMerchantForStore(db, store.id);
-        if (candidate) {
-          managedStore = store;
-          managedMerchant = candidate;
-          break;
-        }
-      }
+    if (storesWithNotificationBot.has(regressionStore.id)) {
+      fail("Store B regression store unexpectedly already has a notification bot");
     }
-    if (!managedStore || !managedMerchant) {
-      fail("No read-only Managed Bot smoke store is available without changing bots");
+    managedMerchant = await readMerchantForStore(db, regressionStore.id);
+    if (!managedMerchant) {
+      fail("Store B regression merchant is missing");
     }
+    managedStore = regressionStore;
 
     smokeOrder = museOrder;
 
@@ -905,6 +962,27 @@ async function main() {
     if (!managedBotSection) {
       fail("Managed Bot create section did not render on the read-only smoke page");
     }
+    const managedBotStartFormAction = managedSetupHtml.includes(
+      'action="/app/setup/notification-bot/start"',
+    );
+    const managedBotCreateButtonTag =
+      managedSetupHtml.match(
+        /<button[^>]*data-testid="merchant-notification-bot-managed-create"[^>]*>/,
+      )?.[0] ?? "";
+    const managedBotCreateButtonPresent = managedBotCreateButtonTag.length > 0;
+    const managedBotCreateButtonDisabled = /\bdisabled\b/.test(
+      managedBotCreateButtonTag,
+    );
+    if (
+      !managedBotStartFormAction ||
+      !managedBotCreateButtonPresent ||
+      managedBotCreateButtonDisabled
+    ) {
+      fail("Store B managed notification attempt cannot be started from the UI");
+    }
+    const managedBotPreviousAttemptError = managedSetupHtml.includes(
+      'data-testid="merchant-notification-bot-managed-error"',
+    );
 
     const ordersResponse = await merchantFetch(
       `/app/orders?verify=${Date.now()}`,
@@ -1003,6 +1081,13 @@ async function main() {
       db,
       "post-deploy",
     );
+    regressionAttemptsAfter = await readRegressionAttempts(db);
+    if (
+      JSON.stringify(regressionAttemptsBefore) !==
+      JSON.stringify(regressionAttemptsAfter)
+    ) {
+      fail("Store B regression link-attempt fixture changed during deploy/smoke");
+    }
     const preservedOrdersAfter = await db`
       select reference, status, payment_status, fulfillment_status,
         payment_method, total, updated_at
@@ -1117,6 +1202,24 @@ async function main() {
           (row) => row.status === "pending",
         ).length,
         notificationBotRows: dbBefore.counts.notification_bots,
+        regressionFixture: {
+          storeSlug: REGRESSION_STORE_SLUG,
+          pendingStorefrontAttempt: {
+            id: pendingStorefrontAttempt.id,
+            purpose: pendingStorefrontAttempt.purpose,
+            status: pendingStorefrontAttempt.status,
+            expiresAt: pendingStorefrontAttempt.expires_at,
+            telegramBotId: pendingStorefrontAttempt.telegram_bot_id,
+          },
+          failedNotificationAttempt: {
+            id: failedNotificationAttempt.id,
+            purpose: failedNotificationAttempt.purpose,
+            status: failedNotificationAttempt.status,
+            failureCode: failedNotificationAttempt.failure_code,
+            telegramBotId: failedNotificationAttempt.telegram_bot_id,
+          },
+          unchanged: true,
+        },
       },
       museOrder: museOrder
         ? {
@@ -1166,6 +1269,10 @@ async function main() {
           status: managedStore.status,
         },
         managedBotCreateSection: managedBotSection,
+        managedBotStartFormAction,
+        managedBotCreateButtonPresent,
+        managedBotCreateButtonDisabled,
+        managedBotPreviousAttemptError,
         managedBotStoreHadNoNotificationBot: !storesWithNotificationBot.has(
           managedStore.id,
         ),
