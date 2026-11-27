@@ -1,5 +1,9 @@
 import { resumeMerchantNotificationBotManagedAction } from "@/app/actions/merchant-notification-bot";
 import {
+  buildNotificationTelegramLaunchTarget,
+  isAndroidUserAgent,
+} from "@/components/merchant/telegram-official-launch";
+import {
   isSameOriginNavigationPost,
   trustedApplicationOrigin,
 } from "@/lib/http/request-origin";
@@ -68,6 +72,12 @@ export async function POST(request: Request): Promise<Response> {
 
   if (!result.managed?.deepLink) {
     return redirectTo(setupUrl.toString());
+  }
+
+  if (isAndroidUserAgent(request.headers.get("user-agent"))) {
+    return redirectTo(
+      buildNotificationTelegramLaunchTarget(result.managed.deepLink, origin),
+    );
   }
 
   return redirectTo(result.managed.deepLink);

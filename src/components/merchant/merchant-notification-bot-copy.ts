@@ -174,6 +174,8 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
         "لم نستلم Start من البوت بعد. افتح البوت واضغط Start ثم أعد التحقق.",
       BOT_START_LINK_REQUIRED:
         "وصل Start عادي، لكنه لا يثبت أنك فتحت رابط التحقق. استخدم زر فتح البوت من هذه الصفحة أو من رسالة المدير، ثم اضغط Start وأعد التحقق.",
+      TELEGRAM_LAUNCH_FAILED:
+        "تعذّر فتح تطبيق تيليجرام العادي. تأكد من تثبيته، ثم أعد المحاولة من هذه الصفحة.",
       RESUME_UNAVAILABLE:
         "لا توجد محاولة محفوظة قابلة للاستئناف الآن. حدّث الصفحة وابدأ محاولة جديدة إذا لزم.",
       EXPIRED: "انتهت صلاحية المحاولة. ابدأ محاولة جديدة.",
@@ -303,6 +305,8 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
         "We have not received Start from the bot yet. Open the bot, press Start, then check again.",
       BOT_START_LINK_REQUIRED:
         "We received a plain Start, but it does not prove that you opened the verification link. Use the Open bot button on this page or in the Manager message, press Start, then check again.",
+      TELEGRAM_LAUNCH_FAILED:
+        "Could not open the standard Telegram app. Make sure it is installed, then try again from this page.",
       RESUME_UNAVAILABLE:
         "There is no stored proposal to resume right now. Refresh the page and start a new attempt if needed.",
       EXPIRED: "The attempt expired. Start a new attempt.",

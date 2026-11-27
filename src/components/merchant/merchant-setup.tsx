@@ -502,6 +502,8 @@ export function MerchantSetup({
           managed={notificationBot.managed}
           locale={locale}
           readOnly={readOnly}
+          isAndroidTelegramLaunch={isAndroidTelegramLaunch}
+          telegramLaunchOrigin={telegramLaunchOrigin}
         />
 
         <section className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm">

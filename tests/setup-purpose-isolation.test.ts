@@ -55,7 +55,7 @@ const { MerchantSetup } = await import(
 const expiresAt = "2026-11-27T19:00:00.000Z";
 
 describe("setup purpose isolation", () => {
-  it("renders the storefront and notification sections from their own purposes", () => {
+  it.each([false, true])("keeps bot sections isolated (Android: %s)", (isAndroid) => {
     const html = renderToStaticMarkup(
       createElement(MerchantSetup, {
         storeName: "COD PR56 Store B",
@@ -72,8 +72,8 @@ describe("setup purpose isolation", () => {
           verificationUrl:
             "https://t.me/StoreBotPurpose?start=store-challenge",
         },
-        isAndroidTelegramLaunch: false,
-        telegramLaunchOrigin: null,
+        isAndroidTelegramLaunch: isAndroid,
+        telegramLaunchOrigin: "https://app.example.test",
         codOrdersEnabled: true,
         needsAttentionOrders: [],
         needsAttentionTotal: 0,
@@ -120,8 +120,15 @@ describe("setup purpose isolation", () => {
 
     expect(notification).toContain("NotifyBotPurpose");
     expect(notification).toContain(
-      "https://t.me/NotifyBotPurpose?start=notification-challenge",
+      isAndroid
+        ? "intent://resolve?domain=NotifyBotPurpose&amp;start=notification-challenge"
+        : "https://t.me/NotifyBotPurpose?start=notification-challenge",
     );
+    if (isAndroid) {
+      expect(notification).toContain("package=org.telegram.messenger");
+      expect(notification).not.toContain("https://t.me/NotifyBotPurpose");
+      expect(notification).not.toContain('target="_blank"');
+    }
     expect(notification).not.toContain("StoreBotPurpose");
     expect(notification).not.toContain("store-challenge");
   });

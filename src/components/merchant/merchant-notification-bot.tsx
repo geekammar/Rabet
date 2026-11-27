@@ -27,6 +27,7 @@ import {
 } from "@/app/actions/merchant-notification-bot";
 import type { MerchantLocale } from "@/components/merchant/language-toggle";
 import { MERCHANT_NOTIFICATION_BOT_COPY } from "@/components/merchant/merchant-notification-bot-copy";
+import { buildNotificationTelegramLaunchTarget } from "@/components/merchant/telegram-official-launch";
 import { Button } from "@/components/ui/button";
 import type { MerchantNotificationBotState } from "@/lib/data/merchant-notification-bot";
 import type { NotificationManagedAttemptState } from "@/lib/telegram/manager-provisioning";
@@ -90,12 +91,16 @@ export function MerchantNotificationBot({
   managed,
   locale,
   readOnly,
+  isAndroidTelegramLaunch,
+  telegramLaunchOrigin,
 }: {
   state: MerchantNotificationBotState | null;
   supported: boolean;
   managed: NotificationManagedAttemptState | null;
   locale: MerchantLocale;
   readOnly: boolean;
+  isAndroidTelegramLaunch: boolean;
+  telegramLaunchOrigin: string | null;
 }) {
   const copy = MERCHANT_NOTIFICATION_BOT_COPY[locale];
   const router = useRouter();
@@ -124,6 +129,12 @@ export function MerchantNotificationBot({
     (managedFlowErrorMessage
       ? { kind: "error", text: managedFlowErrorMessage }
       : null);
+
+  function telegramLaunchHref(deepLink: string): string {
+    return isAndroidTelegramLaunch
+      ? buildNotificationTelegramLaunchTarget(deepLink, telegramLaunchOrigin)
+      : deepLink;
+  }
 
   function errorText(result: MerchantNotificationBotActionResult): string {
     if (result.ok) return "";
@@ -360,8 +371,8 @@ export function MerchantNotificationBot({
                 {managed?.state === "waiting" ? (
                   <Button asChild className="min-h-11">
                     <a
-                      href={managed.deepLink}
-                      target="_blank"
+                      href={telegramLaunchHref(managed.deepLink)}
+                      target={isAndroidTelegramLaunch ? undefined : "_blank"}
                       rel="noreferrer"
                       data-testid="merchant-notification-bot-managed-open"
                     >
@@ -373,8 +384,8 @@ export function MerchantNotificationBot({
                 {managed?.state === "awaiting_start" ? (
                   <Button asChild className="min-h-11">
                     <a
-                      href={managed.verificationUrl}
-                      target="_blank"
+                      href={telegramLaunchHref(managed.verificationUrl)}
+                      target={isAndroidTelegramLaunch ? undefined : "_blank"}
                       rel="noreferrer"
                       data-testid="merchant-notification-bot-managed-open"
                     >
