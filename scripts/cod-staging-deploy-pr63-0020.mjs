@@ -970,7 +970,7 @@ async function main() {
         /<button[^>]*data-testid="merchant-notification-bot-managed-create"[^>]*>/,
       )?.[0] ?? "";
     const managedBotCreateButtonPresent = managedBotCreateButtonTag.length > 0;
-    const managedBotCreateButtonDisabled = /\bdisabled\b/.test(
+    const managedBotCreateButtonDisabled = /\sdisabled(?:=|\s|>)/.test(
       managedBotCreateButtonTag,
     );
     if (
