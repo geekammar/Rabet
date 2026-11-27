@@ -1267,6 +1267,10 @@ export async function handleManagedBotEvent(
       // attempt has no recorded bot id and could be the source of a delayed
       // event. A recent other-store attempt with a different known bot id
       // cannot own this event, so sequential distinct bots remain linkable.
+      const recentAttemptCutoff = new Date(
+        now.getTime() - TELEGRAM_LINK_ATTEMPT_TTL_MS,
+      );
+
       const otherStoreAttempts = await tx
         .select({
           id: telegramLinkAttempt.id,
@@ -1287,9 +1291,12 @@ export async function handleManagedBotEvent(
               "cancelled",
               "failed",
             ]),
-            gt(
-              telegramLinkAttempt.createdAt,
-              new Date(now.getTime() - TELEGRAM_LINK_ATTEMPT_TTL_MS),
+            or(
+              gt(telegramLinkAttempt.createdAt, recentAttemptCutoff),
+              and(
+                eq(telegramLinkAttempt.status, "expired"),
+                gt(telegramLinkAttempt.expiresAt, recentAttemptCutoff),
+              ),
             ),
           ),
         );
