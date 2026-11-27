@@ -332,7 +332,7 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
       "0019_merchant_notification_bot",
 
       "0020_merchant_notification_bot_managed",
-  "0021_merchant_product_publish",
+      "0021_merchant_product_publish",
     ]);
     expect(result.writes.migrationsApplied).toEqual([]);
     expect(await snapshot(baseline)).toEqual(beforeSnapshot);
@@ -374,7 +374,7 @@ describe.skipIf(!shouldRun)("real production runner 0009 to 0010 upgrade", () =>
       "0019_merchant_notification_bot",
 
       "0020_merchant_notification_bot_managed",
-  "0021_merchant_product_publish",
+      "0021_merchant_product_publish",
     ]);
     expect(
       executedCommands.filter((command) => command.includes("db:migrate")),
