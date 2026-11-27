@@ -90,6 +90,7 @@ export type CommerceCopy = {
   orderPlaced: (reference: string) => string;
   awaitingCollection: string;
   reservedNote: string;
+  inStock: string;
   outOfStock: string;
   notOrderable: string;
   genericUnavailable: string;
@@ -187,6 +188,7 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     orderPlaced: (reference) => `Order ${reference} placed.`,
     awaitingCollection: "Payment: cash on delivery — awaiting collection.",
     reservedNote: "The store has reserved the items for this order.",
+    inStock: "In stock",
     outOfStock: "This product is out of stock.",
     notOrderable: "This product cannot be ordered online.",
     genericUnavailable: "This cart is not available.",
@@ -283,6 +285,7 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     orderPlaced: (reference) => `تم تسجيل الطلب ${reference}.`,
     awaitingCollection: "الدفع عند الاستلام — بانتظار التحصيل.",
     reservedNote: "تم حجز المنتجات لهذا الطلب.",
+    inStock: "متوفر",
     outOfStock: "هذا المنتج غير متوفر حاليًا.",
     notOrderable: "لا يمكن طلب هذا المنتج عبر المتجر.",
     genericUnavailable: "هذه السلة غير متاحة.",
