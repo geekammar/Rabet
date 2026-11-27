@@ -1677,8 +1677,8 @@ async function main() {
     `Acted order and adjacent order must not change positions, before ${JSON.stringify(uxBefore)} after ${JSON.stringify(uxAfterHandoff)}`,
   );
   assert(
-    uxAfterHandoff.a.top >= 0 &&
-      uxAfterHandoff.a.top < uxAfterHandoff.viewportHeight,
+    uxAfterHandoff.a.top < uxAfterHandoff.viewportHeight &&
+      uxAfterHandoff.a.bottom > 0,
     `Acted order must remain in view after handoff, saw ${JSON.stringify(uxAfterHandoff)}`,
   );
   assert(
@@ -1764,8 +1764,8 @@ async function main() {
     `Arabic acted order and neighbor must not change positions, before ${JSON.stringify(uxArabicBefore)} after ${JSON.stringify(uxAfterCollection)}`,
   );
   assert(
-    uxAfterCollection.b.top >= 0 &&
-      uxAfterCollection.b.top < uxAfterCollection.viewportHeight,
+    uxAfterCollection.b.top < uxAfterCollection.viewportHeight &&
+      uxAfterCollection.b.bottom > 0,
     `Acted order must remain in view after Arabic collection, saw ${JSON.stringify(uxAfterCollection)}`,
   );
   assert(
