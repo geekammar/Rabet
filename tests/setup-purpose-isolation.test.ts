@@ -125,4 +125,67 @@ describe("setup purpose isolation", () => {
     expect(notification).not.toContain("StoreBotPurpose");
     expect(notification).not.toContain("store-challenge");
   });
+
+  it("posts Resume through its own route and keeps Create as a separate form", () => {
+    function setupHtml(
+      managed: Parameters<typeof MerchantSetup>[0]["notificationBot"]["managed"],
+    ) {
+      return renderToStaticMarkup(
+        createElement(MerchantSetup, {
+          storeName: "COD PR56 Store B",
+          email: "merchant@example.test",
+          status: "active",
+          readOnly: false,
+          initialLocale: "en",
+          telegramConnection: { state: "not_connected" },
+          isAndroidTelegramLaunch: false,
+          telegramLaunchOrigin: null,
+          codOrdersEnabled: true,
+          needsAttentionOrders: [],
+          needsAttentionTotal: 0,
+          needsAttentionTransfers: [],
+          needsAttentionTransferTotal: 0,
+          vodafoneCashSetting: null,
+          storeDefaultLanguageCode: "en",
+          telegramSupportUsername: null,
+          notificationBot: {
+            supported: true,
+            state: null,
+            managed,
+          },
+        }),
+      );
+    }
+
+    const resumable = setupHtml({
+      state: "expired",
+      attemptId: "expired-attempt",
+      reason: "expired",
+      retryable: true,
+      resumable: true,
+      botUsername: "NotifyBotPurpose",
+      botName: "Notify Bot Purpose",
+    });
+
+    expect(resumable).toContain(
+      'action="/app/setup/notification-bot/resume"',
+    );
+    expect(resumable).toContain('name="attemptId" value="expired-attempt"');
+    expect(resumable).toContain(
+      'data-testid="merchant-notification-bot-managed-resume"',
+    );
+    expect(resumable).not.toContain(
+      'action="/app/setup/notification-bot/start"',
+    );
+
+    const fresh = setupHtml({ state: "idle" });
+
+    expect(fresh).toContain('action="/app/setup/notification-bot/start"');
+    expect(fresh).toContain(
+      'data-testid="merchant-notification-bot-managed-create"',
+    );
+    expect(fresh).not.toContain(
+      'action="/app/setup/notification-bot/resume"',
+    );
+  });
 });

@@ -472,6 +472,11 @@ const mockService = {
   sendTest: vi.fn(),
   disconnect: vi.fn(),
 };
+const mockManaged = {
+  ensure: vi.fn(),
+  resume: vi.fn(),
+  verify: vi.fn(),
+};
 const mockRevalidatePath = vi.fn();
 const mockRefresh = vi.fn();
 
@@ -499,12 +504,42 @@ vi.mock("@/lib/merchant/notification-bot", () => ({
   disconnectMerchantNotificationBot: (...args: unknown[]) =>
     mockService.disconnect(...args),
 }));
-
+vi.mock("@/lib/telegram/manager-provisioning", () => ({
+  ensureNotificationBotLinkAttempt: (...args: unknown[]) =>
+    mockManaged.ensure(...args),
+  resumeManagedNotificationBotProposal: (...args: unknown[]) =>
+    mockManaged.resume(...args),
+  verifyManagedNotificationBotStart: (...args: unknown[]) =>
+    mockManaged.verify(...args),
+  managedBotStartDeepLink: (username: string, nonce: string) =>
+    `https://t.me/${username}?start=${nonce}`,
+  merchantManagerDeepLink: (username: string, nonce: string) =>
+    `https://t.me/${username}?start=${nonce}`,
+}));
+vi.mock("@/lib/telegram/manager-config", () => ({
+  readManagerBotConfig: () => ({ token: "manager-test-token" }),
+  resolveTrustedAppOrigin: () => "https://app.example.test",
+}));
+vi.mock("@/lib/telegram/manager-api", () => ({
+  createTelegramBotApiClient: () => ({
+    getMe: vi.fn(async () => ({
+      ok: true as const,
+      result: {
+        id: 9001,
+        is_bot: true,
+        first_name: "Rabet Manager",
+        username: "RabetManagerBot",
+      },
+    })),
+  }),
+}));
 import {
   checkMerchantNotificationBotPairingAction,
   connectMerchantNotificationBotAction,
   disconnectMerchantNotificationBotAction,
+  resumeMerchantNotificationBotManagedAction,
   sendMerchantNotificationBotTestAction,
+  startMerchantNotificationBotManagedAction,
   startMerchantNotificationBotPairingAction,
 } from "@/app/actions/merchant-notification-bot";
 
@@ -650,5 +685,147 @@ describe("merchant notification bot — Server Action boundary", () => {
     });
     expect(mockRevalidatePath).not.toHaveBeenCalled();
     expect(mockRefresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("merchant notification bot — managed intent boundary", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsMerchantAppEnabled.mockReturnValue(true);
+    mockGetMerchantAccess.mockResolvedValue(access());
+    mockManaged.resume.mockResolvedValue({ status: "none" });
+    mockManaged.ensure.mockResolvedValue({ status: "conflict" });
+  });
+
+  it("keeps Create as an explicit action that never resumes a proposal", async () => {
+    const expiresAt = new Date("2026-11-27T12:15:00.000Z");
+
+    mockManaged.ensure.mockResolvedValue({
+      status: "created",
+      attemptId: "created-attempt",
+      nonce: "create-nonce",
+      expiresAt,
+    });
+
+    const result = await startMerchantNotificationBotManagedAction();
+
+    expect(result).toEqual({
+      ok: true,
+      managed: {
+        deepLink: "https://t.me/RabetManagerBot?start=create-nonce",
+        expiresAt: expiresAt.toISOString(),
+      },
+    });
+    expect(mockManaged.ensure).toHaveBeenCalledTimes(1);
+    expect(mockManaged.resume).not.toHaveBeenCalled();
+
+    const [, ensureInput] = mockManaged.ensure.mock.calls[0] as [
+      unknown,
+      { storeId: string; merchantUserId: string },
+    ];
+    expect(ensureInput.storeId).toBe(
+      "00000000-0000-4000-8000-000000000010",
+    );
+    expect(ensureInput.merchantUserId).toBe(
+      "00000000-0000-4000-8000-000000000001",
+    );
+  });
+
+  it("returns a stale Resume as a localized state without creating an attempt or a manager link", async () => {
+    mockManaged.resume.mockResolvedValue({ status: "none" });
+
+    const result = await resumeMerchantNotificationBotManagedAction({
+      attemptId: "stale-attempt",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "RESUME_UNAVAILABLE",
+    });
+    expect(result).not.toHaveProperty("managed");
+    expect(mockManaged.resume).toHaveBeenCalledTimes(1);
+    expect(mockManaged.ensure).not.toHaveBeenCalled();
+    expect(mockRevalidatePath).not.toHaveBeenCalled();
+    expect(mockRefresh).not.toHaveBeenCalled();
+
+    const [, resumeInput] = mockManaged.resume.mock.calls[0] as [
+      unknown,
+      {
+        storeId: string;
+        merchantUserId: string;
+        attemptId: string;
+      },
+    ];
+    expect(resumeInput.storeId).toBe(
+      "00000000-0000-4000-8000-000000000010",
+    );
+    expect(resumeInput.merchantUserId).toBe(
+      "00000000-0000-4000-8000-000000000001",
+    );
+    expect(resumeInput.attemptId).toBe("stale-attempt");
+  });
+
+  it("resumes the same bot and returns the existing link for a second Resume submission", async () => {
+    const expiresAt = new Date("2026-11-27T12:30:00.000Z");
+    const verificationUrl =
+      "https://t.me/SameNotifyBot?start=fresh-challenge";
+
+    mockManaged.resume
+      .mockResolvedValueOnce({
+        status: "resumed",
+        attemptId: "fresh-attempt",
+        nonce: "fresh-challenge",
+        expiresAt,
+        botUsername: "SameNotifyBot",
+        botName: "Same Notify Bot",
+      })
+      .mockResolvedValueOnce({
+        status: "existing",
+        attemptId: "fresh-attempt",
+        verificationUrl,
+        expiresAt,
+        botUsername: "SameNotifyBot",
+        botName: "Same Notify Bot",
+      });
+
+    const first = await resumeMerchantNotificationBotManagedAction({
+      attemptId: "expired-attempt",
+    });
+    const second = await resumeMerchantNotificationBotManagedAction({
+      attemptId: "expired-attempt",
+    });
+
+    expect(first).toEqual({
+      ok: true,
+      managed: {
+        deepLink: verificationUrl,
+        expiresAt: expiresAt.toISOString(),
+      },
+    });
+    expect(second).toEqual(first);
+    expect(mockManaged.resume).toHaveBeenCalledTimes(2);
+    expect(mockManaged.ensure).not.toHaveBeenCalled();
+    expect(mockRevalidatePath).toHaveBeenCalledTimes(2);
+
+    for (const call of mockManaged.resume.mock.calls) {
+      const [, resumeInput] = call as [
+        unknown,
+        { attemptId: string },
+      ];
+      expect(resumeInput.attemptId).toBe("expired-attempt");
+    }
+  });
+
+  it("uses no submitted store id and fails closed before Telegram when denied", async () => {
+    mockGetMerchantAccess.mockResolvedValue(access({ readOnly: true }));
+
+    const result = await resumeMerchantNotificationBotManagedAction({
+      attemptId: "stale-attempt",
+      storeId: "00000000-0000-4000-8000-000000000099",
+    });
+
+    expect(result).toEqual({ ok: false, error: "DENIED" });
+    expect(mockManaged.resume).not.toHaveBeenCalled();
+    expect(mockManaged.ensure).not.toHaveBeenCalled();
   });
 });

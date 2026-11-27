@@ -2237,6 +2237,7 @@ export type NotificationManagedAttemptState =
     }
   | {
       state: "expired";
+      attemptId: string;
       reason: string;
       retryable: boolean;
       botUsername?: string | null;
@@ -2471,6 +2472,7 @@ export async function readMerchantNotificationManagedAttemptState(
   if (attempt.expiresAt.getTime() <= now.getTime()) {
     return {
       state: "expired",
+      attemptId: attempt.id,
       reason: "expired",
       retryable: true,
       botUsername: attempt.telegramBotUsername,
@@ -2484,6 +2486,7 @@ export async function readMerchantNotificationManagedAttemptState(
   if (attempt.status === "expired") {
     return {
       state: "expired",
+      attemptId: attempt.id,
       reason: "expired",
       retryable: true,
       botUsername: attempt.telegramBotUsername,
@@ -2902,8 +2905,6 @@ export async function verifyManagedNotificationBotStart(
 
   try {
     persisted = await db.transaction(async (tx): Promise<PersistResult> => {
-      const effectiveNow = deps.now ?? new Date();
-
       await lockNotificationBotOnboarding(
         tx as unknown as Database,
         input.storeId,
@@ -2924,6 +2925,11 @@ export async function verifyManagedNotificationBotStart(
       ) {
         return { status: "conflict" };
       }
+
+      // Telegram calls and lock acquisition can outlast the challenge window.
+      // Sample the effective time only after both the onboarding lock and the
+      // eligibility check, so this final write cannot persist an expired Start.
+      const effectiveNow = deps.now ?? new Date();
 
       const [current] = await tx
         .select({
@@ -3094,6 +3100,14 @@ export type ResumeManagedNotificationBotResult =
       botUsername: string;
       botName: string | null;
     }
+  | {
+      status: "existing";
+      attemptId: string;
+      verificationUrl: string;
+      expiresAt: Date;
+      botUsername: string;
+      botName: string | null;
+    }
   | { status: "none" }
   | { status: "connected"; botUsername: string; botName: string | null }
   | {
@@ -3109,6 +3123,84 @@ type ResumableNotificationProposal = {
   telegramUserId: number;
   expiresAt: Date;
 };
+
+type LiveNotificationAttempt = {
+  id: string;
+  status: string;
+  failureCode: string | null;
+  nonceCiphertext: string;
+  nonceKeyId: string;
+  telegramBotUsername: string | null;
+  telegramBotName: string | null;
+  expiresAt: Date;
+};
+
+async function readLiveNotificationAttempt(
+  tx: AttemptTransaction,
+  storeId: string,
+  now: Date,
+): Promise<LiveNotificationAttempt | undefined> {
+  const [live] = await tx
+    .select({
+      id: telegramLinkAttempt.id,
+      status: telegramLinkAttempt.status,
+      failureCode: telegramLinkAttempt.failureCode,
+      nonceCiphertext: telegramLinkAttempt.nonceCiphertext,
+      nonceKeyId: telegramLinkAttempt.nonceKeyId,
+      telegramBotUsername: telegramLinkAttempt.telegramBotUsername,
+      telegramBotName: telegramLinkAttempt.telegramBotName,
+      expiresAt: telegramLinkAttempt.expiresAt,
+    })
+    .from(telegramLinkAttempt)
+    .where(
+      and(
+        eq(telegramLinkAttempt.storeId, storeId),
+        eq(telegramLinkAttempt.purpose, "notification_bot"),
+        inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+        gt(telegramLinkAttempt.expiresAt, now),
+      ),
+    )
+    .orderBy(desc(telegramLinkAttempt.createdAt))
+    .limit(1);
+
+  return live;
+}
+
+function existingResumeResult(
+  live: LiveNotificationAttempt | undefined,
+): ResumeManagedNotificationBotResult | null {
+  if (!live || !live.telegramBotUsername) return null;
+
+  if (
+    live.status !== "provisioning" &&
+    live.status !== "awaiting_confirmation"
+  ) {
+    return null;
+  }
+
+  if (
+    live.status === "provisioning" &&
+    live.failureCode !== MANAGED_BOT_START_FAILURE_CODE
+  ) {
+    return null;
+  }
+
+  const nonce = attemptNonceOrNull(live.nonceCiphertext, live.nonceKeyId);
+
+  if (!nonce) return null;
+
+  return {
+    status: "existing",
+    attemptId: live.id,
+    verificationUrl: managedBotStartDeepLink(
+      live.telegramBotUsername,
+      nonce,
+    ),
+    expiresAt: live.expiresAt,
+    botUsername: live.telegramBotUsername,
+    botName: live.telegramBotName,
+  };
+}
 
 /**
  * Resumes a previously correlated notification-bot proposal whose challenge
@@ -3128,6 +3220,7 @@ export async function resumeManagedNotificationBotProposal(
     merchantUserId: string;
     sessionVersion: number;
     managerBotUsername: string;
+    attemptId?: string | null;
   },
   deps: ManagedBotStartVerificationDependencies,
 ): Promise<ResumeManagedNotificationBotResult> {
@@ -3190,20 +3283,18 @@ export async function resumeManagedNotificationBotProposal(
         };
       }
 
-      const [live] = await tx
-        .select({ id: telegramLinkAttempt.id })
-        .from(telegramLinkAttempt)
-        .where(
-          and(
-            eq(telegramLinkAttempt.storeId, input.storeId),
-            eq(telegramLinkAttempt.purpose, "notification_bot"),
-            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
-            gt(telegramLinkAttempt.expiresAt, lookupNow),
-          ),
-        )
-        .limit(1);
+      const live = await readLiveNotificationAttempt(
+        tx,
+        input.storeId,
+        lookupNow,
+      );
 
-      if (live) return { kind: "result", result: { status: "none" } };
+      if (live) {
+        return {
+          kind: "result",
+          result: existingResumeResult(live) ?? { status: "none" },
+        };
+      }
 
       const [latest] = await tx
         .select({
@@ -3229,6 +3320,7 @@ export async function resumeManagedNotificationBotProposal(
 
       if (
         !latest ||
+        (input.attemptId && latest.id !== input.attemptId) ||
         latest.status !== "expired" ||
         latest.failureCode === "superseded_by_manual" ||
         latest.telegramUserId === null ||
@@ -3367,20 +3459,15 @@ export async function resumeManagedNotificationBotProposal(
           return { status: "conflict", reason: "manual_configuration" };
         }
 
-        const [live] = await tx
-          .select({ id: telegramLinkAttempt.id })
-          .from(telegramLinkAttempt)
-          .where(
-            and(
-              eq(telegramLinkAttempt.storeId, input.storeId),
-              eq(telegramLinkAttempt.purpose, "notification_bot"),
-              inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
-              gt(telegramLinkAttempt.expiresAt, challengeNow),
-            ),
-          )
-          .limit(1);
+        const live = await readLiveNotificationAttempt(
+          tx,
+          input.storeId,
+          challengeNow,
+        );
 
-        if (live) return { status: "none" };
+        if (live) {
+          return existingResumeResult(live) ?? { status: "none" };
+        }
 
         const [latest] = await tx
           .select({

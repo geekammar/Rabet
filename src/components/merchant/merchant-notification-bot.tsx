@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useSyncExternalStore, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertCircle,
@@ -45,6 +45,27 @@ type Feedback = {
   text: string;
 };
 
+function subscribeToLocation(onStoreChange: () => void) {
+  window.addEventListener("hashchange", onStoreChange);
+  window.addEventListener("popstate", onStoreChange);
+
+  return () => {
+    window.removeEventListener("hashchange", onStoreChange);
+    window.removeEventListener("popstate", onStoreChange);
+  };
+}
+
+function getManagedFlowErrorSnapshot(): string | null {
+  const match = window.location.hash.match(
+    /^#notification-bot-(?:start|resume)-error=([A-Z_]+)$/,
+  );
+  return match?.[1] ?? null;
+}
+
+function getServerManagedFlowError(): string | null {
+  return null;
+}
+
 function stableUtc(value: string | null): string | null {
   if (!value) return null;
 
@@ -78,6 +99,11 @@ export function MerchantNotificationBot({
 }) {
   const copy = MERCHANT_NOTIFICATION_BOT_COPY[locale];
   const router = useRouter();
+  const managedFlowError = useSyncExternalStore(
+    subscribeToLocation,
+    getManagedFlowErrorSnapshot,
+    getServerManagedFlowError,
+  );
   const [token, setToken] = useState("");
   const [pairingLink, setPairingLink] = useState<{
     deepLink: string;
@@ -90,6 +116,14 @@ export function MerchantNotificationBot({
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   const disabled = readOnly || !supported || isPending;
+  const managedFlowErrorMessage = managedFlowError
+    ? copy.errors[managedFlowError] ?? copy.errors.OPERATION_FAILED
+    : null;
+  const visibleFeedback: Feedback | null =
+    feedback ??
+    (managedFlowErrorMessage
+      ? { kind: "error", text: managedFlowErrorMessage }
+      : null);
 
   function errorText(result: MerchantNotificationBotActionResult): string {
     if (result.ok) return "";
@@ -370,6 +404,25 @@ export function MerchantNotificationBot({
                     : copy.managedCheck}
                 </Button>
               </div>
+            ) : managedResumable ? (
+              <form method="post" action="/app/setup/notification-bot/resume">
+                {managed?.state === "expired" ? (
+                  <input
+                    type="hidden"
+                    name="attemptId"
+                    value={managed.attemptId}
+                  />
+                ) : null}
+                <Button
+                  type="submit"
+                  className="min-h-11"
+                  disabled={disabled}
+                  data-testid="merchant-notification-bot-managed-resume"
+                >
+                  <RefreshCw className="size-4" aria-hidden="true" />
+                  {copy.managedResume}
+                </Button>
+              </form>
             ) : (
               <form method="post" action="/app/setup/notification-bot/start">
                 <Button
@@ -378,12 +431,8 @@ export function MerchantNotificationBot({
                   disabled={disabled}
                   data-testid="merchant-notification-bot-managed-create"
                 >
-                  {managedResumable ? (
-                    <RefreshCw className="size-4" aria-hidden="true" />
-                  ) : (
-                    <ShieldCheck className="size-4" aria-hidden="true" />
-                  )}
-                  {managedResumable ? copy.managedResume : copy.managedCreate}
+                  <ShieldCheck className="size-4" aria-hidden="true" />
+                  {copy.managedCreate}
                 </Button>
               </form>
             )}
@@ -749,24 +798,24 @@ export function MerchantNotificationBot({
         </div>
       ) : null}
 
-      {feedback ? (
+      {visibleFeedback ? (
         <div
-          role={feedback.kind === "error" ? "alert" : "status"}
+          role={visibleFeedback.kind === "error" ? "alert" : "status"}
           className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
-            feedback.kind === "success"
+            visibleFeedback.kind === "success"
               ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200"
-              : feedback.kind === "error"
+              : visibleFeedback.kind === "error"
                 ? "border-destructive/30 bg-destructive/5 text-destructive"
                 : "border-border bg-muted/30 text-muted-foreground"
           }`}
           data-testid="merchant-notification-bot-feedback"
         >
-          {feedback.kind === "success" ? (
+          {visibleFeedback.kind === "success" ? (
             <CheckCircle2
               className="mt-0.5 size-4 shrink-0"
               aria-hidden="true"
             />
-          ) : feedback.kind === "error" ? (
+          ) : visibleFeedback.kind === "error" ? (
             <AlertCircle
               className="mt-0.5 size-4 shrink-0"
               aria-hidden="true"
@@ -777,7 +826,7 @@ export function MerchantNotificationBot({
               aria-hidden="true"
             />
           )}
-          <p className="break-words">{feedback.text}</p>
+          <p className="break-words">{visibleFeedback.text}</p>
         </div>
       ) : null}
     </section>

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
+import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import {
   appUser,
@@ -28,6 +29,7 @@ import {
   handleManagedBotEvent,
   handleManagerStartMessage,
   managedBotStartChallengeCopy,
+  managedBotStartDeepLink,
   managedNotificationBotConfirmationCopy,
   readMerchantNotificationManagedAttemptState,
   readMerchantTelegramConnectionState,
@@ -1013,6 +1015,114 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
     expect(attempt.status).toBe("expired");
   });
 
+  it("rechecks expiry after waiting for the final onboarding lock", async () => {
+    const base = new Date("2026-11-27T12:00:00.000Z");
+    const lockClient = postgres(testDb!.url, { max: 1 });
+    let lockHeld = false;
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    try {
+      vi.setSystemTime(base);
+
+      const { ensured, nonce } = await prepareNotificationProposal({
+        storeId: storeAId,
+        merchantUserId: userAId,
+        telegramUserId: 700206,
+        botId: 800206,
+        botUsername: "LockedExpiryNotifyBot",
+        now: base,
+      });
+
+      const afterExpiry = new Date(
+        base.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS + 60_000,
+      );
+      const manager = managerApi();
+      const confirmationTransport = createFakeTelegramTransport();
+      let signalLockHeld!: () => void;
+      const lockHeldPromise = new Promise<void>((resolve) => {
+        signalLockHeld = resolve;
+      });
+
+      const bot = notificationBotApi(800206, "LockedExpiryNotifyBot", [], {
+        getUpdates: vi.fn(async () => {
+          await lockClient`begin`;
+          await lockClient`select pg_advisory_xact_lock(hashtext(${`telegram-link-attempt:${storeAId}:notification_bot`}))`;
+          lockHeld = true;
+          signalLockHeld();
+          return {
+            ok: true as const,
+            result: [startMessage(1, 700206, nonce)],
+          };
+        }),
+      });
+
+      const verification = verifyManagedNotificationBotStart(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          attemptId: ensured.attemptId,
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => bot,
+          transport: confirmationTransport,
+          webhookOrigin: "https://app.example.test",
+        },
+      );
+
+      await lockHeldPromise;
+
+      let sawBlockedWriter = false;
+
+      for (let poll = 0; poll < 200; poll += 1) {
+        const rows = await db().execute<{ waiting: number }>(sql`
+          select count(*)::int as waiting
+          from pg_stat_activity
+          where datname = current_database()
+            and state = 'active'
+            and wait_event_type = 'Lock'
+            and query like '%pg_advisory_xact_lock%'
+        `);
+
+        if (Number(rows[0]?.waiting ?? 0) > 0) {
+          sawBlockedWriter = true;
+          break;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      expect(sawBlockedWriter).toBe(true);
+
+      vi.setSystemTime(afterExpiry);
+      await lockClient`rollback`;
+      lockHeld = false;
+
+      const result = await verification;
+
+      expect(result.status).toBe("expired");
+      expect(await db().select().from(merchantNotificationBot)).toHaveLength(0);
+      expect(confirmationTransport.sentMessages).toHaveLength(0);
+
+      const [attempt] = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+      expect(attempt.status).toBe("provisioning");
+      expect(attempt.completedAt).toBeNull();
+      expect(attempt.connectionId).toBeNull();
+    } finally {
+      if (lockHeld) {
+        await lockClient`rollback`;
+      }
+      await lockClient.end();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not complete from another account or from a bot bound to another store", async () => {
     const { ensured, nonce } = await prepareNotificationProposal({
       storeId: storeAId,
@@ -1386,6 +1496,153 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
       expect(storeRow.purpose).toBe("store_bot");
       expect(storeRow.status).toBe("pending");
       expect(storeRow.telegramBotId).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns the current verification link for simultaneous and stale resume submissions without creating an attempt", async () => {
+    const creatorUserId = 700205;
+    const base = new Date("2026-11-27T12:00:00.000Z");
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    try {
+      vi.setSystemTime(base);
+
+      const { ensured } = await prepareNotificationProposal({
+        storeId: storeAId,
+        merchantUserId: userAId,
+        telegramUserId: creatorUserId,
+        botId: 800205,
+        botUsername: "TwoResumeNotifyBot",
+        now: base,
+      });
+
+      const afterExpiry = new Date(
+        base.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS + 60_000,
+      );
+      vi.setSystemTime(afterExpiry);
+
+      const manager = managerApi({
+        getManagedBotToken: vi.fn(async () => ({
+          ok: true as const,
+          result: "800205:AA-two-resume-notification-token",
+        })),
+      });
+      const bot = notificationBotApi(800205, "TwoResumeNotifyBot", []);
+
+      const [first, second] = await Promise.all([
+        resumeManagedNotificationBotProposal(
+          db(),
+          {
+            storeId: storeAId,
+            merchantUserId: userAId,
+            sessionVersion: 0,
+            managerBotUsername: "RabetManagerBot",
+            attemptId: ensured.attemptId,
+          },
+          {
+            managerApi: manager,
+            createBotApi: () => bot,
+            webhookOrigin: "https://app.example.test",
+            now: afterExpiry,
+          },
+        ),
+        resumeManagedNotificationBotProposal(
+          db(),
+          {
+            storeId: storeAId,
+            merchantUserId: userAId,
+            sessionVersion: 0,
+            managerBotUsername: "RabetManagerBot",
+            attemptId: ensured.attemptId,
+          },
+          {
+            managerApi: manager,
+            createBotApi: () => bot,
+            webhookOrigin: "https://app.example.test",
+            now: afterExpiry,
+          },
+        ),
+      ]);
+
+      expect([first.status, second.status].sort()).toEqual([
+        "existing",
+        "resumed",
+      ]);
+
+      const resumed = first.status === "resumed" ? first : second;
+      const existing = first.status === "existing" ? first : second;
+
+      expect(resumed.status).toBe("resumed");
+      expect(existing.status).toBe("existing");
+      if (resumed.status !== "resumed" || existing.status !== "existing") {
+        return;
+      }
+
+      const expectedLink = managedBotStartDeepLink(
+        "TwoResumeNotifyBot",
+        resumed.nonce,
+      );
+
+      expect(existing.attemptId).toBe(resumed.attemptId);
+      expect(existing.verificationUrl).toBe(expectedLink);
+      expect(existing.verificationUrl).not.toContain("RabetManagerBot");
+      expect(await db().select().from(merchantNotificationBot)).toHaveLength(0);
+
+      const attempts = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(
+          and(
+            eq(telegramLinkAttempt.storeId, storeAId),
+            eq(telegramLinkAttempt.purpose, "notification_bot"),
+          ),
+        );
+      expect(
+        attempts.filter((attempt) => attempt.status === "provisioning"),
+      ).toHaveLength(1);
+      expect(
+        attempts.filter((attempt) => attempt.status === "pending"),
+      ).toHaveLength(0);
+
+      vi.setSystemTime(new Date(afterExpiry.getTime() + 30_000));
+
+      const staleTab = await resumeManagedNotificationBotProposal(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          managerBotUsername: "RabetManagerBot",
+          attemptId: ensured.attemptId,
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => bot,
+          webhookOrigin: "https://app.example.test",
+          now: new Date(afterExpiry.getTime() + 30_000),
+        },
+      );
+
+      expect(staleTab.status).toBe("existing");
+      if (staleTab.status !== "existing") return;
+      expect(staleTab.attemptId).toBe(resumed.attemptId);
+      expect(staleTab.verificationUrl).toBe(expectedLink);
+
+      expect(
+        await db()
+          .select()
+          .from(telegramLinkAttempt)
+          .where(
+            and(
+              eq(telegramLinkAttempt.storeId, storeAId),
+              eq(telegramLinkAttempt.purpose, "notification_bot"),
+              eq(telegramLinkAttempt.status, "provisioning"),
+            ),
+          ),
+      ).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }

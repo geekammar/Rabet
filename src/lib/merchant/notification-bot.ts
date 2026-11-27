@@ -72,6 +72,7 @@ export type MerchantNotificationBotErrorCode =
   | "CONFIGURATION_CHANGED"
   | "BOT_START_PENDING"
   | "BOT_START_LINK_REQUIRED"
+  | "RESUME_UNAVAILABLE"
   | "EXPIRED"
   | "CONFLICT"
   | "SUPERSEDED"

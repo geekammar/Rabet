@@ -53,6 +53,32 @@ function submittedRecord(input: unknown): Record<string, unknown> {
     : {};
 }
 
+type ManagedManagerContext = {
+  managerApi: TelegramBotApiClient;
+  managerUsername: string;
+};
+
+async function readManagedManagerContext(): Promise<ManagedManagerContext | null> {
+  try {
+    const managerConfig = readManagerBotConfig();
+    const managerApi = createTelegramBotApiClient(managerConfig.token);
+    const me = await managerApi.getMe();
+
+    if (
+      me.ok &&
+      me.result.is_bot === true &&
+      typeof me.result.username === "string" &&
+      me.result.username.length > 0
+    ) {
+      return { managerApi, managerUsername: me.result.username };
+    }
+  } catch (error) {
+    logActionFailure("managed_config", error);
+  }
+
+  return null;
+}
+
 /**
  * Validates and stores the signed-in merchant's notification bot token.
  *
@@ -229,9 +255,9 @@ export async function disconnectMerchantNotificationBotAction(): Promise<Merchan
 
 
 /**
- * Starts the managed notification-bot onboarding attempt for the signed-in
- * merchant. The manager bot username is read from Telegram; the store and
- * merchant identity come only from the verified session.
+ * Explicitly starts a new managed notification-bot onboarding attempt for the
+ * signed-in merchant. This action never resumes a stored proposal; Resume has
+ * its own server-side intent.
  */
 export async function startMerchantNotificationBotManagedAction(): Promise<MerchantNotificationBotActionResult> {
   if (!isMerchantAppEnabled()) {
@@ -244,85 +270,17 @@ export async function startMerchantNotificationBotManagedAction(): Promise<Merch
     return { ok: false, error: "DENIED" };
   }
 
-  let managerApi: TelegramBotApiClient;
-  let managerUsername: string | null = null;
+  const context = await readManagedManagerContext();
 
-  try {
-    const managerConfig = readManagerBotConfig();
-    managerApi = createTelegramBotApiClient(managerConfig.token);
-    const me = await managerApi.getMe();
-
-    if (
-      me.ok &&
-      me.result.is_bot === true &&
-      typeof me.result.username === "string" &&
-      me.result.username.length > 0
-    ) {
-      managerUsername = me.result.username;
-    }
-  } catch (error) {
-    logActionFailure("managed_config", error);
-    return { ok: false, error: "UNAVAILABLE" };
-  }
-
-  if (!managerUsername) {
+  if (!context) {
     return { ok: false, error: "UNAVAILABLE" };
   }
 
   try {
-    const resumed = await resumeManagedNotificationBotProposal(
-      getTransactionDb(),
-      {
-        storeId: access.store.id,
-        merchantUserId: access.userId,
-        sessionVersion: access.sessionVersion,
-        managerBotUsername: managerUsername,
-      },
-      {
-        managerApi,
-        webhookOrigin: resolveTrustedAppOrigin(),
-      },
-    );
-
-    if (resumed.status === "resumed") {
-      revalidatePath("/app/setup");
-      return {
-        ok: true,
-        managed: {
-          deepLink: managedBotStartDeepLink(
-            resumed.botUsername,
-            resumed.nonce,
-          ),
-          expiresAt: resumed.expiresAt.toISOString(),
-        },
-      };
-    }
-
-    if (resumed.status === "connected") {
-      revalidatePath("/app/setup");
-      return { ok: true };
-    }
-
-    if (resumed.status === "bot_review") {
-      return { ok: false, error: "REVIEW" };
-    }
-
-    if (resumed.status === "bot_bound_elsewhere") {
-      return { ok: false, error: "CONFLICT" };
-    }
-
-    if (resumed.status === "conflict") {
-      return { ok: false, error: "CONFLICT" };
-    }
-
-    if (resumed.status === "retryable") {
-      return { ok: false, error: "RETRYABLE" };
-    }
-
     const ensured = await ensureNotificationBotLinkAttempt(getTransactionDb(), {
       storeId: access.store.id,
       merchantUserId: access.userId,
-      managerBotUsername: managerUsername,
+      managerBotUsername: context.managerUsername,
     });
 
     revalidatePath("/app/setup");
@@ -331,7 +289,10 @@ export async function startMerchantNotificationBotManagedAction(): Promise<Merch
       return {
         ok: true,
         managed: {
-          deepLink: merchantManagerDeepLink(managerUsername, ensured.nonce),
+          deepLink: merchantManagerDeepLink(
+            context.managerUsername,
+            ensured.nonce,
+          ),
           expiresAt: ensured.expiresAt.toISOString(),
         },
       };
@@ -352,6 +313,106 @@ export async function startMerchantNotificationBotManagedAction(): Promise<Merch
     return { ok: false, error: "CONFLICT" };
   } catch (error) {
     logActionFailure("managed_start", error);
+    return { ok: false, error: "OPERATION_FAILED" };
+  }
+}
+
+/**
+ * Resumes the merchant's existing stored notification-bot proposal with a
+ * fresh Start challenge. The optional attempt id only selects which stored
+ * proposal the browser saw; the authenticated merchant, store and current
+ * attempt state remain authoritative. This action never creates an attempt.
+ */
+export async function resumeMerchantNotificationBotManagedAction(
+  input: unknown,
+): Promise<MerchantNotificationBotActionResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access || access.readOnly) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const context = await readManagedManagerContext();
+
+  if (!context) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const submittedAttemptId = submittedRecord(input).attemptId;
+  const attemptId =
+    typeof submittedAttemptId === "string" &&
+    submittedAttemptId.trim().length > 0
+      ? submittedAttemptId.trim()
+      : null;
+
+  try {
+    const resumed = await resumeManagedNotificationBotProposal(
+      getTransactionDb(),
+      {
+        storeId: access.store.id,
+        merchantUserId: access.userId,
+        sessionVersion: access.sessionVersion,
+        managerBotUsername: context.managerUsername,
+        attemptId,
+      },
+      {
+        managerApi: context.managerApi,
+        webhookOrigin: resolveTrustedAppOrigin(),
+      },
+    );
+
+    if (resumed.status === "resumed") {
+      revalidatePath("/app/setup");
+      return {
+        ok: true,
+        managed: {
+          deepLink: managedBotStartDeepLink(
+            resumed.botUsername,
+            resumed.nonce,
+          ),
+          expiresAt: resumed.expiresAt.toISOString(),
+        },
+      };
+    }
+
+    if (resumed.status === "existing") {
+      revalidatePath("/app/setup");
+      return {
+        ok: true,
+        managed: {
+          deepLink: resumed.verificationUrl,
+          expiresAt: resumed.expiresAt.toISOString(),
+        },
+      };
+    }
+
+    if (resumed.status === "connected") {
+      revalidatePath("/app/setup");
+      return { ok: true };
+    }
+
+    if (resumed.status === "bot_review") {
+      return { ok: false, error: "REVIEW" };
+    }
+
+    if (
+      resumed.status === "bot_bound_elsewhere" ||
+      resumed.status === "conflict"
+    ) {
+      return { ok: false, error: "CONFLICT" };
+    }
+
+    if (resumed.status === "retryable") {
+      return { ok: false, error: "RETRYABLE" };
+    }
+
+    return { ok: false, error: "RESUME_UNAVAILABLE" };
+  } catch (error) {
+    logActionFailure("managed_resume", error);
     return { ok: false, error: "OPERATION_FAILED" };
   }
 }
