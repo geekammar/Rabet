@@ -29,6 +29,9 @@ import {
   handleManagerStartMessage,
   managedBotStartChallengeCopy,
   managedNotificationBotConfirmationCopy,
+  readMerchantNotificationManagedAttemptState,
+  readMerchantTelegramConnectionState,
+  resumeManagedNotificationBotProposal,
   verifyManagedNotificationBotStart,
 } from "@/lib/telegram/manager-provisioning";
 import { createFakeTelegramTransport } from "@/lib/telegram/transport";
@@ -200,6 +203,33 @@ function startMessage(
   };
 }
 
+function plainStartMessage(
+  updateId: number,
+  userId: number,
+  firstName = "Muse",
+): TelegramBotUpdate {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      from: {
+        id: userId,
+        is_bot: false,
+        first_name: firstName,
+        username: "muse_owner",
+      },
+      chat: {
+        id: userId,
+        type: "private",
+        first_name: firstName,
+        username: "muse_owner",
+      },
+      date: Math.floor(Date.now() / 1000),
+      text: "/start",
+    },
+  };
+}
+
 async function merchantAccess(
   storeId: string,
   userId: string,
@@ -341,6 +371,54 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
       .where(eq(telegramLinkAttempt.id, ensured.attemptId));
     expect(attempt.purpose).toBe("notification_bot");
     expect(attempt.telegramUserId).toBe(700001);
+  });
+
+  it("keeps an older storefront attempt separate from a newer notification proposal", async () => {
+    const storeAttempt = await createTelegramLinkAttempt(db(), {
+      storeId: storeAId,
+      merchantUserId: userAId,
+      managerBotUsername: "RabetManagerBot",
+      now: new Date(Date.now() - 60_000),
+    });
+
+    const { ensured } = await prepareNotificationProposal({
+      storeId: storeAId,
+      merchantUserId: userAId,
+      telegramUserId: 700001,
+      botId: 800020,
+      botUsername: "PurposeNotifyBot",
+    });
+
+    const scope = await readStoreScopeForFixture(db(), storeAId);
+    const storefront = await readMerchantTelegramConnectionState(db(), {
+      scope,
+      merchantUserId: userAId,
+    });
+    const notification = await readMerchantNotificationManagedAttemptState(
+      db(),
+      { storeId: storeAId, merchantUserId: userAId },
+    );
+
+    expect(storefront.state).toBe("waiting");
+    expect(storefront).not.toMatchObject({ botUsername: "PurposeNotifyBot" });
+    expect(notification).toMatchObject({
+      state: "awaiting_start",
+      attemptId: ensured.attemptId,
+      botUsername: "PurposeNotifyBot",
+    });
+
+    const [storeRow] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, storeAttempt.attemptId));
+    expect(storeRow.purpose).toBe("store_bot");
+    expect(storeRow.status).toBe("pending");
+
+    const [notificationRow] = await db()
+      .select()
+      .from(telegramLinkAttempt)
+      .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+    expect(notificationRow.purpose).toBe("notification_bot");
   });
 
   it("allows simultaneous store and notification attempts but fails a managed_bot event closed", async () => {
@@ -1006,5 +1084,464 @@ describe.skipIf(!shouldRun)("managed notification bot onboarding", () => {
       .where(eq(telegramLinkAttempt.id, ensured.attemptId));
     expect(attempt.status).toBe("failed");
     expect(attempt.failureCode).toBe("bot_bound_elsewhere");
+  });
+
+  it("gives a full challenge window from the proposal event and never extends it on duplicates or checks", async () => {
+    const creatorUserId = 700201;
+    const base = new Date("2026-11-27T12:00:00.000Z");
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    try {
+      vi.setSystemTime(base);
+
+      const ensured = await ensureNotificationBotLinkAttempt(db(), {
+        storeId: storeAId,
+        merchantUserId: userAId,
+        managerBotUsername: "RabetManagerBot",
+        now: base,
+      });
+      expect(ensured.status).toBe("created");
+      if (ensured.status !== "created") return;
+
+      expect(
+        (
+          await bindLinkAttemptToTelegramUser(db(), {
+            nonce: ensured.nonce,
+            telegramUserId: creatorUserId,
+            now: base,
+          })
+        ).status,
+      ).toBe("bound");
+
+      const eventAt = new Date(
+        base.getTime() + 14 * 60 * 1000,
+      );
+      vi.setSystemTime(eventAt);
+
+      const first = await handleManagedBotEvent(
+        db(),
+        {
+          creatorUserId,
+          botId: 800201,
+          botUsername: "WindowNotifyBot",
+          botName: "Window Notify",
+        },
+        {
+          managerApi: managerApi(),
+          webhookOrigin: "https://app.example.test",
+          transport: createFakeTelegramTransport(),
+          now: eventAt,
+        },
+      );
+      expect(first.status).toBe("awaiting_bot_start");
+
+      const expectedExpiry = new Date(
+        eventAt.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS,
+      );
+      let [attempt] = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+      expect(attempt.expiresAt).toEqual(expectedExpiry);
+
+      const duplicateAt = new Date(
+        base.getTime() + 16 * 60 * 1000,
+      );
+      vi.setSystemTime(duplicateAt);
+
+      const duplicate = await handleManagedBotEvent(
+        db(),
+        {
+          creatorUserId,
+          botId: 800201,
+          botUsername: "WindowNotifyBot",
+          botName: "Window Notify",
+        },
+        {
+          managerApi: managerApi(),
+          webhookOrigin: "https://app.example.test",
+          transport: createFakeTelegramTransport(),
+          now: duplicateAt,
+        },
+      );
+      expect(duplicate.status).toBe("already_awaiting_start");
+
+      [attempt] = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+      expect(attempt.expiresAt).toEqual(expectedExpiry);
+
+      const checkAt = new Date(
+        base.getTime() + 20 * 60 * 1000,
+      );
+      vi.setSystemTime(checkAt);
+
+      const pending = await verifyManagedNotificationBotStart(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          attemptId: ensured.attemptId,
+        },
+        {
+          managerApi: managerApi(),
+          createBotApi: () =>
+            notificationBotApi(800201, "WindowNotifyBot", []),
+          webhookOrigin: "https://app.example.test",
+          now: checkAt,
+        },
+      );
+      expect(pending.status).toBe("pending");
+
+      [attempt] = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+      expect(attempt.expiresAt).toEqual(expectedExpiry);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes an expired correlated notification proposal with a fresh challenge and accepts only that challenge", async () => {
+    const creatorUserId = 700202;
+    const base = new Date("2026-11-27T12:00:00.000Z");
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    try {
+      vi.setSystemTime(base);
+
+      const storeAttempt = await createTelegramLinkAttempt(db(), {
+        storeId: storeAId,
+        merchantUserId: userAId,
+        managerBotUsername: "RabetManagerBot",
+        now: new Date(base.getTime() - 60_000),
+      });
+
+      const { ensured, nonce: oldNonce } = await prepareNotificationProposal({
+        storeId: storeAId,
+        merchantUserId: userAId,
+        telegramUserId: creatorUserId,
+        botId: 800202,
+        botUsername: "ResumeNotifyBot",
+        now: base,
+      });
+
+      const afterExpiry = new Date(
+        base.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS + 60_000,
+      );
+      vi.setSystemTime(afterExpiry);
+
+      const expiredState = await readMerchantNotificationManagedAttemptState(
+        db(),
+        { storeId: storeAId, merchantUserId: userAId, now: afterExpiry },
+      );
+      expect(expiredState).toMatchObject({
+        state: "expired",
+        resumable: true,
+        botUsername: "ResumeNotifyBot",
+      });
+
+      const updates: TelegramBotUpdate[] = [];
+      const bot = notificationBotApi(800202, "ResumeNotifyBot", updates);
+      const manager = managerApi({
+        getManagedBotToken: vi.fn(async () => ({
+          ok: true as const,
+          result: "800202:AA-resume-notification-token",
+        })),
+      });
+
+      const resumed = await resumeManagedNotificationBotProposal(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          managerBotUsername: "RabetManagerBot",
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => bot,
+          webhookOrigin: "https://app.example.test",
+          now: afterExpiry,
+        },
+      );
+
+      expect(resumed.status).toBe("resumed");
+      if (resumed.status !== "resumed") return;
+
+      expect(resumed.botUsername).toBe("ResumeNotifyBot");
+      expect(resumed.nonce).not.toBe(oldNonce);
+      expect(resumed.expiresAt).toEqual(
+        new Date(afterExpiry.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS),
+      );
+
+      const [oldAttempt] = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(eq(telegramLinkAttempt.id, ensured.attemptId));
+      expect(oldAttempt.status).toBe("expired");
+      expect(oldAttempt.failureCode).toBe("expired");
+
+      const [freshAttempt] = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(eq(telegramLinkAttempt.id, resumed.attemptId));
+      expect(freshAttempt.purpose).toBe("notification_bot");
+      expect(freshAttempt.status).toBe("provisioning");
+      expect(freshAttempt.failureCode).toBe("awaiting_bot_start");
+      expect(freshAttempt.telegramUserId).toBe(creatorUserId);
+      expect(freshAttempt.telegramBotId).toBe(800202);
+      expect(freshAttempt.telegramBotUsername).toBe("ResumeNotifyBot");
+      expect(await db().select().from(merchantNotificationBot)).toHaveLength(0);
+
+      updates.length = 0;
+      updates.push(startMessage(1, creatorUserId, oldNonce));
+      const oldChallenge = await verifyManagedNotificationBotStart(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          attemptId: resumed.attemptId,
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => bot,
+          webhookOrigin: "https://app.example.test",
+        },
+      );
+      expect(oldChallenge.status).toBe("challenge_mismatch");
+      expect(await db().select().from(merchantNotificationBot)).toHaveLength(0);
+
+      updates.length = 0;
+      updates.push(plainStartMessage(2, creatorUserId));
+      const plainStart = await verifyManagedNotificationBotStart(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          attemptId: resumed.attemptId,
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => bot,
+          webhookOrigin: "https://app.example.test",
+        },
+      );
+      expect(plainStart.status).toBe("plain_start");
+      expect(await db().select().from(merchantNotificationBot)).toHaveLength(0);
+
+      updates.length = 0;
+      updates.push(startMessage(3, 700299, resumed.nonce, "Other"));
+      const wrongSender = await verifyManagedNotificationBotStart(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          attemptId: resumed.attemptId,
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => bot,
+          webhookOrigin: "https://app.example.test",
+        },
+      );
+      expect(wrongSender.status).toBe("pending");
+      expect(await db().select().from(merchantNotificationBot)).toHaveLength(0);
+
+      updates.length = 0;
+      updates.push(startMessage(4, creatorUserId, resumed.nonce));
+      const verified = await verifyManagedNotificationBotStart(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          attemptId: resumed.attemptId,
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => bot,
+          webhookOrigin: "https://app.example.test",
+        },
+      );
+      expect(verified.status).toBe("verified");
+
+      const [saved] = await db().select().from(merchantNotificationBot);
+      expect(saved.botId).toBe(800202);
+      expect(saved.botUsername).toBe("ResumeNotifyBot");
+      expect(saved.destinationChatId).toBe(String(creatorUserId));
+
+      const [storeRow] = await db()
+        .select()
+        .from(telegramLinkAttempt)
+        .where(eq(telegramLinkAttempt.id, storeAttempt.attemptId));
+      expect(storeRow.purpose).toBe("store_bot");
+      expect(storeRow.status).toBe("pending");
+      expect(storeRow.telegramBotId).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses to resume when the exact bot cannot be proven or its webhook is active", async () => {
+    const creatorUserId = 700203;
+    const base = new Date("2026-11-27T12:00:00.000Z");
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    try {
+      vi.setSystemTime(base);
+
+      await prepareNotificationProposal({
+        storeId: storeAId,
+        merchantUserId: userAId,
+        telegramUserId: creatorUserId,
+        botId: 800203,
+        botUsername: "UnprovableNotifyBot",
+        now: base,
+      });
+
+      const afterExpiry = new Date(
+        base.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS + 60_000,
+      );
+      vi.setSystemTime(afterExpiry);
+
+      const manager = managerApi({
+        getManagedBotToken: vi.fn(async () => ({
+          ok: true as const,
+          result: "800203:AA-unprovable-notification-token",
+        })),
+      });
+
+      const wrongBot = notificationBotApi(899999, "OtherBot", []);
+      const wrongIdentity = await resumeManagedNotificationBotProposal(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          managerBotUsername: "RabetManagerBot",
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => wrongBot,
+          webhookOrigin: "https://app.example.test",
+          now: afterExpiry,
+        },
+      );
+      expect(wrongIdentity.status).toBe("retryable");
+      expect(
+        await db()
+          .select()
+          .from(telegramLinkAttempt)
+          .where(eq(telegramLinkAttempt.status, "provisioning")),
+      ).toHaveLength(0);
+
+      const webhookBot = notificationBotApi(800203, "UnprovableNotifyBot", [], {
+        getWebhookInfo: vi.fn(async () => ({
+          ok: true as const,
+          result: { url: "https://example.test/webhook" },
+        })),
+      });
+      const webhookActive = await resumeManagedNotificationBotProposal(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          managerBotUsername: "RabetManagerBot",
+        },
+        {
+          managerApi: manager,
+          createBotApi: () => webhookBot,
+          webhookOrigin: "https://app.example.test",
+          now: afterExpiry,
+        },
+      );
+      expect(webhookActive.status).toBe("bot_review");
+      expect(
+        await db()
+          .select()
+          .from(telegramLinkAttempt)
+          .where(eq(telegramLinkAttempt.status, "provisioning")),
+      ).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets a manual notification configuration win over resume", async () => {
+    const creatorUserId = 700204;
+    const base = new Date("2026-11-27T12:00:00.000Z");
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    try {
+      vi.setSystemTime(base);
+
+      await prepareNotificationProposal({
+        storeId: storeAId,
+        merchantUserId: userAId,
+        telegramUserId: creatorUserId,
+        botId: 800204,
+        botUsername: "ManualWinsNotifyBot",
+        now: base,
+      });
+
+      await db().insert(merchantNotificationBot).values({
+        storeId: storeAId,
+        botId: 800999,
+        botUsername: "ManualNotifyBot",
+        tokenCiphertext: "manual-ciphertext",
+        tokenKeyId: KEY_ID,
+        destinationChatId: null,
+        pairingCodeHash: crypto.randomBytes(32).toString("hex"),
+        pairingExpiresAt: new Date(
+          base.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS,
+        ),
+      });
+
+      const afterExpiry = new Date(
+        base.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS + 60_000,
+      );
+      vi.setSystemTime(afterExpiry);
+
+      const resumed = await resumeManagedNotificationBotProposal(
+        db(),
+        {
+          storeId: storeAId,
+          merchantUserId: userAId,
+          sessionVersion: 0,
+          managerBotUsername: "RabetManagerBot",
+        },
+        {
+          managerApi: managerApi(),
+          webhookOrigin: "https://app.example.test",
+          now: afterExpiry,
+        },
+      );
+
+      expect(resumed.status).toBe("conflict");
+      expect(
+        await db()
+          .select()
+          .from(telegramLinkAttempt)
+          .where(eq(telegramLinkAttempt.status, "provisioning")),
+      ).toHaveLength(0);
+
+      const [manual] = await db().select().from(merchantNotificationBot);
+      expect(manual.botId).toBe(800999);
+      expect(manual.botUsername).toBe("ManualNotifyBot");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

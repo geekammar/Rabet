@@ -229,6 +229,8 @@ export function MerchantNotificationBot({
     (managed.state === "waiting" ||
       managed.state === "awaiting_start" ||
       managed.state === "preparing");
+  const managedResumable =
+    managed?.state === "expired" && managed.resumable === true;
   const managedStatusLabel =
     managed?.state === "waiting"
       ? copy.managedWaiting
@@ -376,8 +378,12 @@ export function MerchantNotificationBot({
                   disabled={disabled}
                   data-testid="merchant-notification-bot-managed-create"
                 >
-                  <ShieldCheck className="size-4" aria-hidden="true" />
-                  {copy.managedCreate}
+                  {managedResumable ? (
+                    <RefreshCw className="size-4" aria-hidden="true" />
+                  ) : (
+                    <ShieldCheck className="size-4" aria-hidden="true" />
+                  )}
+                  {managedResumable ? copy.managedResume : copy.managedCreate}
                 </Button>
               </form>
             )}
@@ -389,7 +395,9 @@ export function MerchantNotificationBot({
                 data-testid="merchant-notification-bot-managed-error"
               >
                 {managed.state === "expired"
-                  ? copy.managedExpired
+                  ? managed.resumable
+                    ? copy.managedExpiredResume
+                    : copy.managedExpired
                   : copy.managedFailed}
               </p>
             ) : null}

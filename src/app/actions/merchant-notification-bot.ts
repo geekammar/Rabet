@@ -15,10 +15,15 @@ import {
 } from "@/lib/merchant/notification-bot";
 import {
   ensureNotificationBotLinkAttempt,
+  managedBotStartDeepLink,
   merchantManagerDeepLink,
+  resumeManagedNotificationBotProposal,
   verifyManagedNotificationBotStart,
 } from "@/lib/telegram/manager-provisioning";
-import { createTelegramBotApiClient } from "@/lib/telegram/manager-api";
+import {
+  createTelegramBotApiClient,
+  type TelegramBotApiClient,
+} from "@/lib/telegram/manager-api";
 import {
   readManagerBotConfig,
   resolveTrustedAppOrigin,
@@ -239,12 +244,13 @@ export async function startMerchantNotificationBotManagedAction(): Promise<Merch
     return { ok: false, error: "DENIED" };
   }
 
-  let managerConfig;
+  let managerApi: TelegramBotApiClient;
   let managerUsername: string | null = null;
 
   try {
-    managerConfig = readManagerBotConfig();
-    const me = await createTelegramBotApiClient(managerConfig.token).getMe();
+    const managerConfig = readManagerBotConfig();
+    managerApi = createTelegramBotApiClient(managerConfig.token);
+    const me = await managerApi.getMe();
 
     if (
       me.ok &&
@@ -264,6 +270,55 @@ export async function startMerchantNotificationBotManagedAction(): Promise<Merch
   }
 
   try {
+    const resumed = await resumeManagedNotificationBotProposal(
+      getTransactionDb(),
+      {
+        storeId: access.store.id,
+        merchantUserId: access.userId,
+        sessionVersion: access.sessionVersion,
+        managerBotUsername: managerUsername,
+      },
+      {
+        managerApi,
+        webhookOrigin: resolveTrustedAppOrigin(),
+      },
+    );
+
+    if (resumed.status === "resumed") {
+      revalidatePath("/app/setup");
+      return {
+        ok: true,
+        managed: {
+          deepLink: managedBotStartDeepLink(
+            resumed.botUsername,
+            resumed.nonce,
+          ),
+          expiresAt: resumed.expiresAt.toISOString(),
+        },
+      };
+    }
+
+    if (resumed.status === "connected") {
+      revalidatePath("/app/setup");
+      return { ok: true };
+    }
+
+    if (resumed.status === "bot_review") {
+      return { ok: false, error: "REVIEW" };
+    }
+
+    if (resumed.status === "bot_bound_elsewhere") {
+      return { ok: false, error: "CONFLICT" };
+    }
+
+    if (resumed.status === "conflict") {
+      return { ok: false, error: "CONFLICT" };
+    }
+
+    if (resumed.status === "retryable") {
+      return { ok: false, error: "RETRYABLE" };
+    }
+
     const ensured = await ensureNotificationBotLinkAttempt(getTransactionDb(), {
       storeId: access.store.id,
       merchantUserId: access.userId,
@@ -351,6 +406,13 @@ export async function checkMerchantNotificationBotManagedAction(): Promise<Merch
 
     if (result.status === "pending") {
       return { ok: false, error: "BOT_START_PENDING" };
+    }
+
+    if (
+      result.status === "plain_start" ||
+      result.status === "challenge_mismatch"
+    ) {
+      return { ok: false, error: "BOT_START_LINK_REQUIRED" };
     }
 
     if (result.status === "retryable") {

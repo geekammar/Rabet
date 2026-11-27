@@ -1466,6 +1466,18 @@ export async function handleManagedBotEvent(
           telegramBotUsername: event.botUsername,
           telegramBotName: event.botName,
           failureCode: MANAGED_BOT_START_FAILURE_CODE,
+          // A notification proposal only becomes actionable now that Telegram
+          // has reported the created bot. Give the merchant a full challenge
+          // window from this first event; duplicate events return
+          // `already_awaiting_start` above and never extend it again.
+          ...(attempt.purpose === "notification_bot"
+            ? {
+                expiresAt: new Date(
+                  now.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS,
+                ),
+              }
+            : {}),
+          updatedAt: now,
         })
         .where(
           and(
@@ -1545,7 +1557,7 @@ export async function handleManagedBotEvent(
   };
 }
 
-export const MANAGED_BOT_START_BUTTON_TEXT = "افتح البوت وأرسل Start";
+export const MANAGED_BOT_START_BUTTON_TEXT = "افتح البوت واضغط Start / Open bot and press Start";
 
 export function managedBotStartChallengeCopy(input: {
   purpose?: TelegramLinkAttemptPurpose;
@@ -2223,7 +2235,15 @@ export type NotificationManagedAttemptState =
       botName?: string | null;
       verificationUrl?: string;
     }
-  | { state: "expired" | "failed"; reason: string; retryable: boolean };
+  | {
+      state: "expired";
+      reason: string;
+      retryable: boolean;
+      botUsername?: string | null;
+      botName?: string | null;
+      resumable?: boolean;
+    }
+  | { state: "failed"; reason: string; retryable: boolean };
 
 /**
  * Ensures one active notification-bot attempt for this store, independent of
@@ -2422,6 +2442,7 @@ export async function readMerchantNotificationManagedAttemptState(
       nonceCiphertext: telegramLinkAttempt.nonceCiphertext,
       nonceKeyId: telegramLinkAttempt.nonceKeyId,
       telegramUserId: telegramLinkAttempt.telegramUserId,
+      telegramBotId: telegramLinkAttempt.telegramBotId,
       telegramBotUsername: telegramLinkAttempt.telegramBotUsername,
       telegramBotName: telegramLinkAttempt.telegramBotName,
       failureCode: telegramLinkAttempt.failureCode,
@@ -2440,14 +2461,35 @@ export async function readMerchantNotificationManagedAttemptState(
 
   if (!attempt) return { state: "idle" };
 
+  const resumable =
+    attempt.telegramBotId !== null &&
+    attempt.telegramUserId !== null &&
+    Boolean(attempt.telegramBotUsername) &&
+    (attempt.status === "provisioning" || attempt.status === "expired") &&
+    attempt.failureCode !== "superseded_by_manual";
+
   if (attempt.expiresAt.getTime() <= now.getTime()) {
-    return { state: "expired", reason: "expired", retryable: true };
+    return {
+      state: "expired",
+      reason: "expired",
+      retryable: true,
+      botUsername: attempt.telegramBotUsername,
+      botName: attempt.telegramBotName,
+      resumable,
+    };
   }
 
   if (attempt.status === "completed") return { state: "idle" };
 
   if (attempt.status === "expired") {
-    return { state: "expired", reason: "expired", retryable: true };
+    return {
+      state: "expired",
+      reason: "expired",
+      retryable: true,
+      botUsername: attempt.telegramBotUsername,
+      botName: attempt.telegramBotName,
+      resumable,
+    };
   }
 
   if (attempt.status === "cancelled") {
@@ -2552,6 +2594,8 @@ export type VerifyManagedNotificationBotResult =
       botName: string | null;
     }
   | { status: "pending" }
+  | { status: "plain_start" }
+  | { status: "challenge_mismatch" }
   | {
       status:
         | "not_found"
@@ -2778,6 +2822,8 @@ export async function verifyManagedNotificationBotStart(
     title: string | null;
     username: string | null;
   } | null = null;
+  let sawPlainStart = false;
+  let sawChallengeMismatch = false;
 
   for (const update of updates.result) {
     const message = update.message;
@@ -2787,9 +2833,20 @@ export async function verifyManagedNotificationBotStart(
       message.from?.id !== proposal.telegramUserId ||
       message.chat.type !== "private" ||
       message.chat.id !== proposal.telegramUserId ||
-      typeof message.text !== "string" ||
-      message.text.trim() !== expectedText
+      typeof message.text !== "string"
     ) {
+      continue;
+    }
+
+    const text = message.text.trim();
+
+    if (text !== expectedText) {
+      if (text === "/start") {
+        sawPlainStart = true;
+      } else if (text.startsWith("/start ")) {
+        sawChallengeMismatch = true;
+      }
+
       continue;
     }
 
@@ -2811,7 +2868,11 @@ export async function verifyManagedNotificationBotStart(
     break;
   }
 
-  if (!destination) return { status: "pending" };
+  if (!destination) {
+    if (sawPlainStart) return { status: "plain_start" };
+    if (sawChallengeMismatch) return { status: "challenge_mismatch" };
+    return { status: "pending" };
+  }
 
   let encryptedToken: { ciphertext: string; keyId: string };
 
@@ -3022,6 +3083,401 @@ export async function verifyManagedNotificationBotStart(
   }
 
   return persisted;
+}
+
+export type ResumeManagedNotificationBotResult =
+  | {
+      status: "resumed";
+      attemptId: string;
+      nonce: string;
+      expiresAt: Date;
+      botUsername: string;
+      botName: string | null;
+    }
+  | { status: "none" }
+  | { status: "connected"; botUsername: string; botName: string | null }
+  | {
+      status: "conflict" | "bot_review" | "bot_bound_elsewhere" | "retryable";
+      reason?: string;
+    };
+
+type ResumableNotificationProposal = {
+  attemptId: string;
+  botId: number;
+  botUsername: string;
+  botName: string | null;
+  telegramUserId: number;
+  expiresAt: Date;
+};
+
+/**
+ * Resumes a previously correlated notification-bot proposal whose challenge
+ * window ended.
+ *
+ * The proposal's stored numeric bot id, creator and notification purpose are
+ * reused. The exact bot is re-read through the current manager API and
+ * `getMe`, the webhook must still be empty, and the merchant session/store plus
+ * manual-wins state are rechecked before a new short-lived private-chat Start
+ * challenge is created. This never creates a bot and never trusts the old
+ * challenge, a username, or a plain Start as proof.
+ */
+export async function resumeManagedNotificationBotProposal(
+  db: TransactionDatabase,
+  input: {
+    storeId: string;
+    merchantUserId: string;
+    sessionVersion: number;
+    managerBotUsername: string;
+  },
+  deps: ManagedBotStartVerificationDependencies,
+): Promise<ResumeManagedNotificationBotResult> {
+  const lookupNow = deps.now ?? new Date();
+
+  type Lookup =
+    | { kind: "proposal"; proposal: ResumableNotificationProposal }
+    | { kind: "result"; result: ResumeManagedNotificationBotResult };
+
+  let lookup: Lookup;
+
+  try {
+    lookup = await db.transaction(async (tx): Promise<Lookup> => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
+          "telegram-link-attempt",
+          `${input.storeId}:notification_bot`,
+        )}))`,
+      );
+
+      await tx
+        .update(telegramLinkAttempt)
+        .set({ status: "expired", failureCode: "expired", updatedAt: lookupNow })
+        .where(
+          and(
+            eq(telegramLinkAttempt.storeId, input.storeId),
+            eq(telegramLinkAttempt.purpose, "notification_bot"),
+            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+            lte(telegramLinkAttempt.expiresAt, lookupNow),
+          ),
+        );
+
+      const [configured] = await tx
+        .select({
+          botUsername: merchantNotificationBot.botUsername,
+          botName: merchantNotificationBot.botName,
+          destinationChatId: merchantNotificationBot.destinationChatId,
+        })
+        .from(merchantNotificationBot)
+        .where(eq(merchantNotificationBot.storeId, input.storeId))
+        .limit(1);
+
+      if (configured) {
+        if (configured.destinationChatId !== null) {
+          return {
+            kind: "result",
+            result: {
+              status: "connected",
+              botUsername: configured.botUsername,
+              botName: configured.botName,
+            },
+          };
+        }
+
+        // A manual token/pairing configuration is the newer intention and
+        // must win over a managed proposal.
+        return {
+          kind: "result",
+          result: { status: "conflict", reason: "manual_configuration" },
+        };
+      }
+
+      const [live] = await tx
+        .select({ id: telegramLinkAttempt.id })
+        .from(telegramLinkAttempt)
+        .where(
+          and(
+            eq(telegramLinkAttempt.storeId, input.storeId),
+            eq(telegramLinkAttempt.purpose, "notification_bot"),
+            inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+            gt(telegramLinkAttempt.expiresAt, lookupNow),
+          ),
+        )
+        .limit(1);
+
+      if (live) return { kind: "result", result: { status: "none" } };
+
+      const [latest] = await tx
+        .select({
+          id: telegramLinkAttempt.id,
+          status: telegramLinkAttempt.status,
+          failureCode: telegramLinkAttempt.failureCode,
+          telegramUserId: telegramLinkAttempt.telegramUserId,
+          telegramBotId: telegramLinkAttempt.telegramBotId,
+          telegramBotUsername: telegramLinkAttempt.telegramBotUsername,
+          telegramBotName: telegramLinkAttempt.telegramBotName,
+          expiresAt: telegramLinkAttempt.expiresAt,
+        })
+        .from(telegramLinkAttempt)
+        .where(
+          and(
+            eq(telegramLinkAttempt.storeId, input.storeId),
+            eq(telegramLinkAttempt.merchantUserId, input.merchantUserId),
+            eq(telegramLinkAttempt.purpose, "notification_bot"),
+          ),
+        )
+        .orderBy(desc(telegramLinkAttempt.createdAt))
+        .limit(1);
+
+      if (
+        !latest ||
+        latest.status !== "expired" ||
+        latest.failureCode === "superseded_by_manual" ||
+        latest.telegramUserId === null ||
+        latest.telegramBotId === null ||
+        !latest.telegramBotUsername
+      ) {
+        return { kind: "result", result: { status: "none" } };
+      }
+
+      return {
+        kind: "proposal",
+        proposal: {
+          attemptId: latest.id,
+          botId: latest.telegramBotId,
+          botUsername: latest.telegramBotUsername,
+          botName: latest.telegramBotName,
+          telegramUserId: latest.telegramUserId,
+          expiresAt: latest.expiresAt,
+        },
+      };
+    });
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+
+  if (lookup.kind === "result") return lookup.result;
+
+  const { proposal } = lookup;
+  const tokenResult = await deps.managerApi.getManagedBotToken(proposal.botId);
+
+  if (!tokenResult.ok || typeof tokenResult.result !== "string") {
+    return { status: "retryable", reason: "token_fetch_failed" };
+  }
+
+  const token = tokenResult.result.trim();
+
+  if (token.length === 0) {
+    return { status: "retryable", reason: "token_fetch_failed" };
+  }
+
+  let managedApi: TelegramBotApiClient;
+
+  try {
+    managedApi =
+      deps.createBotApi?.(token) ?? createTelegramBotApiClient(token);
+  } catch {
+    return { status: "retryable", reason: "api_unavailable" };
+  }
+
+  const me = await managedApi.getMe();
+
+  if (
+    !me.ok ||
+    me.result.id !== proposal.botId ||
+    me.result.is_bot !== true ||
+    typeof me.result.username !== "string" ||
+    me.result.username.length === 0
+  ) {
+    return { status: "retryable", reason: "verification_failed" };
+  }
+
+  const verifiedUsername = me.result.username;
+  const verifiedName =
+    typeof me.result.first_name === "string" ? me.result.first_name : null;
+
+  const webhookInfo = await managedApi.getWebhookInfo();
+
+  if (!webhookInfo.ok) {
+    return { status: "retryable", reason: "webhook_inspection_failed" };
+  }
+
+  if (webhookInfo.result.url.length > 0) {
+    return { status: "bot_review" };
+  }
+
+  const challengeNow = deps.now ?? new Date();
+  const nonce = generateLinkNonce();
+  const nonceDigest = hashLinkNonce(nonce);
+  const expiresAt = new Date(
+    challengeNow.getTime() + TELEGRAM_LINK_ATTEMPT_TTL_MS,
+  );
+
+  let encryptedNonce: { ciphertext: string; keyId: string };
+
+  try {
+    encryptedNonce = encryptConnectionSecret(nonce);
+  } catch {
+    return { status: "retryable", reason: "secret_storage_failed" };
+  }
+
+  try {
+    return await db.transaction(
+      async (tx): Promise<ResumeManagedNotificationBotResult> => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtext(${advisoryLockKey(
+            "telegram-link-attempt",
+            `${input.storeId}:notification_bot`,
+          )}))`,
+        );
+
+        const eligibility = await resolveMerchantEligibility(
+          tx as unknown as TransactionDatabase,
+          {
+            userId: input.merchantUserId,
+            sessionVersion: input.sessionVersion,
+          },
+        );
+
+        if (
+          !eligibility ||
+          eligibility.readOnly ||
+          eligibility.store.id !== input.storeId
+        ) {
+          return { status: "conflict", reason: "session_changed" };
+        }
+
+        const [configured] = await tx
+          .select({
+            botUsername: merchantNotificationBot.botUsername,
+            botName: merchantNotificationBot.botName,
+            destinationChatId: merchantNotificationBot.destinationChatId,
+          })
+          .from(merchantNotificationBot)
+          .where(eq(merchantNotificationBot.storeId, input.storeId))
+          .limit(1);
+
+        if (configured) {
+          if (configured.destinationChatId !== null) {
+            return {
+              status: "connected",
+              botUsername: configured.botUsername,
+              botName: configured.botName,
+            };
+          }
+
+          return { status: "conflict", reason: "manual_configuration" };
+        }
+
+        const [live] = await tx
+          .select({ id: telegramLinkAttempt.id })
+          .from(telegramLinkAttempt)
+          .where(
+            and(
+              eq(telegramLinkAttempt.storeId, input.storeId),
+              eq(telegramLinkAttempt.purpose, "notification_bot"),
+              inArray(telegramLinkAttempt.status, [...ACTIVE_ATTEMPT_STATUSES]),
+              gt(telegramLinkAttempt.expiresAt, challengeNow),
+            ),
+          )
+          .limit(1);
+
+        if (live) return { status: "none" };
+
+        const [latest] = await tx
+          .select({
+            id: telegramLinkAttempt.id,
+            status: telegramLinkAttempt.status,
+            failureCode: telegramLinkAttempt.failureCode,
+            telegramUserId: telegramLinkAttempt.telegramUserId,
+            telegramBotId: telegramLinkAttempt.telegramBotId,
+            telegramBotUsername: telegramLinkAttempt.telegramBotUsername,
+          })
+          .from(telegramLinkAttempt)
+          .where(
+            and(
+              eq(telegramLinkAttempt.storeId, input.storeId),
+              eq(telegramLinkAttempt.merchantUserId, input.merchantUserId),
+              eq(telegramLinkAttempt.purpose, "notification_bot"),
+            ),
+          )
+          .orderBy(desc(telegramLinkAttempt.createdAt))
+          .limit(1);
+
+        if (
+          !latest ||
+          latest.id !== proposal.attemptId ||
+          latest.status !== "expired" ||
+          latest.failureCode === "superseded_by_manual" ||
+          latest.telegramUserId !== proposal.telegramUserId ||
+          latest.telegramBotId !== proposal.botId
+        ) {
+          return { status: "none" };
+        }
+
+        const [existingStoreBot] = await tx
+          .select({ id: telegramConnection.id })
+          .from(telegramConnection)
+          .where(eq(telegramConnection.botId, proposal.botId))
+          .limit(1);
+
+        if (existingStoreBot) {
+          return { status: "bot_bound_elsewhere", reason: "store_bot_conflict" };
+        }
+
+        const [existingNotificationBot] = await tx
+          .select({
+            id: merchantNotificationBot.id,
+            storeId: merchantNotificationBot.storeId,
+          })
+          .from(merchantNotificationBot)
+          .where(eq(merchantNotificationBot.botId, proposal.botId))
+          .limit(1);
+
+        if (
+          existingNotificationBot &&
+          existingNotificationBot.storeId !== input.storeId
+        ) {
+          return {
+            status: "bot_bound_elsewhere",
+            reason: "notification_bot_conflict",
+          };
+        }
+
+        const [attempt] = await tx
+          .insert(telegramLinkAttempt)
+          .values({
+            storeId: input.storeId,
+            merchantUserId: input.merchantUserId,
+            purpose: "notification_bot",
+            managerBotUsername: input.managerBotUsername,
+            nonceDigest,
+            nonceCiphertext: encryptedNonce.ciphertext,
+            nonceKeyId: encryptedNonce.keyId,
+            status: "provisioning",
+            telegramUserId: proposal.telegramUserId,
+            telegramBotId: proposal.botId,
+            telegramBotUsername: verifiedUsername,
+            telegramBotName: verifiedName,
+            failureCode: MANAGED_BOT_START_FAILURE_CODE,
+            expiresAt,
+            createdAt: challengeNow,
+            updatedAt: challengeNow,
+          })
+          .returning({ id: telegramLinkAttempt.id });
+
+        return {
+          status: "resumed",
+          attemptId: attempt.id,
+          nonce,
+          expiresAt,
+          botUsername: verifiedUsername,
+          botName: verifiedName,
+        };
+      },
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) return { status: "conflict" };
+    throw mapDatabaseError(error);
+  }
 }
 
 export function managedNotificationBotConfirmationCopy(input: {
@@ -4491,6 +4947,7 @@ export async function readMerchantTelegramConnectionState(
       and(
         eq(telegramLinkAttempt.storeId, input.scope.storeId),
         eq(telegramLinkAttempt.merchantUserId, input.merchantUserId),
+        eq(telegramLinkAttempt.purpose, "store_bot"),
       ),
     )
     .orderBy(desc(telegramLinkAttempt.createdAt))

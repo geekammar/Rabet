@@ -16,7 +16,9 @@ type Copy = {
   managedOpenBot: string;
   managedCheck: string;
   managedChecking: string;
+  managedResume: string;
   managedExpired: string;
+  managedExpiredResume: string;
   managedFailed: string;
   advancedTitle: string;
   advancedBody: string;
@@ -82,10 +84,13 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
     managedAwaitingStart: "تم إنشاء البوت. افتحه واضغط Start لإثبات ملكيته.",
     managedPreparing: "تيليجرام يعالج إنشاء البوت الآن.",
     managedOpenManager: "فتح مدير البوت",
-    managedOpenBot: "فتح بوت الإشعارات",
+    managedOpenBot: "افتح البوت واضغط Start",
     managedCheck: "تحقق من حالة الربط",
     managedChecking: "جارٍ التحقق…",
-    managedExpired: "انتهت صلاحية محاولة الربط. ابدأ محاولة جديدة.",
+    managedResume: "استئناف التحقق من نفس البوت",
+    managedExpired: "انتهت صلاحية محاولة الربط.",
+    managedExpiredResume:
+      "انتهت مهلة التحقق، لكن البوت نفسه ما زال محفوظًا. استأنف التحقق للحصول على رابط Start جديد دون إنشاء بوت آخر.",
     managedFailed: "تعذّر إكمال الربط. ابدأ محاولة جديدة.",
     advancedTitle: "خيار متقدم: الربط برمز البوت",
     advancedBody:
@@ -167,6 +172,8 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
         "تغيّرت إعدادات الإشعارات أثناء الإرسال. أعد المحاولة.",
       BOT_START_PENDING:
         "لم نستلم Start من البوت بعد. افتح البوت واضغط Start ثم أعد التحقق.",
+      BOT_START_LINK_REQUIRED:
+        "وصل Start عادي، لكنه لا يثبت أنك فتحت رابط التحقق. استخدم زر فتح البوت من هذه الصفحة أو من رسالة المدير، ثم اضغط Start وأعد التحقق.",
       EXPIRED: "انتهت صلاحية المحاولة. ابدأ محاولة جديدة.",
       CONFLICT:
         "تعذّر إكمال الربط لأن البوت أو المحاولة مرتبطة بحالة أخرى.",
@@ -201,10 +208,13 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
     managedAwaitingStart: "The bot was created. Open it and press Start to prove ownership.",
     managedPreparing: "Telegram is preparing the bot now.",
     managedOpenManager: "Open manager bot",
-    managedOpenBot: "Open notification bot",
+    managedOpenBot: "Open bot and press Start",
     managedCheck: "Check connection status",
     managedChecking: "Checking…",
-    managedExpired: "The attempt expired. Start a new attempt.",
+    managedResume: "Resume verification for the same bot",
+    managedExpired: "The verification window ended.",
+    managedExpiredResume:
+      "The verification window ended, but the same bot proposal is still stored. Resume verification for a fresh Start link without creating another bot.",
     managedFailed: "The connection could not be completed. Start a new attempt.",
     advancedTitle: "Advanced: connect with a bot token",
     advancedBody:
@@ -289,6 +299,8 @@ export const MERCHANT_NOTIFICATION_BOT_COPY: Record<MerchantLocale, Copy> = {
         "Notification settings changed while sending. Try again.",
       BOT_START_PENDING:
         "We have not received Start from the bot yet. Open the bot, press Start, then check again.",
+      BOT_START_LINK_REQUIRED:
+        "We received a plain Start, but it does not prove that you opened the verification link. Use the Open bot button on this page or in the Manager message, press Start, then check again.",
       EXPIRED: "The attempt expired. Start a new attempt.",
       CONFLICT:
         "The connection could not be completed because the bot or attempt is in another state.",

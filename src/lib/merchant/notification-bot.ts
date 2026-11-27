@@ -71,6 +71,7 @@ export type MerchantNotificationBotErrorCode =
   | "TELEGRAM_REJECTED"
   | "CONFIGURATION_CHANGED"
   | "BOT_START_PENDING"
+  | "BOT_START_LINK_REQUIRED"
   | "EXPIRED"
   | "CONFLICT"
   | "SUPERSEDED"
