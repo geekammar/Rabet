@@ -439,6 +439,160 @@ describe("telegram transport and error sanitization", () => {
       });
     });
   });
+  describe("Telegram media transport", () => {
+    it("captures photo, media and reply-markup operations in the fake transport", async () => {
+      const fake = createFakeTelegramTransport();
+
+      const photo = await fake.sendPhoto({
+        chatId: 123,
+        photo: "https://cdn.example.test/product.jpg",
+        caption: "Product card",
+        replyMarkup: {
+          inline_keyboard: [[{ text: "Add 1", callback_data: "ca:p:1" }]],
+        },
+      });
+      expect(photo.ok).toBe(true);
+      expect(fake.sentPhotos).toHaveLength(1);
+      expect(fake.photoAttempts).toHaveLength(1);
+      expect(fake.sentPhotos[0].photo).toBe(
+        "https://cdn.example.test/product.jpg",
+      );
+
+      const media = await fake.editMessageMedia({
+        chatId: 123,
+        messageId: photo.messageId!,
+        media: {
+          type: "photo",
+          media: "https://cdn.example.test/product.jpg",
+          caption: "Updated card",
+        },
+      });
+      expect(media.ok).toBe(true);
+      expect(fake.editedMedia).toHaveLength(1);
+      expect(fake.editedMedia[0].media.caption).toBe("Updated card");
+
+      const markup = await fake.editMessageReplyMarkup({
+        chatId: 123,
+        messageId: photo.messageId!,
+        replyMarkup: { inline_keyboard: [] },
+      });
+      expect(markup.ok).toBe(true);
+      expect(fake.editedReplyMarkups).toHaveLength(1);
+
+      fake.clear();
+      expect(fake.sentPhotos).toHaveLength(0);
+      expect(fake.photoAttempts).toHaveLength(0);
+      expect(fake.editedMedia).toHaveLength(0);
+      expect(fake.editedReplyMarkups).toHaveLength(0);
+    });
+
+    it("enforces the shorter media caption limit", async () => {
+      const fake = createFakeTelegramTransport();
+
+      const failed = await fake.sendPhoto({
+        chatId: 123,
+        photo: "https://cdn.example.test/product.jpg",
+        caption: "A".repeat(1025),
+      });
+
+      expect(failed.ok).toBe(false);
+      expect(failed.error).toContain("1024");
+      expect(fake.photoAttempts[0].ok).toBe(false);
+      expect(fake.sentPhotos).toHaveLength(0);
+    });
+
+    it("posts sendPhoto, editMessageMedia and editMessageReplyMarkup", async () => {
+      const token = "media-token";
+      const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+
+      globalThis.fetch = vi.fn().mockImplementation(async (url, init) => {
+        calls.push({
+          method: String(url).split("/").at(-1) ?? "",
+          body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+        });
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({ ok: true, result: { message_id: 77 } }),
+        } as unknown as Response;
+      });
+
+      const transport = createFetchTelegramTransport(token);
+
+      const sent = await transport.sendPhoto({
+        chatId: 123,
+        photo: "https://cdn.example.test/product.jpg",
+        caption: "Product card",
+        replyMarkup: {
+          inline_keyboard: [[{ text: "Add 1", callback_data: "ca:p:1" }]],
+        },
+      });
+      expect(sent.ok).toBe(true);
+      expect(sent.messageId).toBe(77);
+
+      const media = await transport.editMessageMedia({
+        chatId: 123,
+        messageId: 77,
+        media: {
+          type: "photo",
+          media: "https://cdn.example.test/product.jpg",
+          caption: "Updated card",
+        },
+      });
+      expect(media.ok).toBe(true);
+
+      const markup = await transport.editMessageReplyMarkup({
+        chatId: 123,
+        messageId: 77,
+        replyMarkup: { inline_keyboard: [] },
+      });
+      expect(markup.ok).toBe(true);
+
+      expect(calls.map((call) => call.method)).toEqual([
+        "sendPhoto",
+        "editMessageMedia",
+        "editMessageReplyMarkup",
+      ]);
+      expect(calls[0].body.photo).toBe(
+        "https://cdn.example.test/product.jpg",
+      );
+      expect(calls[0].body.caption).toBe("Product card");
+      expect(calls[1].body.media).toMatchObject({
+        type: "photo",
+        caption: "Updated card",
+      });
+      expect(calls[2].body.reply_markup).toEqual({ inline_keyboard: [] });
+    });
+
+    it("classifies a missing media message as not_editable", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () =>
+          JSON.stringify({
+            ok: false,
+            error_code: 400,
+            description:
+              "Bad Request: There is no media in the message to edit",
+          }),
+      } as unknown as Response);
+
+      const transport = createFetchTelegramTransport("media-token");
+      const res = await transport.editMessageMedia({
+        chatId: 123,
+        messageId: 456,
+        media: {
+          type: "photo",
+          media: "https://cdn.example.test/product.jpg",
+          caption: "Card",
+        },
+      });
+
+      expect(res.ok).toBe(false);
+      expect(res.errorKind).toBe("not_editable");
+    });
+  });
 
   describe("Telegram Button Payload Validation", () => {
     it("rejects button combining url and callback_data", async () => {

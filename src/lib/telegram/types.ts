@@ -28,6 +28,26 @@ export interface TelegramContact {
   vcard?: string;
 }
 
+export interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+/**
+ * Minimal `InputMediaPhoto` representation accepted by `editMessageMedia`.
+ *
+ * The transport only sends one synthesized photo from a managed product's
+ * `imageUrl`; `file_id` strings are also valid Telegram photo identifiers.
+ */
+export interface TelegramInputMediaPhoto {
+  type: "photo";
+  media: string;
+  caption?: string;
+}
+
 export interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
@@ -35,6 +55,7 @@ export interface TelegramMessage {
   date: number;
   text?: string;
   contact?: TelegramContact;
+  photo?: TelegramPhotoSize[];
   reply_markup?: TelegramInlineKeyboardMarkup;
   reply_to_message?: {
     message_id: number;
@@ -126,10 +147,30 @@ export interface TelegramTransport {
     replyMarkup?: TelegramReplyMarkup;
   }): Promise<TelegramSendResult>;
 
+  sendPhoto(params: {
+    chatId: number | string;
+    photo: string;
+    caption?: string;
+    replyMarkup?: TelegramInlineKeyboardMarkup;
+  }): Promise<TelegramSendResult>;
+
   editMessageText(params: {
     chatId: number | string;
     messageId: number;
     text: string;
+    replyMarkup?: TelegramInlineKeyboardMarkup;
+  }): Promise<TelegramSendResult>;
+
+  editMessageMedia(params: {
+    chatId: number | string;
+    messageId: number;
+    media: TelegramInputMediaPhoto;
+    replyMarkup?: TelegramInlineKeyboardMarkup;
+  }): Promise<TelegramSendResult>;
+
+  editMessageReplyMarkup(params: {
+    chatId: number | string;
+    messageId: number;
     replyMarkup?: TelegramInlineKeyboardMarkup;
   }): Promise<TelegramSendResult>;
 
