@@ -33,6 +33,11 @@ import { appUser, store } from "./tenant";
  * id per connection are enforced by the database.
  */
 
+export type TelegramLinkAttemptPurpose = "store_bot" | "notification_bot";
+
+export const TELEGRAM_LINK_ATTEMPT_PURPOSES: readonly TelegramLinkAttemptPurpose[] =
+  ["store_bot", "notification_bot"];
+
 export type TelegramLinkAttemptStatus =
   | "pending"
   | "provisioning"
@@ -83,6 +88,7 @@ export const telegramLinkAttempt = pgTable(
     merchantUserId: uuid("merchant_user_id")
       .notNull()
       .references(() => appUser.id, { onDelete: "restrict" }),
+    purpose: text("purpose").$type<TelegramLinkAttemptPurpose>().notNull().default("store_bot"),
     managerBotUsername: text("manager_bot_username").notNull(),
     nonceDigest: text("nonce_digest").notNull(),
     nonceCiphertext: text("nonce_ciphertext").notNull(),
@@ -118,16 +124,20 @@ export const telegramLinkAttempt = pgTable(
     ),
     index("telegram_link_attempt_store_idx").on(table.storeId),
     index("telegram_link_attempt_telegram_user_idx").on(table.telegramUserId),
-    uniqueIndex("telegram_link_attempt_one_active_per_store_idx")
-      .on(table.storeId)
+    uniqueIndex("telegram_link_attempt_one_active_per_store_purpose_idx")
+      .on(table.storeId, table.purpose)
       .where(
         sql`${table.status} IN ('pending', 'provisioning', 'awaiting_confirmation')`,
       ),
-    uniqueIndex("telegram_link_attempt_one_active_per_user_idx")
-      .on(table.telegramUserId)
+    uniqueIndex("telegram_link_attempt_one_active_per_user_purpose_idx")
+      .on(table.telegramUserId, table.purpose)
       .where(
         sql`${table.telegramUserId} IS NOT NULL AND ${table.status} IN ('pending', 'provisioning', 'awaiting_confirmation')`,
       ),
+    check(
+      "telegram_link_attempt_purpose_check",
+      sql`${table.purpose} IN ('store_bot', 'notification_bot')`,
+    ),
     check(
       "telegram_link_attempt_nonce_digest_format_check",
       sql`${table.nonceDigest} ~ '^[0-9a-f]{64}$'`,

@@ -34,6 +34,7 @@ export * from "./commerce";
 export * from "./content";
 export * from "./customer";
 export * from "./inquiry";
+export * from "./merchant-notification-bot";
 export * from "./payment-methods";
 export * from "./seller-notifications";
 export * from "./settings";

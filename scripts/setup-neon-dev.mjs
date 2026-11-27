@@ -95,6 +95,7 @@ export const EXPECTED_TABLES = [
   "merchant_auth_throttle",
   "merchant_credential",
   "merchant_invitation",
+  "merchant_notification_bot",
   "message_template",
   "message_translation",
   "order",
@@ -140,6 +141,8 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0016_buyer_language_support",
   "0017_store_telegram_support",
   "0018_sparkling_morlun",
+  "0019_merchant_notification_bot",
+  "0020_merchant_notification_bot_managed",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);
@@ -168,8 +171,13 @@ const LANGUAGE_PREFERENCE_TABLES = new Set([
   "store_language_setting",
 ]);
 
+/** The thirty-eight-table inventory through 0018 (current baseline before 0019). */
+export const EXPECTED_TABLES_V17 = EXPECTED_TABLES.filter(
+  (t) => t !== "merchant_notification_bot",
+);
+
 /** The twenty-one domain tables present in the 0005 tenant-identity baseline. */
-export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V4 = EXPECTED_TABLES_V17.filter(
   (t) =>
     t !== "admin_login_throttle" &&
     !MERCHANT_INVITATION_TABLES.has(t) &&
@@ -183,7 +191,7 @@ export const EXPECTED_TABLES_V4 = EXPECTED_TABLES.filter(
 export const EXPECTED_TABLES_V5 = [...EXPECTED_TABLES_V4];
 
 /** The twenty-two tables present in the 0007 login-throttle baseline. */
-export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V6 = EXPECTED_TABLES_V17.filter(
   (t) =>
     !MERCHANT_INVITATION_TABLES.has(t) &&
     !MERCHANT_SESSION_TABLES.has(t) &&
@@ -196,7 +204,7 @@ export const EXPECTED_TABLES_V6 = EXPECTED_TABLES.filter(
  * The exact twenty-four-table inventory through 0008:
  * credential and invitation tables included, merchant_auth_throttle excluded.
  */
-export const EXPECTED_TABLES_V7 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V7 = EXPECTED_TABLES_V17.filter(
   (t) =>
     !MERCHANT_SESSION_TABLES.has(t) &&
     !MANAGED_TELEGRAM_TABLES.has(t) &&
@@ -205,7 +213,7 @@ export const EXPECTED_TABLES_V7 = EXPECTED_TABLES.filter(
 );
 
 /** The exact twenty-five-table inventory through 0009 (merchant_auth_throttle included). */
-export const EXPECTED_TABLES_V8 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V8 = EXPECTED_TABLES_V17.filter(
   (t) =>
     !MANAGED_TELEGRAM_TABLES.has(t) &&
     !COMMERCE_TABLES.has(t) &&
@@ -216,17 +224,17 @@ export const EXPECTED_TABLES_V8 = EXPECTED_TABLES.filter(
 export const EXPECTED_TABLES_V9 = [...EXPECTED_TABLES_V8];
 
 /** The twenty-eight-table inventory through 0011 (managed bot tables included). */
-export const EXPECTED_TABLES_V10 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V10 = EXPECTED_TABLES_V17.filter(
   (t) => !COMMERCE_TABLES.has(t) && !LANGUAGE_PREFERENCE_TABLES.has(t),
 );
 
 /** The thirty-five-table inventory through 0013 (COD tables included). */
-export const EXPECTED_TABLES_V11 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V11 = EXPECTED_TABLES_V17.filter(
   (t) => !LANGUAGE_PREFERENCE_TABLES.has(t),
 );
 
 /** The thirty-seven-table inventory through 0017 (current baseline before 0018). */
-export const EXPECTED_TABLES_V16 = EXPECTED_TABLES.filter(
+export const EXPECTED_TABLES_V16 = EXPECTED_TABLES_V17.filter(
   (t) => t !== "order_payment_claim",
 );
 
@@ -355,8 +363,23 @@ const VODAFONE_CASH_INDEXES = [
   "order_payment_claim_store_status_idx",
 ];
 
-/** Indexes the current chain requires (0013 adds the COD indexes). */
-export const EXPECTED_INDEXES = [
+const MERCHANT_NOTIFICATION_BOT_INDEXES = [
+  "merchant_notification_bot_store_unique",
+  "merchant_notification_bot_bot_id_unique",
+];
+
+const TELEGRAM_LINK_LEGACY_INDEXES = [
+  "telegram_link_attempt_one_active_per_store_idx",
+  "telegram_link_attempt_one_active_per_user_idx",
+];
+
+const TELEGRAM_LINK_PURPOSE_INDEXES = [
+  "telegram_link_attempt_one_active_per_store_purpose_idx",
+  "telegram_link_attempt_one_active_per_user_purpose_idx",
+];
+
+/** Indexes present through 0019, before the 0020 purpose indexes. */
+const EXPECTED_INDEXES_THROUGH_0019 = [
   ...EXPECTED_INDEXES_V11,
   "cart_one_active_per_store_buyer_idx",
   "cart_store_idx",
@@ -377,10 +400,27 @@ export const EXPECTED_INDEXES = [
   "order_item_order_idx",
   "product_inventory_store_idx",
   ...VODAFONE_CASH_INDEXES,
+  ...MERCHANT_NOTIFICATION_BOT_INDEXES,
 ];
 
+/** Indexes the current chain requires (0013 COD, 0018 Vodafone, 0019 bot, 0020 purpose). */
+export const EXPECTED_INDEXES = [
+  ...EXPECTED_INDEXES_THROUGH_0019.filter(
+    (name) => !TELEGRAM_LINK_LEGACY_INDEXES.includes(name),
+  ),
+  ...TELEGRAM_LINK_PURPOSE_INDEXES,
+];
+
+/** Indexes present through 0019 (notification bot included, legacy link indexes). */
+export const EXPECTED_INDEXES_V18 = EXPECTED_INDEXES_THROUGH_0019;
+
+/** Indexes present through 0018 (current baseline before 0019). */
+export const EXPECTED_INDEXES_V17 = EXPECTED_INDEXES_THROUGH_0019.filter(
+  (name) => !MERCHANT_NOTIFICATION_BOT_INDEXES.includes(name),
+);
+
 /** Indexes present through 0017 (current production baseline, before 0018). */
-export const EXPECTED_INDEXES_V16 = EXPECTED_INDEXES.filter(
+export const EXPECTED_INDEXES_V16 = EXPECTED_INDEXES_V17.filter(
   (name) => !VODAFONE_CASH_INDEXES.includes(name),
 );
 
@@ -595,10 +635,37 @@ const VODAFONE_CASH_CONSTRAINTS = [
   "order_payment_claim_decision_note_length_check",
 ];
 
-/** CHECK, foreign-key and domain constraints the current chain requires. */
-export const CRITICAL_CONSTRAINTS = [
+/** CHECK, foreign-key and domain constraints present through 0018. */
+export const CRITICAL_CONSTRAINTS_V17 = [
   ...CRITICAL_CONSTRAINTS_V16,
   ...VODAFONE_CASH_CONSTRAINTS,
+];
+
+const MERCHANT_NOTIFICATION_BOT_CONSTRAINTS = [
+  "merchant_notification_bot_bot_id_positive_check",
+  "merchant_notification_bot_bot_username_format_check",
+  "merchant_notification_bot_token_not_empty_check",
+  "merchant_notification_bot_token_key_id_format_check",
+  "merchant_notification_bot_destination_chat_id_format_check",
+  "merchant_notification_bot_pairing_state_check",
+  "merchant_notification_bot_pairing_hash_format_check",
+  "merchant_notification_bot_pairing_update_offset_check",
+  "merchant_notification_bot_pairing_candidates_array_check",
+  "merchant_notification_bot_pairing_failure_code_check",
+  "merchant_notification_bot_pairing_failure_state_check",
+  "merchant_notification_bot_verified_requires_destination_check",
+  "merchant_notification_bot_store_id_store_id_fk",
+];
+
+const TELEGRAM_LINK_PURPOSE_CONSTRAINTS = [
+  "telegram_link_attempt_purpose_check",
+];
+
+/** CHECK, foreign-key and domain constraints the current chain requires. */
+export const CRITICAL_CONSTRAINTS = [
+  ...CRITICAL_CONSTRAINTS_V17,
+  ...MERCHANT_NOTIFICATION_BOT_CONSTRAINTS,
+  ...TELEGRAM_LINK_PURPOSE_CONSTRAINTS,
 ];
 
 /** Notification update triggers created by migration 0003. */

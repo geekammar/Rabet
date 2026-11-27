@@ -84,7 +84,9 @@ import {
   CRITICAL_CONSTRAINTS_V12,
   CRITICAL_CONSTRAINTS_V13,
   CRITICAL_CONSTRAINTS_V14,
+  CRITICAL_CONSTRAINTS_V15,
   CRITICAL_CONSTRAINTS_V16,
+  CRITICAL_CONSTRAINTS_V17,
   EXPECTED_INDEXES,
   EXPECTED_INDEXES_V1,
   EXPECTED_INDEXES_V2,
@@ -97,6 +99,7 @@ import {
   EXPECTED_INDEXES_V9,
   EXPECTED_INDEXES_V10,
   EXPECTED_INDEXES_V16,
+  EXPECTED_INDEXES_V17,
   EXPECTED_NOTIFICATION_TRIGGERS,
   EXPECTED_TABLES,
   EXPECTED_TABLES_V1,
@@ -111,6 +114,7 @@ import {
   EXPECTED_TABLES_V10,
   EXPECTED_TABLES_V11,
   EXPECTED_TABLES_V16,
+  EXPECTED_TABLES_V17,
   EXPECTED_TREE_FKS,
   QUERIES,
   buildChildEnv,
@@ -1410,6 +1414,28 @@ export async function runProdActions({
         }
       } else if (
         inspected.state.status === "partial" &&
+        inspected.state.appliedCount === 19 &&
+        inspected.state.pending[0] === "0019_merchant_notification_bot"
+      ) {
+        header("Validating prior release schema on target (read-only)");
+        const validated = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V17,
+          expectedIndexes: EXPECTED_INDEXES_V17,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V17,
+          expectedHashes: ctx.committedHashes.slice(0, 19).map((e) => e.hash),
+        });
+        if (!validated) {
+          io.line("");
+          io.line(
+            "  FAIL Inspection validation checks failed. Target has 19 migrations recorded, " +
+              "but live schema does not match the supported prior release (0018_sparkling_morlun).",
+          );
+          ctx.outcome = "manual-review";
+          ctx.ok = false;
+          return finalize(ctx);
+        }
+      } else if (
+        inspected.state.status === "partial" &&
         inspected.state.appliedCount === 17 &&
         inspected.state.pending[0] === "0017_store_telegram_support"
       ) {
@@ -1417,7 +1443,7 @@ export async function runProdActions({
         const validated = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V16,
           expectedIndexes: EXPECTED_INDEXES_V16,
-          expectedConstraints: CRITICAL_CONSTRAINTS_V16,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V15,
           expectedHashes: ctx.committedHashes.slice(0, 17).map((e) => e.hash),
         });
         if (!validated) {
@@ -1792,6 +1818,9 @@ export async function runProdActions({
     let isSupportedUpgrade = false;
 
     if (inspected.state.status === "partial") {
+      const isKnownPriorReleaseV18 =
+        inspected.state.appliedCount === 19 &&
+        inspected.state.pending[0] === "0019_merchant_notification_bot";
       const isKnownPriorReleaseV17 =
         inspected.state.appliedCount === 18 &&
         inspected.state.pending[0] === "0018_sparkling_morlun";
@@ -1844,7 +1873,33 @@ export async function runProdActions({
         inspected.state.appliedCount === 2 &&
         inspected.state.pending[0] === "0002_payment_methods";
 
-      if (isKnownPriorReleaseV17) {
+      if (isKnownPriorReleaseV18) {
+        header("Verifying prior release schema before migration");
+        const priorValid = await validateTarget(ctx, {
+          expectedTables: EXPECTED_TABLES_V17,
+          expectedIndexes: EXPECTED_INDEXES_V17,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V17,
+          expectedHashes: ctx.committedHashes.slice(0, 19).map((e) => e.hash),
+        });
+
+        if (priorValid) {
+          isSupportedUpgrade = true;
+          note(
+            ctx,
+            "Verified healthy prior release (0018_sparkling_morlun). " +
+              "Proceeding with migration to 0019_merchant_notification_bot.",
+          );
+        } else {
+          io.line("");
+          io.line(
+            `FAIL Database has ${inspected.state.appliedCount} of ${inspected.state.journalCount} ` +
+              "migrations applied, but does not match the verified prior release schema. " +
+              "Refusing to write to an unverified or damaged schema.",
+          );
+          ctx.outcome = "manual-review";
+          return finalize(ctx);
+        }
+      } else if (isKnownPriorReleaseV17) {
         header("Verifying prior release schema before migration");
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V16,
@@ -1858,7 +1913,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0017_store_telegram_support). " +
-              "Proceeding with migration to 0018_sparkling_morlun.",
+              "Proceeding with migration to 0019_merchant_notification_bot.",
           );
         } else {
           io.line("");
@@ -1875,7 +1930,7 @@ export async function runProdActions({
         const priorValid = await validateTarget(ctx, {
           expectedTables: EXPECTED_TABLES_V16,
           expectedIndexes: EXPECTED_INDEXES_V16,
-          expectedConstraints: CRITICAL_CONSTRAINTS_V16,
+          expectedConstraints: CRITICAL_CONSTRAINTS_V15,
           expectedHashes: ctx.committedHashes.slice(0, 17).map((e) => e.hash),
         });
 
@@ -1884,7 +1939,7 @@ export async function runProdActions({
           note(
             ctx,
             "Verified healthy prior release (0016_buyer_language_support). " +
-              "Proceeding with migration to 0018_sparkling_morlun.",
+              "Proceeding with migration to 0019_merchant_notification_bot.",
           );
         } else {
           io.line("");

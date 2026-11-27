@@ -77,6 +77,21 @@ export function buildTelegramLaunchFallbackUrl(origin: string): string {
   return url.toString();
 }
 
+export function buildNotificationTelegramLaunchTarget(
+  httpsUrl: string,
+  origin: string | null,
+): string {
+  const fallbackPath =
+    "/app/setup#notification-bot-start-error=TELEGRAM_LAUNCH_FAILED";
+
+  if (!origin) return fallbackPath;
+
+  return buildAndroidTelegramLaunchTarget(
+    httpsUrl,
+    new URL(fallbackPath, origin).toString(),
+  );
+}
+
 export function isAndroidUserAgent(
   userAgent: string | null | undefined,
 ): boolean {

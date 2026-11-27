@@ -126,3 +126,15 @@ export function suggestedBotUsername(storeSlug: string): string {
   const withPrefix = base.length > 0 ? `rabet_${base}` : "rabet_store";
   return `${withPrefix.slice(0, 28)}_bot`.slice(0, 32);
 }
+
+/** Suggests a distinct Telegram-valid username for the notification bot. */
+export function suggestedNotificationBotUsername(storeSlug: string): string {
+  const base = storeSlug
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 22);
+
+  const withPrefix = base.length > 0 ? `rabet_${base}_notify` : "rabet_notify";
+  return `${withPrefix.slice(0, 27)}_bot`.slice(0, 32);
+}

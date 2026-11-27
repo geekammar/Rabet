@@ -46,9 +46,9 @@ describe.skipIf(!shouldRun)("migration chain", () => {
     }>(sql`select count(*)::int as count from information_schema.tables
       where table_schema = 'public'`);
 
-    // The thirty-eight domain tables. `__drizzle_migrations` lives in the
+    // The thirty-nine domain tables. `__drizzle_migrations` lives in the
     // separate `drizzle` schema and is not counted here.
-    expect(rows[0].count).toBe(38);
+    expect(rows[0].count).toBe(39);
   });
 
   it("records every migration in the journal", async () => {
@@ -56,7 +56,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
       sql`select count(*)::int as count from drizzle.__drizzle_migrations`,
     );
 
-    expect(rows[0].count).toBe(19);
+    expect(rows[0].count).toBe(21);
   });
 
   it("re-applying the chain is a no-op that duplicates no objects", async () => {
@@ -87,7 +87,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
     expect(names).toContain("product_action_check_ancestry");
     expect(names).toContain("product_action_guard_menu_capability");
     expect(names).toContain("inquiry_freeze_context");
-    expect(names.filter((name) => name.endsWith("_touch_updated_at")).length).toBe(29);
+    expect(names.filter((name) => name.endsWith("_touch_updated_at")).length).toBe(30);
   });
 
   it("creates the partial unique indexes that enforce sibling ordering", async () => {
@@ -165,7 +165,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
     // applied before this run, so the journal still holds them — the point is
     // that the broken migration was *not* recorded and built nothing.
     expect(probes[0].count).toBe(0);
-    expect(applied[0].count).toBe(19);
+    expect(applied[0].count).toBe(21);
 
     // The committed schema is intact, not half-dropped.
     const tables = await db.execute<{ count: number }>(
@@ -173,7 +173,7 @@ describe.skipIf(!shouldRun)("migration chain", () => {
         where table_schema = 'public'`,
     );
 
-    expect(tables[0].count).toBe(38);
+    expect(tables[0].count).toBe(39);
 
     await pool.end();
     rmSync(path.dirname(broken), { recursive: true, force: true });

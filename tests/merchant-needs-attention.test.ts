@@ -34,6 +34,10 @@ vi.mock("@/components/merchant/merchant-telegram-connection", () => ({
   MerchantTelegramConnection: () => null,
 }));
 
+vi.mock("@/components/merchant/merchant-notification-bot", () => ({
+  MerchantNotificationBot: () => null,
+}));
+
 const { MerchantNeedsAttention } = await import(
   "@/components/merchant/merchant-needs-attention"
 );
@@ -224,6 +228,7 @@ describe("Merchant setup entry point", () => {
         needsAttentionTransferTotal: 0,
         storeDefaultLanguageCode: "en",
         telegramSupportUsername: null,
+        notificationBot: { supported: true, state: null, managed: null },
         ...overrides,
       }),
     );

@@ -1,0 +1,6 @@
+DROP INDEX "telegram_link_attempt_one_active_per_store_idx";--> statement-breakpoint
+DROP INDEX "telegram_link_attempt_one_active_per_user_idx";--> statement-breakpoint
+ALTER TABLE "telegram_link_attempt" ADD COLUMN "purpose" text DEFAULT 'store_bot' NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "telegram_link_attempt_one_active_per_store_purpose_idx" ON "telegram_link_attempt" USING btree ("store_id","purpose") WHERE "telegram_link_attempt"."status" IN ('pending', 'provisioning', 'awaiting_confirmation');--> statement-breakpoint
+CREATE UNIQUE INDEX "telegram_link_attempt_one_active_per_user_purpose_idx" ON "telegram_link_attempt" USING btree ("telegram_user_id","purpose") WHERE "telegram_link_attempt"."telegram_user_id" IS NOT NULL AND "telegram_link_attempt"."status" IN ('pending', 'provisioning', 'awaiting_confirmation');--> statement-breakpoint
+ALTER TABLE "telegram_link_attempt" ADD CONSTRAINT "telegram_link_attempt_purpose_check" CHECK ("telegram_link_attempt"."purpose" IN ('store_bot', 'notification_bot'));

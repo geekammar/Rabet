@@ -15,7 +15,10 @@ import {
   listMerchantOrdersAwaitingAcceptance,
   listMerchantTransfersAwaitingReview,
 } from "@/lib/commerce/orders";
-import { readVodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
+import {
+  checkMerchantNotificationBotCapability,
+  readMerchantNotificationBotState,
+} from "@/lib/data/merchant-notification-bot";
 import { readStoreDefaultLanguage } from "@/lib/data/store-language";
 import { readStoreTelegramSupportUsername } from "@/lib/data/store-telegram-contact";
 import { trustedApplicationOrigin } from "@/lib/http/request-origin";
@@ -23,7 +26,11 @@ import {
   readMerchantLocale,
   merchantPageMetadata,
 } from "@/lib/merchant/locale-server";
-import { readMerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
+import { readVodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
+import {
+  readMerchantNotificationManagedAttemptState,
+  readMerchantTelegramConnectionState,
+} from "@/lib/telegram/manager-provisioning";
 
 export async function generateMetadata(): Promise<Metadata> {
   return merchantPageMetadata("setup", "Set up your Rabet store.");
@@ -54,6 +61,7 @@ export default async function MerchantSetupPage() {
     needsAttentionTransfers,
     needsAttentionTransferTotal,
     vodafoneCashSetting,
+    notificationBotCapability,
   ] = await Promise.all([
     readMerchantTelegramConnectionState(db, {
       scope: access.scope,
@@ -67,7 +75,20 @@ export default async function MerchantSetupPage() {
     listMerchantTransfersAwaitingReview(db, access.scope),
     countMerchantTransfersAwaitingReview(db, access.scope),
     readVodafoneCashSetting(db, access.scope),
+    checkMerchantNotificationBotCapability(db),
   ]);
+
+  const notificationBotState = notificationBotCapability.supported
+    ? await readMerchantNotificationBotState(db, access.store.id)
+    : null;
+
+  const notificationBotManaged =
+    notificationBotCapability.supported && !notificationBotState
+      ? await readMerchantNotificationManagedAttemptState(db, {
+          storeId: access.store.id,
+          merchantUserId: access.userId,
+        })
+      : null;
 
   return (
     <MerchantSetup
@@ -87,6 +108,11 @@ export default async function MerchantSetupPage() {
       vodafoneCashSetting={vodafoneCashSetting}
       storeDefaultLanguageCode={storeDefaultLanguage?.code === "ar" ? "ar" : "en"}
       telegramSupportUsername={telegramSupportUsername}
+      notificationBot={{
+        supported: notificationBotCapability.supported,
+        state: notificationBotState,
+        managed: notificationBotManaged,
+      }}
     />
   );
 }
