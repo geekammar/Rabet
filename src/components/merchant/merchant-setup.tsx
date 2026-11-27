@@ -255,6 +255,8 @@ export function MerchantSetup({
   codOrdersEnabled,
   needsAttentionOrders,
   needsAttentionTotal,
+  needsAttentionTransfers = [],
+  needsAttentionTransferTotal = 0,
   vodafoneCashSetting,
   storeDefaultLanguageCode,
   telegramSupportUsername,
@@ -270,6 +272,8 @@ export function MerchantSetup({
   codOrdersEnabled: boolean;
   needsAttentionOrders: MerchantNeedsAttentionOrder[];
   needsAttentionTotal: number;
+  needsAttentionTransfers?: MerchantNeedsAttentionOrder[];
+  needsAttentionTransferTotal?: number;
   vodafoneCashSetting: VodafoneCashSetting | null;
   storeDefaultLanguageCode: "ar" | "en";
   telegramSupportUsername: string | null;
@@ -462,11 +466,15 @@ export function MerchantSetup({
           </dl>
         </section>
 
-        {codOrdersEnabled || needsAttentionTotal > 0 ? (
+        {codOrdersEnabled ||
+        needsAttentionTotal > 0 ||
+        needsAttentionTransferTotal > 0 ? (
           <MerchantNeedsAttention
             locale={locale}
             orders={needsAttentionOrders}
             totalPending={needsAttentionTotal}
+            transferOrders={needsAttentionTransfers}
+            totalTransfersPending={needsAttentionTransferTotal}
           />
         ) : null}
 
