@@ -18,6 +18,7 @@ import {
   product,
   productAction,
   productActionTranslation,
+  productInventory,
   productTranslation,
   store,
   storeMembership,
@@ -97,6 +98,8 @@ export interface CatalogProductRecord {
 export interface CatalogProductRecordWithRevision extends CatalogProductRecord {
   /** Exact microsecond UTC `updated_at` revision, never a JavaScript Date. */
   revision: string;
+  /** Optional external image reference; never a publish requirement. */
+  imageUrl: string | null;
   /** Whether the product's non-deleted same-store category is active. */
   categoryIsActive: boolean;
   /** Whether the full same-store category path is active and traversable. */
@@ -538,7 +541,8 @@ export async function listCatalogProductsForStore(
         sortOrder: product.sortOrder,
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
-        revision: productRevisionSql(),
+        revision: catalogProductRevisionSql(),
+        imageUrl: product.imageUrl,
         categoryIsActive: category.isActive,
         translationId: productTranslation.id,
         translationLanguageId: productTranslation.languageId,
@@ -585,6 +589,7 @@ export async function listCatalogProductsForStore(
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
           revision: row.revision,
+          imageUrl: row.imageUrl,
           categoryIsActive: row.categoryIsActive,
           categoryPathVisible: false,
           translations: {},
@@ -642,6 +647,207 @@ export async function listCatalogProductsForStore(
     }
 
     return [...products.values()];
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+export type ProductInventoryRecord = {
+  productId: string;
+  onHand: number;
+  reserved: number;
+};
+
+export async function listProductInventoryForStore(
+  db: Database,
+  scope: StoreScope,
+): Promise<ProductInventoryRecord[]> {
+  assertStoreScope(scope);
+
+  try {
+    return await db
+      .select({
+        productId: productInventory.productId,
+        onHand: productInventory.onHand,
+        reserved: productInventory.reserved,
+      })
+      .from(productInventory)
+      .where(eq(productInventory.storeId, scope.storeId));
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+export type MerchantProductEditRecord = {
+  id: string;
+  categoryId: string;
+  slug: string;
+  price: string;
+  imageUrl: string | null;
+  isActive: boolean;
+  revision: string;
+  categoryIsActive: boolean;
+  categoryPathVisible: boolean;
+  inventory: { onHand: number; reserved: number } | null;
+  translations: Record<
+    string,
+    {
+      languageId: string;
+      name: string;
+      description: string | null;
+      details: string | null;
+    }
+  >;
+};
+
+/**
+ * Reads one merchant-owned product for the draft edit form.
+ *
+ * The row is bound to the trusted store scope, so a foreign product yields
+ * `null`. Reads stay available for a suspended (read-only) store; the write
+ * path re-checks eligibility before changing anything.
+ */
+export async function readCatalogProductForMerchantEdit(
+  db: Database,
+  scope: StoreScope,
+  productId: string,
+): Promise<MerchantProductEditRecord | null> {
+  assertStoreScope(scope);
+
+  try {
+    const rows = await db
+      .select({
+        id: product.id,
+        categoryId: product.categoryId,
+        slug: product.slug,
+        price: product.price,
+        imageUrl: product.imageUrl,
+        isActive: product.isActive,
+        revision: catalogProductRevisionSql(),
+        categoryIsActive: category.isActive,
+      })
+      .from(product)
+      .innerJoin(
+        category,
+        and(
+          eq(product.categoryId, category.id),
+          eq(category.storeId, scope.storeId),
+        ),
+      )
+      .where(storeOwnedProductWhere(db, scope, productId))
+      .limit(1);
+
+    const row = rows[0];
+
+    if (!row) return null;
+
+    const categoryRows = await db
+      .select({
+        id: category.id,
+        parentId: category.parentId,
+        isActive: category.isActive,
+        deletedAt: category.deletedAt,
+      })
+      .from(category)
+      .where(eq(category.storeId, scope.storeId));
+    const categoryById = new Map(
+      categoryRows.map((entry) => [entry.id, entry]),
+    );
+    const categoryPathVisible = isCategoryAncestryActive(
+      row.categoryId,
+      (id) => {
+        const entry = categoryById.get(id);
+        return entry && entry.deletedAt === null ? entry : undefined;
+      },
+    );
+
+    const [inventory] = await db
+      .select({
+        onHand: productInventory.onHand,
+        reserved: productInventory.reserved,
+      })
+      .from(productInventory)
+      .where(
+        and(
+          eq(productInventory.productId, productId),
+          eq(productInventory.storeId, scope.storeId),
+        ),
+      )
+      .limit(1);
+
+    const translationRows = await db
+      .select({
+        languageId: productTranslation.languageId,
+        code: language.code,
+        name: productTranslation.name,
+        description: productTranslation.description,
+        details: productTranslation.details,
+      })
+      .from(productTranslation)
+      .innerJoin(language, eq(language.id, productTranslation.languageId))
+      .where(eq(productTranslation.productId, productId));
+    const translations: MerchantProductEditRecord["translations"] = {};
+
+    for (const translation of translationRows) {
+      translations[translation.code] = {
+        languageId: translation.languageId,
+        name: translation.name,
+        description: translation.description,
+        details: translation.details,
+      };
+    }
+
+    return {
+      id: row.id,
+      categoryId: row.categoryId,
+      slug: row.slug,
+      price: row.price,
+      imageUrl: row.imageUrl,
+      isActive: row.isActive,
+      revision: row.revision,
+      categoryIsActive: row.categoryIsActive,
+      categoryPathVisible,
+      inventory: inventory ?? null,
+      translations,
+    };
+  } catch (error) {
+    throw mapDatabaseError(error);
+  }
+}
+
+export type MerchantProductDetailsWriteResult = {
+  revision: string;
+};
+
+/**
+ * Sets the optional image reference only while the product still belongs to
+ * this store, the merchant eligibility still holds and the expected revision
+ * is current. The shared `updated_at` trigger supplies the next revision.
+ */
+export async function updateCatalogProductImageForMerchant(
+  db: Database,
+  scope: StoreScope,
+  identity: MerchantPriceWriteIdentity,
+  productId: string,
+  imageUrl: string | null,
+  expectedRevision: string,
+): Promise<MerchantProductDetailsWriteResult | null> {
+  assertStoreScope(scope);
+
+  try {
+    const updated = await db
+      .update(product)
+      .set({ imageUrl })
+      .where(
+        and(
+          storeOwnedProductWhere(db, scope, productId),
+          merchantWriteEligibilityWhere(db, scope, identity),
+          eq(catalogProductRevisionSql(), expectedRevision),
+        ),
+      )
+      .returning({ revision: catalogProductRevisionSql() });
+
+    return updated[0] ?? null;
   } catch (error) {
     throw mapDatabaseError(error);
   }
@@ -774,7 +980,7 @@ export async function updateCatalogProductPriceForStore(
 }
 
 /** The exact UTC revision expression shared by reads and guarded writes. */
-function productRevisionSql() {
+export function catalogProductRevisionSql() {
   return sql<string>`to_char(${product.updatedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 }
 
@@ -892,12 +1098,12 @@ export async function updateCatalogProductPriceForMerchant(
         and(
           storeOwnedProductWhere(db, scope, productId),
           merchantWriteEligibilityWhere(db, scope, identity),
-          eq(productRevisionSql(), expectedRevision),
+          eq(catalogProductRevisionSql(), expectedRevision),
         ),
       )
       .returning({
         price: product.price,
-        revision: productRevisionSql(),
+        revision: catalogProductRevisionSql(),
       });
 
     return updated[0] ?? null;
@@ -926,7 +1132,7 @@ export async function readCatalogProductPriceForMerchant(
     const rows = await db
       .select({
         price: product.price,
-        revision: productRevisionSql(),
+        revision: catalogProductRevisionSql(),
       })
       .from(product)
       .where(
@@ -980,12 +1186,12 @@ export async function updateCatalogProductAvailabilityForMerchant(
         and(
           storeOwnedProductWhere(db, scope, productId),
           merchantWriteEligibilityWhere(db, scope, identity),
-          eq(productRevisionSql(), expectedRevision),
+          eq(catalogProductRevisionSql(), expectedRevision),
         ),
       )
       .returning({
         isActive: product.isActive,
-        revision: productRevisionSql(),
+        revision: catalogProductRevisionSql(),
       });
 
     return updated[0] ?? null;
@@ -1014,7 +1220,7 @@ export async function readCatalogProductAvailabilityForMerchant(
     const rows = await db
       .select({
         isActive: product.isActive,
-        revision: productRevisionSql(),
+        revision: catalogProductRevisionSql(),
       })
       .from(product)
       .where(

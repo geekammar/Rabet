@@ -5,6 +5,7 @@ const state = vi.hoisted(() => ({
   getMerchantAccess: vi.fn(),
   updateMerchantCatalogProductPrice: vi.fn(),
   updateMerchantCatalogProductAvailability: vi.fn(),
+  publishMerchantCatalogProduct: vi.fn(),
   updateMerchantCatalogCategoryAvailability: vi.fn(),
   refresh: vi.fn(),
   revalidatePath: vi.fn(),
@@ -24,6 +25,14 @@ vi.mock("@/lib/merchant/catalog", () => ({
     state.updateMerchantCatalogProductAvailability,
 }));
 
+vi.mock("@/lib/merchant/product-publish", () => ({
+  publishMerchantCatalogProduct: state.publishMerchantCatalogProduct,
+}));
+
+vi.mock("@/lib/merchant/product-edit", () => ({
+  updateMerchantCatalogProductDraft: vi.fn(),
+}));
+
 vi.mock("@/lib/merchant/category", () => ({
   updateMerchantCatalogCategoryAvailability:
     state.updateMerchantCatalogCategoryAvailability,
@@ -38,6 +47,7 @@ const {
   saveMerchantProductPrice,
   saveMerchantProductAvailability,
   saveMerchantCategoryAvailability,
+  publishMerchantProduct,
 } = await import("@/app/actions/merchant-catalog");
 
 const REVISION = "2026-11-19T22:42:44.123456Z";
@@ -188,9 +198,9 @@ describe("merchant catalog availability action", () => {
     expect(state.updateMerchantCatalogProductAvailability).not.toHaveBeenCalled();
   });
 
-  it("reads only productId, isActive and revision, ignoring submitted ownership fields, and refreshes on success", async () => {
+  it("routes an availability enable through the readiness-gated publish path", async () => {
     state.getMerchantAccess.mockResolvedValueOnce(access);
-    state.updateMerchantCatalogProductAvailability.mockResolvedValueOnce({
+    state.publishMerchantCatalogProduct.mockResolvedValueOnce({
       ok: true,
       productId: "33333333-3333-4333-8333-333333333333",
       isActive: true,
@@ -212,15 +222,15 @@ describe("merchant catalog availability action", () => {
       isActive: true,
       revision: REVISION,
     });
-    expect(state.updateMerchantCatalogProductAvailability).toHaveBeenCalledWith(
+    expect(state.publishMerchantCatalogProduct).toHaveBeenCalledWith(
       { kind: "application-db" },
       access,
       {
         productId: "33333333-3333-4333-8333-333333333333",
-        isActive: true,
         revision: REVISION,
       },
     );
+    expect(state.updateMerchantCatalogProductAvailability).not.toHaveBeenCalled();
     expect(state.refresh).toHaveBeenCalledTimes(1);
   });
 
@@ -249,7 +259,7 @@ describe("merchant catalog availability action", () => {
 
   it("returns an authorized conflict without refreshing or leaking a target state", async () => {
     state.getMerchantAccess.mockResolvedValueOnce(access);
-    state.updateMerchantCatalogProductAvailability.mockResolvedValueOnce({
+    state.publishMerchantCatalogProduct.mockResolvedValueOnce({
       ok: false,
       error: "CONFLICT",
       current: { isActive: false, revision: REVISION },
@@ -271,7 +281,7 @@ describe("merchant catalog availability action", () => {
 
   it("returns a safe not-found failure without refreshing for a foreign or missing product", async () => {
     state.getMerchantAccess.mockResolvedValueOnce(access);
-    state.updateMerchantCatalogProductAvailability.mockResolvedValueOnce({
+    state.publishMerchantCatalogProduct.mockResolvedValueOnce({
       ok: false,
       error: "NOT_FOUND",
     });
@@ -284,6 +294,68 @@ describe("merchant catalog availability action", () => {
 
     expect(result).toEqual({ ok: false, error: "NOT_FOUND" });
     expect(state.refresh).not.toHaveBeenCalled();
+  });
+
+  it("returns readiness reasons from the explicit publish action without setting isActive on the client", async () => {
+    state.getMerchantAccess.mockResolvedValueOnce(access);
+    state.publishMerchantCatalogProduct.mockResolvedValueOnce({
+      ok: false,
+      error: "NOT_READY",
+      reasons: ["OUT_OF_STOCK", "STORE_BOT_NOT_CONNECTED"],
+    });
+
+    const result = await publishMerchantProduct({
+      productId: "33333333-3333-4333-8333-333333333333",
+      revision: REVISION,
+      isActive: false,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "NOT_READY",
+      reasons: ["OUT_OF_STOCK", "STORE_BOT_NOT_CONNECTED"],
+    });
+    expect(state.publishMerchantCatalogProduct).toHaveBeenCalledWith(
+      { kind: "application-db" },
+      access,
+      {
+        productId: "33333333-3333-4333-8333-333333333333",
+        revision: REVISION,
+      },
+    );
+    expect(state.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("merchant product publish action — authorization", () => {
+  beforeEach(() => {
+    vi.stubEnv("RABET_MERCHANT_APP_ENABLED", "true");
+  });
+
+  it("denies publishing without a verified merchant session", async () => {
+    state.getMerchantAccess.mockResolvedValueOnce(null);
+
+    const result = await publishMerchantProduct({
+      productId: "33333333-3333-4333-8333-333333333333",
+      revision: REVISION,
+    });
+
+    expect(result).toEqual({ ok: false, error: "DENIED" });
+    expect(state.getDb).not.toHaveBeenCalled();
+    expect(state.publishMerchantCatalogProduct).not.toHaveBeenCalled();
+  });
+
+  it("does nothing while the merchant app is disabled", async () => {
+    vi.stubEnv("RABET_MERCHANT_APP_ENABLED", "false");
+
+    const result = await publishMerchantProduct({
+      productId: "33333333-3333-4333-8333-333333333333",
+      revision: REVISION,
+    });
+
+    expect(result).toEqual({ ok: false, error: "UNAVAILABLE" });
+    expect(state.getMerchantAccess).not.toHaveBeenCalled();
+    expect(state.publishMerchantCatalogProduct).not.toHaveBeenCalled();
   });
 });
 

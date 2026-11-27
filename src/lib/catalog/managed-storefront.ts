@@ -8,6 +8,7 @@ import {
   categoryTranslation,
   language,
   product,
+  productInventory,
   productTranslation,
 } from "@/db/schema";
 import { assertStoreScope, type StoreScope } from "@/lib/data/store-scope";
@@ -41,6 +42,8 @@ type ScopedProductRow = {
   slug: string;
   price: string;
   sortOrder: number;
+  imageUrl: string | null;
+  available: number;
 };
 
 type LoadedCatalog = {
@@ -48,6 +51,20 @@ type LoadedCatalog = {
   categoryById: Map<string, ScopedCategoryRow>;
   eligibleCategoryIds: Set<string>;
 };
+
+export type ManagedProductAvailability = {
+  available: number;
+  inStock: boolean;
+};
+
+/**
+ * Buyer reads exclude drafts and category-ineligible rows. `merchant-preview`
+ * is the same reader with those two visibility predicates lifted, so the
+ * authenticated merchant can inspect a draft through the exact buyer content
+ * resolution. It still requires the trusted `StoreScope` and never crosses
+ * stores.
+ */
+export type ManagedProductReadMode = "buyer" | "merchant-preview";
 
 /**
  * Merchant-entered catalog content is not buyer-UI-localized.
@@ -84,6 +101,8 @@ export type ManagedProductPage = {
     price: string;
     name: string;
     description: string | null;
+    imageUrl: string | null;
+    availability: ManagedProductAvailability;
   }>;
   totalCount: number;
   page: number;
@@ -105,11 +124,29 @@ export type ManagedProduct = {
   name: string;
   description: string | null;
   details: string | null;
+  imageUrl: string | null;
+  availability: ManagedProductAvailability;
 };
+
+function availabilityFor(
+  onHand: number | null,
+  reserved: number | null,
+): ManagedProductAvailability {
+  const available = onHand === null ? 0 : Math.max(0, onHand - (reserved ?? 0));
+
+  return { available, inStock: available > 0 };
+}
+
+function availabilityFromAvailable(
+  available: number,
+): ManagedProductAvailability {
+  return { available, inStock: available > 0 };
+}
 
 async function loadCatalog(
   db: Database,
   scope: StoreScope,
+  mode: ManagedProductReadMode = "buyer",
 ): Promise<LoadedCatalog> {
   assertStoreScope(scope);
 
@@ -132,15 +169,35 @@ async function loadCatalog(
       slug: product.slug,
       price: product.price,
       sortOrder: product.sortOrder,
+      imageUrl: product.imageUrl,
+      onHand: productInventory.onHand,
+      reserved: productInventory.reserved,
     })
     .from(product)
+    .leftJoin(
+      productInventory,
+      and(
+        eq(productInventory.productId, product.id),
+        eq(productInventory.storeId, scope.storeId),
+      ),
+    )
     .where(
       and(
         eq(product.storeId, scope.storeId),
-        eq(product.isActive, true),
+        ...(mode === "buyer" ? [eq(product.isActive, true)] : []),
         isNull(product.deletedAt),
       ),
     );
+
+  const productRows: ScopedProductRow[] = products.map((row) => ({
+    id: row.id,
+    categoryId: row.categoryId,
+    slug: row.slug,
+    price: row.price,
+    sortOrder: row.sortOrder,
+    imageUrl: row.imageUrl,
+    available: availabilityFor(row.onHand, row.reserved).available,
+  }));
 
   const categoryById = new Map(categories.map((row) => [row.id, row]));
   const categoryEligibility = new Map<string, boolean>();
@@ -184,18 +241,19 @@ async function loadCatalog(
     return ids;
   }
 
-  const eligibleProducts = products.filter((row) =>
-    isCategoryEligible(row.categoryId),
-  );
+  const visibleProducts =
+    mode === "buyer"
+      ? productRows.filter((row) => isCategoryEligible(row.categoryId))
+      : productRows;
 
   const eligibleCategoryIds = new Set<string>();
-  for (const row of eligibleProducts) {
+  for (const row of visibleProducts) {
     for (const id of categoryAncestryIds(row.categoryId)) {
       eligibleCategoryIds.add(id);
     }
   }
 
-  return { products: eligibleProducts, categoryById, eligibleCategoryIds };
+  return { products: visibleProducts, categoryById, eligibleCategoryIds };
 }
 
 function compareStrings(a: string, b: string): number {
@@ -340,6 +398,8 @@ export async function listManagedProducts(
       price: row.price,
       name: names.get(row.id) ?? row.slug,
       description: descriptions.get(row.id) ?? null,
+      imageUrl: row.imageUrl,
+      availability: availabilityFromAvailable(row.available),
     })),
   };
 }
@@ -410,6 +470,8 @@ export async function listManagedProductsInCategory(
       price: row.price,
       name: names.get(row.id) ?? row.slug,
       description: descriptions.get(row.id) ?? null,
+      imageUrl: row.imageUrl,
+      availability: availabilityFromAvailable(row.available),
     })),
   };
 }
@@ -419,8 +481,9 @@ export async function readManagedProduct(
   scope: StoreScope,
   productId: string,
   catalogContentPlan?: ManagedCatalogContentPlan,
+  options?: { mode?: ManagedProductReadMode },
 ): Promise<ManagedProduct | null> {
-  const loaded = await loadCatalog(db, scope);
+  const loaded = await loadCatalog(db, scope, options?.mode ?? "buyer");
   const row = loaded.products.find((productRow) => productRow.id === productId);
 
   if (!row) return null;
@@ -458,6 +521,8 @@ export async function readManagedProduct(
     name: preferred?.name ?? row.slug,
     description: preferred?.description ?? null,
     details: preferred?.details ?? null,
+    imageUrl: row.imageUrl,
+    availability: availabilityFromAvailable(row.available),
   };
 }
 
