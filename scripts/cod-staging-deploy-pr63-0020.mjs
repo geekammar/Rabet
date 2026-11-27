@@ -11,14 +11,24 @@ const RENDER_API_KEY = process.env.RENDER_API_KEY ?? "";
 const CONFIRM = process.env.DEPLOY_CONFIRM ?? "";
 const EXPECTED_CONFIRM = "DEPLOY_PR63_0020_COD_STAGING";
 const EXPECTED_SERVICE_NAME = "nokmel-cod-staging";
-const EXPECTED_CANDIDATE_SHA = "fc4f791b4252ac8b0486742735e7d85289851c81";
-const EXPECTED_PREVIOUS_SHA = "48be324524fd877aa995e9c0a045cb44c9eff0e3";
-const EXPECTED_PREVIOUS_DEPLOY_ID = "dep-dc4mbeff3r2c73bufrd0";
+const EXPECTED_CANDIDATE_SHA = "8b584988d4883c22fc6737ced0e27e2d6459902d";
+const EXPECTED_PREVIOUS_SHA = "fc4f791b4252ac8b0486742735e7d85289851c81";
+const EXPECTED_PREVIOUS_DEPLOY_ID = "dep-dc4rja56e07s738d1kb0";
 const REGRESSION_STORE_SLUG = "cod-pr56-store-b";
+const REGRESSION_NOTIFICATION_ATTEMPT_ID =
+  "8ac579cf-c6a0-409e-accd-a66aae0378f3";
+const REGRESSION_FAILED_NOTIFICATION_ATTEMPT_ID =
+  "ca171329-0659-4fca-8faf-c8d9bd7276d8";
+const REGRESSION_STOREFRONT_ATTEMPT_ID =
+  "84a5148c-4deb-4b96-b10e-21f560bdbe5b";
 const REGRESSION_LINK_ATTEMPT_IDS = [
-  "84a5148c-4deb-4b96-b10e-21f560bdbe5b",
-  "ca171329-0659-4fca-8faf-c8d9bd7276d8",
+  REGRESSION_NOTIFICATION_ATTEMPT_ID,
+  REGRESSION_FAILED_NOTIFICATION_ATTEMPT_ID,
+  REGRESSION_STOREFRONT_ATTEMPT_ID,
 ];
+const REGRESSION_NOTIFICATION_BOT_USERNAME =
+  "rabet_cod_pr56_store_b_noti2_bot";
+const REGRESSION_NOTIFICATION_BOT_ID = "9220548600";
 const QA_STORE_SLUG = "cod-pr56-store-a";
 const QA_WALLET_NUMBER = "+201000000062";
 const QA_ACCOUNT_NAME = "Synthetic Vodafone QA — Store A";
@@ -365,7 +375,13 @@ async function assertApplied0020(db, label) {
   if (lastTag !== EXPECTED_MIGRATION_TAG) {
     fail(`${label}: last journal tag ${String(lastTag)} is not ${EXPECTED_MIGRATION_TAG}`);
   }
-  return { count, lastHash, tag: EXPECTED_MIGRATION_TAG };
+  return {
+    count,
+    lastHash,
+    tag: EXPECTED_MIGRATION_TAG,
+    journalCount: journalEntries.length,
+    pending: journalEntries.length - count,
+  };
 }
 
 async function applyVodafoneQaFixture(db) {
@@ -657,20 +673,41 @@ async function main() {
     if (!regressionStore) {
       fail(`Regression store ${REGRESSION_STORE_SLUG} is missing`);
     }
-    const pendingStorefrontAttempt = regressionAttemptsBefore.find(
-      (row) => row.id === REGRESSION_LINK_ATTEMPT_IDS[0],
+    const expiredStorefrontAttempt = regressionAttemptsBefore.find(
+      (row) => row.id === REGRESSION_STOREFRONT_ATTEMPT_ID,
+    );
+    const notificationResumeAttempt = regressionAttemptsBefore.find(
+      (row) => row.id === REGRESSION_NOTIFICATION_ATTEMPT_ID,
     );
     const failedNotificationAttempt = regressionAttemptsBefore.find(
-      (row) => row.id === REGRESSION_LINK_ATTEMPT_IDS[1],
+      (row) => row.id === REGRESSION_FAILED_NOTIFICATION_ATTEMPT_ID,
     );
     if (
-      !pendingStorefrontAttempt ||
-      pendingStorefrontAttempt.store_id !== regressionStore.id ||
-      pendingStorefrontAttempt.purpose !== "store_bot" ||
-      pendingStorefrontAttempt.status !== "pending" ||
-      new Date(pendingStorefrontAttempt.expires_at).getTime() >= Date.now()
+      !expiredStorefrontAttempt ||
+      expiredStorefrontAttempt.store_id !== regressionStore.id ||
+      expiredStorefrontAttempt.purpose !== "store_bot" ||
+      expiredStorefrontAttempt.status !== "expired" ||
+      expiredStorefrontAttempt.failure_code !== "expired" ||
+      expiredStorefrontAttempt.telegram_bot_id !== null ||
+      expiredStorefrontAttempt.telegram_bot_username !== null ||
+      new Date(expiredStorefrontAttempt.expires_at).getTime() >= Date.now()
     ) {
-      fail("Store B expired-but-pending storefront attempt is not the expected regression fixture");
+      fail("Store B expired storefront attempt is not the expected regression fixture");
+    }
+    if (
+      !notificationResumeAttempt ||
+      notificationResumeAttempt.store_id !== regressionStore.id ||
+      notificationResumeAttempt.purpose !== "notification_bot" ||
+      !["provisioning", "expired"].includes(notificationResumeAttempt.status) ||
+      notificationResumeAttempt.failure_code === "superseded_by_manual" ||
+      notificationResumeAttempt.telegram_bot_id !==
+        REGRESSION_NOTIFICATION_BOT_ID ||
+      notificationResumeAttempt.telegram_bot_username !==
+        REGRESSION_NOTIFICATION_BOT_USERNAME ||
+      notificationResumeAttempt.telegram_user_id === null ||
+      new Date(notificationResumeAttempt.expires_at).getTime() >= Date.now()
+    ) {
+      fail("Store B resumable notification-bot proposal is not the expected regression fixture");
     }
     if (
       !failedNotificationAttempt ||
@@ -727,6 +764,14 @@ async function main() {
     );
     if (storesWithNotificationBot.has(regressionStore.id)) {
       fail("Store B regression store unexpectedly already has a notification bot");
+    }
+    const regressionConnections = await db`
+      select store_id from telegram_connection
+      where store_id = ${regressionStore.id}
+      limit 1
+    `;
+    if (regressionConnections.length > 0) {
+      fail("Store B regression store unexpectedly already has a storefront connection");
     }
     managedMerchant = await readMerchantForStore(db, regressionStore.id);
     if (!managedMerchant) {
@@ -956,31 +1001,82 @@ async function main() {
     ) {
       fail("Managed Bot smoke setup page reported the notification bot as unsupported");
     }
-    const managedBotSection = managedSetupHtml.includes(
+    const managedStorefrontStart = managedSetupHtml.indexOf(
+      'data-testid="merchant-telegram-connection"',
+    );
+    const managedNotificationStart = managedSetupHtml.indexOf(
+      'data-testid="merchant-notification-bot"',
+    );
+    if (
+      managedStorefrontStart < 0 ||
+      managedNotificationStart <= managedStorefrontStart
+    ) {
+      fail("Store B setup page did not render the storefront and notification sections in order");
+    }
+    const managedStorefrontHtml = managedSetupHtml.slice(
+      managedStorefrontStart,
+      managedNotificationStart,
+    );
+    const managedNotificationHtml = managedSetupHtml.slice(
+      managedNotificationStart,
+    );
+    const managedBotSection = managedNotificationHtml.includes(
       'data-testid="merchant-notification-bot-managed"',
     );
     if (!managedBotSection) {
-      fail("Managed Bot create section did not render on the read-only smoke page");
+      fail("Managed Bot section did not render on the read-only smoke page");
     }
-    const managedBotStartFormAction = managedSetupHtml.includes(
+    const storefrontDisplaysNotificationBot =
+      managedStorefrontHtml.includes(REGRESSION_NOTIFICATION_BOT_USERNAME) ||
+      managedStorefrontHtml.includes(
+        'data-testid="merchant-telegram-bot-username"',
+      );
+    if (storefrontDisplaysNotificationBot) {
+      fail("Store B storefront section displays the notification bot");
+    }
+    const managedBotResumeFormAction = managedNotificationHtml.includes(
+      'action="/app/setup/notification-bot/resume"',
+    );
+    const managedBotStartFormAction = managedNotificationHtml.includes(
       'action="/app/setup/notification-bot/start"',
     );
     const managedBotCreateButtonTag =
-      managedSetupHtml.match(
+      managedNotificationHtml.match(
         /<button[^>]*data-testid="merchant-notification-bot-managed-create"[^>]*>/,
       )?.[0] ?? "";
-    const managedBotCreateButtonPresent = managedBotCreateButtonTag.length > 0;
-    const managedBotCreateButtonDisabled = /\sdisabled(?:=|\s|>)/.test(
-      managedBotCreateButtonTag,
+    const managedBotResumeButtonTag =
+      managedNotificationHtml.match(
+        /<button[^>]*data-testid="merchant-notification-bot-managed-resume"[^>]*>/,
+      )?.[0] ?? "";
+    const managedBotResumeButtonPresent =
+      managedBotResumeButtonTag.length > 0;
+    const managedBotResumeButtonDisabled = /\sdisabled(?:=|\s|>)/.test(
+      managedBotResumeButtonTag,
     );
+    const managedBotResumeAttemptIdMatches =
+      managedNotificationHtml.includes(
+        `name="attemptId" value="${REGRESSION_NOTIFICATION_ATTEMPT_ID}"`,
+      );
+    const managedBotResumeUsernamePresent = managedNotificationHtml.includes(
+      REGRESSION_NOTIFICATION_BOT_USERNAME,
+    );
+    const managedBotResumeCopyVisible =
+      managedNotificationHtml.includes(
+        "Resume verification for the same bot",
+      ) ||
+      managedNotificationHtml.includes("استئناف التحقق من نفس البوت");
     if (
-      !managedBotStartFormAction ||
-      !managedBotCreateButtonPresent ||
-      managedBotCreateButtonDisabled
+      !managedBotResumeFormAction ||
+      !managedBotResumeButtonPresent ||
+      managedBotResumeButtonDisabled ||
+      !managedBotResumeAttemptIdMatches ||
+      !managedBotResumeUsernamePresent ||
+      managedBotStartFormAction ||
+      managedBotCreateButtonTag.length > 0
     ) {
-      fail("Store B managed notification attempt cannot be started from the UI");
+      fail("Store B resumable notification-bot proposal is not available from the UI");
     }
-    const managedBotPreviousAttemptError = managedSetupHtml.includes(
+    const managedBotPreviousAttemptError = managedNotificationHtml.includes(
       'data-testid="merchant-notification-bot-managed-error"',
     );
 
@@ -1204,12 +1300,26 @@ async function main() {
         notificationBotRows: dbBefore.counts.notification_bots,
         regressionFixture: {
           storeSlug: REGRESSION_STORE_SLUG,
-          pendingStorefrontAttempt: {
-            id: pendingStorefrontAttempt.id,
-            purpose: pendingStorefrontAttempt.purpose,
-            status: pendingStorefrontAttempt.status,
-            expiresAt: pendingStorefrontAttempt.expires_at,
-            telegramBotId: pendingStorefrontAttempt.telegram_bot_id,
+          storefrontAttempt: {
+            id: expiredStorefrontAttempt.id,
+            purpose: expiredStorefrontAttempt.purpose,
+            status: expiredStorefrontAttempt.status,
+            failureCode: expiredStorefrontAttempt.failure_code,
+            expiresAt: expiredStorefrontAttempt.expires_at,
+            telegramBotId: expiredStorefrontAttempt.telegram_bot_id,
+            telegramBotUsername:
+              expiredStorefrontAttempt.telegram_bot_username,
+          },
+          notificationAttempt: {
+            id: notificationResumeAttempt.id,
+            purpose: notificationResumeAttempt.purpose,
+            status: notificationResumeAttempt.status,
+            failureCode: notificationResumeAttempt.failure_code,
+            expiresAt: notificationResumeAttempt.expires_at,
+            telegramBotId: notificationResumeAttempt.telegram_bot_id,
+            telegramBotUsername:
+              notificationResumeAttempt.telegram_bot_username,
+            resumable: true,
           },
           failedNotificationAttempt: {
             id: failedNotificationAttempt.id,
@@ -1268,11 +1378,19 @@ async function main() {
           name: managedStore.name,
           status: managedStore.status,
         },
-        managedBotCreateSection: managedBotSection,
+        managedBotSection,
+        managedBotResumeFormAction,
+        managedBotResumeButtonPresent,
+        managedBotResumeButtonDisabled,
+        managedBotResumeAttemptId: REGRESSION_NOTIFICATION_ATTEMPT_ID,
+        managedBotResumeAttemptIdMatches,
+        managedBotResumeBotUsername: REGRESSION_NOTIFICATION_BOT_USERNAME,
+        managedBotResumeUsernamePresent,
+        managedBotResumeCopyVisible,
         managedBotStartFormAction,
-        managedBotCreateButtonPresent,
-        managedBotCreateButtonDisabled,
+        managedBotCreateButtonPresent: managedBotCreateButtonTag.length > 0,
         managedBotPreviousAttemptError,
+        storefrontDisplaysNotificationBot,
         managedBotStoreHadNoNotificationBot: !storesWithNotificationBot.has(
           managedStore.id,
         ),
