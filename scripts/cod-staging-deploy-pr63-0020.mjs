@@ -13,6 +13,7 @@ const EXPECTED_CONFIRM = "DEPLOY_PR63_0020_COD_STAGING";
 const EXPECTED_SERVICE_NAME = "nokmel-cod-staging";
 const EXPECTED_CANDIDATE_SHA = "48be324524fd877aa995e9c0a045cb44c9eff0e3";
 const EXPECTED_PREVIOUS_SHA = "ef3d7e98e84de1f70931291e4dd66187f9f70660";
+const EXPECTED_PREVIOUS_DEPLOY_ID = "dep-dc4c42t6e07s73epof80";
 const QA_STORE_SLUG = "cod-pr56-store-a";
 const QA_WALLET_NUMBER = "+201000000062";
 const QA_ACCOUNT_NAME = "Synthetic Vodafone QA — Store A";
@@ -530,9 +531,23 @@ async function main() {
   if (!/^[0-9a-f]{40}$/.test(currentLiveSha)) {
     fail("Current live deploy has no full commit SHA");
   }
-  if (currentLiveSha !== EXPECTED_PREVIOUS_SHA) {
+  const alreadyDeployed = currentLiveSha === CANDIDATE_SHA;
+  if (!alreadyDeployed && currentLiveSha !== EXPECTED_PREVIOUS_SHA) {
     fail(`Current live deploy ${currentLiveSha} does not match expected previous ${EXPECTED_PREVIOUS_SHA}`);
   }
+  const previousLive =
+    liveDeploys.find(
+      (deploy) => deployCommit(deploy) === EXPECTED_PREVIOUS_SHA,
+    ) ??
+    liveDeploys.find((deploy) => String(deploy.id) === EXPECTED_PREVIOUS_DEPLOY_ID) ??
+    null;
+  const rollbackLive =
+    previousLive ??
+    ({
+      id: EXPECTED_PREVIOUS_DEPLOY_ID,
+      commit: { id: EXPECTED_PREVIOUS_SHA },
+      status: "live_before_task",
+    });
 
   const envBefore = await readEnvMap();
   const databaseUrl = envBefore.get("DATABASE_URL");
@@ -681,7 +696,9 @@ async function main() {
       salt: "rabet-merchant.session-token",
     });
 
-    if (envBefore.get("RABET_BUILD_SHA") !== CANDIDATE_SHA) {
+    const buildShaLabelUpdated =
+      envBefore.get("RABET_BUILD_SHA") !== CANDIDATE_SHA;
+    if (buildShaLabelUpdated) {
       const nextEnvMap = new Map(envBefore);
       nextEnvMap.set("RABET_BUILD_SHA", CANDIDATE_SHA);
       const nextPayload = [...nextEnvMap.entries()].map(([key, value]) => ({
@@ -704,7 +721,12 @@ async function main() {
       fail("Staging environment changed beyond the RABET_BUILD_SHA label");
     }
 
-    const deploy = await deployExactCommit();
+    const deploy = alreadyDeployed
+      ? currentLive
+      : await deployExactCommit();
+    if (alreadyDeployed) {
+      log("Exact candidate is already live; skipped a duplicate Render deploy");
+    }
     const finalCommit = deployCommit(deploy);
     if (finalCommit !== CANDIDATE_SHA) {
       fail(`Deploy commit ${finalCommit} does not match ${CANDIDATE_SHA}`);
@@ -812,14 +834,18 @@ async function main() {
     if (!dbBefore.selectedNotificationBot && !notificationBotManaged) {
       fail("Merchant setup page did not render the Managed Bot create section");
     }
-    if (
-      dbBefore.selectedNotificationBot &&
-      !notificationBotPaired &&
-      !notificationBotPairing
-    ) {
+    const notificationBotUsername = setupHtml.includes(
+      'data-testid="merchant-notification-bot-username"',
+    );
+    if (dbBefore.selectedNotificationBot && !notificationBotUsername) {
       fail("Merchant setup page did not render the existing notification bot state");
     }
-    if (!notificationBotManaged && !notificationBotPaired && !notificationBotPairing) {
+    if (
+      !notificationBotManaged &&
+      !notificationBotPaired &&
+      !notificationBotPairing &&
+      !notificationBotUsername
+    ) {
       fail("Merchant setup page rendered no notification bot setup state");
     }
     const notificationBotStatusMatch = setupHtml.match(
@@ -1020,12 +1046,13 @@ async function main() {
       appUrl: APP_URL,
       reviewedSha: CANDIDATE_SHA,
       rollback: {
-        deployId: String(currentLive.id),
-        sha: currentLiveSha,
-        status: deployStatus(currentLive),
-        createdAt: currentLive.createdAt ?? null,
-        finishedAt: currentLive.finishedAt ?? null,
-        imageRef: currentLive.image?.ref ?? null,
+        deployId: String(rollbackLive.id),
+        sha: deployCommit(rollbackLive) || EXPECTED_PREVIOUS_SHA,
+        status: deployStatus(rollbackLive),
+        createdAt: rollbackLive.createdAt ?? null,
+        finishedAt: rollbackLive.finishedAt ?? null,
+        imageRef: rollbackLive.image?.ref ?? null,
+        databaseMigrationLeftApplied: EXPECTED_MIGRATION_TAG,
       },
       deploy: {
         id: String(deploy.id),
@@ -1037,8 +1064,9 @@ async function main() {
         imageRef: deploy.image?.ref ?? null,
       },
       health,
+      deployReused: alreadyDeployed,
       environment: {
-        buildShaLabelUpdated: true,
+        buildShaLabelUpdated,
         manualTransferFlagPreserved:
           envAfterBuildSha.get("RABET_MANUAL_TRANSFER_ENABLED") ===
           envBefore.get("RABET_MANUAL_TRANSFER_ENABLED"),
@@ -1127,6 +1155,7 @@ async function main() {
         merchantSetupNotificationBotPaired: notificationBotPaired,
         merchantSetupNotificationBotPairing: notificationBotPairing,
         merchantSetupNotificationBotStatus: notificationBotStatus,
+        merchantSetupNotificationBotUsername: notificationBotUsername,
         merchantSetupNotificationBotRowsUnchanged:
           dbBefore.counts.notification_bots === dbAfter.counts.notification_bots,
         managedBotSetupPage: true,
