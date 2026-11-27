@@ -1,5 +1,7 @@
 # Architecture — Rabet (رابط)
 
+> **21 November 2026 — Historical architecture and ADRs for the original catalog** See [Starter Commerce direction](./STARTER_COMMERCE_ARCHITECTURE.md) for the current target and release gates.
+
 This document records the chosen stack, the structure of the codebase and the
 architectural decisions behind them. It is updated as phases are delivered.
 

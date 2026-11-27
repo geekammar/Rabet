@@ -1,5 +1,7 @@
 # Rabet SaaS MVP — Legacy Transition, Backfill Readiness and Delivery Sequence
 
+> **21 November 2026 — Earlier ownership transition and backfill reference** See [Starter Commerce direction](./STARTER_COMMERCE_ARCHITECTURE.md) for the current target and release gates.
+
 **Status:** design proposal only. This PR executes no SQL, creates no store,
 member, invitation, bot or webhook, changes no deployment, and touches no
 production data.

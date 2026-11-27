@@ -1,5 +1,7 @@
 # Rabet SaaS MVP — Target Architecture, Ownership and Mobile Merchant Experience
 
+> **21 November 2026 — Earlier SaaS foundation for identity, catalog and tenancy** See [Starter Commerce direction](./STARTER_COMMERCE_ARCHITECTURE.md) for the current target and release gates.
+
 **Status:** design proposal only. Nothing in this document is implemented by this
 PR. No application runtime, database schema, migration, backfill SQL, deployment
 workflow, authentication behavior, Telegram credential or production data is
