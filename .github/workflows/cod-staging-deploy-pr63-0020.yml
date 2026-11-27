@@ -1,0 +1,59 @@
+name: COD Staging Deploy PR63 0020
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DEPLOY_PR63_0020_COD_STAGING to authorize the exact-SHA deploy on permanent COD Staging.'
+        type: string
+        default: ""
+        required: true
+  push:
+    branches:
+      - ops/merchant-notification-staging-pr63-0020
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cod-staging-pr63-0020-pipeline
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy PR63 0020 and smoke-test Needs Attention and Managed Bot
+    if: (github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY_PR63_0020_COD_STAGING') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy-cod-staging-pr63-0020]'))
+    runs-on: ubuntu-latest
+    environment: render-production
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout orchestration branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy exact PR63 SHA and verify Staging
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: srv-dc2ao2e8bjmc73f5cjig
+          APP_URL: https://nokmel-cod-staging.onrender.com
+          CANDIDATE_SHA: 48be324524fd877aa995e9c0a045cb44c9eff0e3
+          DEPLOY_CONFIRM: DEPLOY_PR63_0020_COD_STAGING
+        run: node scripts/cod-staging-deploy-pr63-0020.mjs
+
+      - name: Upload sanitized summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cod-staging-pr63-0020-deploy-summary
+          path: /tmp/cod-staging-pr63-0020-summary.json
+          if-no-files-found: ignore
+          retention-days: 30

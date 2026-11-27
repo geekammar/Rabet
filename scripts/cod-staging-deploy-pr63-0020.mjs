@@ -9,8 +9,10 @@ const SERVICE_ID = (process.env.RENDER_SERVICE_ID ?? "").trim();
 const APP_URL = (process.env.APP_URL ?? "").trim().replace(/\/$/, "");
 const RENDER_API_KEY = process.env.RENDER_API_KEY ?? "";
 const CONFIRM = process.env.DEPLOY_CONFIRM ?? "";
-const EXPECTED_CONFIRM = "DEPLOY_PR64_COD_STAGING";
+const EXPECTED_CONFIRM = "DEPLOY_PR63_0020_COD_STAGING";
 const EXPECTED_SERVICE_NAME = "nokmel-cod-staging";
+const EXPECTED_CANDIDATE_SHA = "48be324524fd877aa995e9c0a045cb44c9eff0e3";
+const EXPECTED_PREVIOUS_SHA = "ef3d7e98e84de1f70931291e4dd66187f9f70660";
 const QA_STORE_SLUG = "cod-pr56-store-a";
 const QA_WALLET_NUMBER = "+201000000062";
 const QA_ACCOUNT_NAME = "Synthetic Vodafone QA — Store A";
@@ -20,20 +22,20 @@ const QA_INSTRUCTIONS_EN =
   "Synthetic QA only: transfer the exact amount to the test wallet, then submit the reference.";
 const TARGET_ORDER_REFERENCE = "ORD-X2EZD9";
 const PRESERVED_ORDER_REFERENCES = ["ORD-X2EZD9", "ORD-FYJA23"];
-const EXPECTED_LEDGER_COUNT = 20;
+const EXPECTED_LEDGER_COUNT = 21;
 const EXPECTED_LEDGER_HASH =
-  "06411c112521405aefde707bb11021cac11734ac031f2c66321dfe3b637cd67e";
-const EXPECTED_MIGRATION_TAG = "0019_merchant_notification_bot";
+  "f9d3b9f9d5cff43df49d008350e83ec07bd85d451f02cdc63c123e4c13550407";
+const EXPECTED_MIGRATION_TAG = "0020_merchant_notification_bot_managed";
 const EXPECTED_PREVIOUS_LEDGER_HASH =
-  "868ba439a60f6a3870a5535e032ad55ab0d38c69aced7cf1532e465c632dc339";
-const SUMMARY_PATH = "/tmp/cod-staging-pr64-summary.json";
+  "06411c112521405aefde707bb11021cac11734ac031f2c66321dfe3b637cd67e";
+const SUMMARY_PATH = "/tmp/cod-staging-pr63-0020-summary.json";
 
 function log(message) {
-  process.stdout.write(`[cod-staging-pr64] ${String(message)}\n`);
+  process.stdout.write(`[cod-staging-pr63-0020] ${String(message)}\n`);
 }
 
 function fail(message) {
-  process.stderr.write(`[cod-staging-pr64:FAIL] ${String(message)}\n`);
+  process.stderr.write(`[cod-staging-pr63-0020:FAIL] ${String(message)}\n`);
   process.exitCode = 1;
   throw new Error(message);
 }
@@ -143,56 +145,14 @@ async function readLedger(db) {
 }
 
 async function readSnapshot(db, storeId) {
-  const stores = await db`
-    select id, name, slug, status, created_at, updated_at
-    from store
-    order by id
-  `;
-  const orders = await db`
-    select id, store_id, connection_id, telegram_user_id, telegram_chat_id,
-      reference, checkout_key, status, payment_method, payment_status,
-      fulfillment_status, currency, subtotal, delivery_fee, total,
-      placed_at, accepted_at, preparing_at, handed_to_shipping_at,
-      delivered_at, payment_collected_at, cancelled_at, cancellation_reason,
-      created_at, updated_at
-    from "order"
-    order by id
-  `;
-  const orderItems = await db`
-    select id, order_id, product_id, product_name, unit_price, quantity,
-      line_total, created_at
-    from order_item
-    order by id
-  `;
-  const reservations = await db`
-    select id, order_id, order_item_id, product_id, store_id, quantity, status,
-      reserved_at, committed_at, released_at, release_reason, created_at, updated_at
-    from inventory_reservation
-    order by id
-  `;
-  const inventory = await db`
-    select product_id, store_id, on_hand, reserved, created_at, updated_at
-    from product_inventory
-    order by product_id
-  `;
-  const carts = await db`
-    select id, store_id, connection_id, telegram_user_id, telegram_chat_id,
-      status, checkout_state, checkout_key, quote_total, quote_currency,
-      quote_version, created_at, updated_at
-    from cart
-    order by id
-  `;
-  const cartItems = await db`
-    select id, cart_id, product_id, quantity, created_at, updated_at
-    from cart_item
-    order by id
-  `;
-  const claims = await db`
-    select id, order_id, store_id, method, reference, status, submitted_at,
-      decided_at, decided_by, decision_note, created_at, updated_at
-    from order_payment_claim
-    order by id
-  `;
+  const stores = await db`select * from store order by id`;
+  const orders = await db`select * from "order" order by id`;
+  const orderItems = await db`select * from order_item order by id`;
+  const reservations = await db`select * from inventory_reservation order by id`;
+  const inventory = await db`select * from product_inventory order by product_id`;
+  const carts = await db`select * from cart order by id`;
+  const cartItems = await db`select * from cart_item order by id`;
+  const claims = await db`select * from order_payment_claim order by id`;
   const notificationBots = await db`
     select id, store_id, bot_id::text as bot_id, bot_username, bot_name,
       destination_chat_id, destination_chat_title, destination_chat_username,
@@ -206,11 +166,15 @@ async function readSnapshot(db, storeId) {
     from telegram_connection
     order by id
   `;
-  const commerce = await db`
-    select store_id, currency, delivery_fee, cod_enabled, created_at, updated_at
-    from store_commerce_setting
-    order by store_id
+  const linkAttempts = await db`
+    select id, store_id, merchant_user_id, purpose, manager_bot_username,
+      status, telegram_user_id, telegram_bot_id, telegram_bot_username,
+      connection_id, failure_code, expires_at, bound_at, verified_at,
+      completed_at, created_at, updated_at
+    from telegram_link_attempt
+    order by id
   `;
+  const commerce = await db`select * from store_commerce_setting order by store_id`;
   const [counts] = await db`
     select
       (select count(*)::int from store) as stores,
@@ -222,12 +186,24 @@ async function readSnapshot(db, storeId) {
       (select count(*)::int from cart_item) as cart_items,
       (select count(*)::int from order_payment_claim) as claims,
       (select count(*)::int from merchant_notification_bot) as notification_bots,
-      (select count(*)::int from telegram_connection) as connections
+      (select count(*)::int from telegram_connection) as connections,
+      (select count(*)::int from telegram_link_attempt) as link_attempts
   `;
   const [selectedStoreCommerce] = storeId
     ? await db`
-        select currency, delivery_fee, cod_enabled
+        select currency, delivery_fee, cod_enabled, vodafone_cash_enabled,
+          vodafone_cash_number is not null as vodafone_cash_configured
         from store_commerce_setting
+        where store_id = ${storeId}
+        limit 1
+      `
+    : [];
+  const [selectedNotificationBot] = storeId
+    ? await db`
+        select store_id, bot_id::text as bot_id, bot_username, bot_name,
+          destination_chat_id, destination_chat_title, verified_at, last_test_at,
+          config_epoch, created_at, updated_at
+        from merchant_notification_bot
         where store_id = ${storeId}
         limit 1
       `
@@ -247,7 +223,19 @@ async function readSnapshot(db, storeId) {
     ledger: await readLedger(db),
     counts,
     selectedStoreCommerce: selectedStoreCommerce ?? null,
+    selectedNotificationBot: selectedNotificationBot ?? null,
     pendingForStore: pendingForStore?.count ?? 0,
+    storeFlags: stores.map((store) => {
+      const setting = commerce.find((row) => row.store_id === store.id);
+      return {
+        storeId: store.id,
+        slug: store.slug,
+        status: store.status,
+        codEnabled: setting?.cod_enabled ?? null,
+        vodafoneCashEnabled: setting?.vodafone_cash_enabled ?? null,
+        vodafoneCashConfigured: Boolean(setting?.vodafone_cash_number),
+      };
+    }),
     hashes: {
       stores: hashRows(stores),
       orders: hashRows(orders),
@@ -259,6 +247,7 @@ async function readSnapshot(db, storeId) {
       claims: hashRows(claims),
       notificationBots: hashRows(notificationBots),
       connections: hashRows(connections),
+      linkAttempts: hashRows(linkAttempts),
       commerce: hashRows(commerce),
     },
   };
@@ -309,7 +298,7 @@ async function readPreservedClaims(db) {
   return rows;
 }
 
-async function assertApplied0019(db, label) {
+async function assertApplied0020(db, label) {
   const [rows] = await db`
     select count(*)::int as count
     from drizzle.__drizzle_migrations
@@ -336,10 +325,10 @@ async function assertApplied0019(db, label) {
   const countFor = (hash) =>
     Number(hashes.find((row) => row.hash === hash)?.count ?? 0);
   if (countFor(EXPECTED_LEDGER_HASH) !== 1) {
-    fail(`${label}: expected exactly one 0019 migration in the ledger`);
+    fail(`${label}: expected exactly one 0020 migration in the ledger`);
   }
   if (countFor(EXPECTED_PREVIOUS_LEDGER_HASH) !== 1) {
-    fail(`${label}: expected exactly one 0018 migration in the ledger`);
+    fail(`${label}: expected exactly one 0019 migration in the ledger`);
   }
   return { count, lastHash, tag: EXPECTED_MIGRATION_TAG };
 }
@@ -541,6 +530,9 @@ async function main() {
   if (!/^[0-9a-f]{40}$/.test(currentLiveSha)) {
     fail("Current live deploy has no full commit SHA");
   }
+  if (currentLiveSha !== EXPECTED_PREVIOUS_SHA) {
+    fail(`Current live deploy ${currentLiveSha} does not match expected previous ${EXPECTED_PREVIOUS_SHA}`);
+  }
 
   const envBefore = await readEnvMap();
   const databaseUrl = envBefore.get("DATABASE_URL");
@@ -562,6 +554,10 @@ async function main() {
   let orderCandidates;
   let merchant;
   let selectedStore;
+  let managedStore;
+  let managedMerchant;
+  let managedCookie;
+  let managedSetupHtml;
   let smokeOrder;
   let museOrder;
   let dbBefore;
@@ -570,7 +566,7 @@ async function main() {
   let preservedClaimsBefore;
 
   try {
-    const migrationBeforeDeploy = await assertApplied0019(
+    const migrationBeforeDeploy = await assertApplied0020(
       db,
       "pre-deploy",
     );
@@ -603,18 +599,23 @@ async function main() {
       (order) =>
         order.status === "placed" && order.fulfillment_status === "unfulfilled",
     );
-    const preferredPending =
-      pendingOrders.find((order) => order.store_slug === "cod-pr56-store-a") ??
-      pendingOrders[0] ??
-      null;
     const storeACandidate = stores.find(
       (store) => store.slug === QA_STORE_SLUG,
     );
+    museOrder = orderCandidates.find(
+      (order) => order.reference === "ORD-FYJA23",
+    ) ?? null;
+    if (!museOrder) {
+      fail("ORD-FYJA23 is missing before the transfer smoke check");
+    }
     const preferredStoreId =
-      storeACandidate?.id ?? preferredPending?.store_id;
+      museOrder.store_id ?? storeACandidate?.id ?? pendingOrders[0]?.store_id;
     selectedStore =
       stores.find((store) => store.id === preferredStoreId) ?? stores[0] ?? null;
     if (!selectedStore) fail("No Staging store is available for smoke checks");
+    if (selectedStore.id !== museOrder.store_id) {
+      fail(`ORD-FYJA23 store ${museOrder.store_slug} is not the selected smoke store`);
+    }
 
     merchant = await readMerchantForStore(db, selectedStore.id);
     if (!merchant) {
@@ -628,24 +629,40 @@ async function main() {
       }
     }
     if (!merchant) fail("No active merchant fixture is available for smoke checks");
+    if (selectedStore.id !== museOrder.store_id) {
+      fail("Smoke merchant store does not match the ORD-FYJA23 store");
+    }
 
-    const selectedStoreOrders = orderCandidates.filter(
-      (order) => order.store_id === selectedStore.id,
+    const notificationBotStoreRows = await db`
+      select store_id from merchant_notification_bot order by store_id
+    `;
+    const storesWithNotificationBot = new Set(
+      notificationBotStoreRows.map((row) => row.store_id),
     );
-    const selectedStorePending = selectedStoreOrders.filter(
-      (order) =>
-        order.status === "placed" && order.fulfillment_status === "unfulfilled",
-    );
-    smokeOrder =
-      selectedStorePending[0] ?? selectedStoreOrders[0] ?? orderCandidates[0] ?? null;
-    museOrder =
-      orderCandidates.find((order) => order.reference === "ORD-FYJA23") ??
-      preferredPending ??
-      pendingOrders[0] ??
-      smokeOrder ??
-      orderCandidates[0] ??
-      null;
-    if (museOrder) smokeOrder = museOrder;
+    if (!storesWithNotificationBot.has(selectedStore.id)) {
+      managedStore = selectedStore;
+      managedMerchant = merchant;
+    } else {
+      for (const store of stores) {
+        if (
+          store.id === selectedStore.id ||
+          storesWithNotificationBot.has(store.id)
+        ) {
+          continue;
+        }
+        const candidate = await readMerchantForStore(db, store.id);
+        if (candidate) {
+          managedStore = store;
+          managedMerchant = candidate;
+          break;
+        }
+      }
+    }
+    if (!managedStore || !managedMerchant) {
+      fail("No read-only Managed Bot smoke store is available without changing bots");
+    }
+
+    smokeOrder = museOrder;
 
     await db.begin(async (tx) => {
       await tx`set transaction read only`;
@@ -770,6 +787,99 @@ async function main() {
       fail("Merchant setup transfer Needs Attention did not link ORD-FYJA23");
     }
 
+    const notificationBotSection = setupHtml.includes(
+      'data-testid="merchant-notification-bot"',
+    );
+    if (!notificationBotSection) {
+      fail("Merchant setup page did not render the notification bot section");
+    }
+    if (
+      setupHtml.includes(
+        'data-testid="merchant-notification-bot-unsupported"',
+      )
+    ) {
+      fail("Merchant setup page reported the notification bot as unsupported");
+    }
+    const notificationBotManaged = setupHtml.includes(
+      'data-testid="merchant-notification-bot-managed"',
+    );
+    const notificationBotPaired = setupHtml.includes(
+      'data-testid="merchant-notification-bot-paired"',
+    );
+    const notificationBotPairing = setupHtml.includes(
+      'data-testid="merchant-notification-bot-pairing"',
+    );
+    if (!dbBefore.selectedNotificationBot && !notificationBotManaged) {
+      fail("Merchant setup page did not render the Managed Bot create section");
+    }
+    if (
+      dbBefore.selectedNotificationBot &&
+      !notificationBotPaired &&
+      !notificationBotPairing
+    ) {
+      fail("Merchant setup page did not render the existing notification bot state");
+    }
+    if (!notificationBotManaged && !notificationBotPaired && !notificationBotPairing) {
+      fail("Merchant setup page rendered no notification bot setup state");
+    }
+    const notificationBotStatusMatch = setupHtml.match(
+      /data-testid="merchant-notification-bot-status"[^>]*>([^<]*)</,
+    );
+    const notificationBotStatus = notificationBotStatusMatch
+      ? notificationBotStatusMatch[1].trim()
+      : null;
+
+    if (managedStore.id === selectedStore.id) {
+      managedCookie = cookie;
+      managedSetupHtml = setupHtml;
+    } else {
+      managedCookie = await encode({
+        token: {
+          merchantId: managedMerchant.id,
+          role: "merchant",
+          sessionVersion: managedMerchant.session_version,
+          sub: managedMerchant.id,
+        },
+        secret: authSecret,
+        salt: "rabet-merchant.session-token",
+      });
+      const managedSetupResponse = await fetch(
+        `${APP_URL}/app/setup?verify=${Date.now()}`,
+        {
+          headers: {
+            Cookie: `rabet-merchant.session-token=${managedCookie}`,
+            "Cache-Control": "no-cache",
+          },
+          signal: AbortSignal.timeout(30_000),
+        },
+      );
+      managedSetupHtml = await managedSetupResponse.text();
+      if (managedSetupResponse.status !== 200) {
+        fail(`Managed Bot smoke setup page returned HTTP ${managedSetupResponse.status}`);
+      }
+    }
+    if (!managedSetupHtml.includes('data-testid="merchant-setup-page"')) {
+      fail("Managed Bot smoke setup page did not render");
+    }
+    if (
+      !managedSetupHtml.includes('data-testid="merchant-notification-bot"')
+    ) {
+      fail("Managed Bot smoke setup page did not render the notification bot section");
+    }
+    if (
+      managedSetupHtml.includes(
+        'data-testid="merchant-notification-bot-unsupported"',
+      )
+    ) {
+      fail("Managed Bot smoke setup page reported the notification bot as unsupported");
+    }
+    const managedBotSection = managedSetupHtml.includes(
+      'data-testid="merchant-notification-bot-managed"',
+    );
+    if (!managedBotSection) {
+      fail("Managed Bot create section did not render on the read-only smoke page");
+    }
+
     const ordersResponse = await merchantFetch(
       `/app/orders?verify=${Date.now()}`,
     );
@@ -863,7 +973,7 @@ async function main() {
     ) {
       fail("Migration ledger changed during the deploy/smoke window");
     }
-    const migrationAfterDeploy = await assertApplied0019(
+    const migrationAfterDeploy = await assertApplied0020(
       db,
       "post-deploy",
     );
@@ -892,7 +1002,8 @@ async function main() {
       dbBefore.counts.carts !== dbAfter.counts.carts ||
       dbBefore.counts.claims !== dbAfter.counts.claims ||
       dbBefore.counts.notification_bots !== dbAfter.counts.notification_bots ||
-      dbBefore.counts.connections !== dbAfter.counts.connections
+      dbBefore.counts.connections !== dbAfter.counts.connections ||
+      dbBefore.counts.link_attempts !== dbAfter.counts.link_attempts
     ) {
       fail("Database fixture counts changed during the deploy/smoke window");
     }
@@ -956,6 +1067,12 @@ async function main() {
         pendingForStore: dbBefore.pendingForStore,
         commerce: dbBefore.selectedStoreCommerce,
         commerceUnchanged: true,
+        storeFlags: dbBefore.storeFlags,
+        selectedNotificationBot: dbBefore.selectedNotificationBot,
+        notificationBotRowsBefore: dbBefore.counts.notification_bots,
+        notificationBotRowsAfter: dbAfter.counts.notification_bots,
+        linkAttemptRowsBefore: dbBefore.counts.link_attempts,
+        linkAttemptRowsAfter: dbAfter.counts.link_attempts,
         targetOrder: targetOrder
           ? {
               reference: targetOrder.reference,
@@ -1001,6 +1118,27 @@ async function main() {
         merchantSetupTransferPendingCount: transferPendingCount,
         merchantSetupTransferShowsMuseOrder: setupHtml.includes(
           `data-order-id="${museOrder.id}"`,
+        ),
+        merchantSetupNotificationBotSection: notificationBotSection,
+        merchantSetupNotificationBotUnsupported: setupHtml.includes(
+          'data-testid="merchant-notification-bot-unsupported"',
+        ),
+        merchantSetupManagedBotSection: notificationBotManaged,
+        merchantSetupNotificationBotPaired: notificationBotPaired,
+        merchantSetupNotificationBotPairing: notificationBotPairing,
+        merchantSetupNotificationBotStatus: notificationBotStatus,
+        merchantSetupNotificationBotRowsUnchanged:
+          dbBefore.counts.notification_bots === dbAfter.counts.notification_bots,
+        managedBotSetupPage: true,
+        managedBotStore: {
+          id: managedStore.id,
+          slug: managedStore.slug,
+          name: managedStore.name,
+          status: managedStore.status,
+        },
+        managedBotCreateSection: managedBotSection,
+        managedBotStoreHadNoNotificationBot: !storesWithNotificationBot.has(
+          managedStore.id,
         ),
         merchantOrdersPage: true,
         merchantOrdersServedSmokeOrder:
