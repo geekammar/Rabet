@@ -836,6 +836,23 @@ async function runJourney(cdp, fixture, authSecret) {
   );
   await expectNoHorizontalScroll("merchant setup (Arabic)");
 
+  const installHelp = '[data-testid="merchant-install-help"]';
+  assert(
+    await evaluate(`document.querySelector(${JSON.stringify(installHelp)})?.open === false`),
+    "Install help should start collapsed for a connected merchant",
+  );
+  await click(`${installHelp} summary`);
+  assert((await text(installHelp)).includes("إضافة إلى الشاشة الرئيسية"), "Arabic install guidance");
+  await expectNoHorizontalScroll("expanded merchant install help");
+  await click('[data-testid="merchant-locale-en"]');
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(installHelp)})?.innerText.includes("Install app")`,
+    "English installation instructions",
+  );
+  await click('[data-testid="merchant-locale-ar"]');
+  await click(`${installHelp} summary`);
+
   assert(
     await evaluate(
       "Boolean(document.querySelector('[data-testid=\"merchant-products-link\"]'))",
