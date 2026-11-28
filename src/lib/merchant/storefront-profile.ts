@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 
 import type { Database } from "@/db/client";
 import { store } from "@/db/schema";
@@ -12,9 +12,10 @@ import { EMPTY_STOREFRONT_PROFILE, type StorefrontProfile } from "./storefront-p
 
 export async function readStorefrontProfile(db: Database, scope: StoreScope): Promise<StorefrontProfile> {
   assertStoreScope(scope);
-  const [row] = await db.select({ profile: store.storefrontProfile })
+  // Read text so Neon HTTP and PostgreSQL-backed tests return the same representation.
+  const [row] = await db.select({ profile: sql<string | null>`${store.storefrontProfile}::text` })
     .from(store).where(eq(store.id, scope.storeId)).limit(1);
-  return row?.profile ?? EMPTY_STOREFRONT_PROFILE;
+  return row?.profile ? JSON.parse(row.profile) as StorefrontProfile : EMPTY_STOREFRONT_PROFILE;
 }
 
 export async function saveStorefrontProfile(
