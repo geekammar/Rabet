@@ -92,10 +92,14 @@ export async function saveMerchantProductAvailability(
   // Turning a product on is publishing. It must never be a client-declared
   // flag: the same readiness gate as the explicit publish action applies.
   if (submitted.isActive === true) {
-    const published = await publishMerchantCatalogProduct(getDb(), access, {
-      productId: submitted.productId,
-      revision: submitted.revision,
-    });
+    const published = await publishMerchantCatalogProduct(
+      getTransactionDb(),
+      access,
+      {
+        productId: submitted.productId,
+        revision: submitted.revision,
+      },
+    );
 
     if (published.ok) {
       refresh();
@@ -146,10 +150,14 @@ export async function publishMerchantProduct(
       ? (input as Record<string, unknown>)
       : {};
 
-  const result = await publishMerchantCatalogProduct(getDb(), access, {
-    productId: submitted.productId,
-    revision: submitted.revision,
-  });
+  const result = await publishMerchantCatalogProduct(
+    getTransactionDb(),
+    access,
+    {
+      productId: submitted.productId,
+      revision: submitted.revision,
+    },
+  );
 
   if (result.ok) {
     revalidatePath("/app/products");

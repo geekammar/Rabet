@@ -1075,7 +1075,7 @@ export function MerchantProducts({
                             onClick={() =>
                               publishProduct(product, availability.revision)
                             }
-                            data-testid={`merchant-availability-enable-${product.id}`}
+                            data-testid={`merchant-product-publish-${product.id}`}
                           >
                             {rowPublishing ? (
                               <>

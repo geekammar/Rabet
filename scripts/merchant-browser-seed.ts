@@ -10,7 +10,10 @@ import {
   language,
   merchantInvitation,
   product,
+  productInventory,
   productTranslation,
+  storeCommerceSetting,
+  telegramConnection,
 } from "@/db/schema";
 import { createTransactionClient } from "@/db/transaction-client";
 import {
@@ -195,6 +198,12 @@ async function main() {
         },
       ]);
 
+      await db.insert(productInventory).values([
+        { productId: productOne.id, storeId: input.storeId, onHand: 5 },
+        { productId: productTwo.id, storeId: input.storeId, onHand: 5 },
+        { productId: productFallback.id, storeId: input.storeId, onHand: 5 },
+      ]);
+
       return {
         categoryId: storeCategory.id,
         one: { id: productOne.id, price: "10.00" },
@@ -230,6 +239,54 @@ async function main() {
         },
         two: { en: "Al Qamar Product Two" },
       },
+    });
+
+    async function seedPublishPrerequisites(input: {
+      storeId: string;
+      storeKey: string;
+      botId: number;
+      botUsername: string;
+    }) {
+      await db.insert(storeCommerceSetting).values({
+        storeId: input.storeId,
+        currency: "EGP",
+        deliveryFee: "0.00",
+        deliveryFeeConfigured: true,
+        codEnabled: true,
+        vodafoneCashEnabled: false,
+      });
+
+      await db.insert(telegramConnection).values({
+        storeId: input.storeId,
+        botId: input.botId,
+        botUsername: input.botUsername,
+        botName: `${input.botUsername} fixture`,
+        tokenCiphertext: "browser-fixture-ciphertext",
+        tokenKeyId: "browser-fixture-key",
+        webhookSecretHash: "b".repeat(64),
+        webhookUrl: `https://app.example.test/api/telegram/webhook/managed/${input.storeKey}`,
+        status: "ready",
+        verifiedAt: new Date(),
+      });
+    }
+
+    await seedPublishPrerequisites({
+      storeId: a.storeId,
+      storeKey: "browser-store-a",
+      botId: 810_001,
+      botUsername: "NoorStoreBot",
+    });
+    await seedPublishPrerequisites({
+      storeId: b.storeId,
+      storeKey: "browser-store-b",
+      botId: 810_002,
+      botUsername: "QamarStoreBot",
+    });
+    await seedPublishPrerequisites({
+      storeId: empty.storeId,
+      storeKey: "browser-store-empty",
+      botId: 810_003,
+      botUsername: "BidayaStoreBot",
     });
 
     const expired = await issue(

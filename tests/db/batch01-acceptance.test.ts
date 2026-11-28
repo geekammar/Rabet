@@ -330,7 +330,7 @@ async function createAndPublishProduct() {
   if (!readiness) throw new Error("expected readiness");
   expect(readiness.ready).toBe(true);
 
-  const published = await publishMerchantCatalogProduct(appDb(), access, {
+  const published = await publishMerchantCatalogProduct(db(), access, {
     productId: created.productId,
     revision: readiness.revision,
   });
