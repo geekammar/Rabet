@@ -156,6 +156,28 @@ async function seedProduct(
 }
 
 describe.skipIf(!shouldRun)("managed storefront reader visibility", () => {
+  it("searches visible catalog text before pagination and keeps tenant and ancestry filters", async () => {
+    const visible = await seedCategory(storeAId);
+    const hidden = await seedCategory(storeAId, { isActive: false });
+    const foreign = await seedCategory(storeBId);
+    const first = await seedProduct(storeAId, visible, { name: "Café Lamp", isActive: true });
+    const second = await seedProduct(storeAId, visible, { name: "Cafe Maker", isActive: true });
+    await seedProduct(storeAId, visible, { name: "Desk Fan", isActive: true });
+    await seedProduct(storeAId, visible, { name: "Cafe Draft" });
+    await seedProduct(storeAId, hidden, { name: "Cafe Hidden", isActive: true });
+    await seedProduct(storeBId, foreign, { name: "Cafe Foreign", isActive: true });
+
+    const read = (page: number) => listManagedProducts(asAppDb(db()), scopeA, {
+      page, pageSize: 1, search: "CAFE description",
+    });
+    await expect(read(1)).resolves.toMatchObject({
+      page: 1, totalCount: 2, totalPages: 2, items: [{ id: first, name: "Café Lamp" }],
+    });
+    await expect(read(2)).resolves.toMatchObject({
+      page: 2, totalCount: 2, totalPages: 2, items: [{ id: second, name: "Cafe Maker" }],
+    });
+  });
+
   it("hides an inactive draft from buyers while the merchant preview reads it", async () => {
     const categoryId = await seedCategory(storeAId);
     const productId = await seedProduct(storeAId, categoryId, {

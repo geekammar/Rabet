@@ -24,6 +24,11 @@ export type CommerceCopy = {
   previous: string;
   next: string;
   products: string;
+  search: string;
+  searchPrompt: string;
+  searchInvalid: string;
+  searchResults: string;
+  searchEmpty: string;
   browseCategories: string;
   cart: string;
   languageButton: string;
@@ -117,6 +122,11 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     previous: "Previous",
     next: "Next",
     products: "Products",
+    search: "Search products",
+    searchPrompt: "Reply with a product name or keyword.",
+    searchInvalid: "Try a keyword of up to 80 characters.",
+    searchResults: "Product search results",
+    searchEmpty: "No products matched. Try another keyword.",
     browseCategories: "Browse categories",
     cart: "Cart",
     languageButton: "اللغة / Language",
@@ -232,6 +242,11 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     previous: "السابق",
     next: "التالي",
     products: "المنتجات",
+    search: "ابحث عن منتج",
+    searchPrompt: "رد باسم المنتج أو بكلمة من وصفه.",
+    searchInvalid: "جرّب كتابة كلمة بحث لا تتجاوز 80 حرفًا.",
+    searchResults: "نتائج البحث عن المنتجات",
+    searchEmpty: "لم نجد منتجات مطابقة. جرّب كلمة بحث أخرى.",
     browseCategories: "تصفح الأقسام",
     cart: "السلة",
     languageButton: "اللغة / Language",
