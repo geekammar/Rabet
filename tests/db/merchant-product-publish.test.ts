@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
+import postgres from "postgres";
 
 vi.mock("@/auth-merchant", () => ({
   auth: vi.fn(async () => null),
@@ -253,6 +254,36 @@ async function readProductRow(productId: string) {
   return row;
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+
+  return { promise, resolve };
+}
+
+async function waitForLockWaitOnInventory(deadlineMs = 4000) {
+  const deadline = Date.now() + deadlineMs;
+
+  while (Date.now() < deadline) {
+    const rows = await db().execute<{ waiting: number }>(sql`
+      select count(*)::int as waiting
+      from pg_stat_activity
+      where datname = current_database()
+        and state = 'active'
+        and wait_event_type = 'Lock'
+        and query like '%product_inventory%'
+    `);
+
+    if (Number(rows[0]?.waiting ?? 0) > 0) return true;
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  return false;
+}
+
 describe.skipIf(!shouldRun)("merchant product publish readiness", () => {
   it("returns actionable reasons when stock, payment, delivery and bot are missing", async () => {
     const merchant = await seedMerchant();
@@ -326,7 +357,7 @@ describe.skipIf(!shouldRun)("merchant product publish readiness", () => {
       productId,
     );
 
-    const result = await publishMerchantCatalogProduct(appDb(), merchant.access, {
+    const result = await publishMerchantCatalogProduct(db(), merchant.access, {
       productId,
       revision: readiness!.revision,
     });
@@ -347,7 +378,7 @@ describe.skipIf(!shouldRun)("merchant product publish readiness", () => {
       merchant.productId,
     );
 
-    const result = await publishMerchantCatalogProduct(appDb(), merchant.access, {
+    const result = await publishMerchantCatalogProduct(db(), merchant.access, {
       productId: merchant.productId,
       revision: before!.revision,
     });
@@ -372,6 +403,95 @@ describe.skipIf(!shouldRun)("merchant product publish readiness", () => {
     });
   });
 
+  it("does not activate when commerce readiness changes after a ready read", async () => {
+    const merchant = await seedReadyMerchant();
+    const before = await readMerchantProductReadiness(
+      appDb(),
+      merchant.access,
+      merchant.productId,
+    );
+
+    expect(before).toMatchObject({ ready: true, isActive: false });
+
+    await db()
+      .update(storeCommerceSetting)
+      .set({ codEnabled: false, deliveryFeeConfigured: false })
+      .where(eq(storeCommerceSetting.storeId, merchant.storeId));
+
+    const result = await publishMerchantCatalogProduct(db(), merchant.access, {
+      productId: merchant.productId,
+      revision: before!.revision,
+    });
+
+    expect(result).toMatchObject({ ok: false, error: "NOT_READY" });
+    if (!result.ok && result.error === "NOT_READY") {
+      expect(new Set(result.reasons)).toEqual(
+        new Set<MerchantProductReadinessReason>([
+          "NO_PAYMENT_METHOD",
+          "DELIVERY_FEE_NOT_CONFIGURED",
+        ]),
+      );
+    }
+    expect(await readProductRow(merchant.productId)).toMatchObject({
+      isActive: false,
+    });
+  });
+
+  it("does not activate when inventory is drained by a concurrent transaction after a ready read", async () => {
+    const merchant = await seedReadyMerchant();
+    const before = await readMerchantProductReadiness(
+      appDb(),
+      merchant.access,
+      merchant.productId,
+    );
+
+    expect(before).toMatchObject({ ready: true, isActive: false });
+
+    const rival = postgres(testDb!.url, { max: 1 });
+    const drained = deferred();
+    const releaseDrain = deferred();
+
+    const rivalTransaction = rival.begin(async (tx) => {
+      await tx`
+        update product_inventory
+        set on_hand = 0
+        where product_id = ${merchant.productId}::uuid
+          and store_id = ${merchant.storeId}::uuid
+      `;
+      drained.resolve();
+      await releaseDrain.promise;
+    });
+
+    try {
+      await drained.promise;
+
+      const publishPromise = publishMerchantCatalogProduct(
+        db(),
+        merchant.access,
+        { productId: merchant.productId, revision: before!.revision },
+      );
+
+      expect(await waitForLockWaitOnInventory()).toBe(true);
+
+      releaseDrain.resolve();
+      await rivalTransaction;
+
+      const result = await publishPromise;
+
+      expect(result).toMatchObject({ ok: false, error: "NOT_READY" });
+      if (!result.ok && result.error === "NOT_READY") {
+        expect(result.reasons).toContain("OUT_OF_STOCK");
+      }
+      expect(await readProductRow(merchant.productId)).toMatchObject({
+        isActive: false,
+      });
+    } finally {
+      releaseDrain.resolve();
+      await rivalTransaction.catch(() => {});
+      await rival.end();
+    }
+  });
+
   it("denies a cross-store product without disclosing it", async () => {
     const storeA = await seedReadyMerchant();
     const storeB = await seedMerchant();
@@ -387,7 +507,7 @@ describe.skipIf(!shouldRun)("merchant product publish readiness", () => {
     );
 
     const result = await publishMerchantCatalogProduct(
-      appDb(),
+      db(),
       storeA.access,
       { productId: productB, revision: readinessA!.revision },
     );
@@ -415,7 +535,7 @@ describe.skipIf(!shouldRun)("merchant product publish readiness", () => {
 
     expect(readiness?.ready).toBe(false);
 
-    const result = await publishMerchantCatalogProduct(appDb(), merchant.access, {
+    const result = await publishMerchantCatalogProduct(db(), merchant.access, {
       productId,
       revision: readiness!.revision,
     });

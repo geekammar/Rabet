@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
   getDb: vi.fn(() => ({ kind: "application-db" })),
+  getTransactionDb: vi.fn(() => ({ kind: "transaction-db" })),
   getMerchantAccess: vi.fn(),
   updateMerchantCatalogProductPrice: vi.fn(),
   updateMerchantCatalogProductAvailability: vi.fn(),
@@ -13,6 +14,10 @@ const state = vi.hoisted(() => ({
 
 vi.mock("@/db/client", () => ({
   getDb: state.getDb,
+}));
+
+vi.mock("@/db/transaction-client", () => ({
+  getTransactionDb: state.getTransactionDb,
 }));
 
 vi.mock("@/lib/auth/merchant-session", () => ({
@@ -223,7 +228,7 @@ describe("merchant catalog availability action", () => {
       revision: REVISION,
     });
     expect(state.publishMerchantCatalogProduct).toHaveBeenCalledWith(
-      { kind: "application-db" },
+      { kind: "transaction-db" },
       access,
       {
         productId: "33333333-3333-4333-8333-333333333333",
@@ -232,6 +237,30 @@ describe("merchant catalog availability action", () => {
     );
     expect(state.updateMerchantCatalogProductAvailability).not.toHaveBeenCalled();
     expect(state.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an availability enable when publication readiness is not met", async () => {
+    state.getMerchantAccess.mockResolvedValueOnce(access);
+    state.publishMerchantCatalogProduct.mockResolvedValueOnce({
+      ok: false,
+      error: "NOT_READY",
+      reasons: ["CATEGORY_NOT_ELIGIBLE"],
+    });
+
+    const result = await saveMerchantProductAvailability({
+      productId: "33333333-3333-4333-8333-333333333333",
+      isActive: true,
+      revision: REVISION,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "NOT_READY",
+      reasons: ["CATEGORY_NOT_ELIGIBLE"],
+    });
+    expect(state.publishMerchantCatalogProduct).toHaveBeenCalledTimes(1);
+    expect(state.updateMerchantCatalogProductAvailability).not.toHaveBeenCalled();
+    expect(state.refresh).not.toHaveBeenCalled();
   });
 
   it("passes an explicit false desired state instead of toggling the saved value", async () => {
@@ -316,7 +345,7 @@ describe("merchant catalog availability action", () => {
       reasons: ["OUT_OF_STOCK", "STORE_BOT_NOT_CONNECTED"],
     });
     expect(state.publishMerchantCatalogProduct).toHaveBeenCalledWith(
-      { kind: "application-db" },
+      { kind: "transaction-db" },
       access,
       {
         productId: "33333333-3333-4333-8333-333333333333",
@@ -341,7 +370,7 @@ describe("merchant product publish action — authorization", () => {
     });
 
     expect(result).toEqual({ ok: false, error: "DENIED" });
-    expect(state.getDb).not.toHaveBeenCalled();
+    expect(state.getTransactionDb).not.toHaveBeenCalled();
     expect(state.publishMerchantCatalogProduct).not.toHaveBeenCalled();
   });
 
@@ -355,6 +384,7 @@ describe("merchant product publish action — authorization", () => {
 
     expect(result).toEqual({ ok: false, error: "UNAVAILABLE" });
     expect(state.getMerchantAccess).not.toHaveBeenCalled();
+    expect(state.getTransactionDb).not.toHaveBeenCalled();
     expect(state.publishMerchantCatalogProduct).not.toHaveBeenCalled();
   });
 });
