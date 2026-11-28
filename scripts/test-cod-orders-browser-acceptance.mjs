@@ -521,9 +521,15 @@ async function main() {
   await cdp.evaluate("document.querySelector('[data-testid=\"merchant-login-submit\"]').click()");
   await waitFor(
     cdp,
-    `location.pathname + location.search + location.hash === ${JSON.stringify(orderPath)} &&
+    `location.pathname === '/app/orders' &&
+      new URLSearchParams(location.search).get('order') === ${JSON.stringify(order.id)} &&
       Boolean(document.getElementById(${JSON.stringify(`merchant-order-${order.id}`)}))`,
-    "authorized order and its anchor after merchant login",
+    "authorized order after merchant login",
+  );
+  await waitFor(
+    cdp,
+    `location.hash === ${JSON.stringify(`#merchant-order-${order.id}`)}`,
+    "selected order card anchor after merchant login",
   );
 
   log("Checking the merchant COD Orders entry and click-through...");
