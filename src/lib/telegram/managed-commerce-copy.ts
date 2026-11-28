@@ -29,6 +29,7 @@ export type CommerceCopy = {
   searchInvalid: string;
   searchResults: string;
   searchEmpty: string;
+  browseProducts: string;
   browseCategories: string;
   cart: string;
   languageButton: string;
@@ -127,6 +128,7 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     searchInvalid: "Try a keyword of up to 80 characters.",
     searchResults: "Product search results",
     searchEmpty: "No products matched. Try another keyword.",
+    browseProducts: "Browse products",
     browseCategories: "Browse categories",
     cart: "Cart",
     languageButton: "اللغة / Language",
@@ -247,6 +249,7 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     searchInvalid: "جرّب كتابة كلمة بحث لا تتجاوز 80 حرفًا.",
     searchResults: "نتائج البحث عن المنتجات",
     searchEmpty: "لم نجد منتجات مطابقة. جرّب كلمة بحث أخرى.",
+    browseProducts: "تصفح المنتجات",
     browseCategories: "تصفح الأقسام",
     cart: "السلة",
     languageButton: "اللغة / Language",

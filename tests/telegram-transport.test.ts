@@ -525,7 +525,7 @@ describe("telegram transport and error sanitization", () => {
         photo: "https://cdn.example.test/product.jpg",
         caption: "Product card",
         replyMarkup: {
-          inline_keyboard: [[{ text: "Add 1", callback_data: "ca:p:1" }]],
+          inline_keyboard: [[{ text: "Add 1", callback_data: "ca:p:1", style: "success" }]],
         },
       });
       expect(sent.ok).toBe(true);
@@ -558,6 +558,9 @@ describe("telegram transport and error sanitization", () => {
         "https://cdn.example.test/product.jpg",
       );
       expect(calls[0].body.caption).toBe("Product card");
+      expect(calls[0].body.reply_markup).toEqual({
+        inline_keyboard: [[{ text: "Add 1", callback_data: "ca:p:1", style: "success" }]],
+      });
       expect(calls[1].body.media).toMatchObject({
         type: "photo",
         caption: "Updated card",
