@@ -749,7 +749,35 @@ async function runJourney(cdp, fixture, authSecret) {
 
   await click('[data-testid="merchant-logout"]');
   await waitForUrl("/app/login", "redirect to merchant login");
+  await navigate(`${BASE_URL}/app`);
+  await waitForUrl("/app/login", "signed-out merchant PWA entry");
   await waitFor(cdp, "Boolean(document.querySelector('[data-testid=\"merchant-login-email\"]'))", "merchant login form");
+  await waitFor(
+    cdp,
+    "document.querySelectorAll('link[rel=manifest]').length === 1 && document.querySelector('link[rel=manifest]').getAttribute('href') === '/app/manifest.webmanifest'",
+    "merchant install manifest on signed-out login",
+  );
+  const merchantManifestResponse = await fetch(`${BASE_URL}/app/manifest.webmanifest`, {
+    redirect: "manual",
+  });
+  assert(
+    merchantManifestResponse.ok &&
+      merchantManifestResponse.headers.get("content-type")?.startsWith("application/manifest+json"),
+    "The merchant manifest should be public and served as a web app manifest",
+  );
+  const merchantManifest = await merchantManifestResponse.json();
+  assert(
+    merchantManifest.id === "/app" &&
+      merchantManifest.start_url === "/app" &&
+      merchantManifest.scope === "/app" &&
+      merchantManifest.display === "standalone",
+    "The merchant install should have its own identity and launch into /app",
+  );
+  const adminManifest = await fetch(`${BASE_URL}/manifest.webmanifest`).then((res) => res.json());
+  assert(
+    adminManifest.start_url === "/overview" && adminManifest.scope === "/",
+    "The existing admin install should still launch into /overview",
+  );
   await expectMerchantLocale(
     "merchant-login-page",
     "en",
@@ -786,6 +814,11 @@ async function runJourney(cdp, fixture, authSecret) {
   );
   await click('[data-testid="merchant-login-submit"]');
   await waitForUrl("/app/setup", "merchant A setup page");
+  await waitFor(
+    cdp,
+    "document.querySelectorAll('link[rel=manifest]').length === 1 && document.querySelector('link[rel=manifest]').getAttribute('href') === '/app/manifest.webmanifest'",
+    "merchant install manifest on authenticated setup",
+  );
   await waitFor(
     cdp,
     "document.querySelector('[data-testid=\"merchant-store-name\"]')?.textContent === " +

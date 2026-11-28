@@ -136,6 +136,6 @@ export const config = {
      * - _next/static, _next/image, favicon.ico and other static assets, so
      *   the PWA shell, icons and manifest always load while signed out
      */
-    "/((?!api/auth/(?!callback/credentials)|api/healthz|_next/static|_next/image|favicon.ico|icons|manifest.webmanifest|robots.txt|sitemap.xml).*)",
+    "/((?!api/auth/(?!callback/credentials)|api/healthz|_next/static|_next/image|favicon.ico|icons|manifest.webmanifest|app/manifest[.]webmanifest$|robots.txt|sitemap.xml).*)",
   ],
 };
