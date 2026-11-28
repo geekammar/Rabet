@@ -80,9 +80,10 @@ describe("merchant login action", () => {
 
   it("reconstructs the Orders URL and card anchor from a valid order ID", async () => {
     const orderId = "15fd76b5-fe40-44b3-b72f-f12c85e27ef0";
-    authState.signIn.mockResolvedValueOnce(undefined);
+    const orderPath = `/app/orders?order=${orderId}#merchant-order-${orderId}`;
+    authState.signIn.mockResolvedValueOnce(`https://merchant.example.test${orderPath}`);
 
-    await merchantLogin(undefined, formData({
+    const state = await merchantLogin(undefined, formData({
       email: "merchant@example.test",
       password: "merchant-password-123",
       order: orderId.toUpperCase(),
@@ -91,8 +92,10 @@ describe("merchant login action", () => {
     expect(authState.signIn).toHaveBeenCalledWith("credentials", {
       email: "merchant@example.test",
       password: "merchant-password-123",
-      redirectTo: `/app/orders?order=${orderId}#merchant-order-${orderId}`,
+      redirectTo: orderPath,
+      redirect: false,
     });
+    expect(state).toEqual({ orderPath });
   });
 
   it("rejects malformed input without calling Auth.js", async () => {

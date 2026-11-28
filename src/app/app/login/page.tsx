@@ -3,6 +3,7 @@ import { connection } from "next/server";
 import { notFound, redirect } from "next/navigation";
 
 import { MerchantLoginForm } from "@/components/merchant/merchant-login-form";
+import { MerchantOrderResume } from "@/components/merchant/merchant-order-resume";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { getMerchantAccess } from "@/lib/auth/merchant-session";
 import {
@@ -35,9 +36,13 @@ export default async function MerchantLoginPage({
   const orderId = parseMerchantOrderId((await searchParams).order);
   const access = await getMerchantAccess();
 
-  if (access) redirect(merchantPostLoginPath(orderId));
+  if (access && !orderId) redirect("/app/setup");
 
   const initialLocale = await readMerchantLocale();
+  if (access) {
+    return <MerchantOrderResume path={merchantPostLoginPath(orderId)} locale={initialLocale} />;
+  }
+
 
   return <MerchantLoginForm initialLocale={initialLocale} orderId={orderId} />;
 }

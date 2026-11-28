@@ -4,7 +4,6 @@ import { connection } from "next/server";
 import { notFound, redirect } from "next/navigation";
 
 import { MerchantOrderActions } from "@/components/dashboard/orders/order-actions";
-import { MerchantOrderAnchor } from "@/components/merchant/merchant-order-anchor";
 import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { getMerchantAccess } from "@/lib/auth/merchant-session";
@@ -485,9 +484,6 @@ export default async function MerchantOrdersPage({
       ? await readMerchantOrderById(db, access.scope, selectedOrderId)
       : null;
   const visibleOrders = selectedOrder ? [...orders, selectedOrder] : orders;
-  const selectedCardId = visibleOrders.some((order) => order.id === selectedOrderId)
-    ? `merchant-order-${selectedOrderId}`
-    : null;
   const copy = COPY[locale];
   const dateFormat = new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
@@ -529,8 +525,6 @@ export default async function MerchantOrdersPage({
           <p className="mt-1">{copy.suspendedBody}</p>
         </div>
       ) : null}
-
-      {selectedCardId && <MerchantOrderAnchor cardId={selectedCardId} />}
 
       {visibleOrders.length === 0 ? (
         <section className="rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">

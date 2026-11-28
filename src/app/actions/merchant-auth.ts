@@ -5,7 +5,10 @@ import { AuthError } from "next-auth";
 import { signIn, signOut } from "@/auth-merchant";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { signInSchema } from "@/lib/auth/schema";
-import { merchantPostLoginPath } from "@/lib/merchant/order-link";
+import {
+  merchantPostLoginPath,
+  parseMerchantOrderId,
+} from "@/lib/merchant/order-link";
 
 /**
  * Merchant sign-in and sign-out Server Actions.
@@ -19,6 +22,7 @@ import { merchantPostLoginPath } from "@/lib/merchant/order-link";
  */
 export type MerchantLoginState = {
   error?: "INVALID_CREDENTIALS" | "UNAVAILABLE";
+  orderPath?: string;
 };
 
 export async function merchantLogin(
@@ -38,12 +42,17 @@ export async function merchantLogin(
     return { error: "INVALID_CREDENTIALS" };
   }
 
+  const orderId = parseMerchantOrderId(formData.get("order"));
+  const redirectTo = merchantPostLoginPath(orderId);
+
   try {
-    await signIn("credentials", {
+    const result = await signIn("credentials", {
       email: parsed.data.email,
       password: parsed.data.password,
-      redirectTo: merchantPostLoginPath(formData.get("order")),
+      redirectTo,
+      ...(orderId ? { redirect: false } : {}),
     });
+    if (orderId && typeof result === "string") return { orderPath: redirectTo };
   } catch (error) {
     if (error instanceof AuthError) {
       return { error: "INVALID_CREDENTIALS" };

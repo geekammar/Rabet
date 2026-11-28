@@ -12,6 +12,7 @@ import {
   MerchantLanguageToggle,
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
+import { MerchantOrderResume } from "@/components/merchant/merchant-order-resume";
 import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
 
@@ -67,6 +68,8 @@ export function MerchantLoginForm({
       : state?.error === "UNAVAILABLE"
         ? copy.unavailable
         : null;
+
+  if (state?.orderPath) return <MerchantOrderResume path={state.orderPath} locale={locale} />;
 
   return (
     <div
