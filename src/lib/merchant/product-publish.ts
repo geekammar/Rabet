@@ -284,8 +284,8 @@ export async function readMerchantProductReadiness(
  * The merchant activation path must not trust a readiness value read before
  * the write: inventory, category ancestry, commerce settings, product
  * translations and the Store Bot connection are all independent rows that do
- * not bump the product revision. Locking each row with `SELECT ... FOR UPDATE`
- * inside the caller's transaction means a concurrent change either commits
+ * not bump the product revision. Locking each row inside the caller's
+ * transaction means a concurrent change either commits
  * before this read (and is evaluated) or waits until activation commits (and
  * is applied after the product is already active). The caller re-evaluates
  * readiness from these locked reads immediately before the guarded update.
@@ -315,7 +315,8 @@ async function readMerchantProductReadinessForActivation(
       ),
     )
     .limit(1)
-    .for("update");
+    // Checkout locks inventory before inserting rows that reference the product.
+    .for("no key update");
 
   if (!productRow) return null;
 
@@ -381,7 +382,8 @@ async function readMerchantProductReadinessForActivation(
     )
     .orderBy(desc(telegramConnection.verifiedAt))
     .limit(1)
-    .for("update");
+    // Order and webhook-update inserts also need a foreign-key lock here.
+    .for("no key update");
 
   const storeBotReady =
     typeof readyConnection?.botUsername === "string" &&

@@ -437,7 +437,7 @@ describe.skipIf(!shouldRun)("merchant product publish readiness", () => {
     });
   });
 
-  it("does not activate when inventory is drained by a concurrent transaction after a ready read", async () => {
+  it("lets a concurrent stock writer take the checkout foreign-key lock before rechecking stock", async () => {
     const merchant = await seedReadyMerchant();
     const before = await readMerchantProductReadiness(
       appDb(),
@@ -460,6 +460,9 @@ describe.skipIf(!shouldRun)("merchant product publish readiness", () => {
       `;
       drained.resolve();
       await releaseDrain.promise;
+      // Checkout takes this lock when inserting order items and reservations.
+      await tx`set local lock_timeout = '1s'`;
+      await tx`select id from product where id = ${merchant.productId}::uuid for key share`;
     });
 
     try {
