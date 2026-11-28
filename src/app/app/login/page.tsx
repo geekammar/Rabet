@@ -9,6 +9,10 @@ import {
   readMerchantLocale,
   merchantPageMetadata,
 } from "@/lib/merchant/locale-server";
+import {
+  merchantPostLoginPath,
+  parseMerchantOrderId,
+} from "@/lib/merchant/order-link";
 
 export async function generateMetadata(): Promise<Metadata> {
   return merchantPageMetadata(
@@ -19,16 +23,21 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export const instant = false;
 
-export default async function MerchantLoginPage() {
+export default async function MerchantLoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ order?: string | string[] }>;
+}) {
   await connection();
 
   if (!isMerchantAppEnabled()) notFound();
 
+  const orderId = parseMerchantOrderId((await searchParams).order);
   const access = await getMerchantAccess();
 
-  if (access) redirect("/app/setup");
+  if (access) redirect(merchantPostLoginPath(orderId));
 
   const initialLocale = await readMerchantLocale();
 
-  return <MerchantLoginForm initialLocale={initialLocale} />;
+  return <MerchantLoginForm initialLocale={initialLocale} orderId={orderId} />;
 }

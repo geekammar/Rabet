@@ -48,8 +48,10 @@ const COPY = {
 
 export function MerchantLoginForm({
   initialLocale,
+  orderId,
 }: {
   initialLocale: MerchantLocale;
+  orderId: string | null;
 }) {
   const [state, formAction, pending] = useActionState<MerchantLoginState, FormData>(
     merchantLogin,
@@ -97,6 +99,7 @@ export function MerchantLoginForm({
             className="space-y-4"
             aria-describedby={errorMessage ? "merchant-login-error" : undefined}
           >
+            {orderId && <input type="hidden" name="order" value={orderId} />}
             <div className="space-y-2">
               <label
                 htmlFor="merchant-email"

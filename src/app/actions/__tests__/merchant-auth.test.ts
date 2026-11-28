@@ -58,21 +58,41 @@ describe("merchant login action", () => {
     vi.stubEnv("RABET_MERCHANT_APP_ENABLED", "true");
   });
 
-  it("uses a fixed internal redirect, never a caller-supplied callback URL", async () => {
+  it.each(["//example.invalid/", "15fd76b5-fe40-44b3-b72f-f12c85e27ef0\n"])(
+    "falls back to setup for an invalid order target (%j)", async (order) => {
+      authState.signIn.mockResolvedValueOnce(undefined);
+
+      const state = await merchantLogin(undefined, formData({
+        email: "merchant@example.test",
+        password: "merchant-password-123",
+        callbackUrl: "https://example.invalid/",
+        order,
+      }));
+
+      expect(authState.signIn).toHaveBeenCalledWith("credentials", {
+        email: "merchant@example.test",
+        password: "merchant-password-123",
+        redirectTo: "/app/setup",
+      });
+      expect(state).toEqual({ error: "INVALID_CREDENTIALS" });
+    },
+  );
+
+  it("reconstructs the Orders URL and card anchor from a valid order ID", async () => {
+    const orderId = "15fd76b5-fe40-44b3-b72f-f12c85e27ef0";
     authState.signIn.mockResolvedValueOnce(undefined);
 
-    const state = await merchantLogin(undefined, formData({
+    await merchantLogin(undefined, formData({
       email: "merchant@example.test",
       password: "merchant-password-123",
-      callbackUrl: "https://evil.example.test/",
+      order: orderId.toUpperCase(),
     }));
 
     expect(authState.signIn).toHaveBeenCalledWith("credentials", {
       email: "merchant@example.test",
       password: "merchant-password-123",
-      redirectTo: "/app/setup",
+      redirectTo: `/app/orders?order=${orderId}#merchant-order-${orderId}`,
     });
-    expect(state).toEqual({ error: "INVALID_CREDENTIALS" });
   });
 
   it("rejects malformed input without calling Auth.js", async () => {

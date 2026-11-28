@@ -25,6 +25,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { hash as hashPassword } from "@node-rs/argon2";
 import { encode as encodeAuthJwt } from "next-auth/jwt";
 import postgres from "postgres";
 
@@ -237,10 +238,17 @@ async function main() {
     values ('Synthetic COD Store', 'synthetic-cod-store', 'active')
     returning id
   `;
+  const merchantEmail = "cod-browser-owner@example.test";
+  const merchantPassword = crypto.randomUUID();
+  const passwordHash = await hashPassword(merchantPassword);
   const [user] = await pgClient`
     insert into "app_user" ("email")
-    values ('cod-browser-owner@example.test')
+    values (${merchantEmail})
     returning id, session_version
+  `;
+  await pgClient`
+    insert into "merchant_credential" ("user_id", "password_hash")
+    values (${user.id}, ${passwordHash})
   `;
   await pgClient`
     insert into "store_membership" ("store_id", "user_id", "role", "status")
@@ -483,14 +491,6 @@ async function main() {
     deviceScaleFactor: 2,
     mobile: true,
   });
-  await cdp.send("Network.setCookie", {
-    name: "rabet-merchant.session-token",
-    value: merchantCookie,
-    domain: "127.0.0.1",
-    path: "/",
-    httpOnly: true,
-  });
-
   const navigate = async (url, label) => {
     await cdp.send("Page.navigate", { url });
     await waitFor(
@@ -499,6 +499,32 @@ async function main() {
       `${label} document ready`,
     );
   };
+
+  log("Checking that a signed-out order link resumes after merchant sign-in...");
+  const orderPath = `/app/orders?order=${order.id}#merchant-order-${order.id}`;
+  await navigate(`${BASE_URL}${orderPath}`, "signed-out order link");
+  await waitFor(
+    cdp,
+    `location.pathname === '/app/login' &&
+      new URLSearchParams(location.search).get('order') === ${JSON.stringify(order.id)} &&
+      Boolean(document.querySelector('[data-testid="merchant-login-email"]'))`,
+    "merchant login with the order selector preserved",
+  );
+  assert(
+    !(await cdp.evaluate("document.body.innerText.includes('ORD-ABC234')")),
+    "The signed-out page must not expose the order",
+  );
+  for (const [field, value] of [["email", merchantEmail], ["password", merchantPassword]]) {
+    await cdp.evaluate(`document.querySelector('[data-testid="merchant-login-${field}"]').focus()`);
+    await cdp.send("Input.insertText", { text: value });
+  }
+  await cdp.evaluate("document.querySelector('[data-testid=\"merchant-login-submit\"]').click()");
+  await waitFor(
+    cdp,
+    `location.pathname + location.search + location.hash === ${JSON.stringify(orderPath)} &&
+      Boolean(document.getElementById(${JSON.stringify(`merchant-order-${order.id}`)}))`,
+    "authorized order and its anchor after merchant login",
+  );
 
   log("Checking the merchant COD Orders entry and click-through...");
   await cdp.send("Network.setCookie", {
