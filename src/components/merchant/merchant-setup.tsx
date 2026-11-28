@@ -16,6 +16,7 @@ import {
   MerchantLanguageToggle,
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
+import { MerchantInstallHelp } from "@/components/merchant/merchant-install-help";
 import { MerchantLogoutButton } from "@/components/merchant/merchant-logout-button";
 import {
   MerchantNeedsAttention,
@@ -907,6 +908,9 @@ export function MerchantSetup({
             {copy.pendingBody}
           </div>
         )}
+        {!readOnly && telegramConnection.state === "connected" ? (
+          <MerchantInstallHelp locale={locale} />
+        ) : null}
       </main>
     </div>
   );
