@@ -23,7 +23,7 @@ import {
   telegramConnection,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
-import { resolveMerchantAccess } from "@/lib/auth/merchant-session";
+import type { MerchantAccess } from "@/lib/auth/merchant-session";
 import { saveStorefrontProfile } from "@/lib/merchant/storefront-profile";
 import { EMPTY_STOREFRONT_PROFILE } from "@/lib/merchant/storefront-profile-fields";
 import { readLatestBuyerCodOrder } from "@/lib/commerce/orders";
@@ -631,13 +631,26 @@ async function completeReview(
   };
 }
 
+async function merchantAccessForStoreA(): Promise<MerchantAccess> {
+  return {
+    userId: fixture.userAId,
+    email: "botcod.a@example.test",
+    sessionVersion: 0,
+    role: "owner",
+    store: {
+      id: fixture.storeAId,
+      name: "Bot COD Store A",
+      slug: "bot-cod-store-a",
+      status: "active",
+    },
+    scope: await readStoreScopeForFixture(db(), fixture.storeAId),
+    readOnly: false,
+  };
+}
+
 describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
   it("shows a saved welcome cover only in its own storefront and falls back to text", async () => {
-    const access = await resolveMerchantAccess(db() as unknown as TransactionDatabase, {
-      userId: fixture.userAId,
-      sessionVersion: 0,
-    });
-    expect(access).not.toBeNull();
+    const access = await merchantAccessForStoreA();
     const profile = {
       ...EMPTY_STOREFRONT_PROFILE,
       displayName: "Noor Store",
@@ -647,10 +660,10 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       coverUrl: "https://cdn.example.test/cover.jpg",
     };
     await expect(saveStorefrontProfile(db() as unknown as TransactionDatabase, {
-      ...access!,
+      ...access,
       scope: await readStoreScopeForFixture(db(), fixture.storeBId),
     }, profile)).resolves.toBe(false);
-    await expect(saveStorefrontProfile(db() as unknown as TransactionDatabase, access!, profile))
+    await expect(saveStorefrontProfile(db() as unknown as TransactionDatabase, access, profile))
       .resolves.toBe(true);
 
     const home = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start", {}, "en"));
@@ -1957,21 +1970,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
   });
 
   it("saves the merchant default only for the authenticated store", async () => {
-    const scopeA = await readStoreScopeForFixture(db(), fixture.storeAId);
-    const accessA = {
-      userId: fixture.userAId,
-      email: "botcod.a@example.test",
-      sessionVersion: 0,
-      role: "owner" as const,
-      store: {
-        id: fixture.storeAId,
-        name: "Bot COD Store A",
-        slug: "bot-cod-store-a",
-        status: "active" as const,
-      },
-      scope: scopeA,
-      readOnly: false,
-    };
+    const accessA = await merchantAccessForStoreA();
 
     const saved = await saveMerchantStoreLanguage(
       db() as unknown as TransactionDatabase,
