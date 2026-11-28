@@ -83,6 +83,7 @@ export interface TelegramUpdate {
 
 export interface TelegramInlineKeyboardButton {
   text: string;
+  style?: "primary" | "success" | "danger";
   callback_data?: string;
   url?: string;
 }

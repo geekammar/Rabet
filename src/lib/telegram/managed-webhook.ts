@@ -486,6 +486,7 @@ function reviewKeyboard(
     [
       {
         text: copy.confirmButton,
+        style: "success",
         callback_data: tokens.confirmCod(review.cartId, review.quoteVersion),
       },
     ],
@@ -495,6 +496,7 @@ function reviewKeyboard(
     paymentButtons.push([
       {
         text: copy.payWithVodafoneCash,
+        style: "success",
         callback_data: tokens.confirmVodafoneCash(
           review.cartId,
           review.quoteVersion,
@@ -522,11 +524,11 @@ function cartKeyboard(cart: CartView, copy: CommerceCopy) {
   const keyboard: TelegramInlineKeyboardButton[][] = cart.lines.map((line) => [
     { text: "−", callback_data: tokens.cartDecrease(line.productId) },
     { text: "+", callback_data: tokens.cartIncrease(line.productId) },
-    { text: copy.remove, callback_data: tokens.cartRemove(line.productId) },
+    { text: copy.remove, style: "danger", callback_data: tokens.cartRemove(line.productId) },
   ]);
 
   keyboard.push([
-    { text: copy.checkout, callback_data: tokens.checkout(cart.id) },
+    { text: copy.checkout, style: "primary", callback_data: tokens.checkout(cart.id) },
   ]);
   keyboard.push([
     { text: copy.languageButton, callback_data: tokens.languages() },
@@ -1133,9 +1135,10 @@ async function renderHome(
     plan,
   );
 
-  const keyboard: TelegramInlineKeyboardButton[][] = page.items.map((item) => [
-    productButton(item),
-  ]);
+  const keyboard: TelegramInlineKeyboardButton[][] = [
+    [{ text: copy.browseProducts, style: "primary", callback_data: tokens.products(1) }],
+    ...page.items.map((item) => [productButton(item)]),
+  ];
 
   keyboard.push([
     { text: copy.browseCategories, callback_data: tokens.storefrontCategories() },
@@ -1603,6 +1606,7 @@ async function renderProduct(
       for (let quantity = 1; quantity <= maxQuantity; quantity += 1) {
         quantityButtons.push({
           text: copy.addQuantity(quantity),
+          style: "success",
           callback_data: tokens.cartAdd(productId, quantity),
         });
       }

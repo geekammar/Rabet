@@ -629,6 +629,23 @@ async function completeReview(
 }
 
 describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
+  it("renders distinct browse, purchase and removal actions", async () => {
+    const home = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start", {}, "en"));
+    const markup = home.transport.sentMessages.at(-1)?.replyMarkup;
+    expect(markup && "inline_keyboard" in markup && markup.inline_keyboard[0]).toEqual([
+      { text: "Browse products", style: "primary", callback_data: "prods" },
+    ]);
+    const browse = await call(fixture.connectionAId, callbackUpdate(BUYER_A, "prods", "en", 7001));
+    expect(browse.transport.editedMessages.at(-1)).toMatchObject({ messageId: 7001 });
+    expect(browse.transport.sentMessages).toHaveLength(0);
+
+    const card = await call(fixture.connectionAId, callbackUpdate(BUYER_A, `p:${fixture.productAId}`, "en"));
+    expect(lastButton(card.transport, "ca:")).toMatchObject({ style: "success" });
+    const added = await call(fixture.connectionAId, callbackUpdate(BUYER_A, `ca:${fixture.productAId}:1`, "en"));
+    expect(lastButton(added.transport, "cr:")).toMatchObject({ style: "danger" });
+    expect(lastButton(added.transport, "co:")).toMatchObject({ style: "primary" });
+  });
+
   it("accepts a private reply to this bot's catalog search prompt and handles empty results", async () => {
     const search = await call(fixture.connectionAId, callbackUpdate(BUYER_A, "catalog-search", "en"));
     expect(search.status).toBe(200);
