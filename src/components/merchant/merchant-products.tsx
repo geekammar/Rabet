@@ -813,8 +813,8 @@ export function MerchantProducts({
                           data-testid={`merchant-product-available-${product.id}`}
                         >
                           {product.categoryPathVisible
-                            ? `${copy.publishedStatus} — ${copy.availableInCatalog}`
-                            : `${copy.publishedStatus} — ${copy.availabilityOnCategoryHidden}`}
+                            ? copy.availableInCatalog
+                            : copy.availabilityOnCategoryHidden}
                         </span>
                       ) : (
                         <Badge
