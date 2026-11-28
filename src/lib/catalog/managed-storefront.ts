@@ -401,7 +401,10 @@ export async function listManagedProducts(
         const name = searchContent.names.get(row.id) ?? row.slug;
         const description = searchContent.descriptions.get(row.id) ?? "";
         const text = catalogSearchText(`${name} ${description}`);
-        return words.every((word) => text.includes(word));
+        const terms = text.match(/[\p{L}\p{N}]+/gu) ?? [];
+        return words.every((word) => Array.from(word).length === 1
+          ? terms.includes(word)
+          : text.includes(word));
       })
     : ordered;
 
