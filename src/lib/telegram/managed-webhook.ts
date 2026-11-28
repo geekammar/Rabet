@@ -22,6 +22,7 @@ import {
   confirmCodOrder,
   confirmVodafoneCashOrder,
   readCartForBuyer,
+  readLatestBuyerCodOrder,
   bindVodafoneCashTransferPromptMessage,
   listBuyerOutstandingVodafoneTransfers,
   readCheckoutAvailability,
@@ -35,8 +36,8 @@ import {
   savePhone,
   startCheckout,
   submitVodafoneCashTransferClaim,
+  type BuyerOrderChat,
   type CartView,
-  type BuyerVodafoneTransferSummary,
   type CheckoutReview,
   type CommerceSetting,
   type TransferSnapshot,
@@ -60,9 +61,11 @@ import {
   verifyWebhookSecret,
 } from "./connection-secrets";
 import {
+  claimManagedCartMutation,
   claimManagedTelegramUpdate,
   markManagedTelegramUpdateFailed,
   markManagedTelegramUpdateProcessed,
+  type ManagedUpdateAttempt,
 } from "./managed-updates";
 import { readReadyManagedConnection } from "./manager-provisioning";
 import {
@@ -201,11 +204,8 @@ type CodContext = {
   setting: CommerceSetting | null;
 };
 
-type HomeRecovery = {
-  commerceDb: TransactionDatabase;
-  connectionId: string;
-  buyerId: number;
-  chatId: number;
+type HomeRecovery = BuyerOrderChat & {
+  commerceDb: TransactionDatabase | null;
   locale: ManagedCommerceLocale;
 };
 
@@ -216,24 +216,14 @@ function homeRecoveryFor(
   chatId: number,
   locale: ManagedCommerceLocale,
 ): HomeRecovery | undefined {
-  if (!commerceDb || buyerId === null) return undefined;
-  return { commerceDb, connectionId, buyerId, chatId, locale };
-}
-
-async function outstandingVodafoneTransfers(
-  recovery: HomeRecovery,
-  scope: StoreScope,
-): Promise<BuyerVodafoneTransferSummary[]> {
-  const transfers = await listBuyerOutstandingVodafoneTransfers(
-    recovery.commerceDb,
-    scope,
-    {
-      connectionId: recovery.connectionId,
-      telegramUserId: recovery.buyerId,
-      telegramChatId: recovery.chatId,
-    },
-  );
-  return transfers;
+  if (buyerId === null) return undefined;
+  return {
+    commerceDb,
+    connectionId,
+    telegramUserId: buyerId,
+    telegramChatId: chatId,
+    locale,
+  };
 }
 
 type LanguageContext = {
@@ -713,6 +703,38 @@ async function renderPlacedOrderOnActiveMessage(
   }
 }
 
+async function renderLatestCodOrder(
+  db: Database,
+  scope: StoreScope,
+  transport: TelegramTransport,
+  messageId: number,
+  copy: CommerceCopy,
+  buyer: BuyerOrderChat,
+): Promise<void> {
+  const order = await readLatestBuyerCodOrder(db, scope, buyer);
+  let text = copy.latestCodOrderUnavailable;
+  if (order) {
+    const status = order.fulfillmentStatus === "unfulfilled"
+      ? order.status
+      : order.fulfillmentStatus;
+    const lines = [
+      `${copy.codOrderReference}: ${order.reference}`,
+      `${copy.codOrderStatusLabel}: ${copy.codOrderStatuses[status]}`,
+    ];
+    if (status !== "cancelled" || order.paymentStatus !== "awaiting_collection") {
+      lines.push(`${copy.paymentLabel}: ${copy.codPaymentStatuses[order.paymentStatus]}`);
+    }
+    text = lines.join("\n");
+  }
+
+  await editOrThrow(transport, {
+    chatId: buyer.telegramChatId,
+    messageId,
+    text,
+    replyMarkup: { inline_keyboard: homeKeyboard(copy, "cod") },
+  });
+}
+
 function transferInstructionsFor(
   snapshot: TransferSnapshot | null,
   locale: ManagedCommerceLocale,
@@ -1097,8 +1119,18 @@ async function renderHome(
     keyboard.push([{ text: copy.cart, callback_data: tokens.cart() }]);
   }
 
-  if (recovery) {
-    const transfers = await outstandingVodafoneTransfers(recovery, scope);
+  if (recovery && (await readLatestBuyerCodOrder(db, scope, recovery))) {
+    keyboard.push([
+      { text: copy.latestCodOrder, callback_data: tokens.latestCodOrder() },
+    ]);
+  }
+
+  if (recovery?.commerceDb) {
+    const transfers = await listBuyerOutstandingVodafoneTransfers(
+      recovery.commerceDb,
+      scope,
+      recovery,
+    );
     if (transfers.length > 0) {
       keyboard.push([
         {
@@ -1861,6 +1893,14 @@ async function dispatchMessage(
     plan,
     transport,
     message.chat.id,
+    undefined,
+    homeRecoveryFor(
+      commerceDb,
+      connectionId,
+      buyerId,
+      message.chat.id,
+      context.language.locale,
+    ),
   );
 }
 
@@ -1993,15 +2033,15 @@ async function renderLanguageContextScreen(
   }
 
   if (context.startsWith("to:")) {
-    if (!recovery) return false;
+    if (!recovery?.commerceDb) return false;
 
     const state = await readVodafoneCashOrderState(
       recovery.commerceDb,
       scope,
       {
         connectionId: recovery.connectionId,
-        telegramUserId: recovery.buyerId,
-        telegramChatId: recovery.chatId,
+        telegramUserId: recovery.telegramUserId,
+        telegramChatId: recovery.telegramChatId,
         orderId: context.slice(3),
       },
     );
@@ -2016,6 +2056,11 @@ async function renderLanguageContextScreen(
       recovery.locale,
       copy,
     );
+    return true;
+  }
+
+  if (context === "cod" && recovery) {
+    await renderLatestCodOrder(db, scope, transport, messageId, copy, recovery);
     return true;
   }
 
@@ -2103,6 +2148,7 @@ async function dispatchCallback(
     from: { id: number; first_name?: string; language_code?: string };
   },
   parsedToken: ParsedToken,
+  updateAttempt: ManagedUpdateAttempt,
 ): Promise<void> {
   const ack = await transport.answerCallbackQuery({
     callbackQueryId: callbackQuery.id,
@@ -2126,6 +2172,15 @@ async function dispatchCallback(
     callbackQuery.from.language_code,
   );
   let { copy, plan } = context;
+
+  if (parsedToken.type === "latestCodOrder") {
+    await renderLatestCodOrder(db, scope, transport, messageId, copy, {
+      connectionId,
+      telegramUserId: buyerId,
+      telegramChatId: chatId,
+    });
+    return;
+  }
 
   if (parsedToken.type === "languages") {
     await renderLanguageMenu(
@@ -2238,115 +2293,85 @@ async function dispatchCallback(
       return;
     }
 
-    if (parsedToken.type === "cartAdd") {
-      const result = await addToCart(commerceDb, scope, {
+    if (
+      parsedToken.type === "cartAdd" ||
+      parsedToken.type === "cartIncrease" ||
+      parsedToken.type === "cartDecrease" ||
+      parsedToken.type === "cartRemove"
+    ) {
+      const input = {
         connectionId,
         telegramUserId: buyerId,
-        telegramChatId: chatId,
         productId: parsedToken.productId,
-        quantity: parsedToken.quantity,
+      };
+      const result = await commerceDb.transaction(async (tx) => {
+        const shouldApply = await claimManagedCartMutation(tx, {
+          ...updateAttempt,
+          connectionId,
+        });
+        if (!shouldApply) {
+          return {
+            status: "replayed" as const,
+            cart: await readCartForBuyer(tx, scope, input),
+          };
+        }
+
+        switch (parsedToken.type) {
+          case "cartAdd":
+            return addToCart(tx, scope, {
+              ...input,
+              telegramChatId: chatId,
+              quantity: parsedToken.quantity,
+            });
+          case "cartIncrease":
+            return changeCartQuantity(tx, scope, { ...input, delta: 1 });
+          case "cartDecrease":
+            return changeCartQuantity(tx, scope, { ...input, delta: -1 });
+          case "cartRemove":
+            return removeCartItem(tx, scope, input);
+        }
       });
 
-      if (result.status === "added") {
+      if (
+        result.status === "added" ||
+        result.status === "updated" ||
+        result.status === "replayed"
+      ) {
         await renderCartView(
           transport,
           chatId,
           messageId,
-          await localizeCartView(db, scope, result.cart, plan, copy),
+          result.cart
+            ? await localizeCartView(db, scope, result.cart, plan, copy)
+            : null,
           copy,
         );
         return;
       }
+
+      if (parsedToken.type === "cartDecrease" || parsedToken.type === "cartRemove") {
+        await renderCartView(transport, chatId, messageId, null, copy);
+        return;
+      }
+
+      const text = parsedToken.type === "cartAdd"
+        ? result.status === "out_of_stock"
+          ? copy.outOfStock
+          : result.status === "cod_unavailable"
+            ? copy.notOrderable
+            : copy.unavailable
+        : result.status === "empty"
+          ? copy.cartEmpty
+          : result.status === "invalid_quantity"
+            ? copy.maxQuantity
+            : copy.genericUnavailable;
 
       await editOrThrow(transport, {
         chatId,
         messageId,
-        text:
-          result.status === "out_of_stock"
-            ? copy.outOfStock
-            : result.status === "cod_unavailable"
-              ? copy.notOrderable
-              : copy.unavailable,
+        text,
         replyMarkup: { inline_keyboard: homeKeyboard(copy) },
       });
-      return;
-    }
-
-    if (parsedToken.type === "cartIncrease") {
-      const result = await changeCartQuantity(commerceDb, scope, {
-        connectionId,
-        telegramUserId: buyerId,
-        productId: parsedToken.productId,
-        delta: 1,
-      });
-
-      if (result.status === "updated") {
-        await renderCartView(
-          transport,
-          chatId,
-          messageId,
-          await localizeCartView(db, scope, result.cart, plan, copy),
-          copy,
-        );
-        return;
-      }
-
-      await editOrThrow(transport, {
-        chatId,
-        messageId,
-        text:
-          result.status === "empty"
-            ? copy.cartEmpty
-            : result.status === "invalid_quantity"
-              ? copy.maxQuantity
-              : copy.genericUnavailable,
-        replyMarkup: { inline_keyboard: homeKeyboard(copy) },
-      });
-      return;
-    }
-
-    if (parsedToken.type === "cartDecrease") {
-      const result = await changeCartQuantity(commerceDb, scope, {
-        connectionId,
-        telegramUserId: buyerId,
-        productId: parsedToken.productId,
-        delta: -1,
-      });
-
-      if (result.status === "updated") {
-        await renderCartView(
-          transport,
-          chatId,
-          messageId,
-          await localizeCartView(db, scope, result.cart, plan, copy),
-          copy,
-        );
-        return;
-      }
-
-      await renderCartView(transport, chatId, messageId, null, copy);
-      return;
-    }
-
-    if (parsedToken.type === "cartRemove") {
-      const result = await removeCartItem(commerceDb, scope, {
-        connectionId,
-        telegramUserId: buyerId,
-        productId: parsedToken.productId,
-      });
-
-      if (result.status === "updated") {
-        await renderCartView(
-          transport,
-          chatId,
-          messageId,
-          await localizeCartView(db, scope, result.cart, plan, copy),
-          copy,
-        );
-        return;
-      }
-
-      await renderCartView(transport, chatId, messageId, null, copy);
       return;
     }
 
@@ -2936,6 +2961,7 @@ async function dispatchCallback(
     transport,
     chatId,
     messageId,
+    homeRecoveryFor(commerceDb, connectionId, buyerId, chatId, context.language.locale),
   );
 }
 
@@ -3094,6 +3120,7 @@ export async function handleManagedTelegramWebhookRequest(
         transport,
         validation.data.callbackQuery,
         validation.data.parsedToken,
+        { botId: connection.botId, updateId: update.update_id, attemptToken },
       );
     }
 

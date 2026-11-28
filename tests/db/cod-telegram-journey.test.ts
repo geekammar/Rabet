@@ -23,6 +23,7 @@ import {
   telegramConnection,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
+import { readLatestBuyerCodOrder } from "@/lib/commerce/orders";
 import {
   readStoreLanguageChoice,
   resolveBuyerLanguage,
@@ -30,6 +31,7 @@ import {
 import { saveMerchantStoreLanguage } from "@/lib/merchant/store-language";
 import { hashWebhookSecret } from "@/lib/telegram/connection-secrets";
 import { handleManagedTelegramWebhookRequest } from "@/lib/telegram/managed-webhook";
+import { tokens } from "@/lib/telegram/tokens";
 import {
   createFakeTelegramTransport,
   type FakeTelegramTransport,
@@ -1023,6 +1025,68 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     expect(cartRow.status).toBe("converted");
   });
 
+  it.each([
+    ["add", 0, 1, 2],
+    ["increase", 2, 3, 4],
+    ["decrease", 2, 1, 0],
+    ["remove", 2, 0, 1],
+  ] as const)(
+    "applies a cart %s once when the same Telegram update is retried after a rendering failure",
+    async (action, initialQuantity, afterFirst, afterDistinct) => {
+      const productId = fixture.productAId;
+      const add = tokens.cartAdd(productId, 1);
+      const data = {
+        add,
+        increase: tokens.cartIncrease(productId),
+        decrease: tokens.cartDecrease(productId),
+        remove: tokens.cartRemove(productId),
+      }[action];
+      if (initialQuantity) {
+        const seed = await call(
+          fixture.connectionAId,
+          callbackUpdate(BUYER_A, tokens.cartAdd(productId, initialQuantity)),
+        );
+        expect(seed.status).toBe(200);
+      }
+
+      const quantity = async () => {
+        const [item] = await db().select().from(cartItem);
+        return item?.quantity ?? 0;
+      };
+      const transport = createFakeTelegramTransport();
+      const hasPhoto = action === "add";
+      transport.failEditWith = hasPhoto ? "No text in message" : "Edit failed";
+      transport.failEditKind = hasPhoto ? "not_editable" : "api_error";
+      transport.failSendWith = "Replacement failed";
+      const update = callbackUpdate(BUYER_A, data, "en", undefined, hasPhoto);
+
+      const failed = await call(fixture.connectionAId, update, "bot-secret-a", transport);
+      expect(failed.status).toBe(500);
+      expect(await quantity()).toBe(afterFirst);
+      const [cartAfterFirst] = await db().select().from(cart);
+
+      const retryTransport = createFakeTelegramTransport();
+      if (hasPhoto) {
+        retryTransport.failEditWith = "No text in message";
+        retryTransport.failEditKind = "not_editable";
+      }
+      const retried = await call(fixture.connectionAId, update, "bot-secret-a", retryTransport);
+      expect(retried.status).toBe(200);
+      expect(await quantity()).toBe(afterFirst);
+      expect(await db().select().from(cart)).toEqual([cartAfterFirst]);
+      expect(lastText(retried.transport)).toContain(
+        afterFirst ? `Bot A One × ${afterFirst}` : "Your cart is empty",
+      );
+
+      const distinct = await call(
+        fixture.connectionAId,
+        callbackUpdate(BUYER_A, action === "remove" ? add : data),
+      );
+      expect(distinct.status).toBe(200);
+      expect(await quantity()).toBe(afterDistinct);
+    },
+  );
+
   it("returns a revised review instead of placing an order when the quote changed", async () => {
     const { confirmData } = await completeReview();
 
@@ -1951,6 +2015,103 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
 
     expect(await db().select().from(order)).toHaveLength(1);
     expect(await db().select().from(inventoryReservation)).toHaveLength(1);
+  });
+
+  it("recovers the latest COD order from /start when both receipt displays fail", async () => {
+    const latest = tokens.latestCodOrder();
+    const initialHome = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start"));
+    expect(lastButton(initialHome.transport, latest)).toBeUndefined();
+
+    const { confirmData, transport: reviewTransport } = await completeReview();
+    const reviewId = reviewTransport.sentMessages.at(-1)!.messageId;
+    const transport = createFakeTelegramTransport();
+    transport.failSendWith = "Request timed out";
+    transport.failSendKind = "timeout";
+    transport.failEditWith = "Edit failed";
+    transport.failEditKind = "api_error";
+    const sendReceipt = vi.spyOn(transport, "sendMessage");
+    const editReview = vi.spyOn(transport, "editMessageText");
+    const failed = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, confirmData, "en", reviewId),
+      "bot-secret-a",
+      transport,
+    );
+    expect(failed.status).toBe(500);
+    expect(sendReceipt).toHaveBeenCalledTimes(1);
+    expect(editReview).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ messageId: reviewId }),
+    );
+    expect(lastReceipt(failed.transport)).toBeUndefined();
+    expect(failed.transport.editedMessages).toHaveLength(0);
+    const orders = await db().select().from(order);
+    const reservations = await db().select().from(inventoryReservation);
+    expect(orders).toHaveLength(1);
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0].orderId).toBe(orders[0].id);
+    const { reference } = orders[0];
+
+    // Recovery remains available after the store disables new COD orders.
+    await db().update(storeCommerceSetting).set({ codEnabled: false })
+      .where(eq(storeCommerceSetting.storeId, fixture.storeAId));
+    const home = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start"));
+    expect(lastButton(home.transport, latest)?.text).toBe("Latest COD order");
+    const homeId = home.transport.sentMessages.at(-1)!.messageId;
+    const recovered = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, latest, "en", homeId),
+    );
+    expect(recovered.status).toBe(200);
+    expect(lastText(recovered.transport)).toContain(`Order reference: ${reference}`);
+    expect(lastText(recovered.transport)).toContain("Order status: Placed");
+    expect(lastText(recovered.transport)).toContain("Payment: Awaiting collection");
+    const returned = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, tokens.home(), "en", homeId),
+    );
+    expect(lastButton(returned.transport, latest)?.text).toBe("Latest COD order");
+
+    const otherBuyer = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A + 1, latest, "en", homeId),
+    );
+    const otherChatUpdate = callbackUpdate(BUYER_A, latest, "en", homeId);
+    otherChatUpdate.callback_query.message.chat.id = BUYER_A + 1;
+    const otherChat = await call(fixture.connectionAId, otherChatUpdate);
+    const otherStore = await call(
+      fixture.connectionBId,
+      callbackUpdate(BUYER_A, latest, "en", homeId),
+      "bot-secret-b",
+    );
+    for (const denied of [otherBuyer, otherChat, otherStore]) {
+      expect(denied.status).toBe(200);
+      expect(lastText(denied.transport)).toBe("There is no cash-on-delivery order in this chat.");
+    }
+    const otherBuyerHome = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A + 1, "/start"),
+    );
+    expect(lastButton(otherBuyerHome.transport, latest)).toBeUndefined();
+    const scope = await readStoreScopeForFixture(db(), fixture.storeAId);
+    expect(await readLatestBuyerCodOrder(asAppDb(db()), scope, {
+      connectionId: fixture.connectionBId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+    })).toBeNull();
+    expect(await db().select().from(order)).toEqual(orders);
+    expect(await db().select().from(inventoryReservation)).toEqual(reservations);
+
+    await db().update(order).set({ status: "accepted", acceptedAt: new Date() })
+      .where(eq(order.id, orders[0].id));
+    const switched = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, tokens.lang("ar", "cod"), "en", homeId),
+    );
+    expect(switched.status).toBe(200);
+    expect(lastText(switched.transport)).toContain(`مرجع الطلب: ${reference}`);
+    expect(lastText(switched.transport)).toContain("حالة الطلب: تم قبول الطلب");
+    const arabicHome = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start"));
+    expect(lastButton(arabicHome.transport, latest)?.text).toBe("آخر طلب بالدفع عند الاستلام");
   });
 
 });

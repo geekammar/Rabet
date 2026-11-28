@@ -25,6 +25,15 @@ export type ClaimManagedUpdateResult =
   | { status: "in_flight" };
 
 export type ManagedUpdateDatabase = Database | TransactionDatabase;
+type ManagedUpdateTransaction = Parameters<
+  Parameters<TransactionDatabase["transaction"]>[0]
+>[0];
+
+export type ManagedUpdateAttempt = {
+  botId: number;
+  updateId: number;
+  attemptToken: string;
+};
 
 /**
  * Both drivers expose the same Drizzle query builder for the operations here;
@@ -74,13 +83,13 @@ export async function claimManagedTelegramUpdate(
       return { status: "claimed", attemptToken };
     }
 
+    // Keep processedAt if the cart action committed before rendering failed.
     const [reclaimed] = await queryDb
       .update(telegramManagedUpdate)
       .set({
         status: "processing",
         attemptToken,
         claimedAt: now,
-        processedAt: null,
         processingError: null,
       })
       .where(
@@ -105,7 +114,6 @@ export async function claimManagedTelegramUpdate(
     const [existing] = await queryDb
       .select({
         status: telegramManagedUpdate.status,
-        processedAt: telegramManagedUpdate.processedAt,
       })
       .from(telegramManagedUpdate)
       .where(
@@ -123,7 +131,7 @@ export async function claimManagedTelegramUpdate(
       );
     }
 
-    if (existing.status === "processed" || existing.processedAt !== null) {
+    if (existing.status === "processed") {
       return { status: "already_processed" };
     }
 
@@ -134,13 +142,45 @@ export async function claimManagedTelegramUpdate(
   }
 }
 
+/**
+ * Record the cart effect in its transaction while fencing expired attempts.
+ * A timestamp on a processing or failed update means its cart action already
+ * ran. Only the processed status means the Telegram response also finished.
+ */
+export async function claimManagedCartMutation(
+  tx: ManagedUpdateTransaction,
+  input: ManagedUpdateAttempt & { connectionId: string },
+): Promise<boolean> {
+  const [update] = await tx
+    .select({
+      id: telegramManagedUpdate.id,
+      processedAt: telegramManagedUpdate.processedAt,
+    })
+    .from(telegramManagedUpdate)
+    .where(
+      and(
+        eq(telegramManagedUpdate.botId, input.botId),
+        eq(telegramManagedUpdate.updateId, input.updateId),
+        eq(telegramManagedUpdate.connectionId, input.connectionId),
+        eq(telegramManagedUpdate.attemptToken, input.attemptToken),
+        eq(telegramManagedUpdate.status, "processing"),
+      ),
+    )
+    .for("update");
+
+  if (!update) throw new Error("Managed cart update is no longer claimed");
+  if (update.processedAt !== null) return false;
+
+  await tx
+    .update(telegramManagedUpdate)
+    .set({ processedAt: new Date() })
+    .where(eq(telegramManagedUpdate.id, update.id));
+  return true;
+}
+
 export async function markManagedTelegramUpdateProcessed(
   db: ManagedUpdateDatabase,
-  input: {
-    botId: number;
-    updateId: number;
-    attemptToken: string;
-  },
+  input: ManagedUpdateAttempt,
 ): Promise<boolean> {
   const queryDb = queryBuilder(db);
 
@@ -170,12 +210,7 @@ export async function markManagedTelegramUpdateProcessed(
 
 export async function markManagedTelegramUpdateFailed(
   db: ManagedUpdateDatabase,
-  input: {
-    botId: number;
-    updateId: number;
-    attemptToken: string;
-    errorMessage: string;
-  },
+  input: ManagedUpdateAttempt & { errorMessage: string },
 ): Promise<boolean> {
   const queryDb = queryBuilder(db);
 
