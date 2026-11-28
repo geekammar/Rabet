@@ -60,6 +60,8 @@ export interface TelegramMessage {
   reply_to_message?: {
     message_id: number;
     chat?: TelegramChat;
+    from?: TelegramUser;
+    text?: string;
   };
 }
 

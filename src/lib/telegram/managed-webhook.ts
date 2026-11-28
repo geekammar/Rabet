@@ -111,6 +111,32 @@ import { validateIncomingUpdate } from "./webhook";
  */
 
 const PAGE_SIZE = 8;
+const SEARCH_QUERY_LIMIT = 80;
+
+function managedSearchQuery(value: string): string | null {
+  const query = value.replace(/\s+/gu, " ").trim();
+  return query && Array.from(query).length <= SEARCH_QUERY_LIMIT &&
+    /[\p{L}\p{N}]/u.test(query) && !/[\p{Cc}\p{Cf}]/u.test(query)
+    ? query
+    : null;
+}
+
+function matchesSearchPrompt(text: unknown): boolean {
+  return (["ar", "en"] as const).some((locale) => {
+    const copy = copyForLocale(locale);
+    return text === copy.searchPrompt || text === `${copy.searchInvalid}\n\n${copy.searchPrompt}`;
+  });
+}
+
+function queryFromSearchResults(message: TelegramMessage, botId: number): string | null {
+  if (message.from?.id !== botId || message.from.is_bot !== true ||
+      typeof message.text !== "string") return null;
+
+  const [title, query] = message.text.split("\n");
+  if (title !== copyForLocale("ar").searchResults &&
+      title !== copyForLocale("en").searchResults) return null;
+  return typeof query === "string" ? managedSearchQuery(query) : null;
+}
 
 export interface ManagedWebhookOptions {
   db?: Database;
@@ -1113,6 +1139,7 @@ async function renderHome(
 
   keyboard.push([
     { text: copy.browseCategories, callback_data: tokens.storefrontCategories() },
+    { text: copy.search, callback_data: tokens.catalogSearch() },
   ]);
 
   if (cod.enabled) {
@@ -1210,6 +1237,7 @@ async function renderProducts(
     keyboard.push(nav);
   }
 
+  keyboard.push([{ text: copy.search, callback_data: tokens.catalogSearch() }]);
   keyboard.push(...homeKeyboard(copy, `p:${page.page}`));
 
   const text =
@@ -1223,6 +1251,63 @@ async function renderProducts(
     text,
     replyMarkup: { inline_keyboard: keyboard },
   });
+}
+
+async function sendCatalogSearchPrompt(
+  transport: TelegramTransport,
+  chatId: number,
+  copy: CommerceCopy,
+  invalid = false,
+): Promise<void> {
+  await sendOrThrow(transport, {
+    chatId,
+    text: invalid ? `${copy.searchInvalid}\n\n${copy.searchPrompt}` : copy.searchPrompt,
+    replyMarkup: { force_reply: true },
+  });
+}
+
+async function renderCatalogSearch(
+  db: Database,
+  scope: StoreScope,
+  transport: TelegramTransport,
+  chatId: number,
+  query: string,
+  pageNumber: number,
+  copy: CommerceCopy,
+  plan: ManagedCatalogContentPlan,
+  messageId?: number,
+): Promise<void> {
+  const page = await listManagedProducts(
+    db, scope, { page: pageNumber, pageSize: PAGE_SIZE, search: query }, plan,
+  );
+  const keyboard = page.items.map((item) => [productButton(item)]);
+  const navigation: TelegramInlineKeyboardButton[] = [];
+  if (page.page > 1) {
+    navigation.push({ text: copy.previous, callback_data: tokens.catalogSearchPage(page.page - 1) });
+  }
+  if (page.page < page.totalPages) {
+    navigation.push({ text: copy.next, callback_data: tokens.catalogSearchPage(page.page + 1) });
+  }
+  if (navigation.length) keyboard.push(navigation);
+  keyboard.push(
+    [{ text: copy.search, callback_data: tokens.catalogSearch() }],
+    [
+      { text: copy.products, callback_data: tokens.products(1) },
+      { text: copy.home, callback_data: tokens.home() },
+    ],
+  );
+
+  const summary = page.totalCount ? `${page.page}/${page.totalPages}` : copy.searchEmpty;
+  const params = {
+    chatId,
+    text: `${copy.searchResults}\n${query}\n\n${summary}`,
+    replyMarkup: { inline_keyboard: keyboard },
+  };
+  if (messageId !== undefined) {
+    await editOrThrow(transport, { ...params, messageId });
+  } else {
+    await sendOrThrow(transport, params);
+  }
 }
 
 async function renderCategories(
@@ -1580,6 +1665,7 @@ async function dispatchMessage(
   scope: StoreScope,
   storeName: string,
   connectionId: string,
+  botId: number,
   cod: CodContext,
   commerceDb: TransactionDatabase | null,
   transport: TelegramTransport,
@@ -1642,6 +1728,18 @@ async function dispatchMessage(
       copy,
       context.language.locale,
     );
+    return;
+  }
+
+  const reply = message.reply_to_message;
+  if (reply?.from?.id === botId && reply.from.is_bot === true &&
+      reply.chat?.id === message.chat.id && matchesSearchPrompt(reply.text)) {
+    const query = managedSearchQuery(text);
+    if (query) {
+      await renderCatalogSearch(db, scope, transport, message.chat.id, query, 1, copy, plan);
+    } else {
+      await sendCatalogSearchPrompt(transport, message.chat.id, copy, true);
+    }
     return;
   }
 
@@ -2172,6 +2270,21 @@ async function dispatchCallback(
     callbackQuery.from.language_code,
   );
   let { copy, plan } = context;
+
+  if (parsedToken.type === "catalogSearch") {
+    await sendCatalogSearchPrompt(transport, chatId, copy);
+    return;
+  }
+
+  if (parsedToken.type === "catalogSearchPage") {
+    const query = queryFromSearchResults(message, updateAttempt.botId);
+    if (query) {
+      await renderCatalogSearch(
+        db, scope, transport, chatId, query, parsedToken.page, copy, plan, messageId,
+      );
+    }
+    return;
+  }
 
   if (parsedToken.type === "latestCodOrder") {
     await renderLatestCodOrder(db, scope, transport, messageId, copy, {
@@ -3104,6 +3217,7 @@ export async function handleManagedTelegramWebhookRequest(
         scope,
         connection.storeName,
         connection.id,
+        connection.botId,
         cod,
         commerceDb,
         transport,

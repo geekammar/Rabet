@@ -629,6 +629,62 @@ async function completeReview(
 }
 
 describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
+  it("accepts a private reply to this bot's catalog search prompt and handles empty results", async () => {
+    const search = await call(fixture.connectionAId, callbackUpdate(BUYER_A, "catalog-search", "en"));
+    expect(search.status).toBe(200);
+    const prompt = search.transport.sentMessages.at(-1)!;
+    expect(prompt.replyMarkup).toEqual({ force_reply: true });
+    const reply = {
+      message_id: prompt.messageId,
+      from: { id: 990001, is_bot: true },
+      chat: { id: BUYER_A, type: "private" },
+      text: prompt.text,
+    };
+    const find = (text: string, extra = {}) => call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, text, { reply_to_message: reply, ...extra }, "en"),
+    );
+
+    const result = await find("bot a description");
+    expect(result.status).toBe(200);
+    expect(lastText(result.transport)).toContain("Product search results");
+    expect(lastButton(result.transport, "p:")?.callback_data).toBe(`p:${fixture.productAId}`);
+    expect(lastButton(result.transport, "prods")?.callback_data).toBe("prods");
+
+    const resultMessage = result.transport.sentMessages.at(-1)!;
+    const pageUpdate = callbackUpdate(BUYER_A, "catalog-search:1", "en", resultMessage.messageId);
+    const page = await call(fixture.connectionAId, {
+      ...pageUpdate,
+      callback_query: {
+        ...pageUpdate.callback_query,
+        message: {
+          ...pageUpdate.callback_query.message,
+          from: reply.from,
+          text: resultMessage.text,
+        },
+      },
+    });
+    expect(page.status).toBe(200);
+    expect(page.transport.sentMessages).toHaveLength(0);
+    expect(page.transport.editedMessages.at(-1)).toMatchObject({
+      messageId: resultMessage.messageId,
+      text: resultMessage.text,
+    });
+
+    const empty = await find("Bot B One");
+    expect(lastText(empty.transport)).toContain("No products matched");
+    expect(lastButton(empty.transport, "p:")).toBeUndefined();
+
+    const invalid = await find("x".repeat(81));
+    expect(invalid.transport.sentMessages.at(-1)?.replyMarkup).toEqual({ force_reply: true });
+    expect(lastText(invalid.transport)).toContain("up to 80 characters");
+
+    const unrelated = await find("bot a description", {
+      reply_to_message: { ...reply, from: { id: 990002, is_bot: true } },
+    });
+    expect(lastText(unrelated.transport)).not.toContain("Product search results");
+  });
+
   it("keeps catalog browsing unchanged when the COD gate is off", async () => {
     const previous = process.env.RABET_COD_ORDERS_ENABLED;
 

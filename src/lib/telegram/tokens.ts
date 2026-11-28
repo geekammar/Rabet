@@ -35,6 +35,11 @@ export function assertValidCallbackData(data: string): string {
 export const tokens = {
   home: (): string => assertValidCallbackData("home"),
   homeNew: (): string => assertValidCallbackData("home:new"),
+  catalogSearch: (): string => assertValidCallbackData("catalog-search"),
+  catalogSearchPage: (page: number): string => {
+    if (!PAGE_REGEX.test(String(page))) throw new Error(`Invalid page number: ${page}`);
+    return assertValidCallbackData(`catalog-search:${page}`);
+  },
   latestCodOrder: (): string => assertValidCallbackData("cod:latest"),
   rootCategory: (page?: number): string => {
     if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
@@ -219,6 +224,8 @@ export const tokens = {
 export type ParsedToken =
   | { type: "home" }
   | { type: "homeNew" }
+  | { type: "catalogSearch" }
+  | { type: "catalogSearchPage"; page: number }
   | { type: "latestCodOrder" }
   | { type: "root"; page: number }
   | { type: "storefrontCategories"; page: number }
@@ -266,6 +273,15 @@ export function parseToken(data?: string): ParsedToken {
 
   if (data === "home:new") {
     return { type: "homeNew" };
+  }
+
+  if (data === "catalog-search") return { type: "catalogSearch" };
+
+  if (data.startsWith("catalog-search:")) {
+    const page = data.slice("catalog-search:".length);
+    return PAGE_REGEX.test(page)
+      ? { type: "catalogSearchPage", page: Number(page) }
+      : { type: "unknown", raw: data };
   }
 
   if (data === "cod:latest") {

@@ -283,12 +283,18 @@ function paginate<T>(
 
 async function loadProductTranslations(
   db: Database,
-  productIds: string[],
+  products: string[] | StoreScope,
   plan?: ManagedCatalogContentPlan,
 ): Promise<{ names: Map<string, string>; descriptions: Map<string, string> }> {
-  if (productIds.length === 0) {
+  if (Array.isArray(products) && products.length === 0) {
     return { names: new Map(), descriptions: new Map() };
   }
+
+  const productIds = Array.isArray(products)
+    ? products
+    : db.select({ id: product.id }).from(product).where(
+        and(eq(product.storeId, products.storeId), eq(product.isActive, true), isNull(product.deletedAt)),
+      );
 
   const rows = await db
     .select({
@@ -362,10 +368,14 @@ async function loadCategoryTranslations(
   return names;
 }
 
+function catalogSearchText(value: string): string {
+  return value.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
 export async function listManagedProducts(
   db: Database,
   scope: StoreScope,
-  params: { page: number; pageSize: number },
+  params: { page: number; pageSize: number; search?: string },
   catalogContentPlan?: ManagedCatalogContentPlan,
 ): Promise<ManagedProductPage> {
   const loaded = await loadCatalog(db, scope);
@@ -382,8 +392,24 @@ export async function listManagedProducts(
         compareStrings(a.id, b.id),
     );
 
-  const result = paginate(ordered, params.page, params.pageSize);
-  const { names, descriptions } = await loadProductTranslations(
+  const words = catalogSearchText(params.search ?? "").split(/\s+/).filter(Boolean);
+  const searchContent = words.length
+    ? await loadProductTranslations(db, scope, catalogContentPlan)
+    : null;
+  const matching = searchContent
+    ? ordered.filter((row) => {
+        const name = searchContent.names.get(row.id) ?? row.slug;
+        const description = searchContent.descriptions.get(row.id) ?? "";
+        const text = catalogSearchText(`${name} ${description}`);
+        const terms: string[] = text.match(/[\p{L}\p{N}]+/gu) ?? [];
+        return words.every((word) =>
+          Array.from(word).length === 1 ? terms.includes(word) : text.includes(word),
+        );
+      })
+    : ordered;
+
+  const result = paginate(matching, params.page, params.pageSize);
+  const { names, descriptions } = searchContent ?? await loadProductTranslations(
     db,
     result.items.map((row) => row.id),
     catalogContentPlan,
