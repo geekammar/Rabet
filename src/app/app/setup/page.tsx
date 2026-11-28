@@ -26,6 +26,7 @@ import {
   readMerchantLocale,
   merchantPageMetadata,
 } from "@/lib/merchant/locale-server";
+import { readMerchantCommerceSetting } from "@/lib/merchant/store-commerce";
 import { readVodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
 import {
   readMerchantNotificationManagedAttemptState,
@@ -61,6 +62,7 @@ export default async function MerchantSetupPage() {
     needsAttentionTransfers,
     needsAttentionTransferTotal,
     vodafoneCashSetting,
+    commerceSetting,
     notificationBotCapability,
   ] = await Promise.all([
     readMerchantTelegramConnectionState(db, {
@@ -75,6 +77,7 @@ export default async function MerchantSetupPage() {
     listMerchantTransfersAwaitingReview(db, access.scope),
     countMerchantTransfersAwaitingReview(db, access.scope),
     readVodafoneCashSetting(db, access.scope),
+    readMerchantCommerceSetting(db, access.scope),
     checkMerchantNotificationBotCapability(db),
   ]);
 
@@ -106,6 +109,7 @@ export default async function MerchantSetupPage() {
       needsAttentionTransfers={needsAttentionTransfers}
       needsAttentionTransferTotal={needsAttentionTransferTotal}
       vodafoneCashSetting={vodafoneCashSetting}
+      commerceSetting={commerceSetting}
       storeDefaultLanguageCode={storeDefaultLanguage?.code === "ar" ? "ar" : "en"}
       telegramSupportUsername={telegramSupportUsername}
       notificationBot={{

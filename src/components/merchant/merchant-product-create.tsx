@@ -41,6 +41,17 @@ type Copy = {
   namePlaceholder: string;
   priceLabel: string;
   pricePlaceholder: string;
+  descriptionLabel: string;
+  descriptionPlaceholder: string;
+  imageLabel: string;
+  imagePlaceholder: string;
+  imageHint: string;
+  stockLabel: string;
+  stockPlaceholder: string;
+  stockHint: string;
+  invalidDescription: string;
+  invalidImage: string;
+  invalidStock: string;
   categoryLabel: string;
   newCategoryOption: string;
   newCategoryLabel: string;
@@ -75,6 +86,17 @@ const COPY: Record<MerchantLocale, Copy> = {
     namePlaceholder: "مثال: منتج النور الأول",
     priceLabel: "السعر",
     pricePlaceholder: "0.00",
+    descriptionLabel: "وصف المنتج",
+    descriptionPlaceholder: "وصف قصير يظهر للعميل مع المنتج.",
+    imageLabel: "رابط صورة المنتج",
+    imagePlaceholder: "https://example.com/product.jpg",
+    imageHint: "رابط صورة واحد اختياري. يمكنك تركه فارغًا.",
+    stockLabel: "المخزون الأولي",
+    stockPlaceholder: "مثال: 10",
+    stockHint: "عدد القطع المتاحة للبيع. اتركه فارغًا لإضافته لاحقًا.",
+    invalidDescription: "أدخل وصفًا لا يتجاوز 4096 حرفًا.",
+    invalidImage: "أدخل رابط صورة صالحًا يبدأ بـ http أو https.",
+    invalidStock: "أدخل عددًا صحيحًا غير سالب للمخزون.",
     categoryLabel: "القسم",
     newCategoryOption: "إنشاء قسم جديد",
     newCategoryLabel: "اسم القسم الجديد",
@@ -109,6 +131,17 @@ const COPY: Record<MerchantLocale, Copy> = {
     namePlaceholder: "e.g. Al Noor Product One",
     priceLabel: "Price",
     pricePlaceholder: "0.00",
+    descriptionLabel: "Product description",
+    descriptionPlaceholder: "A short description shown with the product.",
+    imageLabel: "Product image URL",
+    imagePlaceholder: "https://example.com/product.jpg",
+    imageHint: "One optional image URL. You can leave it empty.",
+    stockLabel: "Initial stock",
+    stockPlaceholder: "e.g. 10",
+    stockHint: "Units available to sell. Leave empty to add later.",
+    invalidDescription: "Enter a description of at most 4096 characters.",
+    invalidImage: "Enter a valid image URL starting with http or https.",
+    invalidStock: "Enter a whole, non-negative stock quantity.",
     categoryLabel: "Category",
     newCategoryOption: "Create a new category",
     newCategoryLabel: "New category name",
@@ -141,6 +174,9 @@ type FieldErrors = {
   price?: boolean;
   category?: boolean;
   newCategoryName?: boolean;
+  description?: boolean;
+  imageUrl?: boolean;
+  stock?: boolean;
 };
 
 type SaveError =
@@ -204,6 +240,9 @@ export function MerchantProductCreate({
   const [locale, setLocale] = useMerchantLocale(initialLocale, "productCreate");
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
+  const [description, setDescription] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
+  const [stock, setStock] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [newCategoryName, setNewCategoryName] = useState("");
   const [hydrated, setHydrated] = useState(false);
@@ -245,6 +284,9 @@ export function MerchantProductCreate({
       if (restored) {
         setName(restored.name);
         setPrice(restored.price);
+        setDescription(restored.description);
+        setImageUrl(restored.imageUrl);
+        setStock(restored.stock);
         setNewCategoryName(restored.newCategoryName);
         setCategoryId(restored.categoryId);
         restoredRef.current = true;
@@ -270,18 +312,24 @@ export function MerchantProductCreate({
       categoryId,
       newCategoryName,
       useNewCategory,
+      description,
+      imageUrl,
+      stock,
     };
 
     writeProductFormDraft(storage, draftKey, draft);
   }, [
     categoryId,
+    description,
     draftKey,
     editVersion,
     hydrated,
+    imageUrl,
     name,
     newCategoryName,
     price,
     readOnly,
+    stock,
     useNewCategory,
   ]);
 
@@ -295,6 +343,26 @@ export function MerchantProductCreate({
 
     if (name.trim().length === 0) errors.name = true;
     if (!/^\d+(\.\d{1,2})?$/.test(price.trim())) errors.price = true;
+    if (description.trim().length > 4096) errors.description = true;
+
+    if (imageUrl.trim().length > 0) {
+      if (imageUrl.trim().length > 2048) {
+        errors.imageUrl = true;
+      } else {
+        try {
+          const parsed = new URL(imageUrl.trim());
+          if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+            errors.imageUrl = true;
+          }
+        } catch {
+          errors.imageUrl = true;
+        }
+      }
+    }
+
+    if (stock.trim().length > 0 && !/^[0-9]{1,9}$/.test(stock.trim())) {
+      errors.stock = true;
+    }
 
     if (useNewCategory) {
       if (newCategoryName.trim().length === 0) errors.newCategoryName = true;
@@ -326,6 +394,9 @@ export function MerchantProductCreate({
         result = await createMerchantProductDraft({
           name,
           price,
+          description,
+          imageUrl,
+          stock,
           categoryId: useNewCategory ? "" : categoryId,
           newCategoryName: useNewCategory ? newCategoryName : "",
         });
@@ -495,6 +566,101 @@ export function MerchantProductCreate({
                 {fieldErrors.price ? (
                   <p id="merchant-product-price-error" role="alert" className="text-sm text-destructive" data-testid="merchant-product-price-error">
                     {copy.invalidPrice}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="merchant-product-description" className="block text-sm font-medium">
+                  {copy.descriptionLabel}
+                </label>
+                <textarea
+                  id="merchant-product-description"
+                  name="description"
+                  rows={4}
+                  maxLength={4096}
+                  value={description}
+                  readOnly={submitting}
+                  onChange={(event) => {
+                    setDescription(event.target.value);
+                    setFieldErrors((current) => ({ ...current, description: false }));
+                    setSaveError(null);
+                    markEdited();
+                  }}
+                  aria-invalid={fieldErrors.description ? "true" : undefined}
+                  placeholder={copy.descriptionPlaceholder}
+                  data-testid="merchant-product-description"
+                  className="w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-base shadow-sm outline-none placeholder:text-muted-foreground read-only:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 sm:text-sm"
+                />
+                {fieldErrors.description ? (
+                  <p role="alert" className="text-sm text-destructive">
+                    {copy.invalidDescription}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="merchant-product-image" className="block text-sm font-medium">
+                  {copy.imageLabel}
+                </label>
+                <input
+                  id="merchant-product-image"
+                  name="imageUrl"
+                  type="url"
+                  dir="ltr"
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={2048}
+                  value={imageUrl}
+                  readOnly={submitting}
+                  onChange={(event) => {
+                    setImageUrl(event.target.value);
+                    setFieldErrors((current) => ({ ...current, imageUrl: false }));
+                    setSaveError(null);
+                    markEdited();
+                  }}
+                  aria-invalid={fieldErrors.imageUrl ? "true" : undefined}
+                  placeholder={copy.imagePlaceholder}
+                  data-testid="merchant-product-image"
+                  className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground read-only:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                />
+                <p className="text-xs text-muted-foreground">{copy.imageHint}</p>
+                {fieldErrors.imageUrl ? (
+                  <p role="alert" className="text-sm text-destructive">
+                    {copy.invalidImage}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="merchant-product-stock" className="block text-sm font-medium">
+                  {copy.stockLabel}
+                </label>
+                <input
+                  id="merchant-product-stock"
+                  name="stock"
+                  type="text"
+                  inputMode="numeric"
+                  dir="ltr"
+                  autoComplete="off"
+                  maxLength={9}
+                  value={stock}
+                  readOnly={submitting}
+                  onChange={(event) => {
+                    setStock(event.target.value);
+                    setFieldErrors((current) => ({ ...current, stock: false }));
+                    setSaveError(null);
+                    markEdited();
+                  }}
+                  aria-invalid={fieldErrors.stock ? "true" : undefined}
+                  placeholder={copy.stockPlaceholder}
+                  data-testid="merchant-product-stock"
+                  className="flex min-h-11 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground read-only:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 sm:max-w-48"
+                />
+                <p className="text-xs text-muted-foreground">{copy.stockHint}</p>
+                {fieldErrors.stock ? (
+                  <p role="alert" className="text-sm text-destructive">
+                    {copy.invalidStock}
                   </p>
                 ) : null}
               </div>

@@ -13,6 +13,7 @@ import {
   readManagedCategory,
   readManagedProduct,
   type ManagedCatalogContentPlan,
+  type ManagedProduct,
 } from "@/lib/catalog/managed-storefront";
 import {
   addToCart,
@@ -21,6 +22,7 @@ import {
   confirmCodOrder,
   confirmVodafoneCashOrder,
   readCartForBuyer,
+  readLatestBuyerCodOrder,
   bindVodafoneCashTransferPromptMessage,
   listBuyerOutstandingVodafoneTransfers,
   readCheckoutAvailability,
@@ -34,8 +36,8 @@ import {
   savePhone,
   startCheckout,
   submitVodafoneCashTransferClaim,
+  type BuyerOrderChat,
   type CartView,
-  type BuyerVodafoneTransferSummary,
   type CheckoutReview,
   type CommerceSetting,
   type TransferSnapshot,
@@ -59,9 +61,11 @@ import {
   verifyWebhookSecret,
 } from "./connection-secrets";
 import {
+  claimManagedCartMutation,
   claimManagedTelegramUpdate,
   markManagedTelegramUpdateFailed,
   markManagedTelegramUpdateProcessed,
+  type ManagedUpdateAttempt,
 } from "./managed-updates";
 import { readReadyManagedConnection } from "./manager-provisioning";
 import {
@@ -80,11 +84,14 @@ import {
   createFetchTelegramTransport,
   formatSafeDiagnostic,
   StandardExecutionDeadline,
+  TELEGRAM_MAX_CAPTION_CHARS,
 } from "./transport";
 import type {
   ExecutionDeadline,
+  TelegramErrorKind,
   TelegramInlineKeyboardButton,
   TelegramMessage,
+  TelegramSendResult,
   TelegramTransport,
 } from "./types";
 import { validateIncomingUpdate } from "./webhook";
@@ -197,11 +204,8 @@ type CodContext = {
   setting: CommerceSetting | null;
 };
 
-type HomeRecovery = {
-  commerceDb: TransactionDatabase;
-  connectionId: string;
-  buyerId: number;
-  chatId: number;
+type HomeRecovery = BuyerOrderChat & {
+  commerceDb: TransactionDatabase | null;
   locale: ManagedCommerceLocale;
 };
 
@@ -212,24 +216,14 @@ function homeRecoveryFor(
   chatId: number,
   locale: ManagedCommerceLocale,
 ): HomeRecovery | undefined {
-  if (!commerceDb || buyerId === null) return undefined;
-  return { commerceDb, connectionId, buyerId, chatId, locale };
-}
-
-async function outstandingVodafoneTransfers(
-  recovery: HomeRecovery,
-  scope: StoreScope,
-): Promise<BuyerVodafoneTransferSummary[]> {
-  const transfers = await listBuyerOutstandingVodafoneTransfers(
-    recovery.commerceDb,
-    scope,
-    {
-      connectionId: recovery.connectionId,
-      telegramUserId: recovery.buyerId,
-      telegramChatId: recovery.chatId,
-    },
-  );
-  return transfers;
+  if (buyerId === null) return undefined;
+  return {
+    commerceDb,
+    connectionId,
+    telegramUserId: buyerId,
+    telegramChatId: chatId,
+    locale,
+  };
 }
 
 type LanguageContext = {
@@ -327,6 +321,80 @@ function repliedMessageId(message: TelegramMessage): number | null {
 
 function money(value: string, currency: string): string {
   return currency ? `${value} ${currency}` : value;
+}
+
+/**
+ * The shared managed catalog reader owns `imageUrl` and `availability`.
+ *
+ * This adapter is deliberately tolerant while the reader contract rolls out in
+ * parallel: a reader build that already returns the fields is used as-is, and
+ * an older build still renders a text-only card from the existing inventory
+ * read. No second catalog query is introduced here.
+ */
+type ManagedProductContractFields = {
+  imageUrl?: string | null;
+  availability?: { available: number; inStock: boolean };
+};
+
+function productContractFields(product: ManagedProduct): ManagedProductContractFields {
+  return product as ManagedProduct & ManagedProductContractFields;
+}
+
+function isHttpImageUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.trim().length === 0) return false;
+  return /^https?:\/\/\S+$/i.test(value.trim());
+}
+
+function productImageUrl(product: ManagedProduct): string | null {
+  const value = productContractFields(product).imageUrl;
+  return isHttpImageUrl(value) ? value.trim() : null;
+}
+
+function productAvailability(
+  product: ManagedProduct,
+): { available: number; inStock: boolean } | null {
+  const value = productContractFields(product).availability;
+  if (typeof value !== "object" || value === null) return null;
+
+  const available = (value as { available?: unknown }).available;
+  const inStock = (value as { inStock?: unknown }).inStock;
+
+  if (typeof available !== "number" || !Number.isFinite(available)) return null;
+  if (typeof inStock !== "boolean") return null;
+
+  return {
+    available: Math.max(0, Math.floor(available)),
+    inStock,
+  };
+}
+
+function isAmbiguousDelivery(kind: TelegramErrorKind | undefined): boolean {
+  return kind === "timeout" || kind === "network_error";
+}
+
+/**
+ * Superseded storefront messages keep functioning safely, but their controls
+ * should not compete with the replacement screen. This is best effort: a
+ * failure to clear an old keyboard must never fail the new screen.
+ */
+async function clearMessageKeyboard(
+  transport: TelegramTransport,
+  chatId: number | string,
+  messageId: number,
+): Promise<void> {
+  try {
+    await transport.editMessageReplyMarkup({
+      chatId,
+      messageId,
+      replyMarkup: { inline_keyboard: [] },
+    });
+  } catch {
+    // Best effort only: the replacement screen already succeeded.
+  }
+}
+
+function messageHasPhoto(message: TelegramMessage): boolean {
+  return Array.isArray(message.photo) && message.photo.length > 0;
 }
 
 function cartLinesText(cart: CartView): string {
@@ -551,20 +619,16 @@ async function sendAddressPrompt(
   });
 }
 
-async function renderPlacedOrder(
-  transport: TelegramTransport,
-  chatId: number,
-  messageId: number | undefined,
-  result: {
-    reference: string;
-    subtotal: string;
-    deliveryFee: string;
-    total: string;
-    currency: string;
-  },
-  copy: CommerceCopy,
-): Promise<void> {
-  const text = [
+type PlacedOrderReceipt = {
+  reference: string;
+  subtotal: string;
+  deliveryFee: string;
+  total: string;
+  currency: string;
+};
+
+function placedOrderText(result: PlacedOrderReceipt, copy: CommerceCopy): string {
+  return [
     copy.orderPlaced(result.reference),
     "",
     `${copy.subtotal}: ${money(result.subtotal, result.currency)}`,
@@ -574,22 +638,101 @@ async function renderPlacedOrder(
     "",
     copy.reservedNote,
   ].join("\n");
+}
 
+function placedOrderKeyboard(copy: CommerceCopy) {
+  return {
+    inline_keyboard: [
+      [{ text: copy.home, callback_data: tokens.homeNew() }],
+    ],
+  };
+}
+
+/**
+ * The receipt is its own message so browsing can keep editing the active
+ * storefront message without destroying the order reference. The active
+ * message is reduced to a short confirmation and a fresh-home action.
+ */
+async function sendPlacedOrderReceipt(
+  transport: TelegramTransport,
+  chatId: number,
+  result: PlacedOrderReceipt,
+  copy: CommerceCopy,
+): Promise<TelegramSendResult> {
+  return transport.sendMessage({
+    chatId,
+    text: placedOrderText(result, copy),
+    replyMarkup: placedOrderKeyboard(copy),
+  });
+}
+
+async function renderPlacedOrderBridge(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number,
+  result: PlacedOrderReceipt,
+  copy: CommerceCopy,
+): Promise<void> {
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text: `${copy.orderPlaced(result.reference)}\n\n${copy.reservedNote}`,
+    replyMarkup: placedOrderKeyboard(copy),
+  });
+}
+
+async function renderPlacedOrderOnActiveMessage(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number,
+  result: PlacedOrderReceipt,
+  copy: CommerceCopy,
+  allowReplacementSend: boolean,
+): Promise<void> {
   const params = {
     chatId,
-    text,
-    replyMarkup: {
-      inline_keyboard: [
-        [{ text: copy.home, callback_data: tokens.homeNew() }],
-      ],
-    },
+    messageId,
+    text: placedOrderText(result, copy),
+    replyMarkup: placedOrderKeyboard(copy),
   };
 
-  if (messageId) {
-    await editOrThrow(transport, { ...params, messageId });
+  if (allowReplacementSend) {
+    await editOrThrow(transport, params);
   } else {
-    await sendOrThrow(transport, params);
+    await editOnlyOrThrow(transport, params);
   }
+}
+
+async function renderLatestCodOrder(
+  db: Database,
+  scope: StoreScope,
+  transport: TelegramTransport,
+  messageId: number,
+  copy: CommerceCopy,
+  buyer: BuyerOrderChat,
+): Promise<void> {
+  const order = await readLatestBuyerCodOrder(db, scope, buyer);
+  let text = copy.latestCodOrderUnavailable;
+  if (order) {
+    const status = order.fulfillmentStatus === "unfulfilled"
+      ? order.status
+      : order.fulfillmentStatus;
+    const lines = [
+      `${copy.codOrderReference}: ${order.reference}`,
+      `${copy.codOrderStatusLabel}: ${copy.codOrderStatuses[status]}`,
+    ];
+    if (status !== "cancelled" || order.paymentStatus !== "awaiting_collection") {
+      lines.push(`${copy.paymentLabel}: ${copy.codPaymentStatuses[order.paymentStatus]}`);
+    }
+    text = lines.join("\n");
+  }
+
+  await editOrThrow(transport, {
+    chatId: buyer.telegramChatId,
+    messageId,
+    text,
+    replyMarkup: { inline_keyboard: homeKeyboard(copy, "cod") },
+  });
 }
 
 function transferInstructionsFor(
@@ -843,6 +986,36 @@ async function editOrThrow(
   params: Parameters<TelegramTransport["editMessageText"]>[0],
 ): Promise<void> {
   const result = await transport.editMessageText(params);
+
+  if (result.ok) return;
+
+  // A media message cannot be converted into a text screen. Replace it with a
+  // single deliberate text message and retire the superseded controls. A not
+  // editable/deleted source is a definite Telegram outcome, so one replacement
+  // is safe; timeout and network outcomes are never retried with a new send.
+  if (result.errorKind === "not_editable") {
+    await sendOrThrow(transport, {
+      chatId: params.chatId,
+      text: params.text,
+      replyMarkup: params.replyMarkup,
+    });
+    await clearMessageKeyboard(transport, params.chatId, params.messageId);
+    return;
+  }
+
+  throw new Error(result.error ?? "Telegram edit failed");
+}
+
+/**
+ * Edits only. Used when a previous send had an ambiguous outcome: replacing
+ * the known active message is safe, while another blind send could duplicate
+ * the receipt if the original message actually arrived.
+ */
+async function editOnlyOrThrow(
+  transport: TelegramTransport,
+  params: Parameters<TelegramTransport["editMessageText"]>[0],
+): Promise<void> {
+  const result = await transport.editMessageText(params);
   if (!result.ok) {
     throw new Error(result.error ?? "Telegram edit failed");
   }
@@ -946,8 +1119,18 @@ async function renderHome(
     keyboard.push([{ text: copy.cart, callback_data: tokens.cart() }]);
   }
 
-  if (recovery) {
-    const transfers = await outstandingVodafoneTransfers(recovery, scope);
+  if (recovery && (await readLatestBuyerCodOrder(db, scope, recovery))) {
+    keyboard.push([
+      { text: copy.latestCodOrder, callback_data: tokens.latestCodOrder() },
+    ]);
+  }
+
+  if (recovery?.commerceDb) {
+    const transfers = await listBuyerOutstandingVodafoneTransfers(
+      recovery.commerceDb,
+      scope,
+      recovery,
+    );
     if (transfers.length > 0) {
       keyboard.push([
         {
@@ -1195,6 +1378,72 @@ async function renderCategory(
   });
 }
 
+async function renderProductCard(
+  transport: TelegramTransport,
+  chatId: number,
+  messageId: number,
+  activeMessageHasMedia: boolean,
+  imageUrl: string | null,
+  text: string,
+  replyMarkup: { inline_keyboard: TelegramInlineKeyboardButton[][] },
+): Promise<void> {
+  // Captions are shorter than regular messages. A card that cannot fit keeps
+  // the complete, usable text path instead of truncating merchant content.
+  if (imageUrl && text.length <= TELEGRAM_MAX_CAPTION_CHARS) {
+    if (activeMessageHasMedia) {
+      const edited = await transport.editMessageMedia({
+        chatId,
+        messageId,
+        media: { type: "photo", media: imageUrl, caption: text },
+        replyMarkup,
+      });
+
+      if (edited.ok) return;
+
+      if (isAmbiguousDelivery(edited.errorKind)) {
+        // The edit may have reached Telegram. A retried update can safely
+        // repeat the edit; a second message would not be safe.
+        throw new Error(edited.error ?? "Telegram media edit failed");
+      }
+      // A definite media failure falls through to the text-only card.
+    } else {
+      const sent = await transport.sendPhoto({
+        chatId,
+        photo: imageUrl,
+        caption: text,
+        replyMarkup,
+      });
+
+      if (sent.ok) {
+        // Text -> photo needs a replacement message. Retire the old controls
+        // so only the replacement acts as the active storefront.
+        await clearMessageKeyboard(transport, chatId, messageId);
+        return;
+      }
+
+      if (isAmbiguousDelivery(sent.errorKind)) {
+        // Never blindly re-send after an unknown outcome. The source message
+        // is text, so render the usable text card in place.
+        await editOnlyOrThrow(transport, {
+          chatId,
+          messageId,
+          text,
+          replyMarkup,
+        });
+        return;
+      }
+      // A definite photo failure still leaves a complete text-only card.
+    }
+  }
+
+  await editOrThrow(transport, {
+    chatId,
+    messageId,
+    text,
+    replyMarkup,
+  });
+}
+
 async function renderProduct(
   db: Database,
   scope: StoreScope,
@@ -1204,6 +1453,7 @@ async function renderProduct(
   transport: TelegramTransport,
   chatId: number,
   messageId: number,
+  activeMessageHasMedia: boolean,
   productId: string,
 ): Promise<void> {
   const productRow = await readManagedProduct(
@@ -1228,27 +1478,41 @@ async function renderProduct(
     scope.storeId,
   );
 
+  const contractAvailability = productAvailability(productRow);
+  let stock: number | null = contractAvailability?.available ?? null;
+
+  if (stock === null && cod.enabled) {
+    const availability = await readInventoryAvailability(db, scope, [
+      productId,
+    ]);
+    stock = availability.get(productId) ?? 0;
+  }
+
+  const inStock = contractAvailability
+    ? contractAvailability.inStock && contractAvailability.available > 0
+    : stock !== null && stock > 0;
+
   const lines = [productRow.name];
 
   if (productRow.description && productRow.description.trim().length > 0) {
     lines.push(productRow.description.trim());
   }
 
-  lines.push(productRow.price);
+  // Currency is store commerce configuration, never catalog content. When the
+  // store has no commerce setting yet, the price remains usable without one.
+  lines.push(money(productRow.price, cod.setting?.currency ?? ""));
+
+  if (stock !== null) {
+    lines.push(inStock ? copy.inStock : copy.outOfStock);
+  }
 
   const keyboard: TelegramInlineKeyboardButton[][] = [];
-  let stock = 0;
 
-  if (cod.enabled) {
-    const availability = await readInventoryAvailability(db, scope, [
-      productId,
-    ]);
-    stock = availability.get(productId) ?? 0;
+  if (cod.enabled && inStock && stock !== null) {
+    // Last-unit behavior is deliberate: the buyer can only add what exists.
+    const maxQuantity = Math.min(5, stock);
 
-    if (stock <= 0) {
-      lines.push(copy.outOfStock);
-    } else {
-      const maxQuantity = Math.min(5, stock);
+    if (maxQuantity > 0) {
       const quantityButtons: TelegramInlineKeyboardButton[] = [];
 
       for (let quantity = 1; quantity <= maxQuantity; quantity += 1) {
@@ -1289,12 +1553,15 @@ async function renderProduct(
     },
   ]);
 
-  await editOrThrow(transport, {
+  await renderProductCard(
+    transport,
     chatId,
     messageId,
-    text: lines.join("\n\n"),
-    replyMarkup: { inline_keyboard: keyboard },
-  });
+    activeMessageHasMedia,
+    productImageUrl(productRow),
+    lines.join("\n\n"),
+    { inline_keyboard: keyboard },
+  );
 }
 
 function phoneReplyMarkup(copy: CommerceCopy) {
@@ -1626,6 +1893,14 @@ async function dispatchMessage(
     plan,
     transport,
     message.chat.id,
+    undefined,
+    homeRecoveryFor(
+      commerceDb,
+      connectionId,
+      buyerId,
+      message.chat.id,
+      context.language.locale,
+    ),
   );
 }
 
@@ -1738,6 +2013,7 @@ async function renderLanguageContextScreen(
   messageId: number,
   context: string | null,
   recovery?: HomeRecovery,
+  activeMessageHasMedia = false,
 ): Promise<boolean> {
   if (!context || context === "h") {
     if (!context) return false;
@@ -1757,15 +2033,15 @@ async function renderLanguageContextScreen(
   }
 
   if (context.startsWith("to:")) {
-    if (!recovery) return false;
+    if (!recovery?.commerceDb) return false;
 
     const state = await readVodafoneCashOrderState(
       recovery.commerceDb,
       scope,
       {
         connectionId: recovery.connectionId,
-        telegramUserId: recovery.buyerId,
-        telegramChatId: recovery.chatId,
+        telegramUserId: recovery.telegramUserId,
+        telegramChatId: recovery.telegramChatId,
         orderId: context.slice(3),
       },
     );
@@ -1780,6 +2056,11 @@ async function renderLanguageContextScreen(
       recovery.locale,
       copy,
     );
+    return true;
+  }
+
+  if (context === "cod" && recovery) {
+    await renderLatestCodOrder(db, scope, transport, messageId, copy, recovery);
     return true;
   }
 
@@ -1825,6 +2106,7 @@ async function renderLanguageContextScreen(
       transport,
       chatId,
       messageId,
+      activeMessageHasMedia,
       context.slice(3),
     );
     return true;
@@ -1866,6 +2148,7 @@ async function dispatchCallback(
     from: { id: number; first_name?: string; language_code?: string };
   },
   parsedToken: ParsedToken,
+  updateAttempt: ManagedUpdateAttempt,
 ): Promise<void> {
   const ack = await transport.answerCallbackQuery({
     callbackQueryId: callbackQuery.id,
@@ -1880,6 +2163,7 @@ async function dispatchCallback(
 
   const chatId = message.chat.id;
   const messageId = message.message_id;
+  const activeMessageHasMedia = messageHasPhoto(message);
   const buyerId = callbackQuery.from.id;
   let context = await languageContextFor(
     db,
@@ -1888,6 +2172,15 @@ async function dispatchCallback(
     callbackQuery.from.language_code,
   );
   let { copy, plan } = context;
+
+  if (parsedToken.type === "latestCodOrder") {
+    await renderLatestCodOrder(db, scope, transport, messageId, copy, {
+      connectionId,
+      telegramUserId: buyerId,
+      telegramChatId: chatId,
+    });
+    return;
+  }
 
   if (parsedToken.type === "languages") {
     await renderLanguageMenu(
@@ -1961,6 +2254,7 @@ async function dispatchCallback(
           chatId,
           context.language.locale,
         ),
+        activeMessageHasMedia,
       )
     ) {
       return;
@@ -1999,115 +2293,85 @@ async function dispatchCallback(
       return;
     }
 
-    if (parsedToken.type === "cartAdd") {
-      const result = await addToCart(commerceDb, scope, {
+    if (
+      parsedToken.type === "cartAdd" ||
+      parsedToken.type === "cartIncrease" ||
+      parsedToken.type === "cartDecrease" ||
+      parsedToken.type === "cartRemove"
+    ) {
+      const input = {
         connectionId,
         telegramUserId: buyerId,
-        telegramChatId: chatId,
         productId: parsedToken.productId,
-        quantity: parsedToken.quantity,
+      };
+      const result = await commerceDb.transaction(async (tx) => {
+        const shouldApply = await claimManagedCartMutation(tx, {
+          ...updateAttempt,
+          connectionId,
+        });
+        if (!shouldApply) {
+          return {
+            status: "replayed" as const,
+            cart: await readCartForBuyer(tx, scope, input),
+          };
+        }
+
+        switch (parsedToken.type) {
+          case "cartAdd":
+            return addToCart(tx, scope, {
+              ...input,
+              telegramChatId: chatId,
+              quantity: parsedToken.quantity,
+            });
+          case "cartIncrease":
+            return changeCartQuantity(tx, scope, { ...input, delta: 1 });
+          case "cartDecrease":
+            return changeCartQuantity(tx, scope, { ...input, delta: -1 });
+          case "cartRemove":
+            return removeCartItem(tx, scope, input);
+        }
       });
 
-      if (result.status === "added") {
+      if (
+        result.status === "added" ||
+        result.status === "updated" ||
+        result.status === "replayed"
+      ) {
         await renderCartView(
           transport,
           chatId,
           messageId,
-          await localizeCartView(db, scope, result.cart, plan, copy),
+          result.cart
+            ? await localizeCartView(db, scope, result.cart, plan, copy)
+            : null,
           copy,
         );
         return;
       }
+
+      if (parsedToken.type === "cartDecrease" || parsedToken.type === "cartRemove") {
+        await renderCartView(transport, chatId, messageId, null, copy);
+        return;
+      }
+
+      const text = parsedToken.type === "cartAdd"
+        ? result.status === "out_of_stock"
+          ? copy.outOfStock
+          : result.status === "cod_unavailable"
+            ? copy.notOrderable
+            : copy.unavailable
+        : result.status === "empty"
+          ? copy.cartEmpty
+          : result.status === "invalid_quantity"
+            ? copy.maxQuantity
+            : copy.genericUnavailable;
 
       await editOrThrow(transport, {
         chatId,
         messageId,
-        text:
-          result.status === "out_of_stock"
-            ? copy.outOfStock
-            : result.status === "cod_unavailable"
-              ? copy.notOrderable
-              : copy.unavailable,
+        text,
         replyMarkup: { inline_keyboard: homeKeyboard(copy) },
       });
-      return;
-    }
-
-    if (parsedToken.type === "cartIncrease") {
-      const result = await changeCartQuantity(commerceDb, scope, {
-        connectionId,
-        telegramUserId: buyerId,
-        productId: parsedToken.productId,
-        delta: 1,
-      });
-
-      if (result.status === "updated") {
-        await renderCartView(
-          transport,
-          chatId,
-          messageId,
-          await localizeCartView(db, scope, result.cart, plan, copy),
-          copy,
-        );
-        return;
-      }
-
-      await editOrThrow(transport, {
-        chatId,
-        messageId,
-        text:
-          result.status === "empty"
-            ? copy.cartEmpty
-            : result.status === "invalid_quantity"
-              ? copy.maxQuantity
-              : copy.genericUnavailable,
-        replyMarkup: { inline_keyboard: homeKeyboard(copy) },
-      });
-      return;
-    }
-
-    if (parsedToken.type === "cartDecrease") {
-      const result = await changeCartQuantity(commerceDb, scope, {
-        connectionId,
-        telegramUserId: buyerId,
-        productId: parsedToken.productId,
-        delta: -1,
-      });
-
-      if (result.status === "updated") {
-        await renderCartView(
-          transport,
-          chatId,
-          messageId,
-          await localizeCartView(db, scope, result.cart, plan, copy),
-          copy,
-        );
-        return;
-      }
-
-      await renderCartView(transport, chatId, messageId, null, copy);
-      return;
-    }
-
-    if (parsedToken.type === "cartRemove") {
-      const result = await removeCartItem(commerceDb, scope, {
-        connectionId,
-        telegramUserId: buyerId,
-        productId: parsedToken.productId,
-      });
-
-      if (result.status === "updated") {
-        await renderCartView(
-          transport,
-          chatId,
-          messageId,
-          await localizeCartView(db, scope, result.cart, plan, copy),
-          copy,
-        );
-        return;
-      }
-
-      await renderCartView(transport, chatId, messageId, null, copy);
       return;
     }
 
@@ -2160,8 +2424,54 @@ async function dispatchCallback(
         expectedQuoteVersion: parsedToken.quoteVersion,
       }, plan);
 
-      if (result.status === "placed" || result.status === "already_placed") {
-        await renderPlacedOrder(transport, chatId, messageId, result, copy);
+      if (result.status === "placed") {
+        // The receipt is a separate message so all later browsing edits keep
+        // the order reference intact. The active message becomes a compact
+        // confirmation with a fresh-home action, retiring stale confirm
+        // controls.
+        const receipt = await sendPlacedOrderReceipt(
+          transport,
+          chatId,
+          result,
+          copy,
+        );
+
+        if (receipt.ok) {
+          await renderPlacedOrderBridge(
+            transport,
+            chatId,
+            messageId,
+            result,
+            copy,
+          );
+          return;
+        }
+
+        // Delivery is not guaranteed exactly once. Never blindly re-send a
+        // receipt after an unknown outcome; falling back to the known active
+        // message keeps the reference available and cannot duplicate an order.
+        await renderPlacedOrderOnActiveMessage(
+          transport,
+          chatId,
+          messageId,
+          result,
+          copy,
+          false,
+        );
+        return;
+      }
+
+      if (result.status === "already_placed") {
+        // Replayed confirmations edit the active message only. The order and
+        // its reservation were already committed under the checkout key.
+        await renderPlacedOrderOnActiveMessage(
+          transport,
+          chatId,
+          messageId,
+          result,
+          copy,
+          true,
+        );
         return;
       }
 
@@ -2633,6 +2943,7 @@ async function dispatchCallback(
       transport,
       chatId,
       messageId,
+      activeMessageHasMedia,
       parsedToken.productId,
     );
     return;
@@ -2650,6 +2961,7 @@ async function dispatchCallback(
     transport,
     chatId,
     messageId,
+    homeRecoveryFor(commerceDb, connectionId, buyerId, chatId, context.language.locale),
   );
 }
 
@@ -2808,6 +3120,7 @@ export async function handleManagedTelegramWebhookRequest(
         transport,
         validation.data.callbackQuery,
         validation.data.parsedToken,
+        { botId: connection.botId, updateId: update.update_id, attemptToken },
       );
     }
 

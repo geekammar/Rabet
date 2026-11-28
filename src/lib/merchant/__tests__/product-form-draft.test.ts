@@ -41,6 +41,9 @@ function draft(overrides?: Partial<ProductFormDraft>): ProductFormDraft {
     categoryId: "",
     newCategoryName: "العناية",
     useNewCategory: true,
+    description: "وصف المنتج",
+    imageUrl: "https://example.test/product.jpg",
+    stock: "12",
     ...overrides,
   };
 }
@@ -66,6 +69,36 @@ describe("merchant product form draft", () => {
     expect(
       readProductFormDraft(storage, key, now + PRODUCT_FORM_DRAFT_TTL_MS),
     ).toEqual(draft());
+  });
+
+  it("restores an older draft that predates the description, image and stock fields", () => {
+    const storage = new MemoryStorage();
+    const key = productFormDraftKey(STORE_ID, USER_ID);
+    const now = 1_800_000_000_000;
+
+    storage.setItem(
+      key,
+      JSON.stringify({
+        version: 1,
+        savedAt: now,
+        name: "منتج قديم",
+        price: "5.00",
+        categoryId: "",
+        newCategoryName: "",
+        useNewCategory: true,
+      }),
+    );
+
+    expect(readProductFormDraft(storage, key, now)).toEqual({
+      name: "منتج قديم",
+      price: "5.00",
+      categoryId: "",
+      newCategoryName: "",
+      useNewCategory: true,
+      description: "",
+      imageUrl: "",
+      stock: "",
+    });
   });
 
   it("ignores expired, future-dated and malformed drafts", () => {

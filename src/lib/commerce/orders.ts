@@ -16,6 +16,9 @@ import {
   store,
   storeCommerceSetting,
   telegramConnection,
+  type FulfillmentStatus,
+  type OrderStatus,
+  type PaymentStatus,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
 import {
@@ -971,7 +974,7 @@ export type AddToCartResult =
   | { status: "cod_unavailable" };
 
 export async function addToCart(
-  db: TransactionDatabase,
+  db: Pick<TransactionDatabase, "transaction">,
   scope: StoreScope,
   input: {
     connectionId: string;
@@ -1078,7 +1081,7 @@ export type CartActionResult =
   | { status: "invalid_quantity" };
 
 export async function changeCartQuantity(
-  db: TransactionDatabase,
+  db: Pick<TransactionDatabase, "transaction">,
   scope: StoreScope,
   input: {
     connectionId: string;
@@ -1146,7 +1149,7 @@ export async function changeCartQuantity(
 }
 
 export async function removeCartItem(
-  db: TransactionDatabase,
+  db: Pick<TransactionDatabase, "transaction">,
   scope: StoreScope,
   input: {
     connectionId: string;
@@ -1878,6 +1881,57 @@ export async function readCartForBuyer(
   const cartRow = await findActiveCart(db, scope, input);
   if (!cartRow) return null;
   return buildCartView(db, scope, cartRow);
+}
+
+export type BuyerCodOrder = {
+  reference: string;
+  status: OrderStatus;
+  fulfillmentStatus: FulfillmentStatus;
+  paymentStatus: Extract<
+    PaymentStatus,
+    "awaiting_collection" | "collected" | "failed"
+  >;
+};
+
+export type BuyerOrderChat = {
+  connectionId: string;
+  telegramUserId: number;
+  telegramChatId: number;
+};
+
+export async function readLatestBuyerCodOrder(
+  db: Database,
+  scope: StoreScope,
+  input: BuyerOrderChat,
+): Promise<BuyerCodOrder | null> {
+  assertStoreScope(scope);
+
+  const [row] = await db
+    .select({
+      reference: orderTable.reference,
+      status: orderTable.status,
+      fulfillmentStatus: orderTable.fulfillmentStatus,
+      paymentStatus: orderTable.paymentStatus,
+    })
+    .from(orderTable)
+    .where(
+      and(
+        eq(orderTable.storeId, scope.storeId),
+        eq(orderTable.connectionId, input.connectionId),
+        eq(orderTable.telegramUserId, input.telegramUserId),
+        eq(orderTable.telegramChatId, input.telegramChatId),
+        eq(orderTable.paymentMethod, "cod"),
+      ),
+    )
+    .orderBy(
+      desc(orderTable.placedAt),
+      desc(orderTable.createdAt),
+      desc(orderTable.id),
+    )
+    .limit(1);
+
+  // Order and fulfillment status, and the COD payment subset, are constrained in SQL.
+  return (row as BuyerCodOrder | undefined) ?? null;
 }
 
 

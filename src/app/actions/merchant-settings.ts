@@ -6,6 +6,10 @@ import { getTransactionDb } from "@/db/transaction-client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { getMerchantAccess } from "@/lib/auth/merchant-session";
 import {
+  saveMerchantCommerceSetting,
+  type MerchantCommerceSettingResult,
+} from "@/lib/merchant/store-commerce";
+import {
   saveMerchantStoreLanguage,
   type MerchantStoreLanguageResult,
 } from "@/lib/merchant/store-language";
@@ -127,6 +131,45 @@ export async function saveMerchantVodafoneCashAction(
     accountName: submitted.accountName,
     instructionsAr: submitted.instructionsAr,
     instructionsEn: submitted.instructionsEn,
+  });
+
+  if (result.ok) {
+    revalidatePath("/app/setup");
+    refresh();
+  }
+
+  return result;
+}
+
+/**
+ * Saves the signed-in merchant's cash-on-delivery switch and flat delivery fee.
+ *
+ * The store comes from the verified session scope. An empty fee means "not
+ * configured"; a numeric zero (`0`/`0.00`) is an explicit free-delivery
+ * decision and is stored with that distinction. Manual Vodafone Cash fields
+ * and stock reservations are never touched by this write.
+ */
+export async function saveMerchantCommerceSettingAction(
+  input: unknown,
+): Promise<MerchantCommerceSettingResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+
+  const result = await saveMerchantCommerceSetting(getTransactionDb(), access, {
+    codEnabled: submitted.codEnabled,
+    deliveryFee: submitted.deliveryFee,
   });
 
   if (result.ok) {

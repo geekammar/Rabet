@@ -21,6 +21,7 @@ import {
   MerchantNeedsAttention,
   type MerchantNeedsAttentionOrder,
 } from "@/components/merchant/merchant-needs-attention";
+import { MerchantCommerceSettings } from "@/components/merchant/merchant-commerce-settings";
 import { MerchantNotificationBot } from "@/components/merchant/merchant-notification-bot";
 import { MerchantTelegramConnection } from "@/components/merchant/merchant-telegram-connection";
 import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
@@ -28,6 +29,7 @@ import { Button } from "@/components/ui/button";
 import type { StoreStatus } from "@/db/schema/tenant";
 import type { MerchantNotificationBotState } from "@/lib/data/merchant-notification-bot";
 import type { NotificationManagedAttemptState } from "@/lib/telegram/manager-provisioning";
+import type { MerchantCommerceSetting } from "@/lib/merchant/store-commerce";
 import type { VodafoneCashSetting } from "@/lib/merchant/store-vodafone-cash";
 import type { MerchantTelegramConnectionState } from "@/lib/telegram/manager-provisioning";
 
@@ -261,6 +263,7 @@ export function MerchantSetup({
   needsAttentionTransfers = [],
   needsAttentionTransferTotal = 0,
   vodafoneCashSetting,
+  commerceSetting,
   storeDefaultLanguageCode,
   telegramSupportUsername,
   notificationBot,
@@ -279,6 +282,7 @@ export function MerchantSetup({
   needsAttentionTransfers?: MerchantNeedsAttentionOrder[];
   needsAttentionTransferTotal?: number;
   vodafoneCashSetting: VodafoneCashSetting | null;
+  commerceSetting: MerchantCommerceSetting | null;
   storeDefaultLanguageCode: "ar" | "en";
   telegramSupportUsername: string | null;
   notificationBot: {
@@ -839,6 +843,13 @@ export function MerchantSetup({
             </Button>
           </form>
         </section>
+
+        <MerchantCommerceSettings
+          locale={locale}
+          readOnly={readOnly}
+          codOrdersEnabled={codOrdersEnabled}
+          setting={commerceSetting}
+        />
 
         <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">

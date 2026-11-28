@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 
 import {
@@ -23,6 +23,7 @@ import {
   telegramConnection,
 } from "@/db/schema";
 import type { TransactionDatabase } from "@/db/transaction-client";
+import { readLatestBuyerCodOrder } from "@/lib/commerce/orders";
 import {
   readStoreLanguageChoice,
   resolveBuyerLanguage,
@@ -30,6 +31,7 @@ import {
 import { saveMerchantStoreLanguage } from "@/lib/merchant/store-language";
 import { hashWebhookSecret } from "@/lib/telegram/connection-secrets";
 import { handleManagedTelegramWebhookRequest } from "@/lib/telegram/managed-webhook";
+import { tokens } from "@/lib/telegram/tokens";
 import {
   createFakeTelegramTransport,
   type FakeTelegramTransport,
@@ -44,6 +46,53 @@ import {
 } from "./helpers";
 
 const shouldRun = hasTestCluster();
+
+type ProductContractOverride = {
+  imageUrl?: string | null;
+  availability?: { available: number; inStock: boolean };
+};
+
+/**
+ * The shared managed reader is owned by a parallel worker. The production
+ * handler already consumes `imageUrl` and `availability`; this passthrough stub
+ * lets these journey tests prove the contract without waiting for that branch
+ * and without adding a second catalog read.
+ */
+const productContract = vi.hoisted(
+  () => new Map<string, ProductContractOverride>(),
+);
+
+vi.mock("@/lib/catalog/managed-storefront", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/catalog/managed-storefront")>();
+
+  function withContract<T extends { id: string }>(item: T): T {
+    const override = productContract.get(item.id);
+    return override ? { ...item, ...override } : item;
+  }
+
+  return {
+    ...actual,
+    readManagedProduct: async (
+      ...args: Parameters<typeof actual.readManagedProduct>
+    ) => {
+      const item = await actual.readManagedProduct(...args);
+      return item ? withContract(item) : null;
+    },
+    listManagedProducts: async (
+      ...args: Parameters<typeof actual.listManagedProducts>
+    ) => {
+      const page = await actual.listManagedProducts(...args);
+      return { ...page, items: page.items.map(withContract) };
+    },
+    listManagedProductsInCategory: async (
+      ...args: Parameters<typeof actual.listManagedProductsInCategory>
+    ) => {
+      const page = await actual.listManagedProductsInCategory(...args);
+      return { ...page, items: page.items.map(withContract) };
+    },
+  };
+});
 
 let testDb: TestDatabase | null = null;
 let updateId = 5000;
@@ -255,6 +304,7 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!testDb) return;
   updateId = 5000;
+  productContract.clear();
   const db = testDb.db;
 
   await db.execute(sql`
@@ -367,6 +417,7 @@ function callbackUpdate(
   data: string,
   languageCode?: string,
   messageId?: number,
+  hasPhoto = false,
 ) {
   return {
     update_id: nextUpdateId(),
@@ -382,6 +433,18 @@ function callbackUpdate(
         message_id: messageId ?? 7000 + updateId,
         chat: { id: buyerId, type: "private" },
         date: 1,
+        ...(hasPhoto
+          ? {
+              photo: [
+                {
+                  file_id: "contract-photo-file-id",
+                  file_unique_id: "contract-photo-unique-id",
+                  width: 800,
+                  height: 600,
+                },
+              ],
+            }
+          : {}),
       },
       data,
     },
@@ -441,6 +504,14 @@ function lastText(transport: FakeTelegramTransport): string {
     transport.sentMessages.at(-1)?.text ??
     ""
   );
+}
+
+function lastReceipt(
+  transport: FakeTelegramTransport,
+): { text: string; messageId: number } | undefined {
+  return [...transport.sentMessages]
+    .reverse()
+    .find((message) => /placed|تم تسجيل الطلب/.test(message.text));
 }
 
 async function setStoreDefault(storeId: string, code: "ar" | "en") {
@@ -594,6 +665,290 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     }
   });
 
+  it("renders the contract image product with price, currency and availability", async () => {
+    productContract.set(fixture.productAId, {
+      imageUrl: "https://cdn.example.test/products/bot-a.jpg",
+      availability: { available: 2, inStock: true },
+    });
+
+    const start = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "/start"),
+    );
+    expect(start.status).toBe(200);
+    const homeMessage = start.transport.sentMessages.at(-1)!;
+
+    const product = await call(
+      fixture.connectionAId,
+      callbackUpdate(
+        BUYER_A,
+        `p:${fixture.productAId}`,
+        undefined,
+        homeMessage.messageId,
+      ),
+    );
+    expect(product.status).toBe(200);
+
+    expect(product.transport.sentPhotos).toHaveLength(1);
+    const photo = product.transport.sentPhotos[0];
+    expect(photo.photo).toBe("https://cdn.example.test/products/bot-a.jpg");
+    expect(photo.caption).toContain("Bot A One");
+    expect(photo.caption).toContain("Bot A description");
+    expect(photo.caption).toContain("11.00 SAR");
+    expect(photo.caption).toContain("In stock");
+    expect(photo.caption).not.toContain("out of stock");
+
+    const addButtons = inlineButtons(photo).filter((button) =>
+      button.callback_data?.startsWith("ca:"),
+    );
+    expect(addButtons.map((button) => button.callback_data)).toEqual([
+      `ca:${fixture.productAId}:1`,
+      `ca:${fixture.productAId}:2`,
+    ]);
+
+    // Text -> photo needs a replacement. The superseded text controls are
+    // retired instead of creating competing active storefronts.
+    expect(
+      product.transport.editedReplyMarkups.some(
+        (entry) =>
+          entry.messageId === homeMessage.messageId &&
+          entry.replyMarkup?.inline_keyboard.length === 0,
+      ),
+    ).toBe(true);
+    expect(product.transport.sentMessages).toHaveLength(0);
+    expect(product.transport.editedMessages).toHaveLength(0);
+  });
+
+  it("keeps a usable text-only product card when the contract has no image", async () => {
+    const start = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "/start"),
+    );
+    const homeMessage = start.transport.sentMessages.at(-1)!;
+
+    const product = await call(
+      fixture.connectionAId,
+      callbackUpdate(
+        BUYER_A,
+        `p:${fixture.productAId}`,
+        undefined,
+        homeMessage.messageId,
+      ),
+    );
+    expect(product.status).toBe(200);
+
+    expect(product.transport.sentPhotos).toHaveLength(0);
+    expect(product.transport.photoAttempts).toHaveLength(0);
+    expect(product.transport.editedMessages).toHaveLength(1);
+
+    const card = product.transport.editedMessages[0];
+    expect(card.messageId).toBe(homeMessage.messageId);
+    expect(card.text).toContain("Bot A One");
+    expect(card.text).toContain("Bot A description");
+    expect(card.text).toContain("11.00 SAR");
+    expect(card.text).toContain("In stock");
+    expect(
+      inlineButtons(card).some((button) =>
+        button.callback_data?.startsWith("ca:"),
+      ),
+    ).toBe(true);
+  });
+
+  it("uses contract availability and refuses add-to-cart for an out-of-stock product", async () => {
+    // The database still has stock; the shared reader is authoritative.
+    productContract.set(fixture.productAId, {
+      availability: { available: 0, inStock: false },
+    });
+
+    const start = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "/start"),
+    );
+    const homeMessage = start.transport.sentMessages.at(-1)!;
+
+    const product = await call(
+      fixture.connectionAId,
+      callbackUpdate(
+        BUYER_A,
+        `p:${fixture.productAId}`,
+        undefined,
+        homeMessage.messageId,
+      ),
+    );
+    expect(product.status).toBe(200);
+
+    const card = product.transport.editedMessages.at(-1)!;
+    expect(card.text).toContain("out of stock");
+    expect(
+      inlineButtons(card).some((button) =>
+        button.callback_data?.startsWith("ca:"),
+      ),
+    ).toBe(false);
+
+    // Empty the store's inventory to prove the cart boundary rejects a stale
+    // or forged add for a genuinely out-of-stock product.
+    await db().execute(sql`
+      update "product_inventory" set on_hand = 0, reserved = 0
+      where product_id = ${fixture.productAId}
+    `);
+
+    const rejected = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, `ca:${fixture.productAId}:1`),
+    );
+    expect(rejected.status).toBe(200);
+    expect(lastText(rejected.transport)).toContain("out of stock");
+    expect(await db().select().from(cart)).toHaveLength(0);
+    expect(await db().select().from(order)).toHaveLength(0);
+  });
+
+  it("falls back to the text card when a photo outcome is ambiguous without a blind resend", async () => {
+    productContract.set(fixture.productAId, {
+      imageUrl: "https://cdn.example.test/products/bot-a.jpg",
+      availability: { available: 3, inStock: true },
+    });
+
+    const start = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "/start"),
+    );
+    const homeMessage = start.transport.sentMessages.at(-1)!;
+
+    const transport = createFakeTelegramTransport();
+    transport.failPhotoWith = "Request timed out";
+    transport.failPhotoKind = "timeout";
+
+    const product = await call(
+      fixture.connectionAId,
+      callbackUpdate(
+        BUYER_A,
+        `p:${fixture.productAId}`,
+        undefined,
+        homeMessage.messageId,
+      ),
+      "bot-secret-a",
+      transport,
+    );
+    expect(product.status).toBe(200);
+
+    // Exactly one photo attempt; the unknown outcome is never retried with a
+    // second send. The known text message becomes the usable card.
+    expect(product.transport.photoAttempts).toHaveLength(1);
+    expect(product.transport.photoAttempts[0].ok).toBe(false);
+    expect(product.transport.sentPhotos).toHaveLength(0);
+    expect(product.transport.sentMessages).toHaveLength(0);
+
+    const fallback = product.transport.editedMessages.at(-1)!;
+    expect(fallback.messageId).toBe(homeMessage.messageId);
+    expect(fallback.text).toContain("Bot A One");
+    expect(fallback.text).toContain("11.00 SAR");
+    expect(fallback.text).toContain("In stock");
+    expect(
+      inlineButtons(fallback).some((button) =>
+        button.callback_data?.startsWith("ca:"),
+      ),
+    ).toBe(true);
+  });
+
+  it("edits an existing photo product message in place instead of sending again", async () => {
+    productContract.set(fixture.productAId, {
+      imageUrl: "https://cdn.example.test/products/bot-a.jpg",
+      availability: { available: 4, inStock: true },
+    });
+
+    const start = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "/start"),
+    );
+    const homeMessage = start.transport.sentMessages.at(-1)!;
+
+    const first = await call(
+      fixture.connectionAId,
+      callbackUpdate(
+        BUYER_A,
+        `p:${fixture.productAId}`,
+        undefined,
+        homeMessage.messageId,
+      ),
+    );
+    const photoMessage = first.transport.sentPhotos[0];
+    expect(photoMessage).toBeDefined();
+
+    const refreshed = await call(
+      fixture.connectionAId,
+      callbackUpdate(
+        BUYER_A,
+        `p:${fixture.productAId}`,
+        undefined,
+        photoMessage.messageId,
+        true,
+      ),
+      "bot-secret-a",
+      first.transport,
+    );
+    expect(refreshed.status).toBe(200);
+
+    expect(refreshed.transport.sentPhotos).toHaveLength(1);
+    expect(refreshed.transport.editedMedia).toHaveLength(1);
+    expect(refreshed.transport.editedMedia[0].messageId).toBe(
+      photoMessage.messageId,
+    );
+    expect(refreshed.transport.editedMedia[0].media.media).toBe(
+      "https://cdn.example.test/products/bot-a.jpg",
+    );
+    expect(refreshed.transport.editedMedia[0].media.caption).toContain(
+      "Bot A One",
+    );
+  });
+
+  it("replaces a photo product message with one text screen when text editing is unsupported", async () => {
+    productContract.set(fixture.productAId, {
+      imageUrl: "https://cdn.example.test/products/bot-a.jpg",
+      availability: { available: 4, inStock: true },
+    });
+
+    const start = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A, "/start"),
+    );
+    const homeMessage = start.transport.sentMessages.at(-1)!;
+
+    const first = await call(
+      fixture.connectionAId,
+      callbackUpdate(
+        BUYER_A,
+        `p:${fixture.productAId}`,
+        undefined,
+        homeMessage.messageId,
+      ),
+    );
+    const photoMessage = first.transport.sentPhotos[0];
+
+    first.transport.failEditWith =
+      "Bad Request: There is no text in the message to edit";
+    first.transport.failEditKind = "not_editable";
+
+    const cartView = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, "cart", undefined, photoMessage.messageId, true),
+      "bot-secret-a",
+      first.transport,
+    );
+    expect(cartView.status).toBe(200);
+
+    expect(cartView.transport.sentMessages).toHaveLength(1);
+    expect(cartView.transport.sentMessages[0].text).toContain(
+      "Your cart is empty",
+    );
+    expect(
+      cartView.transport.editedReplyMarkups.some(
+        (entry) =>
+          entry.messageId === photoMessage.messageId &&
+          entry.replyMarkup?.inline_keyboard.length === 0,
+      ),
+    ).toBe(true);
+  });
+
   it("places one COD order from product to contact, address, review and confirmation", async () => {
     const { cartId, confirmData } = await completeReview();
 
@@ -603,13 +958,23 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     );
 
     expect(confirmed.status).toBe(200);
-    const text = lastText(confirmed.transport);
-    expect(text).toContain("placed");
-    expect(text).toContain("awaiting collection");
-    expect(text).toContain("Total: 37.00 SAR");
 
-    const reference = /Order (ORD-[A-HJ-NP-Z2-9]{6}) placed/.exec(text)?.[1];
+    const receipt = lastReceipt(confirmed.transport);
+    expect(receipt).toBeDefined();
+    const receiptText = receipt!.text;
+    expect(receiptText).toContain("placed");
+    expect(receiptText).toContain("awaiting collection");
+    expect(receiptText).toContain("Total: 37.00 SAR");
+
+    const reference = /Order (ORD-[A-HJ-NP-Z2-9]{6}) placed/.exec(
+      receiptText,
+    )?.[1];
     expect(reference).toBeDefined();
+
+    // The active storefront message is deliberately not the receipt.
+    const bridge = confirmed.transport.editedMessages.at(-1)!;
+    expect(bridge.text).toContain(`Order ${reference} placed`);
+    expect(bridge.text).not.toContain("Subtotal:");
 
     const orders = await db().select().from(order);
     expect(orders).toHaveLength(1);
@@ -628,13 +993,21 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     expect(inventory.onHand).toBe(5);
 
     // A second tap is a separate Telegram update. It must return the same
-    // reference and must not reserve stock again.
+    // reference, edit only, and must not reserve stock or send a receipt again.
     const duplicate = await call(
       fixture.connectionAId,
       callbackUpdate(BUYER_A, confirmData),
+      "bot-secret-a",
+      confirmed.transport,
     );
     expect(duplicate.status).toBe(200);
     expect(lastText(duplicate.transport)).toContain(`Order ${reference} placed`);
+    expect(lastText(duplicate.transport)).toContain("Total: 37.00 SAR");
+    expect(
+      duplicate.transport.sentMessages.filter((message) =>
+        message.text.includes(`Order ${reference} placed`),
+      ),
+    ).toHaveLength(1);
 
     expect(await db().select().from(order)).toHaveLength(1);
     expect(await db().select().from(inventoryReservation)).toHaveLength(1);
@@ -651,6 +1024,68 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       .where(eq(cart.id, cartId));
     expect(cartRow.status).toBe("converted");
   });
+
+  it.each([
+    ["add", 0, 1, 2],
+    ["increase", 2, 3, 4],
+    ["decrease", 2, 1, 0],
+    ["remove", 2, 0, 1],
+  ] as const)(
+    "applies a cart %s once when the same Telegram update is retried after a rendering failure",
+    async (action, initialQuantity, afterFirst, afterDistinct) => {
+      const productId = fixture.productAId;
+      const add = tokens.cartAdd(productId, 1);
+      const data = {
+        add,
+        increase: tokens.cartIncrease(productId),
+        decrease: tokens.cartDecrease(productId),
+        remove: tokens.cartRemove(productId),
+      }[action];
+      if (initialQuantity) {
+        const seed = await call(
+          fixture.connectionAId,
+          callbackUpdate(BUYER_A, tokens.cartAdd(productId, initialQuantity)),
+        );
+        expect(seed.status).toBe(200);
+      }
+
+      const quantity = async () => {
+        const [item] = await db().select().from(cartItem);
+        return item?.quantity ?? 0;
+      };
+      const transport = createFakeTelegramTransport();
+      const hasPhoto = action === "add";
+      transport.failEditWith = hasPhoto ? "No text in message" : "Edit failed";
+      transport.failEditKind = hasPhoto ? "not_editable" : "api_error";
+      transport.failSendWith = "Replacement failed";
+      const update = callbackUpdate(BUYER_A, data, "en", undefined, hasPhoto);
+
+      const failed = await call(fixture.connectionAId, update, "bot-secret-a", transport);
+      expect(failed.status).toBe(500);
+      expect(await quantity()).toBe(afterFirst);
+      const [cartAfterFirst] = await db().select().from(cart);
+
+      const retryTransport = createFakeTelegramTransport();
+      if (hasPhoto) {
+        retryTransport.failEditWith = "No text in message";
+        retryTransport.failEditKind = "not_editable";
+      }
+      const retried = await call(fixture.connectionAId, update, "bot-secret-a", retryTransport);
+      expect(retried.status).toBe(200);
+      expect(await quantity()).toBe(afterFirst);
+      expect(await db().select().from(cart)).toEqual([cartAfterFirst]);
+      expect(lastText(retried.transport)).toContain(
+        afterFirst ? `Bot A One × ${afterFirst}` : "Your cart is empty",
+      );
+
+      const distinct = await call(
+        fixture.connectionAId,
+        callbackUpdate(BUYER_A, action === "remove" ? add : data),
+      );
+      expect(distinct.status).toBe(200);
+      expect(await quantity()).toBe(afterDistinct);
+    },
+  );
 
   it("returns a revised review instead of placing an order when the quote changed", async () => {
     const { confirmData } = await completeReview();
@@ -690,7 +1125,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     );
     expect(placed.status).toBe(200);
     expect(lastText(placed.transport)).toContain("placed");
-    expect(lastText(placed.transport)).toContain("Total: 44.00 SAR");
+    expect(lastReceipt(placed.transport)?.text).toContain("Total: 44.00 SAR");
     expect(await db().select().from(order)).toHaveLength(1);
   });
 
@@ -827,7 +1262,10 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     );
     expect(confirmed.status).toBe(200);
     expect(lastText(confirmed.transport)).toContain("تم تسجيل الطلب");
-    expect(lastText(confirmed.transport)).toContain("بانتظار التحصيل");
+    expect(lastReceipt(confirmed.transport)?.text).toContain(
+      "بانتظار التحصيل",
+    );
+    expect(lastReceipt(confirmed.transport)?.text).toContain("37.00 SAR");
 
     const [orderRow] = await db().select().from(order);
     expect(orderRow.customerPhone).toBe("+966555123456");
@@ -1128,7 +1566,9 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       callbackUpdate(buyer, confirmButton!.callback_data!),
     );
     expect(lastText(confirmed.transport)).toContain("placed");
-    expect(lastText(confirmed.transport)).toContain("Total: 37.00 SAR");
+    expect(lastReceipt(confirmed.transport)?.text).toContain(
+      "Total: 37.00 SAR",
+    );
 
     const orders = await db().select().from(order);
     expect(orders).toHaveLength(1);
@@ -1434,7 +1874,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
     );
     expect(denied).toEqual({ ok: false, error: "DENIED" });
   });
-  it("keeps the placed receipt when returning home and changing language", async () => {
+  it("keeps the separate placed receipt when returning home and changing language", async () => {
     const { confirmData } = await completeReview();
     const transport = createFakeTelegramTransport();
 
@@ -1445,10 +1885,12 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       transport,
     );
 
-    const receipt = confirmed.transport.editedMessages.at(-1);
+    const receipt = lastReceipt(confirmed.transport);
     expect(receipt?.text).toContain("placed");
     expect(receipt?.text).toContain("Total: 37.00 SAR");
     const receiptId = receipt!.messageId;
+    const reference = /ORD-[A-HJ-NP-Z2-9]{6}/.exec(receipt!.text)?.[0];
+    expect(reference).toBeDefined();
 
     const receiptButtons = inlineButtons(receipt!);
     expect(
@@ -1457,22 +1899,33 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       ),
     ).toBe(false);
 
-    const homeButton = receiptButtons.find(
+    const bridge = confirmed.transport.editedMessages.at(-1)!;
+    expect(bridge.text).toContain("placed");
+    expect(bridge.text).not.toContain("Subtotal:");
+    const bridgeMessageId = bridge.messageId;
+
+    const homeButton = inlineButtons(bridge).find(
       (button) => button.callback_data === "home:new",
     );
     expect(homeButton).toBeDefined();
 
     const home = await call(
       fixture.connectionAId,
-      callbackUpdate(BUYER_A, homeButton!.callback_data!, undefined, receiptId),
+      callbackUpdate(
+        BUYER_A,
+        homeButton!.callback_data!,
+        undefined,
+        bridgeMessageId,
+      ),
       "bot-secret-a",
       transport,
     );
     expect(home.transport.sentMessages.at(-1)?.text).toContain("Welcome to");
+    const homeMessageId = home.transport.sentMessages.at(-1)!.messageId;
 
     const languageMenu = await call(
       fixture.connectionAId,
-      callbackUpdate(BUYER_A, "langs:h", undefined, receiptId + 1),
+      callbackUpdate(BUYER_A, "langs:h", undefined, homeMessageId),
       "bot-secret-a",
       transport,
     );
@@ -1482,7 +1935,7 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
 
     const switched = await call(
       fixture.connectionAId,
-      callbackUpdate(BUYER_A, "lang:ar:h", undefined, receiptId + 1),
+      callbackUpdate(BUYER_A, "lang:ar:h", undefined, homeMessageId),
       "bot-secret-a",
       transport,
     );
@@ -1490,15 +1943,175 @@ describe.skipIf(!shouldRun)("COD managed Telegram journey", () => {
       "مرحبًا بك",
     );
 
+    // Browsing edits the home message only. The separate receipt is untouched.
     const receiptEdits = switched.transport.editedMessages.filter(
       (message) => message.messageId === receiptId,
     );
-    expect(receiptEdits).toHaveLength(1);
-    expect(receiptEdits[0].text).toContain("placed");
-    expect(receiptEdits[0].text).toContain("ORD-");
+    expect(receiptEdits).toHaveLength(0);
+    expect(
+      switched.transport.sentMessages.filter((message) =>
+        message.text.includes(`Order ${reference} placed`),
+      ),
+    ).toHaveLength(1);
+
+    // A replayed confirmation after browsing edits the stale message with the
+    // same receipt; it never creates another order, reservation or receipt
+    // send.
+    const replayed = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, confirmData, undefined, bridgeMessageId),
+      "bot-secret-a",
+      transport,
+    );
+    expect(replayed.status).toBe(200);
+    expect(lastText(replayed.transport)).toContain(reference!);
+    expect(lastText(replayed.transport)).toContain("37.00 SAR");
+    expect(
+      replayed.transport.sentMessages.filter((message) =>
+        message.text.includes(reference!),
+      ),
+    ).toHaveLength(1);
 
     expect(await db().select().from(order)).toHaveLength(1);
     expect(await db().select().from(inventoryReservation)).toHaveLength(1);
+  });
+
+  it("does not duplicate the order or blind-resend the receipt when delivery is ambiguous", async () => {
+    const { confirmData } = await completeReview();
+    const transport = createFakeTelegramTransport();
+    transport.failSendWith = "Request timed out";
+    transport.failSendKind = "timeout";
+
+    const confirmed = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, confirmData),
+      "bot-secret-a",
+      transport,
+    );
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.transport.sentMessages).toHaveLength(0);
+
+    // Recovery renders the receipt on the known active message instead of
+    // sending again into an unknown delivery outcome.
+    const recovered = confirmed.transport.editedMessages.at(-1)!;
+    expect(recovered.text).toContain("placed");
+    expect(recovered.text).toContain("Total: 37.00 SAR");
+
+    expect(await db().select().from(order)).toHaveLength(1);
+    expect(await db().select().from(inventoryReservation)).toHaveLength(1);
+
+    transport.failSendWith = undefined;
+    transport.failSendKind = undefined;
+
+    const replayed = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, confirmData),
+      "bot-secret-a",
+      transport,
+    );
+    expect(replayed.status).toBe(200);
+    expect(replayed.transport.sentMessages).toHaveLength(0);
+    expect(lastText(replayed.transport)).toContain("Total: 37.00 SAR");
+
+    expect(await db().select().from(order)).toHaveLength(1);
+    expect(await db().select().from(inventoryReservation)).toHaveLength(1);
+  });
+
+  it("recovers the latest COD order from /start when both receipt displays fail", async () => {
+    const latest = tokens.latestCodOrder();
+    const initialHome = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start"));
+    expect(lastButton(initialHome.transport, latest)).toBeUndefined();
+
+    const { confirmData, transport: reviewTransport } = await completeReview();
+    const reviewId = reviewTransport.sentMessages.at(-1)!.messageId;
+    const transport = createFakeTelegramTransport();
+    transport.failSendWith = "Request timed out";
+    transport.failSendKind = "timeout";
+    transport.failEditWith = "Edit failed";
+    transport.failEditKind = "api_error";
+    const sendReceipt = vi.spyOn(transport, "sendMessage");
+    const editReview = vi.spyOn(transport, "editMessageText");
+    const failed = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, confirmData, "en", reviewId),
+      "bot-secret-a",
+      transport,
+    );
+    expect(failed.status).toBe(500);
+    expect(sendReceipt).toHaveBeenCalledTimes(1);
+    expect(editReview).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ messageId: reviewId }),
+    );
+    expect(lastReceipt(failed.transport)).toBeUndefined();
+    expect(failed.transport.editedMessages).toHaveLength(0);
+    const orders = await db().select().from(order);
+    const reservations = await db().select().from(inventoryReservation);
+    expect(orders).toHaveLength(1);
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0].orderId).toBe(orders[0].id);
+    const { reference } = orders[0];
+
+    // Recovery remains available after the store disables new COD orders.
+    await db().update(storeCommerceSetting).set({ codEnabled: false })
+      .where(eq(storeCommerceSetting.storeId, fixture.storeAId));
+    const home = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start"));
+    expect(lastButton(home.transport, latest)?.text).toBe("Latest COD order");
+    const homeId = home.transport.sentMessages.at(-1)!.messageId;
+    const recovered = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, latest, "en", homeId),
+    );
+    expect(recovered.status).toBe(200);
+    expect(lastText(recovered.transport)).toContain(`Order reference: ${reference}`);
+    expect(lastText(recovered.transport)).toContain("Order status: Placed");
+    expect(lastText(recovered.transport)).toContain("Payment: Awaiting collection");
+    const returned = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, tokens.home(), "en", homeId),
+    );
+    expect(lastButton(returned.transport, latest)?.text).toBe("Latest COD order");
+
+    const otherBuyer = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A + 1, latest, "en", homeId),
+    );
+    const otherChatUpdate = callbackUpdate(BUYER_A, latest, "en", homeId);
+    otherChatUpdate.callback_query.message.chat.id = BUYER_A + 1;
+    const otherChat = await call(fixture.connectionAId, otherChatUpdate);
+    const otherStore = await call(
+      fixture.connectionBId,
+      callbackUpdate(BUYER_A, latest, "en", homeId),
+      "bot-secret-b",
+    );
+    for (const denied of [otherBuyer, otherChat, otherStore]) {
+      expect(denied.status).toBe(200);
+      expect(lastText(denied.transport)).toBe("There is no cash-on-delivery order in this chat.");
+    }
+    const otherBuyerHome = await call(
+      fixture.connectionAId,
+      messageUpdate(BUYER_A + 1, "/start"),
+    );
+    expect(lastButton(otherBuyerHome.transport, latest)).toBeUndefined();
+    const scope = await readStoreScopeForFixture(db(), fixture.storeAId);
+    expect(await readLatestBuyerCodOrder(asAppDb(db()), scope, {
+      connectionId: fixture.connectionBId,
+      telegramUserId: BUYER_A,
+      telegramChatId: BUYER_A,
+    })).toBeNull();
+    expect(await db().select().from(order)).toEqual(orders);
+    expect(await db().select().from(inventoryReservation)).toEqual(reservations);
+
+    await db().update(order).set({ status: "accepted", acceptedAt: new Date() })
+      .where(eq(order.id, orders[0].id));
+    const switched = await call(
+      fixture.connectionAId,
+      callbackUpdate(BUYER_A, tokens.lang("ar", "cod"), "en", homeId),
+    );
+    expect(switched.status).toBe(200);
+    expect(lastText(switched.transport)).toContain(`مرجع الطلب: ${reference}`);
+    expect(lastText(switched.transport)).toContain("حالة الطلب: تم قبول الطلب");
+    const arabicHome = await call(fixture.connectionAId, messageUpdate(BUYER_A, "/start"));
+    expect(lastButton(arabicHome.transport, latest)?.text).toBe("آخر طلب بالدفع عند الاستلام");
   });
 
 });

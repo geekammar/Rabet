@@ -21,6 +21,11 @@ import {
   resolveMerchantCatalogLanguage,
   type MerchantProductCreateResult,
 } from "@/lib/merchant/product-create";
+import {
+  publishMerchantCatalogProduct,
+  type MerchantProductPublishResult,
+} from "@/lib/merchant/product-publish";
+import { updateMerchantCatalogProductDraft } from "@/lib/merchant/product-edit";
 
 /**
  * Saves one exact decimal price for a product in the signed-in merchant's own
@@ -68,7 +73,7 @@ export async function saveMerchantProductPrice(
 
 export async function saveMerchantProductAvailability(
   input: unknown,
-): Promise<MerchantProductAvailabilityResult> {
+): Promise<MerchantProductAvailabilityResult | MerchantProductPublishResult> {
   if (!isMerchantAppEnabled()) {
     return { ok: false, error: "UNAVAILABLE" };
   }
@@ -84,6 +89,25 @@ export async function saveMerchantProductAvailability(
       ? (input as Record<string, unknown>)
       : {};
 
+  // Turning a product on is publishing. It must never be a client-declared
+  // flag: the same readiness gate as the explicit publish action applies.
+  if (submitted.isActive === true) {
+    const published = await publishMerchantCatalogProduct(
+      getTransactionDb(),
+      access,
+      {
+        productId: submitted.productId,
+        revision: submitted.revision,
+      },
+    );
+
+    if (published.ok) {
+      refresh();
+    }
+
+    return published;
+  }
+
   const result = await updateMerchantCatalogProductAvailability(
     getDb(),
     access,
@@ -95,6 +119,93 @@ export async function saveMerchantProductAvailability(
   );
 
   if (result.ok) {
+    refresh();
+  }
+
+  return result;
+}
+
+/**
+ * Explicitly publishes one draft product after server-side readiness checks.
+ *
+ * Only `productId` and the expected product `revision` are read from the
+ * submitted object. The store and write eligibility come from the verified
+ * merchant session, and the client can never declare `isActive` here.
+ */
+export async function publishMerchantProduct(
+  input: unknown,
+): Promise<MerchantProductPublishResult> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+
+  const result = await publishMerchantCatalogProduct(
+    getTransactionDb(),
+    access,
+    {
+      productId: submitted.productId,
+      revision: submitted.revision,
+    },
+  );
+
+  if (result.ok) {
+    revalidatePath("/app/products");
+    refresh();
+  }
+
+  return result;
+}
+
+export async function saveMerchantProductDraftDetails(
+  input: unknown,
+): Promise<Awaited<ReturnType<typeof updateMerchantCatalogProductDraft>>> {
+  if (!isMerchantAppEnabled()) {
+    return { ok: false, error: "UNAVAILABLE" };
+  }
+
+  const access = await getMerchantAccess();
+
+  if (!access) {
+    return { ok: false, error: "DENIED" };
+  }
+
+  const submitted =
+    typeof input === "object" && input !== null
+      ? (input as Record<string, unknown>)
+      : {};
+
+  const language = await resolveMerchantCatalogLanguage(getDb());
+
+  if (!language) {
+    return { ok: false, error: "INVALID_INPUT" };
+  }
+
+  const result = await updateMerchantCatalogProductDraft(
+    getTransactionDb(),
+    access,
+    language,
+    {
+      productId: submitted.productId,
+      revision: submitted.revision,
+      description: submitted.description,
+      imageUrl: submitted.imageUrl,
+      stock: submitted.stock,
+    },
+  );
+
+  if (result.ok) {
+    revalidatePath("/app/products");
     refresh();
   }
 
@@ -181,6 +292,9 @@ export async function createMerchantProductDraft(
       price: submitted.price,
       categoryId: submitted.categoryId,
       newCategoryName: submitted.newCategoryName,
+      description: submitted.description,
+      imageUrl: submitted.imageUrl,
+      stock: submitted.stock,
     },
   );
 
