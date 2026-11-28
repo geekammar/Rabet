@@ -3,12 +3,14 @@ import {
   check,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { StorefrontProfile } from "@/lib/merchant/storefront-profile-fields";
 
 /**
  * Tenant identity foundation (S1.1).
@@ -56,6 +58,7 @@ export const store = pgTable(
     // the merchant has not configured (or explicitly cleared) the contact, so
     // every existing store remains valid without a backfill.
     telegramSupportUsername: text("telegram_support_username"),
+    storefrontProfile: jsonb("storefront_profile").$type<StorefrontProfile>(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
