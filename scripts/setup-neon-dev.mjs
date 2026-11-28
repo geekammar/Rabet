@@ -143,6 +143,7 @@ export const EXPECTED_MIGRATION_TAGS = [
   "0018_sparkling_morlun",
   "0019_merchant_notification_bot",
   "0020_merchant_notification_bot_managed",
+  "0021_merchant_product_publish",
 ];
 
 const TENANT_TABLES = new Set(["app_user", "store", "store_membership"]);

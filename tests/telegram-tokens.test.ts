@@ -10,6 +10,14 @@ import {
 describe("telegram tokens", () => {
   const uuid = "123e4567-e89b-12d3-a456-426614174000";
 
+  it("encodes only the page and validates bounded catalog search callbacks", () => {
+    expect(parseToken(tokens.catalogSearch())).toEqual({ type: "catalogSearch" });
+    expect(parseToken(tokens.catalogSearchPage(2))).toEqual({ type: "catalogSearchPage", page: 2 });
+    expect(parseToken("catalog-search:0").type).toBe("unknown");
+    expect(parseToken("catalog-search:100000").type).toBe("unknown");
+    expect(() => tokens.catalogSearchPage(1.5)).toThrow(/Invalid page number/);
+  });
+
   it("enforces 1-64 UTF-8 bytes ceiling", () => {
     expect(() => assertValidCallbackData("")).toThrow();
     expect(assertValidCallbackData("home")).toBe("home");

@@ -12,6 +12,7 @@ import {
   buyerLocaleFromLanguageCode,
   type BuyerLocale,
 } from "@/lib/commerce/buyer-language";
+import type { BuyerCodOrder } from "@/lib/commerce/orders";
 
 export type ManagedCommerceLocale = BuyerLocale;
 
@@ -23,6 +24,11 @@ export type CommerceCopy = {
   previous: string;
   next: string;
   products: string;
+  search: string;
+  searchPrompt: string;
+  searchInvalid: string;
+  searchResults: string;
+  searchEmpty: string;
   browseCategories: string;
   cart: string;
   languageButton: string;
@@ -90,6 +96,16 @@ export type CommerceCopy = {
   orderPlaced: (reference: string) => string;
   awaitingCollection: string;
   reservedNote: string;
+  latestCodOrder: string;
+  latestCodOrderUnavailable: string;
+  codOrderReference: string;
+  codOrderStatusLabel: string;
+  codOrderStatuses: Record<
+    BuyerCodOrder["status"] | Exclude<BuyerCodOrder["fulfillmentStatus"], "unfulfilled">,
+    string
+  >;
+  codPaymentStatuses: Record<BuyerCodOrder["paymentStatus"], string>;
+  inStock: string;
   outOfStock: string;
   notOrderable: string;
   genericUnavailable: string;
@@ -106,6 +122,11 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     previous: "Previous",
     next: "Next",
     products: "Products",
+    search: "Search products",
+    searchPrompt: "Reply with a product name or keyword.",
+    searchInvalid: "Try a keyword of up to 80 characters.",
+    searchResults: "Product search results",
+    searchEmpty: "No products matched. Try another keyword.",
     browseCategories: "Browse categories",
     cart: "Cart",
     languageButton: "اللغة / Language",
@@ -187,6 +208,24 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     orderPlaced: (reference) => `Order ${reference} placed.`,
     awaitingCollection: "Payment: cash on delivery — awaiting collection.",
     reservedNote: "The store has reserved the items for this order.",
+    latestCodOrder: "Latest COD order",
+    latestCodOrderUnavailable: "There is no cash-on-delivery order in this chat.",
+    codOrderReference: "Order reference",
+    codOrderStatusLabel: "Order status",
+    codOrderStatuses: {
+      placed: "Placed",
+      accepted: "Accepted",
+      preparing: "Preparing",
+      handed_to_shipping: "Handed to shipping",
+      delivered: "Delivered",
+      cancelled: "Cancelled",
+    },
+    codPaymentStatuses: {
+      awaiting_collection: "Awaiting collection",
+      collected: "Collected",
+      failed: "Collection failed",
+    },
+    inStock: "In stock",
     outOfStock: "This product is out of stock.",
     notOrderable: "This product cannot be ordered online.",
     genericUnavailable: "This cart is not available.",
@@ -203,6 +242,11 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     previous: "السابق",
     next: "التالي",
     products: "المنتجات",
+    search: "ابحث عن منتج",
+    searchPrompt: "رد باسم المنتج أو بكلمة من وصفه.",
+    searchInvalid: "جرّب كتابة كلمة بحث لا تتجاوز 80 حرفًا.",
+    searchResults: "نتائج البحث عن المنتجات",
+    searchEmpty: "لم نجد منتجات مطابقة. جرّب كلمة بحث أخرى.",
     browseCategories: "تصفح الأقسام",
     cart: "السلة",
     languageButton: "اللغة / Language",
@@ -283,6 +327,24 @@ const COPY: Record<ManagedCommerceLocale, CommerceCopy> = {
     orderPlaced: (reference) => `تم تسجيل الطلب ${reference}.`,
     awaitingCollection: "الدفع عند الاستلام — بانتظار التحصيل.",
     reservedNote: "تم حجز المنتجات لهذا الطلب.",
+    latestCodOrder: "آخر طلب بالدفع عند الاستلام",
+    latestCodOrderUnavailable: "لا يوجد طلب بالدفع عند الاستلام في هذه المحادثة.",
+    codOrderReference: "مرجع الطلب",
+    codOrderStatusLabel: "حالة الطلب",
+    codOrderStatuses: {
+      placed: "تم تسجيل الطلب",
+      accepted: "تم قبول الطلب",
+      preparing: "قيد التجهيز",
+      handed_to_shipping: "سُلّم للشحن",
+      delivered: "تم التسليم",
+      cancelled: "ملغى",
+    },
+    codPaymentStatuses: {
+      awaiting_collection: "بانتظار التحصيل",
+      collected: "تم التحصيل",
+      failed: "تعذّر التحصيل",
+    },
+    inStock: "متوفر",
     outOfStock: "هذا المنتج غير متوفر حاليًا.",
     notOrderable: "لا يمكن طلب هذا المنتج عبر المتجر.",
     genericUnavailable: "هذه السلة غير متاحة.",

@@ -4,6 +4,7 @@ import type {
   TelegramAnswerResult,
   TelegramErrorKind,
   TelegramInlineKeyboardMarkup,
+  TelegramInputMediaPhoto,
   TelegramReplyMarkup,
   TelegramSendResult,
   TelegramTransport,
@@ -16,6 +17,7 @@ import {
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 export const TELEGRAM_MAX_MESSAGE_CHARS = 4096;
+export const TELEGRAM_MAX_CAPTION_CHARS = 1024;
 export const TELEGRAM_MAX_CALLBACK_BYTES = 64;
 
 /**
@@ -170,7 +172,9 @@ export function classifyHttpError(
   if (
     desc.includes("message can't be edited") ||
     desc.includes("message to edit not found") ||
-    desc.includes("message cannot be edited")
+    desc.includes("message cannot be edited") ||
+    desc.includes("no media in the message to edit") ||
+    desc.includes("no text in the message to edit")
   ) {
     return { errorKind: "not_editable" };
   }
@@ -314,6 +318,41 @@ export function createFetchTelegramTransport(
       };
     },
 
+    async sendPhoto({ chatId, photo, caption, replyMarkup }): Promise<TelegramSendResult> {
+      const check = validateCaptionLimits(caption, replyMarkup);
+      if (!check.ok) {
+        return check;
+      }
+
+      const body: Record<string, unknown> = {
+        chat_id: chatId,
+        photo,
+      };
+      if (caption) {
+        body.caption = caption;
+      }
+      if (replyMarkup) {
+        body.reply_markup = replyMarkup;
+      }
+
+      const res = await postTelegram<{ message_id?: number }>("sendPhoto", body);
+      if (!res.ok) {
+        return {
+          ok: false,
+          error: res.error,
+          errorKind: res.errorKind,
+          httpStatus: res.httpStatus,
+          retryAfterSeconds: res.retryAfterSeconds,
+          isBlocked: res.errorKind === "blocked",
+        };
+      }
+
+      return {
+        ok: true,
+        messageId: res.result?.message_id,
+      };
+    },
+
     async editMessageText({ chatId, messageId, text, replyMarkup }): Promise<TelegramSendResult> {
       const check = validatePayloadLimits(text, replyMarkup);
       if (!check.ok) {
@@ -330,6 +369,71 @@ export function createFetchTelegramTransport(
       }
 
       const res = await postTelegram<{ message_id?: number }>("editMessageText", body);
+      if (!res.ok) {
+        return {
+          ok: false,
+          error: res.error,
+          errorKind: res.errorKind,
+          retryAfterSeconds: res.retryAfterSeconds,
+        };
+      }
+
+      return {
+        ok: true,
+        messageId: res.result?.message_id ?? messageId,
+      };
+    },
+
+    async editMessageMedia({ chatId, messageId, media, replyMarkup }): Promise<TelegramSendResult> {
+      const check = validateCaptionLimits(media.caption, replyMarkup);
+      if (!check.ok) {
+        return check;
+      }
+
+      const body: Record<string, unknown> = {
+        chat_id: chatId,
+        message_id: messageId,
+        media,
+      };
+      if (replyMarkup) {
+        body.reply_markup = replyMarkup;
+      }
+
+      const res = await postTelegram<{ message_id?: number }>("editMessageMedia", body);
+      if (!res.ok) {
+        return {
+          ok: false,
+          error: res.error,
+          errorKind: res.errorKind,
+          retryAfterSeconds: res.retryAfterSeconds,
+        };
+      }
+
+      return {
+        ok: true,
+        messageId: res.result?.message_id ?? messageId,
+      };
+    },
+
+    async editMessageReplyMarkup({ chatId, messageId, replyMarkup }): Promise<TelegramSendResult> {
+      const effectiveMarkup: TelegramInlineKeyboardMarkup = replyMarkup ?? {
+        inline_keyboard: [],
+      };
+      const check = validatePayloadLimits("", effectiveMarkup);
+      if (!check.ok) {
+        return check;
+      }
+
+      const body: Record<string, unknown> = {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: effectiveMarkup,
+      };
+
+      const res = await postTelegram<{ message_id?: number }>(
+        "editMessageReplyMarkup",
+        body,
+      );
       if (!res.ok) {
         return {
           ok: false,
@@ -381,6 +485,36 @@ export interface FakeEditedMessage {
   replyMarkup?: TelegramInlineKeyboardMarkup;
 }
 
+export interface FakeSentPhoto {
+  chatId: number | string;
+  messageId: number;
+  photo: string;
+  caption?: string;
+  replyMarkup?: TelegramInlineKeyboardMarkup;
+}
+
+export interface FakePhotoAttempt {
+  chatId: number | string;
+  photo: string;
+  caption?: string;
+  replyMarkup?: TelegramInlineKeyboardMarkup;
+  ok: boolean;
+  errorKind?: TelegramErrorKind;
+}
+
+export interface FakeEditedMedia {
+  chatId: number | string;
+  messageId: number;
+  media: TelegramInputMediaPhoto;
+  replyMarkup?: TelegramInlineKeyboardMarkup;
+}
+
+export interface FakeEditedReplyMarkup {
+  chatId: number | string;
+  messageId: number;
+  replyMarkup?: TelegramInlineKeyboardMarkup;
+}
+
 export interface FakeAnsweredCallback {
   callbackQueryId: string;
   text?: string;
@@ -389,7 +523,11 @@ export interface FakeAnsweredCallback {
 
 export interface FakeTelegramTransport extends TelegramTransport {
   sentMessages: FakeSentMessage[];
+  sentPhotos: FakeSentPhoto[];
+  photoAttempts: FakePhotoAttempt[];
   editedMessages: FakeEditedMessage[];
+  editedMedia: FakeEditedMedia[];
+  editedReplyMarkups: FakeEditedReplyMarkup[];
   answeredCallbacks: FakeAnsweredCallback[];
   deadline?: ExecutionDeadline;
   failSendWith?: string;
@@ -397,9 +535,20 @@ export interface FakeTelegramTransport extends TelegramTransport {
   failSendHttpStatus?: number;
   failSendRetryAfter?: number;
   failSendIsBlocked?: boolean;
+  failPhotoWith?: string;
+  failPhotoKind?: TelegramErrorKind;
+  failPhotoHttpStatus?: number;
+  failPhotoRetryAfter?: number;
+  failPhotoIsBlocked?: boolean;
   failEditWith?: string;
   failEditKind?: TelegramErrorKind;
   failEditRetryAfter?: number;
+  failMediaWith?: string;
+  failMediaKind?: TelegramErrorKind;
+  failMediaRetryAfter?: number;
+  failReplyMarkupWith?: string;
+  failReplyMarkupKind?: TelegramErrorKind;
+  failReplyMarkupRetryAfter?: number;
   failAnswerWith?: string;
   failAnswerKind?: TelegramErrorKind;
   failAnswerRetryAfter?: number;
@@ -417,7 +566,6 @@ export function validatePayloadLimits(
       errorKind: "api_error",
     };
   }
-
   if (replyMarkup && "inline_keyboard" in replyMarkup) {
     for (const row of replyMarkup.inline_keyboard) {
       for (const btn of row) {
@@ -452,19 +600,42 @@ export function validatePayloadLimits(
   return { ok: true };
 }
 
+export function validateCaptionLimits(
+  caption: string | undefined,
+  replyMarkup?: TelegramReplyMarkup,
+): { ok: true } | { ok: false; error: string; errorKind: TelegramErrorKind } {
+  if (caption !== undefined && caption.length > TELEGRAM_MAX_CAPTION_CHARS) {
+    return {
+      ok: false,
+      error: `Media caption exceeds Telegram limit of ${TELEGRAM_MAX_CAPTION_CHARS} characters (received ${caption.length})`,
+      errorKind: "api_error",
+    };
+  }
+
+  return validatePayloadLimits("", replyMarkup);
+}
+
 /**
  * Creates an in-memory fake transport for hermetic testing.
  */
 export function createFakeTelegramTransport(): FakeTelegramTransport {
   const sentMessages: FakeSentMessage[] = [];
+  const sentPhotos: FakeSentPhoto[] = [];
+  const photoAttempts: FakePhotoAttempt[] = [];
   const editedMessages: FakeEditedMessage[] = [];
+  const editedMedia: FakeEditedMedia[] = [];
+  const editedReplyMarkups: FakeEditedReplyMarkup[] = [];
   const answeredCallbacks: FakeAnsweredCallback[] = [];
 
   let nextMessageId = 1000;
 
   const transport: FakeTelegramTransport = {
     sentMessages,
+    sentPhotos,
+    photoAttempts,
     editedMessages,
+    editedMedia,
+    editedReplyMarkups,
     answeredCallbacks,
 
     async sendMessage({ chatId, text, replyMarkup }) {
@@ -490,6 +661,54 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
       return { ok: true, messageId: nextMessageId };
     },
 
+    async sendPhoto({ chatId, photo, caption, replyMarkup }) {
+      if (transport.deadline?.isExpired()) {
+        throw new BudgetExceededError("Execution budget exceeded in fake transport");
+      }
+      if (transport.failPhotoWith) {
+        const errorKind = transport.failPhotoKind ?? "api_error";
+        photoAttempts.push({
+          chatId,
+          photo,
+          caption,
+          replyMarkup,
+          ok: false,
+          errorKind,
+        });
+        return {
+          ok: false,
+          error: transport.failPhotoWith,
+          errorKind,
+          httpStatus: transport.failPhotoHttpStatus,
+          retryAfterSeconds: transport.failPhotoRetryAfter,
+          isBlocked:
+            transport.failPhotoIsBlocked ?? (errorKind === "blocked"),
+        };
+      }
+      const check = validateCaptionLimits(caption, replyMarkup);
+      if (!check.ok) {
+        photoAttempts.push({
+          chatId,
+          photo,
+          caption,
+          replyMarkup,
+          ok: false,
+          errorKind: check.errorKind,
+        });
+        return check;
+      }
+      nextMessageId += 1;
+      photoAttempts.push({ chatId, photo, caption, replyMarkup, ok: true });
+      sentPhotos.push({
+        chatId,
+        messageId: nextMessageId,
+        photo,
+        caption,
+        replyMarkup,
+      });
+      return { ok: true, messageId: nextMessageId };
+    },
+
     async editMessageText({ chatId, messageId, text, replyMarkup }) {
       if (transport.deadline?.isExpired()) {
         throw new BudgetExceededError("Execution budget exceeded in fake transport");
@@ -507,6 +726,53 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
         return check;
       }
       editedMessages.push({ chatId, messageId, text, replyMarkup });
+      return { ok: true, messageId };
+    },
+
+    async editMessageMedia({ chatId, messageId, media, replyMarkup }) {
+      if (transport.deadline?.isExpired()) {
+        throw new BudgetExceededError("Execution budget exceeded in fake transport");
+      }
+      if (transport.failMediaWith) {
+        return {
+          ok: false,
+          error: transport.failMediaWith,
+          errorKind: transport.failMediaKind ?? "api_error",
+          retryAfterSeconds: transport.failMediaRetryAfter,
+        };
+      }
+      const check = validateCaptionLimits(media.caption, replyMarkup);
+      if (!check.ok) {
+        return check;
+      }
+      editedMedia.push({ chatId, messageId, media, replyMarkup });
+      return { ok: true, messageId };
+    },
+
+    async editMessageReplyMarkup({ chatId, messageId, replyMarkup }) {
+      if (transport.deadline?.isExpired()) {
+        throw new BudgetExceededError("Execution budget exceeded in fake transport");
+      }
+      if (transport.failReplyMarkupWith) {
+        return {
+          ok: false,
+          error: transport.failReplyMarkupWith,
+          errorKind: transport.failReplyMarkupKind ?? "api_error",
+          retryAfterSeconds: transport.failReplyMarkupRetryAfter,
+        };
+      }
+      const effectiveMarkup: TelegramInlineKeyboardMarkup = replyMarkup ?? {
+        inline_keyboard: [],
+      };
+      const check = validatePayloadLimits("", effectiveMarkup);
+      if (!check.ok) {
+        return check;
+      }
+      editedReplyMarkups.push({
+        chatId,
+        messageId,
+        replyMarkup: effectiveMarkup,
+      });
       return { ok: true, messageId };
     },
 
@@ -537,15 +803,32 @@ export function createFakeTelegramTransport(): FakeTelegramTransport {
 
     clear() {
       sentMessages.length = 0;
+      sentPhotos.length = 0;
+      photoAttempts.length = 0;
       editedMessages.length = 0;
+      editedMedia.length = 0;
+      editedReplyMarkups.length = 0;
       answeredCallbacks.length = 0;
       transport.deadline = undefined;
       transport.failSendWith = undefined;
       transport.failSendKind = undefined;
+      transport.failSendHttpStatus = undefined;
       transport.failSendRetryAfter = undefined;
+      transport.failSendIsBlocked = undefined;
+      transport.failPhotoWith = undefined;
+      transport.failPhotoKind = undefined;
+      transport.failPhotoHttpStatus = undefined;
+      transport.failPhotoRetryAfter = undefined;
+      transport.failPhotoIsBlocked = undefined;
       transport.failEditWith = undefined;
       transport.failEditKind = undefined;
       transport.failEditRetryAfter = undefined;
+      transport.failMediaWith = undefined;
+      transport.failMediaKind = undefined;
+      transport.failMediaRetryAfter = undefined;
+      transport.failReplyMarkupWith = undefined;
+      transport.failReplyMarkupKind = undefined;
+      transport.failReplyMarkupRetryAfter = undefined;
       transport.failAnswerWith = undefined;
       transport.failAnswerKind = undefined;
       transport.failAnswerRetryAfter = undefined;

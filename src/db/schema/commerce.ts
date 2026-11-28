@@ -54,6 +54,12 @@ export const storeCommerceSetting = pgTable(
     deliveryFee: numeric("delivery_fee", { precision: 18, scale: 2 })
       .notNull()
       .default("0.00"),
+    // `delivery_fee` stays NOT NULL for the checkout contract. This flag is
+    // what separates an explicit free delivery (`0.00` with `true`) from a fee
+    // the merchant never configured (`false`), which blocks publishing.
+    deliveryFeeConfigured: boolean("delivery_fee_configured")
+      .notNull()
+      .default(false),
     codEnabled: boolean("cod_enabled").notNull().default(false),
     vodafoneCashEnabled: boolean("vodafone_cash_enabled")
       .notNull()

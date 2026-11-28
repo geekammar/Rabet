@@ -12,7 +12,7 @@ export const UUID_REGEX =
 export const LANG_CODE_REGEX = /^[a-z]{2}$/;
 export const PAGE_REGEX = /^[1-9][0-9]{0,4}$/;
 const LANGUAGE_CONTEXT_PATTERN =
-  /^(?:h|p:[1-9][0-9]{0,4}|cs|c:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::[1-9][0-9]{0,4})?|pd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|to:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+  /^(?:h|cod|p:[1-9][0-9]{0,4}|cs|c:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::[1-9][0-9]{0,4})?|pd:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|to:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 function assertLanguageContext(context: string | undefined): string | null {
   if (context === undefined) return null;
@@ -35,6 +35,12 @@ export function assertValidCallbackData(data: string): string {
 export const tokens = {
   home: (): string => assertValidCallbackData("home"),
   homeNew: (): string => assertValidCallbackData("home:new"),
+  catalogSearch: (): string => assertValidCallbackData("catalog-search"),
+  catalogSearchPage: (page: number): string => {
+    if (!PAGE_REGEX.test(String(page))) throw new Error(`Invalid page number: ${page}`);
+    return assertValidCallbackData(`catalog-search:${page}`);
+  },
+  latestCodOrder: (): string => assertValidCallbackData("cod:latest"),
   rootCategory: (page?: number): string => {
     if (page !== undefined && (!Number.isInteger(page) || page < 1 || page > 99999)) {
       throw new Error(`Invalid page number: ${page}`);
@@ -218,6 +224,9 @@ export const tokens = {
 export type ParsedToken =
   | { type: "home" }
   | { type: "homeNew" }
+  | { type: "catalogSearch" }
+  | { type: "catalogSearchPage"; page: number }
+  | { type: "latestCodOrder" }
   | { type: "root"; page: number }
   | { type: "storefrontCategories"; page: number }
   | { type: "storefrontCategory"; categoryId: string; page: number }
@@ -264,6 +273,19 @@ export function parseToken(data?: string): ParsedToken {
 
   if (data === "home:new") {
     return { type: "homeNew" };
+  }
+
+  if (data === "catalog-search") return { type: "catalogSearch" };
+
+  if (data.startsWith("catalog-search:")) {
+    const page = data.slice("catalog-search:".length);
+    return PAGE_REGEX.test(page)
+      ? { type: "catalogSearchPage", page: Number(page) }
+      : { type: "unknown", raw: data };
+  }
+
+  if (data === "cod:latest") {
+    return { type: "latestCodOrder" };
   }
 
   if (data === "cart") {

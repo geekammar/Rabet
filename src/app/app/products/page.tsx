@@ -7,7 +7,10 @@ import { MerchantProducts } from "@/components/merchant/merchant-products";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { requireMerchantAccess } from "@/lib/auth/merchant-session";
 import { isCodAvailable } from "@/lib/commerce/orders";
-import { listCatalogProductsForStore } from "@/lib/data/catalog";
+import {
+  listCatalogProductsForStore,
+  listProductInventoryForStore,
+} from "@/lib/data/catalog";
 import {
   readMerchantLocale,
   merchantPageMetadata,
@@ -30,11 +33,16 @@ export default async function MerchantProductsPage() {
 
   const access = await requireMerchantAccess();
   const db = getDb();
-  const [products, initialLocale, codAvailability] = await Promise.all([
-    listCatalogProductsForStore(db, access.scope),
-    readMerchantLocale(),
-    isCodAvailable(db, access.scope),
-  ]);
+  const [products, inventory, initialLocale, codAvailability] =
+    await Promise.all([
+      listCatalogProductsForStore(db, access.scope),
+      listProductInventoryForStore(db, access.scope),
+      readMerchantLocale(),
+      isCodAvailable(db, access.scope),
+    ]);
+  const inventoryByProduct = new Map(
+    inventory.map((row) => [row.productId, row]),
+  );
 
   return (
     <MerchantProducts
@@ -42,14 +50,23 @@ export default async function MerchantProductsPage() {
       readOnly={access.readOnly}
       initialLocale={initialLocale}
       codOrdersEnabled={codAvailability.enabled}
-      products={products.map((product) => ({
-        id: product.id,
-        name: resolveMerchantProductName(product.translations, product.slug),
-        price: product.price,
-        revision: product.revision,
-        isActive: product.isActive,
-        categoryPathVisible: product.categoryPathVisible,
-      }))}
+      products={products.map((product) => {
+        const stock = inventoryByProduct.get(product.id);
+        const available = stock
+          ? Math.max(0, stock.onHand - stock.reserved)
+          : 0;
+
+        return {
+          id: product.id,
+          name: resolveMerchantProductName(product.translations, product.slug),
+          price: product.price,
+          revision: product.revision,
+          isActive: product.isActive,
+          categoryPathVisible: product.categoryPathVisible,
+          imageUrl: product.imageUrl,
+          available,
+        };
+      })}
     />
   );
 }

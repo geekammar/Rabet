@@ -148,6 +148,13 @@
       "when": 1795731438497,
       "tag": "0020_merchant_notification_bot_managed",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1795821547547,
+      "tag": "0021_merchant_product_publish",
+      "breakpoints": true
     }
   ]
 }
