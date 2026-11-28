@@ -908,6 +908,11 @@ export function MerchantSetup({
             {copy.pendingBody}
           </div>
         )}
+        <Button asChild variant="outline" className="min-h-11">
+          <Link href="/app/setup/storefront">
+            {locale === "ar" ? "هوية واجهة المتجر" : "Storefront identity"}
+          </Link>
+        </Button>
         {!readOnly && telegramConnection.state === "connected" ? (
           <MerchantInstallHelp locale={locale} />
         ) : null}

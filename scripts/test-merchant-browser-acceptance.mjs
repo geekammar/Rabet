@@ -515,10 +515,10 @@ async function runJourney(cdp, fixture, authSecret) {
     const ok = await evaluate(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return false;
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      ).set;
+      const prototype = el instanceof HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, "value").set;
       setter.call(el, ${JSON.stringify(value)});
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -835,6 +835,29 @@ async function runJourney(cdp, fixture, authSecret) {
     "Setup page should be RTL",
   );
   await expectNoHorizontalScroll("merchant setup (Arabic)");
+
+  await click('a[href="/app/setup/storefront"]');
+  await waitForUrl("/app/setup/storefront", "storefront identity page");
+  const identityForm = '[data-testid="merchant-storefront-profile"]';
+  await waitFor(cdp, `Boolean(document.querySelector(${JSON.stringify(identityForm)}))`, "storefront identity form");
+  await setValue(`${identityForm} [name="welcome"]`, "أهلًا بك في واجهة نكمل");
+  const storefrontPreview = '[data-testid="merchant-storefront-preview"]';
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(storefrontPreview)})?.textContent.includes("أهلًا بك في واجهة نكمل")`,
+    "local storefront preview",
+  );
+  await click(`${identityForm} button[type="submit"]`);
+  await waitFor(
+    cdp,
+    `document.querySelector(${JSON.stringify(identityForm + ' [role="status"]')})?.textContent.includes("تم الحفظ")`,
+    "storefront identity save",
+  );
+  await navigate(`${BASE_URL}/app/setup/storefront`);
+  await expectInputValue(`${identityForm} [name="welcome"]`, "أهلًا بك في واجهة نكمل", "saved storefront welcome");
+  await click('a[href="/app/setup"]');
+  await waitForUrl("/app/setup", "return from storefront identity");
+
 
   const installHelp = '[data-testid="merchant-install-help"]';
   assert(

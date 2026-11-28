@@ -55,6 +55,8 @@ import {
   createStoreScopeForExistingStore,
   type StoreScope,
 } from "@/lib/data/store-scope";
+import { readStorefrontProfile } from "@/lib/merchant/storefront-profile";
+import { storefrontWelcomeLines } from "@/lib/merchant/storefront-profile-fields";
 import { readStoreTelegramSupportUsername } from "@/lib/data/store-telegram-contact";
 import {
   decryptConnectionSecret,
@@ -1124,16 +1126,12 @@ async function renderHome(
   chatId: number,
   messageId?: number,
   recovery?: HomeRecovery,
+  activeMessageHasMedia = false,
 ): Promise<void> {
-  const page = await listManagedProducts(
-    db,
-    scope,
-    {
-      page: 1,
-      pageSize: PAGE_SIZE,
-    },
-    plan,
-  );
+  const [page, profile] = await Promise.all([
+    listManagedProducts(db, scope, { page: 1, pageSize: PAGE_SIZE }, plan),
+    readStorefrontProfile(db, scope),
+  ]);
 
   const keyboard: TelegramInlineKeyboardButton[][] = [
     [{ text: copy.browseProducts, style: "primary", callback_data: tokens.products(1) }],
@@ -1181,22 +1179,29 @@ async function renderHome(
     { text: copy.languageButton, callback_data: tokens.languages("h") },
   ]);
 
-  const text =
-    page.totalCount === 0
-      ? `${copy.welcome(storeName)}\n\n${copy.empty}`
-      : `${copy.welcome(storeName)}\n\n${copy.products}`;
+  const text = [
+    ...storefrontWelcomeLines(profile, storeName, copy.welcome),
+    page.totalCount === 0 ? copy.empty : copy.products,
+  ].join("\n\n");
+  const replyMarkup = { inline_keyboard: keyboard };
+  const photo = profile.coverUrl || profile.logoUrl || null;
 
-  const params = {
-    chatId,
-    text,
-    replyMarkup: { inline_keyboard: keyboard },
-  };
-
-  if (messageId) {
-    await editOrThrow(transport, { ...params, messageId });
-  } else {
-    await sendOrThrow(transport, params);
+  if (messageId !== undefined) {
+    await renderStorefrontCard(
+      transport, chatId, messageId, activeMessageHasMedia, photo, text, replyMarkup,
+    );
+    return;
   }
+
+  if (photo && text.length <= TELEGRAM_MAX_CAPTION_CHARS) {
+    const result = await transport.sendPhoto({ chatId, photo, caption: text, replyMarkup });
+    if (result.ok) return;
+    if (isAmbiguousDelivery(result.errorKind) || result.errorKind === "rate_limited") {
+      throw new Error(result.error ?? "Telegram cover delivery failed");
+    }
+  }
+
+  await sendOrThrow(transport, { chatId, text, replyMarkup });
 }
 
 async function renderProducts(
@@ -1466,7 +1471,7 @@ async function renderCategory(
   });
 }
 
-async function renderProductCard(
+async function renderStorefrontCard(
   transport: TelegramTransport,
   chatId: number,
   messageId: number,
@@ -1642,7 +1647,7 @@ async function renderProduct(
     },
   ]);
 
-  await renderProductCard(
+  await renderStorefrontCard(
     transport,
     chatId,
     messageId,
@@ -2130,6 +2135,7 @@ async function renderLanguageContextScreen(
       chatId,
       messageId,
       recovery,
+      activeMessageHasMedia,
     );
     return true;
   }
@@ -3003,6 +3009,7 @@ async function dispatchCallback(
         chatId,
         context.language.locale,
       ),
+      activeMessageHasMedia,
     );
     return;
   }
