@@ -5,13 +5,16 @@ import { AuthError } from "next-auth";
 import { signIn, signOut } from "@/auth-merchant";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
 import { signInSchema } from "@/lib/auth/schema";
+import {
+  merchantPostLoginPath,
+  parseMerchantOrderId,
+} from "@/lib/merchant/order-link";
 
 /**
  * Merchant sign-in and sign-out Server Actions.
  *
  * The enablement gate runs before Auth.js is called. A successful sign-in
- * redirects to the fixed internal `/app/setup` page; no caller-supplied
- * callback URL is accepted, so these actions cannot become an open redirect.
+ * opens setup or reconstructs the internal Orders link from a validated ID.
  *
  * The form never reveals whether the email exists, the password was wrong or
  * the account is disabled: every failure returns the same code, and the
@@ -19,6 +22,7 @@ import { signInSchema } from "@/lib/auth/schema";
  */
 export type MerchantLoginState = {
   error?: "INVALID_CREDENTIALS" | "UNAVAILABLE";
+  orderPath?: string;
 };
 
 export async function merchantLogin(
@@ -38,12 +42,17 @@ export async function merchantLogin(
     return { error: "INVALID_CREDENTIALS" };
   }
 
+  const orderId = parseMerchantOrderId(formData.get("order"));
+  const redirectTo = merchantPostLoginPath(orderId);
+
   try {
-    await signIn("credentials", {
+    const result = await signIn("credentials", {
       email: parsed.data.email,
       password: parsed.data.password,
-      redirectTo: "/app/setup",
+      redirectTo,
+      ...(orderId ? { redirect: false } : {}),
     });
+    if (orderId && typeof result === "string") return { orderPath: redirectTo };
   } catch (error) {
     if (error instanceof AuthError) {
       return { error: "INVALID_CREDENTIALS" };

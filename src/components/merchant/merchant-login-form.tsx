@@ -12,6 +12,7 @@ import {
   MerchantLanguageToggle,
   type MerchantLocale,
 } from "@/components/merchant/language-toggle";
+import { MerchantOrderResume } from "@/components/merchant/merchant-order-resume";
 import { useMerchantLocale } from "@/components/merchant/use-merchant-locale";
 import { Button } from "@/components/ui/button";
 
@@ -48,8 +49,10 @@ const COPY = {
 
 export function MerchantLoginForm({
   initialLocale,
+  orderId,
 }: {
   initialLocale: MerchantLocale;
+  orderId: string | null;
 }) {
   const [state, formAction, pending] = useActionState<MerchantLoginState, FormData>(
     merchantLogin,
@@ -65,6 +68,8 @@ export function MerchantLoginForm({
       : state?.error === "UNAVAILABLE"
         ? copy.unavailable
         : null;
+
+  if (state?.orderPath) return <MerchantOrderResume path={state.orderPath} locale={locale} />;
 
   return (
     <div
@@ -97,6 +102,7 @@ export function MerchantLoginForm({
             className="space-y-4"
             aria-describedby={errorMessage ? "merchant-login-error" : undefined}
           >
+            {orderId && <input type="hidden" name="order" value={orderId} />}
             <div className="space-y-2">
               <label
                 htmlFor="merchant-email"

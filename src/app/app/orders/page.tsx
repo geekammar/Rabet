@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 import { MerchantOrderActions } from "@/components/dashboard/orders/order-actions";
 import { getDb } from "@/db/client";
 import { isMerchantAppEnabled } from "@/lib/auth/merchant-gate";
-import { requireMerchantAccess } from "@/lib/auth/merchant-session";
+import { getMerchantAccess } from "@/lib/auth/merchant-session";
 import {
   listMerchantOrders,
   readMerchantOrderById,
@@ -17,6 +17,7 @@ import {
   merchantPageMetadata,
   readMerchantLocale,
 } from "@/lib/merchant/locale-server";
+import { parseMerchantOrderId } from "@/lib/merchant/order-link";
 
 export async function generateMetadata(): Promise<Metadata> {
   return merchantPageMetadata(
@@ -455,19 +456,6 @@ function OrderCard({
   );
 }
 
-const ORDER_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function readSelectedOrderId(
-  value: string | string[] | undefined,
-): string | null {
-  const candidate = Array.isArray(value) ? value[0] : value;
-
-  return typeof candidate === "string" && ORDER_ID_PATTERN.test(candidate)
-    ? candidate
-    : null;
-}
-
 export default async function MerchantOrdersPage({
   searchParams,
 }: {
@@ -477,14 +465,20 @@ export default async function MerchantOrdersPage({
 
   if (!isMerchantAppEnabled()) notFound();
 
-  const access = await requireMerchantAccess();
-  const [params, locale] = await Promise.all([
-    searchParams,
-    readMerchantLocale(),
-  ]);
+  const { order } = await searchParams;
+  const selectedOrderId = parseMerchantOrderId(
+    Array.isArray(order) ? order[0] : order,
+  );
+  const access = await getMerchantAccess();
+  if (!access) {
+    redirect(
+      selectedOrderId ? `/app/login?order=${selectedOrderId}` : "/app/login",
+    );
+  }
+
+  const locale = await readMerchantLocale();
   const db = getDb();
   const orders = await listMerchantOrders(db, access.scope);
-  const selectedOrderId = readSelectedOrderId(params.order);
   const selectedOrder =
     selectedOrderId && !orders.some((order) => order.id === selectedOrderId)
       ? await readMerchantOrderById(db, access.scope, selectedOrderId)
